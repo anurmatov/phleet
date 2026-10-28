@@ -31,7 +31,14 @@ try
             StockOpenShellEnrollment.PrepareNative(builder.Configuration, Environment.GetEnvironmentVariable("HOME") ?? "", binding, rootFile);
         }
     }
-    else builder.Services.AddAgentCoreServices(builder.Configuration);
+    else
+    {
+        // Managed stock mode only (#492): the bot/journal slots carry stock-issued placeholders,
+        // never literals; the gate inside AddAgentCoreServices revalidates them. Empty otherwise.
+        if (StockOpenShellEnrollment.ManagedCredentialOverlay(builder.Configuration) is { Count: > 0 } slots)
+            builder.Configuration.AddInMemoryCollection(slots);
+        builder.Services.AddAgentCoreServices(builder.Configuration);
+    }
 }
 catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
 {

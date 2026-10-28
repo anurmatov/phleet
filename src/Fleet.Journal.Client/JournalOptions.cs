@@ -54,10 +54,21 @@ public sealed class JournalOptions
     /// <summary>Where uploads go. Defaults to the journal's own base URL — the same listener.</summary>
     public string MediaBaseUrl { get; set; } = "";
 
+    /// <summary>
+    /// Managed stock OpenShell only (#492): <see cref="IngestToken"/> is the placeholder stock issued in
+    /// the workload's environment, resolved by the gateway on egress, so the derived token stays
+    /// outside. Set only by the agent's validated managed overlay, never by provisioning; capture only.
+    /// </summary>
+    public bool StockPlaceholders { get; set; }
+
     public bool Enabled => !string.IsNullOrWhiteSpace(IngestToken);
 
     private static readonly Regex TokenShape = new(
         "^cj1\\.ingest\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]+={0,2}$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex StockTokenShape = new(
+        "^openshell:resolve:env:(?:v[0-9]+_|s[A-Za-z0-9_]+_)?FLEET_JOURNAL_INGEST_TOKEN$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -65,6 +76,9 @@ public sealed class JournalOptions
     /// </summary>
     public string? DescribeFault()
     {
+        if (StockPlaceholders && (FilesEnabled || SendEnabled || CrossChatEnabled
+            || !string.IsNullOrWhiteSpace(ReadToken) || !string.IsNullOrWhiteSpace(CrossChatToken)))
+            return "Journal:StockPlaceholders supports capture only; files, send and cross-chat are unavailable.";
         if (CrossChatEnabled && (!SendEnabled || !Regex.IsMatch(CrossChatToken.Trim(),
             "^cj1\\.read-cross-chat\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]+={0,2}$", RegexOptions.CultureInvariant)
             || CrossChatToken.Trim().Split('.')[2] != Subject))
@@ -75,9 +89,9 @@ public sealed class JournalOptions
             return "Journal:FilesEnabled requires capture and a matching-subject journal read token.";
         if (!Enabled) return null;
 
-        if (!TokenShape.IsMatch(IngestToken.Trim()))
+        if (!(StockPlaceholders ? StockTokenShape : TokenShape).IsMatch(IngestToken.Trim()))
             return $"{Section}:{nameof(IngestToken)} is set but is not a journal ingest token "
-                + "(expected cj1.ingest.<subject>.<mac>).";
+                + (StockPlaceholders ? "placeholder." : "(expected cj1.ingest.<subject>.<mac>).");
 
         if (!Uri.TryCreate(BaseUrl, UriKind.Absolute, out var uri)
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))

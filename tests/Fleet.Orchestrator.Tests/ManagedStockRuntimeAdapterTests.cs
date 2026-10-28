@@ -18,6 +18,8 @@ namespace Fleet.Orchestrator.Tests;
 public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 {
     private const string Key = "sk-synthetic-value-never-in-argv";
+    private const string BotToken = "424242:synthetic-bot-secret-never-in-argv";
+    private const string IngestToken = "cj1.ingest.agent1.synthetic-journal-mac-never-in-argv";
     private readonly string _dir = Directory.CreateTempSubdirectory("managed-stock-").FullName;
     private readonly FakeCli _cli = new();
     private readonly FakeStore _store = new();
@@ -173,8 +175,11 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     }
 
     [Theory]
-    [InlineData("telegram", "managed_route_unsupported:telegram")]
+    [InlineData("telegram", "telegram_bot_token_unresolved")]
+    [InlineData("telegram_invalid", "telegram_bot_token_invalid")]
     [InlineData("journal", "managed_route_unsupported:journal")]
+    [InlineData("journal_send", "managed_route_unsupported:journal_files")]
+    [InlineData("journal_mcp", "managed_route_unsupported:mcp:fleet-comms-journal")]
     [InlineData("mcp", "managed_route_unsupported:mcp:other")]
     [InlineData("unrouted", "managed_route_unsupported:mcp:fleet-temporal")]
     [InlineData("version", "stock_cli_version_mismatch")]
@@ -185,7 +190,24 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         switch (fault)
         {
             case "telegram": agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" }); break;
-            case "journal": agent.JournalEnabled = true; break;
+            case "telegram_invalid":
+                agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
+                _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = "synthetic-without-bot-id";
+                break;
+            case "journal": // capture is configured, but this installation names no journal listener host
+                agent.JournalEnabled = true;
+                agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
+                _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
+                break;
+            case "journal_send": // files/send have no managed route: refused, not silently dropped
+                agent.JournalEnabled = true;
+                agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
+                _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
+                agent.Tools.Add(new AgentTool { ToolName = JournalGrants.SendGrant });
+                break;
+            case "journal_mcp":
+                agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", Url = "http://comms.example.test/journal/v1/mcp", TransportType = "http" });
+                break;
             case "mcp": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "other", Url = "http://other/mcp", TransportType = "http" }); break;
             case "unrouted": // a supported service, but this installation configured no receiving host for it
                 agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-temporal", Url = "https://temporal.example.test/mcp", TransportType = "http" });
@@ -644,11 +666,128 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Empty(survivors);
     }
 
+    // ── own Telegram bot and journal capture (#492) ────────────────────────
+
+    private Agent BotAndJournalAgent()
+    {
+        var agent = ManagedAgent(desired: "openshell", applied: "docker");
+        agent.JournalEnabled = true;
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
+        _broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = BotToken;
+        _journalHost = "journal.example.test";
+        _generatedSettings = new JsonObject
+        {
+            ["Agent"] = new JsonObject { ["Name"] = "agent1" },
+            ["Telegram"] = new JsonObject { ["AllowedUserIds"] = new JsonArray(1001) },
+            ["Journal"] = new JsonObject { ["IngestToken"] = IngestToken, ["ExcludedChatIds"] = "" },
+        }.ToJsonString();
+        return agent;
+    }
+
+    [Fact]
+    public async Task Own_bot_and_journal_apply_with_values_only_in_outside_providers_and_placeholder_slots_inside()
+    {
+        _store.Add(BotAndJournalAgent());
+        var runtime = Runtime();
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        // Each value reaches only its own stock provider, through the CLI environment under the credential name.
+        var telegram = Assert.Single(_cli.Calls, c => c.Args.Take(4).SequenceEqual(["provider", "create", "--name", "fleet-agent1-telegram"]));
+        Assert.Equal(["provider", "create", "--name", "fleet-agent1-telegram", "--type", "telegram", "--credential", "TELEGRAM_BOT_TOKEN"], telegram.Args);
+        Assert.Equal([("TELEGRAM_BOT_TOKEN", BotToken)], telegram.SecretEnv!.Select(p => (p.Key, p.Value)));
+        var journal = Assert.Single(_cli.Calls, c => c.Args.Take(4).SequenceEqual(["provider", "create", "--name", "fleet-agent1-journal"]));
+        Assert.Equal(["provider", "create", "--name", "fleet-agent1-journal", "--type", "fleet-journal", "--credential", "FLEET_JOURNAL_INGEST_TOKEN"], journal.Args);
+        Assert.Equal([("FLEET_JOURNAL_INGEST_TOKEN", IngestToken)], journal.SecretEnv!.Select(p => (p.Key, p.Value)));
+        foreach (var secret in new[] { Key, BotToken, IngestToken, "synthetic-bot-secret" })
+            Assert.DoesNotContain(_cli.Calls, c => c.Args.Any(a => a.Contains(secret, StringComparison.Ordinal)));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(["fleet-agent1-openai", "fleet-agent1-telegram", "fleet-agent1-journal"],
+            create.Args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => create.Args[p.i + 1]));
+        var applied = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).Applied!;
+        Assert.Equal(["fleet-agent1-telegram", "fleet-agent1-journal"], applied.ServiceProviders);
+
+        // Workload inputs: empty credential slots, the public bot id, the capture switch and the journal route.
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        var bundle = Directory.GetParent(app)!.FullName;
+        foreach (var file in Directory.EnumerateFiles(bundle, "*", SearchOption.AllDirectories))
+            foreach (var secret in new[] { Key, BotToken, IngestToken, "synthetic-bot-secret", "synthetic-journal-mac" })
+                Assert.DoesNotContain(secret, File.ReadAllText(file), StringComparison.Ordinal);
+        var settings = JsonNode.Parse(File.ReadAllText(Path.Combine(app, "appsettings.json")))!;
+        Assert.Equal("424242", settings["StockOpenShell"]!["TelegramBotId"]!.GetValue<string>());
+        Assert.True(settings["StockOpenShell"]!["JournalCapture"]!.GetValue<bool>());
+        Assert.Equal("https://journal.example.test", settings["Journal"]!["BaseUrl"]!.GetValue<string>());
+        Assert.Null(settings["Journal"]!["IngestToken"]);
+        Assert.Null(settings["Telegram"]!["BotToken"]);
+        Assert.Equal(1001, settings["Telegram"]!["AllowedUserIds"]![0]!.GetValue<int>()); // ordinary allowlist kept
+
+        // Revoke detaches every attached provider, not only the native one.
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+        Assert.Equal(["fleet-agent1-openai", "fleet-agent1-telegram", "fleet-agent1-journal"],
+            _cli.Calls.Where(c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"])).Select(c => c.Args[4]));
+    }
+
+    [Fact]
+    public async Task Reprovision_without_the_bot_attaches_only_the_remaining_providers()
+    {
+        var agent = _store.Add(BotAndJournalAgent());
+        var runtime = Runtime();
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+
+        agent.JournalEnabled = false;
+        agent.EnvRefs.Clear();
+        _cli.Calls.Clear();
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+
+        // The reuse cut detached all three; only the native provider is attached again.
+        Assert.Equal(3, _cli.Calls.Count(c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"])));
+        Assert.Equal(["fleet-agent1-openai"], _cli.Calls.Where(c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "attach"])).Select(c => c.Args[4]));
+        Assert.Empty(ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).Applied!.ServiceProviders);
+    }
+
+    [Theory]
+    [InlineData("bot_unresolved", "telegram_bot_token_unresolved")]
+    [InlineData("journal_token_missing", "journal_token_unresolved")]
+    public async Task Missing_bot_or_journal_credential_refuses_before_the_old_runtime_stops(string fault, string code)
+    {
+        _store.Add(BotAndJournalAgent());
+        if (fault == "bot_unresolved") _broker.Credentials.Extra.Clear();
+        else _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"},\"Journal\":{\"ExcludedChatIds\":\"\"}}";
+        _host.DockerStates = ["running"];
+        var stops = 0;
+        var runtime = Runtime(dockerStop: _ => { stops++; return Task.FromResult(true); });
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal(code, result.Code);
+        Assert.Equal(0, stops);
+        Assert.Empty(_broker.Puts);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" || c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        var stored = _store.Get("agent1");
+        Assert.Equal("docker", stored.AppliedRuntimeKind);
+        Assert.Null(ManagedRecord.Parse(stored.AppliedRuntimeBinding).Candidate);
+    }
+
+    [Fact]
+    public async Task Journal_enabled_without_a_bot_stays_capture_off_and_needs_no_journal_route()
+    {
+        var agent = _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        agent.JournalEnabled = true; // ordinary provisioning mints no ingest token without the agent's own bot
+
+        Assert.True((await Runtime().ApplyAsync("agent1", default)).Ok);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Contains("fleet-agent1-journal"));
+        var app = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/app").Args[3];
+        Assert.Null(JsonNode.Parse(File.ReadAllText(Path.Combine(app, "appsettings.json")))!["StockOpenShell"]!["JournalCapture"]);
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────
 
     private readonly List<string> _dockerProvisions = [];
     private (bool Ok, string Message) _dockerResult = (true, "provisioned");
     private JsonObject? _serviceHosts = new() { ["temporal"] = "temporal.example.test", ["telegram"] = "telegram.example.test" };
+    private string? _journalHost;
+    private string _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"}}";
     private string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
     private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null)
@@ -661,9 +800,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             ["GatewayJwksPath"] = "/trust/gateway.jwks", ["AssertionPrivateKeyPath"] = "/outside/private.pem",
             ["AssertionPublicKeyPath"] = "/outside/public.pem", ["MemoryHost"] = "memory.example.test", ["BrokerHost"] = "broker.example.test",
             ["ServiceHosts"] = _serviceHosts?.DeepClone(),
+            ["JournalHost"] = _journalHost,
         }.ToJsonString());
         var generated = Directory.CreateDirectory(Path.Combine(_dir, "generated")).FullName;
-        File.WriteAllText(Path.Combine(generated, "appsettings.json"), "{\"Agent\":{\"Name\":\"agent1\"}}");
+        File.WriteAllText(Path.Combine(generated, "appsettings.json"), _generatedSettings);
         File.WriteAllText(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), "model = \"synthetic\"\n");
         return new StockOpenShellRuntime(Config(), _cli, Provisioner(), _store, _host, _broker.Credentials,
             new ServiceCollection().BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)
@@ -883,12 +1023,13 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     private sealed class FakeCredentials : ICredentialsReader
     {
+        public readonly Dictionary<string, string> Extra = new();
         public string? Get(string key) => key switch
         {
             "SYNTHETIC_API_KEY" => Key,
             "BROKER_ADMIN_USER" => "synthetic-admin",
             "BROKER_ADMIN_PASSWORD" => "synthetic-password",
-            _ => null,
+            _ => Extra.GetValueOrDefault(key),
         };
         public void InvalidateCache() { }
     }

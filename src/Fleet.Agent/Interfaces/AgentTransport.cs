@@ -98,7 +98,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         RichFallbackCounter? richFallbackCounter = null,
         SinkSuppressionCounter? sinkCounter = null,
         JournalCapture? journal = null,
-        TurnBindingPublisher? turnBindings = null)
+        TurnBindingPublisher? turnBindings = null,
+        Fleet.Shared.Security.StockBrokerIdentity? stockEnrollment = null)
     {
         _journal = journal;
         _turnBindings = turnBindings;
@@ -131,10 +132,17 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         {
             try
             {
-                _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
-                // The same credential, separate request policy: ordinary replies retain SDK retries.
-                if (journal?.SendEnabled == true)
-                    _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
+                // Stock enrollment is registered only by its startup gate, and only the managed profile
+                // admits a bot: its token is the wrapped stock placeholder, sent only through the handler.
+                if (stockEnrollment is not null)
+                    _bot = new TelegramBotClient(telegramConfig.Value.BotToken, StockTelegramHttpHandler.CreateClient(telegramConfig.Value.BotToken));
+                else
+                {
+                    _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+                    // The same credential, separate request policy: ordinary replies retain SDK retries.
+                    if (journal?.SendEnabled == true)
+                        _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
+                }
                 sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramConfigured);
             }
             catch (Exception ex)

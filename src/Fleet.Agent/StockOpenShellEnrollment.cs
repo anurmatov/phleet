@@ -65,6 +65,8 @@ public static class StockOpenShellEnrollment
             if (!string.IsNullOrEmpty(configuration["Agent:NativeAuthMode"])
                 || !string.IsNullOrEmpty(configuration["Agent:ProviderApiKeyEnvRef"]))
                 Deny("stock_enrollment_disabled_with_native_auth");
+            if (ManagedRouteKeys.Any(key => !string.IsNullOrEmpty(configuration[key])))
+                Deny("stock_enrollment_disabled_with_managed_route");
             return null; // Opt-in only; no new behavior for existing installs.
         }
         if (path is null or "") Deny("stock_enrollment_file_missing");
@@ -142,9 +144,16 @@ public static class StockOpenShellEnrollment
                 || HostedModelProviders.TryResolve("codex", configuration["Agent:Model"] ?? "", out _, out _)
                 || CodexLocalModelProviders.Split(configuration["Agent:Model"] ?? "").Provider is not null)
                 Deny("stock_enrollment_native_profile_unsupported");
-            if (!string.IsNullOrEmpty(configuration[$"{TelegramOptions.Section}:{nameof(TelegramOptions.BotToken)}"])
-                || !string.IsNullOrEmpty(configuration["Journal:IngestToken"])
+            // Managed mode only (#492): the agent's own bot and journal capture may hold exactly the stock
+            // placeholders from the child environment (the final start's overlay), never a literal or
+            // another value. The manual profile, files/send/cross-chat and other routes stay refused.
+            var slots = configuration["Agent:NativeAuthMode"] == "api_key" ? ManagedCredentialSlots(configuration, environment) : null;
+            if ((slots is null && ManagedRouteKeys.Any(key => !string.IsNullOrEmpty(configuration[key])))
+                || !SlotHolds(configuration, slots, TelegramTokenKey) || !SlotHolds(configuration, slots, JournalTokenKey)
+                || !SlotHolds(configuration, slots, JournalStockKey)
+                || !string.IsNullOrEmpty(configuration["Journal:ReadToken"]) || !string.IsNullOrEmpty(configuration["Journal:CrossChatToken"])
                 || configuration.GetValue<bool>("Journal:FilesEnabled") || configuration.GetValue<bool>("Journal:SendEnabled")
+                || configuration.GetValue<bool>("Journal:CrossChatEnabled")
                 || !string.IsNullOrEmpty(configuration["Conversations:SouthBaseUrl"]) || !string.IsNullOrEmpty(configuration["ClientChannel:OwnerPrincipalToken"]))
                 Deny("stock_enrollment_extra_route_unsupported");
             if (effectiveUid() is 0 or uint.MaxValue || !Path.IsPathFullyQualified(home) || home == "/root")
@@ -264,6 +273,52 @@ public static class StockOpenShellEnrollment
         if (Path.Exists(Path.Combine(home, ".codex-host"))) Deny("stock_enrollment_native_cache_forbidden");
         return value;
     }
+
+    private const string TelegramTokenKey = $"{TelegramOptions.Section}:{nameof(TelegramOptions.BotToken)}";
+    private const string JournalTokenKey = "Journal:IngestToken";
+    private const string JournalStockKey = "Journal:StockPlaceholders";
+
+    /// <summary>Managed-only route selectors (nonsecret, written by the orchestrator) and the overlay's flag.</summary>
+    private static readonly string[] ManagedRouteKeys = ["StockOpenShell:TelegramBotId", "StockOpenShell:JournalCapture", JournalStockKey];
+
+    private static bool SlotHolds(IConfiguration configuration, IReadOnlyDictionary<string, string?>? slots, string key) =>
+        string.IsNullOrEmpty(configuration[key]) || slots is not null && slots.TryGetValue(key, out var expected) && configuration[key] == expected;
+
+    /// <summary>
+    /// Managed mode (#492): the ordinary Telegram/journal credential slots, filled only from the
+    /// placeholders stock issued in the child environment for the attached outside providers. The
+    /// orchestrator supplies only the nonsecret bot id and the capture switch; a missing, literal or
+    /// foreign value refuses. Empty when neither route is selected.
+    /// </summary>
+    internal static Dictionary<string, string?> ManagedCredentialSlots(IConfiguration configuration, Func<string, string?> environment)
+    {
+        var slots = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (configuration["StockOpenShell:TelegramBotId"] is { Length: > 0 } botId)
+        {
+            var id = botId.Length <= 16 && long.TryParse(botId, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+            slots[TelegramTokenKey] = StockTelegramHttpHandler.SdkToken(id, environment(StockCredentials.TelegramBotToken))
+                ?? throw new InvalidOperationException("stock_enrollment_telegram_placeholder_invalid");
+        }
+        if (configuration["StockOpenShell:JournalCapture"] is { Length: > 0 } capture)
+        {
+            if (!bool.TryParse(capture, out var on) || !on) Deny("stock_enrollment_journal_placeholder_invalid");
+            var placeholder = environment(StockCredentials.JournalIngestToken);
+            if (!StockCredentials.IsPlaceholder(placeholder, StockCredentials.JournalIngestToken)) Deny("stock_enrollment_journal_placeholder_invalid");
+            slots[JournalTokenKey] = placeholder;
+            slots[JournalStockKey] = "true";
+        }
+        return slots;
+    }
+
+    /// <summary>
+    /// The final managed daemon start's configuration overlay (Program.cs), so every ordinary reader
+    /// sees the placeholder-only slots. Empty outside managed mode; the startup gate still validates it.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string?> ManagedCredentialOverlay(IConfiguration configuration, Func<string, string?>? environment = null) =>
+        bool.TryParse(configuration["StockOpenShell:Enabled"], out var enabled) && enabled && configuration["Agent:NativeAuthMode"] == "api_key"
+            ? ManagedCredentialSlots(configuration, environment ?? Environment.GetEnvironmentVariable)
+            : new Dictionary<string, string?>();
 
     private static void RequireApiAuth(byte[] bytes, string placeholder)
     {

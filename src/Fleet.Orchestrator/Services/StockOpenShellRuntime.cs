@@ -155,7 +155,14 @@ public sealed class DockerStockHostView(DockerService docker, IConfiguration con
 // ── Persisted binding and compare-and-set store ─────────────────────────────
 
 public sealed record ManagedBinding(string SandboxName, string SandboxId, Guid Epoch, string Image, int PolicyVersionId,
-    string PolicySha256, string AuthMode, string KeyRef, string Provider, string GatewayGeneration);
+    string PolicySha256, string AuthMode, string KeyRef, string Provider, string GatewayGeneration)
+{
+    /// <summary>Further attached stock providers: the agent's own Telegram bot and journal capture (#492).</summary>
+    public IReadOnlyList<string> ServiceProviders { get; init; } = [];
+
+    /// <summary>Every provider attached to this binding, native API key first.</summary>
+    public IReadOnlyList<string> AllProviders() => [Provider, .. ServiceProviders];
+}
 
 /// <summary>JSON stored in <c>agents.AppliedRuntimeBinding</c>. Heartbeats never write it.</summary>
 public sealed record ManagedRecord
@@ -251,6 +258,9 @@ public sealed class StockOpenShellRuntime(
     public const string StockCommit = "bdb956f2cd65a635f1294fccf1d138d263bf650f";
     public const string Unavailable = "managed_runtime_unavailable";
     public const string Entrypoint = "/app/stock-entrypoint.sh";
+    /// <summary>Operator-imported stock profile IDs for the agent's own bot and journal capture (#492).</summary>
+    public const string TelegramProfile = "telegram";
+    public const string JournalProfile = "fleet-journal";
     internal static readonly string Instance = Guid.NewGuid().ToString("N");
     internal static readonly string[] MemoryTools = ["memory_get", "memory_search", "memory_list"];
     /// <summary>Ordinary MCP endpoint name → first-party receiving service that verifies the outside assertion.</summary>
@@ -470,9 +480,13 @@ public sealed class StockOpenShellRuntime(
         var policy = agent.SandboxPolicyVersionId is { } id ? await store.LoadPolicyAsync(id, ct) : null;
         if (policy is null) return "sandbox_policy_version_not_found";
         if (string.IsNullOrEmpty(credentials.Get(agent.ProviderApiKeyEnvRef))) return "provider_key_reference_unresolved";
-        // Ordinary-service routes are not yet available in managed mode; refuse rather than drop them.
-        if (ContainerProvisioningService.HasTelegramBot(agent)) return "managed_route_unsupported:telegram";
-        if (agent.JournalEnabled) return "managed_route_unsupported:journal";
+        // The agent's own bot token and derived journal ingest token stay outside in stock providers; the
+        // workload gets only the public bot id and stock placeholders. Missing values refuse here.
+        if (ContainerProvisioningService.HasTelegramBot(agent) && TelegramCredential(agent).Fault is { } telegramFault) return telegramFault;
+        // Journal files/send (and cross-chat, which needs send) have no managed route; refuse rather than drop them.
+        if ((ContainerProvisioningService.HasFilesGrant(agent) && JournalCapture(agent)) || JournalGrants.SendEffective(agent))
+            return "managed_route_unsupported:journal_files";
+        if (JournalCapture(agent) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
         // Only first-party HTTP MCP receivers that verify the outside assertion are routed; others refuse.
         if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory" && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)
             return "managed_route_unsupported:mcp:" + extra.McpName;
@@ -483,6 +497,8 @@ public sealed class StockOpenShellRuntime(
         // A supported service without an operator-configured receiving host has no route in this installation.
         if (agent.McpEndpoints.FirstOrDefault(e => ServiceByMcpName.TryGetValue(e.McpName, out var service) && TemplateHost(template, service) is null) is { } unrouted)
             return "managed_route_unsupported:mcp:" + unrouted.McpName;
+        // Journal capture needs the operator's journal listener host as its route.
+        if (JournalCapture(agent) && JournalHost(template) is null) return "managed_route_unsupported:journal";
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
         if (await broker.VerifyAccessAsync(ct) is { } accessFault) return accessFault;
         var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
@@ -652,6 +668,9 @@ public sealed class StockOpenShellRuntime(
         try { generated = await GeneratedInputsAsync(agent, ct); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
         { return (record, null, null, Result.Refused(409, "managed_inputs_invalid")); }
+        var (serviceSecrets, botId, credentialFault) = ServiceSecrets(agent, generated);
+        if (credentialFault is not null) return (record, null, null, Result.Refused(409, credentialFault));
+        IReadOnlyList<string> serviceProviders = [.. serviceSecrets.Select(s => s.Provider)];
         var policy = (await store.LoadPolicyAsync(agent.SandboxPolicyVersionId!.Value, ct))!;
         var generation = await host.GatewayGenerationAsync(ct);
         if (generation is null) return (record, null, null, Result.Refused(503, "gateway_unavailable"));
@@ -668,9 +687,9 @@ public sealed class StockOpenShellRuntime(
         }
         var epoch = Guid.NewGuid();
         var candidate = reuse
-            ? record.Applied! with { Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef!, GatewayGeneration = generation }
+            ? record.Applied! with { Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef!, GatewayGeneration = generation, ServiceProviders = serviceProviders }
             : new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch, image,
-                policy.Id, policy.Sha256, "api_key", agent.ProviderApiKeyEnvRef!, $"fleet-{agent.Name}-openai", generation);
+                policy.Id, policy.Sha256, "api_key", agent.ProviderApiKeyEnvRef!, $"fleet-{agent.Name}-openai", generation) { ServiceProviders = serviceProviders };
         var applying = record with { State = "applying", Candidate = candidate, Errors = [] };
         await checkpoint(applying);
 
@@ -682,13 +701,24 @@ public sealed class StockOpenShellRuntime(
         {
             WriteBrokerPasswords(agent.Name, passwords);
             WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, reuse ? candidate.SandboxId : "pending", epoch, policy.Sha256, "revoked"));
-            bundle = await BuildBundleAsync(agent, template, generated, epochDir, passwords["workload"], epoch, policy, reuse ? candidate.SandboxId : "pending");
+            bundle = await BuildBundleAsync(agent, template, generated, epochDir, passwords["workload"], epoch, policy,
+                reuse ? candidate.SandboxId : "pending", botId, serviceSecrets.Select(s => s.Value));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
         { return Hold(applying, 500, "managed_files_failed"); }
         var key = credentials.Get(agent.ProviderApiKeyEnvRef!);
         if (string.IsNullOrEmpty(key)) return Hold(applying, 409, "provider_key_reference_unresolved");
         var secret = new Dictionary<string, string> { ["OPENAI_API_KEY"] = key };
+
+        // Every outside provider exists with its current value before create/attach; values only in the CLI env.
+        async Task<string?> EnsureProvidersAsync()
+        {
+            if (await EnsureProviderAsync(candidate.Provider, "openai", secret, ct) is { } fault) return fault;
+            foreach (var service in serviceSecrets)
+                if (await EnsureProviderAsync(service.Provider, service.Profile, new Dictionary<string, string> { [service.Key] = service.Value }, ct) is { } serviceFault)
+                    return serviceFault;
+            return null;
+        }
 
         if (reuse)
         {
@@ -705,11 +735,12 @@ public sealed class StockOpenShellRuntime(
                 try { StageWorkspace(agent, Path.Combine(bundle, "workspace")); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "workspace_stage_failed"); }
             }
-            if (await EnsureProviderAsync(candidate.Provider, secret, ct) is { } providerFault) return Hold(applying, 502, providerFault);
+            if (await EnsureProvidersAsync() is { } providerFault) return Hold(applying, 502, providerFault);
             // Pinned contract: an explicit canonical launcher, staged; no --upload with a trailing command.
             var create = await cli.RunAsync([
                 "sandbox", "create", "--name", candidate.SandboxName, "--from", candidate.Image,
-                "--policy", Path.Combine(epochDir, "policy.yaml"), "--provider", candidate.Provider, "--no-auto-providers",
+                "--policy", Path.Combine(epochDir, "policy.yaml"), .. candidate.AllProviders().SelectMany(p => new[] { "--provider", p }),
+                "--no-auto-providers",
                 "--restart-policy", "never", "--label", "fleet.agent=" + agent.Name, "--label", "fleet.epoch=" + epoch.ToString("N"),
                 "--env", "FLEET_STOCK_STAGED=1", "--detach", "--", Entrypoint], null, TimeSpan.FromMinutes(5), ct);
             // Whatever create reported, record any sandbox that now exists so cleanup keeps its identity.
@@ -738,9 +769,13 @@ public sealed class StockOpenShellRuntime(
                 var set = await cli.RunAsync(["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"], null, LegTimeout, ct);
                 if (set.ExitCode != 0 || set.TimedOut) return await HoldStoppedAsync(applying, candidate, "policy_update_unknown", [], ct);
             }
-            if (await EnsureProviderAsync(candidate.Provider, secret, ct) is { } providerFault) return await HoldStoppedAsync(applying, candidate, providerFault, [], ct);
-            var attach = await cli.RunAsync(["sandbox", "provider", "attach", candidate.SandboxName, candidate.Provider], null, LegTimeout, ct);
-            if (attach.ExitCode != 0 || attach.TimedOut) return await HoldStoppedAsync(applying, candidate, "provider_attach_unknown", [], ct);
+            if (await EnsureProvidersAsync() is { } providerFault) return await HoldStoppedAsync(applying, candidate, providerFault, [], ct);
+            // The cut detached every old provider; attach exactly the current set (a dropped bot/journal stays detached).
+            foreach (var provider in candidate.AllProviders())
+            {
+                var attach = await cli.RunAsync(["sandbox", "provider", "attach", candidate.SandboxName, provider], null, LegTimeout, ct);
+                if (attach.ExitCode != 0 || attach.TimedOut) return await HoldStoppedAsync(applying, candidate, "provider_attach_unknown", [], ct);
+            }
         }
 
         // Broker users exist only now; then the outside and guest enrollments carry the exact UUID/epoch.
@@ -759,13 +794,67 @@ public sealed class StockOpenShellRuntime(
         return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [] }, "openshell", policy.Id, Result.Done("applied_openshell"));
     }
 
-    private async Task<string?> EnsureProviderAsync(string provider, IReadOnlyDictionary<string, string> secret, CancellationToken ct)
+    /// <summary>Bare <c>--credential KEY</c> arguments: the CLI reads each value from its own environment.</summary>
+    private async Task<string?> EnsureProviderAsync(string provider, string profile, IReadOnlyDictionary<string, string> secret, CancellationToken ct)
     {
         var exists = await cli.RunAsync(["provider", "get", provider], null, LegTimeout, ct);
+        var keys = secret.Keys.Order(StringComparer.Ordinal).SelectMany(key => new[] { "--credential", key }).ToList();
         var run = await cli.RunAsync(exists.ExitCode == 0
-            ? ["provider", "update", provider, "--credential", "OPENAI_API_KEY"]
-            : ["provider", "create", "--name", provider, "--type", "openai", "--credential", "OPENAI_API_KEY"], secret, LegTimeout, ct);
+            ? ["provider", "update", provider, .. keys]
+            : ["provider", "create", "--name", provider, "--type", profile, .. keys], secret, LegTimeout, ct);
         return run.ExitCode == 0 && !run.TimedOut ? null : "provider_setup_unknown";
+    }
+
+    /// <summary>One outside service credential for its own stock provider; the value never leaves the CLI environment.</summary>
+    private sealed record ServiceSecret(string Provider, string Profile, string Key, string Value)
+    {
+        public override string ToString() => Provider; // never the value
+    }
+
+    /// <summary>Journal capture exists exactly when ordinary provisioning would mint an ingest token.</summary>
+    internal static bool JournalCapture(Agent agent) => agent.JournalEnabled && ContainerProvisioningService.HasTelegramBot(agent);
+
+    private static string? JournalHost(JsonObject template) =>
+        template["JournalHost"]?.GetValue<string>() is { Length: > 0 } host ? host : null;
+
+    /// <summary>
+    /// The agent's own bot token, read from the host env by its existing reference (never argv, DB or logs),
+    /// and the public numeric bot id before ':' that Telegram.Bot validates. Neither is logged.
+    /// </summary>
+    private (string? Token, long BotId, string? Fault) TelegramCredential(Agent agent)
+    {
+        if (JournalGrants.BotRef(agent) is not { } reference || credentials.Get(reference) is not { Length: > 0 } token)
+            return (null, 0, "telegram_bot_token_unresolved");
+        var colon = token.IndexOf(':');
+        return colon is >= 1 and <= 16 && colon < token.Length - 1 && long.TryParse(token.AsSpan(0, colon),
+            System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var id) && id > 0
+            ? (token, id, null) : (null, 0, "telegram_bot_token_invalid");
+    }
+
+    /// <summary>
+    /// Bot token and the same derived per-agent ingest token the ordinary path would carry (no switched
+    /// identity), resolved before any old-runtime action. A missing value refuses with a named code.
+    /// </summary>
+    private (List<ServiceSecret> Secrets, long? BotId, string? Fault) ServiceSecrets(Agent agent, string generated)
+    {
+        var secrets = new List<ServiceSecret>();
+        long? botId = null;
+        if (ContainerProvisioningService.HasTelegramBot(agent))
+        {
+            var (token, id, fault) = TelegramCredential(agent);
+            if (fault is not null) return ([], null, fault);
+            secrets.Add(new($"fleet-{agent.Name}-telegram", TelegramProfile, StockCredentials.TelegramBotToken, token!));
+            botId = id;
+        }
+        if (JournalCapture(agent))
+        {
+            string? ingest;
+            try { ingest = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, "appsettings.json")))?["Journal"]?["IngestToken"]?.GetValue<string>(); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { ingest = null; }
+            if (string.IsNullOrEmpty(ingest)) return ([], null, "journal_token_unresolved");
+            secrets.Add(new($"fleet-{agent.Name}-journal", JournalProfile, StockCredentials.JournalIngestToken, ingest));
+        }
+        return (secrets, botId, null);
     }
 
     /// <summary>Any failure after staging still attempts one bounded, verified Stop and keeps every error.</summary>
@@ -923,8 +1012,14 @@ public sealed class StockOpenShellRuntime(
             legs.Add(Leg("detach:" + target.SandboxName, async token =>
             {
                 if (await VerifyIdentityAsync(target, token) is { } identity) return identity.Code;
-                var run = await cli.RunAsync(["sandbox", "provider", "detach", target.SandboxName, target.Provider], null, LegTimeout, token);
-                return run.ExitCode == 0 && !run.TimedOut ? null : "provider_detach_unknown";
+                // Every attached provider is detached; one failure does not skip the others.
+                var unresolved = false;
+                foreach (var provider in target.AllProviders())
+                {
+                    var run = await cli.RunAsync(["sandbox", "provider", "detach", target.SandboxName, provider], null, LegTimeout, token);
+                    unresolved |= run.ExitCode != 0 || run.TimedOut;
+                }
+                return unresolved ? "provider_detach_unknown" : null;
             }));
             if (stop) legs.Add(Leg("stop:" + target.SandboxName, async token =>
                 await LifecycleAsync("stop", target, token) ?? await QuiescentAsync(target, token)));
@@ -1073,14 +1168,17 @@ public sealed class StockOpenShellRuntime(
             if (node is null) return null;
             foreach (var field in new[] { "GatewayIssuer", "GatewayAudience", "GatewayJwksPath", "AssertionPrivateKeyPath", "AssertionPublicKeyPath", "MemoryHost", "BrokerHost" })
                 if (node[field]?.GetValue<string>() is not { Length: > 0 }) return null;
-            // Optional receiving hosts of non-memory first-party services: exact DNS names, distinct from memory and each other.
+            // Optional receiving hosts of non-memory first-party services and the journal listener (#492):
+            // exact DNS names, distinct from memory and each other.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { node["MemoryHost"]!.GetValue<string>() };
             if (node["ServiceHosts"] is { } hosts)
             {
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { node["MemoryHost"]!.GetValue<string>() };
                 foreach (var (service, host) in hosts.AsObject())
                     if (!StockServices.McpNames.ContainsKey(service) || host?.GetValue<string>() is not { } name
                         || Uri.CheckHostName(name) != UriHostNameType.Dns || !seen.Add(name)) return null;
             }
+            if (node["JournalHost"] is { } journal && (journal.GetValue<string>() is not { } journalHost
+                || Uri.CheckHostName(journalHost) != UriHostNameType.Dns || !seen.Add(journalHost))) return null;
             return node;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException
@@ -1160,7 +1258,7 @@ public sealed class StockOpenShellRuntime(
     }
 
     private async Task<string> BuildBundleAsync(Agent agent, JsonObject template, string generated, string epochDir, string workloadPassword,
-        Guid epoch, SandboxPolicyVersion policy, string sandboxId)
+        Guid epoch, SandboxPolicyVersion policy, string sandboxId, long? botId, IEnumerable<string> outsideSecrets)
     {
         var bundle = Path.Combine(epochDir, "bundle");
         PrivateDirectory(Path.Combine(bundle, "app"));
@@ -1181,7 +1279,23 @@ public sealed class StockOpenShellRuntime(
         agentNode["ProviderApiKeyEnvRef"] = agent.ProviderApiKeyEnvRef;
         agentNode["WorkDir"] = "/workspace";
         (settings["RabbitMq"] ??= new JsonObject())["Host"] = template["BrokerHost"]!.GetValue<string>();
-        WriteText(Path.Combine(bundle, "app", "appsettings.json"), settings.ToJsonString());
+        // #492: credential slots stay empty. The agent fills them from the placeholders stock issues for
+        // the attached providers; it gets only the public bot id and the journal listener's route.
+        (settings["Telegram"] as JsonObject)?.Remove("BotToken");
+        if (botId is { } id) settings["StockOpenShell"]!["TelegramBotId"] = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (settings["Journal"] is JsonObject journal)
+        {
+            foreach (var slot in new[] { "IngestToken", "ReadToken", "CrossChatToken" }) journal.Remove(slot);
+            if (JournalCapture(agent))
+            {
+                journal["BaseUrl"] = $"https://{JournalHost(template)}";
+                settings["StockOpenShell"]!["JournalCapture"] = true;
+            }
+        }
+        var workloadSettings = settings.ToJsonString();
+        if (outsideSecrets.Any(secret => workloadSettings.Contains(secret, StringComparison.Ordinal)))
+            throw new InvalidOperationException("managed_secret_in_workload_inputs");
+        WriteText(Path.Combine(bundle, "app", "appsettings.json"), workloadSettings);
         File.Copy(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName),
             Path.Combine(bundle, "app", Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), overwrite: true);
         foreach (var dir in new[] { "roles", "projects" })

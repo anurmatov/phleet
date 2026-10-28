@@ -29,6 +29,30 @@ public static class StockServices
 }
 
 /// <summary>
+/// Managed-mode credentials other than the native API key (#492). The real values stay outside in
+/// stock providers attached to the sandbox; the workload's child environment carries only the
+/// placeholder stock issued under each name, which the gateway resolves on egress.
+/// </summary>
+public static class StockCredentials
+{
+    /// <summary>The agent's own Telegram bot token (stock profile <c>telegram</c>).</summary>
+    public const string TelegramBotToken = "TELEGRAM_BOT_TOKEN";
+
+    /// <summary>The agent's derived journal ingest token (stock profile <c>fleet-journal</c>).</summary>
+    public const string JournalIngestToken = "FLEET_JOURNAL_INGEST_TOKEN";
+
+    public static readonly IReadOnlyList<string> ServiceKeys = [TelegramBotToken, JournalIngestToken];
+
+    /// <summary>
+    /// Syntax only, the same source-supported handle forms as the native API key: a refusal check for
+    /// literals and foreign keys, NOT proof of stock issuance or isolation.
+    /// </summary>
+    public static bool IsPlaceholder(string? value, string key) =>
+        value is { Length: <= 1024 } && System.Text.RegularExpressions.Regex.IsMatch(value,
+            @"\Aopenshell:resolve:env:(?:v[0-9]+_|s[A-Za-z0-9_]+_)?" + System.Text.RegularExpressions.Regex.Escape(key) + @"\z");
+}
+
+/// <summary>
 /// One non-memory receiving route: its exact HTTPS host, the agent's granted tool names on that
 /// service (from existing grants, never widened) and the fixed non-identity query the receiver appends
 /// after verified attribution (only Telegram's <c>formatting_mode</c>).

@@ -459,18 +459,23 @@ public static class AgentHostRegistration
         // the drainer. The bot id is read from the transport lazily; the transport derives it from
         // Telegram:BotToken when it is constructed, before any hosted service starts, so receipts
         // queued across a restart never meet an unknown own bot.
-        services.AddSingleton(sp =>
+        // Stock profiles hold only an epoch-scoped broker identity without the receipt exchange/queue,
+        // so no consumer is started there (#492); the gap is documented, not retried forever.
+        if (!configuration.GetValue<bool>("StockOpenShell:Enabled"))
         {
-            long? botId = null;
-            return new ToolSendReceiptConsumer(
-                sp.GetRequiredService<IOptions<AgentOptions>>(),
-                sp.GetRequiredService<GroupRelayService>(),
-                sp.GetRequiredService<JournalCapture>(),
-                sp.GetRequiredService<JournalCounters>(),
-                () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,
-                sp.GetRequiredService<ILogger<ToolSendReceiptConsumer>>());
-        });
-        services.AddHostedService(sp => sp.GetRequiredService<ToolSendReceiptConsumer>());
+            services.AddSingleton(sp =>
+            {
+                long? botId = null;
+                return new ToolSendReceiptConsumer(
+                    sp.GetRequiredService<IOptions<AgentOptions>>(),
+                    sp.GetRequiredService<GroupRelayService>(),
+                    sp.GetRequiredService<JournalCapture>(),
+                    sp.GetRequiredService<JournalCounters>(),
+                    () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,
+                    sp.GetRequiredService<ILogger<ToolSendReceiptConsumer>>());
+            });
+            services.AddHostedService(sp => sp.GetRequiredService<ToolSendReceiptConsumer>());
+        }
 
         services.AddHttpClient(JournalHttpClientName)
             // A recreated Comms container comes back on a new address; recycle pooled connections so

@@ -230,6 +230,135 @@ public sealed class ManagedStockAgentTests
             () => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
     }
 
+    // ── own Telegram bot and journal capture (#492) ────────────────────────
+
+    private const string TelegramPlaceholder = "openshell:resolve:env:v7_TELEGRAM_BOT_TOKEN";
+    private const string JournalPlaceholder = "openshell:resolve:env:v7_FLEET_JOURNAL_INGEST_TOKEN";
+
+    /// <summary>The stock-issued child environment: placeholders only, under the provider credential names.</summary>
+    private static Func<string, string?> ChildEnvironment(string? telegram = TelegramPlaceholder, string? journal = JournalPlaceholder) => key => key switch
+    {
+        "OPENAI_API_KEY" => Placeholder,
+        StockCredentials.TelegramBotToken => telegram,
+        StockCredentials.JournalIngestToken => journal,
+        _ => throw new Exception("unexpected environment read"),
+    };
+
+    private static void SelectBotAndJournal(Fixture f)
+    {
+        f.Settings["StockOpenShell:TelegramBotId"] = "424242";
+        f.Settings["StockOpenShell:JournalCapture"] = "True"; // the JSON provider's rendering of the orchestrator's true
+    }
+
+    [Fact]
+    public void Own_bot_and_journal_accept_only_the_issued_placeholders_before_and_after_the_overlay()
+    {
+        using var f = new Fixture();
+        SelectBotAndJournal(f);
+        var env = ChildEnvironment();
+        var c = f.Config();
+        Assert.NotNull(StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)); // validation-only entrypoint run
+
+        var overlay = StockOpenShellEnrollment.ManagedCredentialOverlay(c, env);
+        Assert.Equal("424242:" + TelegramPlaceholder, overlay["Telegram:BotToken"]);
+        Assert.Equal(JournalPlaceholder, overlay["Journal:IngestToken"]);
+        Assert.Equal("true", overlay["Journal:StockPlaceholders"]);
+        var daemon = new ConfigurationBuilder().AddInMemoryCollection(f.Settings).AddInMemoryCollection(overlay).Build();
+        Assert.NotNull(StockOpenShellEnrollment.Validate(daemon, f.Home, () => 10001, f.Root, env)); // final daemon start
+        var journal = daemon.GetSection(Fleet.Journal.Client.JournalOptions.Section).Get<Fleet.Journal.Client.JournalOptions>()!;
+        Assert.True(journal.Enabled);
+        Assert.Null(journal.DescribeFault());
+        Assert.Equal(424242, new global::Telegram.Bot.TelegramBotClientOptions(daemon["Telegram:BotToken"]!).BotId);
+    }
+
+    [Theory]
+    [InlineData("telegram_env_literal")]
+    [InlineData("telegram_env_missing")]
+    [InlineData("telegram_env_foreign")]
+    [InlineData("journal_env_literal")]
+    [InlineData("journal_env_missing")]
+    [InlineData("bot_id_invalid")]
+    [InlineData("literal_bot_token")]
+    [InlineData("other_bot_token")]
+    [InlineData("literal_ingest_token")]
+    [InlineData("read_token")]
+    [InlineData("send")]
+    [InlineData("stock_flag_without_capture")]
+    [InlineData("manual_profile")]
+    public void Literal_missing_foreign_or_unsupported_bot_and_journal_inputs_refuse(string fault)
+    {
+        using var f = new Fixture();
+        SelectBotAndJournal(f);
+        string? telegram = TelegramPlaceholder, journal = JournalPlaceholder;
+        switch (fault)
+        {
+            case "telegram_env_literal": telegram = "424242:synthetic-literal-token"; break;
+            case "telegram_env_missing": telegram = null; break;
+            case "telegram_env_foreign": telegram = "openshell:resolve:env:OPENAI_API_KEY"; break;
+            case "journal_env_literal": journal = "cj1.ingest.agent1.synthetic-mac"; break;
+            case "journal_env_missing": journal = null; break;
+            case "bot_id_invalid": f.Settings["StockOpenShell:TelegramBotId"] = "synthetic"; break;
+            case "literal_bot_token": f.Settings["Telegram:BotToken"] = "424242:synthetic-literal-token"; break;
+            case "other_bot_token": f.Settings["Telegram:BotToken"] = "777:" + TelegramPlaceholder; break;
+            case "literal_ingest_token": f.Settings["Journal:IngestToken"] = "cj1.ingest.agent1.synthetic-mac"; break;
+            case "read_token": f.Settings["Journal:ReadToken"] = "cj1.read.agent1.synthetic-mac"; break;
+            case "send": f.Settings["Journal:SendEnabled"] = "true"; break;
+            case "stock_flag_without_capture":
+                f.Settings.Remove("StockOpenShell:JournalCapture");
+                f.Settings["Journal:StockPlaceholders"] = "true";
+                break;
+            case "manual_profile": // the manual profile keeps refusing the bot and journal
+                f.Settings.Remove("Agent:NativeAuthMode");
+                f.Settings.Remove("Agent:ProviderApiKeyEnvRef");
+                Directory.CreateDirectory(Path.Combine(f.Home, ".codex-host"));
+                File.WriteAllText(Path.Combine(f.Home, ".codex-host", "auth.json"), "{\"synthetic\":true}");
+                break;
+        }
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.Validate(f.Config(), f.Home, () => 10001, f.Root, ChildEnvironment(telegram, journal)));
+        Assert.StartsWith("stock_enrollment_", refusal.Message);
+        Assert.DoesNotContain("synthetic", refusal.Message);
+    }
+
+    [Theory]
+    [InlineData("StockOpenShell:TelegramBotId", "424242")]
+    [InlineData("StockOpenShell:JournalCapture", "true")]
+    [InlineData("Journal:StockPlaceholders", "true")]
+    public void Ordinary_agents_refuse_managed_route_selectors_and_get_no_overlay(string key, string value)
+    {
+        var c = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { [key] = value }).Build();
+        Assert.Equal("stock_enrollment_disabled_with_managed_route", Assert.Throws<InvalidOperationException>(
+            () => StockOpenShellEnrollment.Validate(c, "/synthetic", () => 10001)).Message);
+        var ordinary = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Telegram:BotToken"] = "424242:synthetic-ordinary-token", ["StockOpenShell:TelegramBotId"] = "424242",
+        }).Build();
+        Assert.Empty(StockOpenShellEnrollment.ManagedCredentialOverlay(ordinary, _ => throw new Exception("ordinary agents read no placeholder")));
+    }
+
+    [Fact]
+    public void Ordinary_journal_validation_is_unchanged_and_stock_placeholders_are_capture_only()
+    {
+        const string ordinary = "cj1.ingest.agent1.syntheticmac";
+        Assert.Null(new Fleet.Journal.Client.JournalOptions { IngestToken = ordinary }.DescribeFault());
+        Assert.NotNull(new Fleet.Journal.Client.JournalOptions { IngestToken = JournalPlaceholder }.DescribeFault());
+        Assert.Null(new Fleet.Journal.Client.JournalOptions { IngestToken = JournalPlaceholder, StockPlaceholders = true }.DescribeFault());
+        Assert.NotNull(new Fleet.Journal.Client.JournalOptions { IngestToken = ordinary, StockPlaceholders = true }.DescribeFault());
+        Assert.NotNull(new Fleet.Journal.Client.JournalOptions { IngestToken = JournalPlaceholder, StockPlaceholders = true, FilesEnabled = true }.DescribeFault());
+    }
+
+    [Fact]
+    public async Task Journal_requests_carry_only_the_placeholder_bearer()
+    {
+        var inner = new ManagedStockAgentTelegramTests.Stub();
+        var client = new Fleet.Journal.Client.JournalHttpClient(
+            new HttpClient(inner) { BaseAddress = new Uri("https://journal.example.test") }, JournalPlaceholder);
+        await client.PostAsync("{}"u8.ToArray(), default);
+        var request = Assert.Single(inner.Requests);
+        Assert.Equal("https://journal.example.test/journal/v1/messages", request.Uri.AbsoluteUri);
+        Assert.Equal("Bearer " + JournalPlaceholder, request.Authorization);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _dir = Path.Combine(Path.GetTempPath(), "managed-agent-" + Guid.NewGuid().ToString("N"));
@@ -325,5 +454,112 @@ public sealed class ManagedStockAgentCancelHostTests
             Assert.Equal(200, (int)(await client.GetAsync("/health")).StatusCode);
         }
         finally { client.Dispose(); await app.DisposeAsync(); }
+    }
+}
+
+/// <summary>
+/// #492: the managed Telegram SDK seam. The real token stays outside; Telegram.Bot runs on the wrapped
+/// stock placeholder and every request leaves as exactly the stock-substitutable API or file URL.
+/// </summary>
+public sealed class ManagedStockAgentTelegramTests
+{
+    private const string P = "openshell:resolve:env:v7_TELEGRAM_BOT_TOKEN";
+    private static readonly string Token = StockTelegramHttpHandler.SdkToken(424242, P)!;
+
+    internal sealed class Stub : HttpMessageHandler
+    {
+        public readonly List<(Uri Uri, string? Authorization)> Requests = [];
+        public Func<HttpRequestMessage, HttpResponseMessage>? Respond;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Requests.Add((request.RequestUri!, request.Headers.Authorization?.ToString()));
+            return Task.FromResult(Respond?.Invoke(request) ?? new HttpResponseMessage(System.Net.HttpStatusCode.Accepted));
+        }
+    }
+
+    [Theory]
+    [InlineData("/bot{T}/getUpdates", "/bot{P}/getUpdates")]
+    [InlineData("/bot{T}/sendMessage", "/bot{P}/sendMessage")]
+    [InlineData("/file/bot{T}/photos/file_1.jpg", "/file/bot{P}/photos/file_1.jpg")]
+    public void Api_and_file_urls_are_rewritten_to_exactly_the_placeholder_path(string sent, string expected)
+    {
+        var handler = new StockTelegramHttpHandler(Token, new Stub());
+        Assert.Equal("https://api.telegram.org" + expected.Replace("{P}", P),
+            handler.Rewrite(new Uri("https://api.telegram.org" + sent.Replace("{T}", Token))).AbsoluteUri);
+    }
+
+    [Theory]
+    [InlineData("https://other.example.test/bot{T}/getMe")]
+    [InlineData("http://api.telegram.org/bot{T}/getMe")]
+    [InlineData("https://api.telegram.org:8443/bot{T}/getMe")]
+    [InlineData("https://user@api.telegram.org/bot{T}/getMe")]
+    [InlineData("https://api.telegram.org/bot{T}/getMe?offset=1")]
+    [InlineData("https://api.telegram.org/bot424242:synthetic-literal-token/getMe")]
+    [InlineData("https://api.telegram.org/bot{P}/getMe")]
+    [InlineData("https://api.telegram.org/bot{T}/getMe/extra")]
+    [InlineData("https://api.telegram.org/bot{T}/")]
+    [InlineData("https://api.telegram.org/file/bot{T}/")]
+    [InlineData("https://api.telegram.org/file/bot{T}/openshell:resolve:env:OPENAI_API_KEY")]
+    [InlineData("https://api.telegram.org/other/bot{T}/getMe")]
+    public async Task Other_hosts_shapes_and_literal_tokens_are_refused_before_the_network(string url)
+    {
+        var inner = new Stub();
+        using var client = new HttpClient(new StockTelegramHttpHandler(Token, inner));
+        var refusal = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync(url.Replace("{T}", Token).Replace("{P}", P)));
+        Assert.Equal("stock_telegram_request_refused", refusal.Message);
+        Assert.Empty(inner.Requests);
+    }
+
+    [Theory]
+    [InlineData("424242:synthetic-literal-token")]
+    [InlineData("424242:openshell:resolve:env:OPENAI_API_KEY")]
+    [InlineData("0:openshell:resolve:env:TELEGRAM_BOT_TOKEN")]
+    [InlineData("0424242:openshell:resolve:env:TELEGRAM_BOT_TOKEN")]
+    [InlineData("openshell:resolve:env:TELEGRAM_BOT_TOKEN")]
+    [InlineData("424242:openshell:resolve:env:TELEGRAM_BOT_TOKEN\n")]
+    public void Handler_accepts_only_the_wrapped_issued_placeholder(string token)
+    {
+        Assert.Throws<InvalidOperationException>(() => new StockTelegramHttpHandler(token, new Stub()));
+        Assert.Null(StockTelegramHttpHandler.SdkToken(424242, "synthetic-literal-token"));
+        Assert.Null(StockTelegramHttpHandler.SdkToken(0, P));
+    }
+
+    [Fact]
+    public void Wrapped_token_passes_telegram_bot_validation_with_the_public_bot_id()
+    {
+        Assert.Equal("424242:" + P, Token);
+        Assert.Equal(424242, new global::Telegram.Bot.TelegramBotClientOptions(Token).BotId);
+        Assert.Equal(424242, new global::Telegram.Bot.TelegramBotClient(Token, StockTelegramHttpHandler.CreateClient(Token)).BotId);
+    }
+
+    [Fact]
+    public async Task Real_sdk_poll_send_and_file_calls_reach_the_inner_handler_on_the_exact_placeholder_paths()
+    {
+        static HttpResponseMessage Json(string json) =>
+            new(System.Net.HttpStatusCode.OK) { Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json") };
+        var inner = new Stub
+        {
+            Respond = request => request.RequestUri!.AbsolutePath switch
+            {
+                var path when path.StartsWith("/file/", StringComparison.Ordinal) => new(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) },
+                var path when path.EndsWith("/getMe", StringComparison.Ordinal) =>
+                    Json("{\"ok\":true,\"result\":{\"id\":424242,\"is_bot\":true,\"first_name\":\"synthetic\",\"username\":\"synthetic_bot\"}}"),
+                var path when path.EndsWith("/getUpdates", StringComparison.Ordinal) => Json("{\"ok\":true,\"result\":[]}"),
+                _ => Json("{\"ok\":true,\"result\":{\"message_id\":7,\"date\":0,\"chat\":{\"id\":1001,\"type\":\"private\"}}}"),
+            },
+        };
+        var bot = new global::Telegram.Bot.TelegramBotClient(Token, new HttpClient(new StockTelegramHttpHandler(Token, inner)));
+
+        Assert.Equal("synthetic_bot", (await global::Telegram.Bot.TelegramBotClientExtensions.GetMe(bot)).Username);
+        Assert.Empty(await global::Telegram.Bot.TelegramBotClientExtensions.GetUpdates(bot));
+        Assert.Equal(7, (await global::Telegram.Bot.TelegramBotClientExtensions.SendMessage(bot, 1001, "synthetic")).MessageId);
+        using var file = new MemoryStream();
+        await bot.DownloadFile("photos/file_1.jpg", file);
+        Assert.Equal([1, 2, 3], file.ToArray());
+
+        Assert.Equal([$"https://api.telegram.org/bot{P}/getMe", $"https://api.telegram.org/bot{P}/getUpdates",
+            $"https://api.telegram.org/bot{P}/sendMessage", $"https://api.telegram.org/file/bot{P}/photos/file_1.jpg"],
+            inner.Requests.Select(r => r.Uri.AbsoluteUri));
+        Assert.DoesNotContain(inner.Requests, r => r.Uri.AbsoluteUri.Contains("424242", StringComparison.Ordinal));
     }
 }

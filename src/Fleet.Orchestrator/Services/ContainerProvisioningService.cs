@@ -25,7 +25,7 @@ public sealed class ContainerProvisioningService(
     internal const string JournalMcpServerName = "fleet-comms-journal";
     internal const string JournalFilesServerName = "fleet-journal-files";
     internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
-    private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
+    internal static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
     private static IEnumerable<string> SendWarnings(Agent agent)
     {
         if (JournalGrants.HasSendGrant(agent) && !JournalGrants.SendEffective(agent))

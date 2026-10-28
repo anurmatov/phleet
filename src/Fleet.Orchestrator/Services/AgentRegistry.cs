@@ -50,7 +50,7 @@ public sealed class AgentRegistry
             AppliedRuntimeKind = dbAgent.AppliedRuntimeKind,
             RuntimePending = AgentPatchHelpers.RuntimePending(dbAgent),
         };
-        (state.ManagedState, state.ManagedErrors) = ManagedView(dbAgent.AppliedRuntimeBinding);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(dbAgent.AppliedRuntimeBinding);
         // Only add if not already present (heartbeat may have arrived first)
         if (_agents.TryAdd(dbAgent.Name, state))
             BroadcastIfChanged(state, force: true);
@@ -63,7 +63,7 @@ public sealed class AgentRegistry
         state.RuntimeKind = agent.RuntimeKind;
         state.AppliedRuntimeKind = agent.AppliedRuntimeKind;
         state.RuntimePending = AgentPatchHelpers.RuntimePending(agent);
-        (state.ManagedState, state.ManagedErrors) = ManagedView(agent.AppliedRuntimeBinding);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(agent.AppliedRuntimeBinding);
         BroadcastIfChanged(state, force: true);
     }
 
@@ -290,14 +290,45 @@ public sealed class AgentRegistry
         int PriorityQueuedCount);
 
     /// <summary>Content-free view of the managed record: state and error codes only.</summary>
-    internal static (string? State, IReadOnlyList<string>? Errors) ManagedView(string? binding)
+    internal static (string? State, IReadOnlyList<string>? Errors, ManagedStatusView? Status) ManagedView(string? binding)
     {
-        if (string.IsNullOrEmpty(binding)) return (null, null);
+        if (string.IsNullOrEmpty(binding)) return (null, null, null);
         try
         {
             var record = ManagedRecord.Parse(binding);
-            return (record.Operation is not null ? "busy" : record.State, record.Errors);
+            return (record.Operation is not null ? "busy" : record.State, record.Errors, ManagedStatus(record));
         }
-        catch (System.Text.Json.JsonException) { return ("unreadable", null); }
+        catch (System.Text.Json.JsonException) { return ("unreadable", null, null); }
+    }
+
+    /// <summary>Applied-binding/lifecycle summary. Operation is reduced to its kind (no owner instance).</summary>
+    internal static ManagedStatusView ManagedStatus(ManagedRecord record)
+    {
+        var operation = record.Operation?.Split(':')[0];
+        var admission = operation switch
+        {
+            "revoke" => "revoking",
+            "stop" => "stopping",
+            "start" or "apply" or "restart_hold" => "applying",
+            not null => "busy",
+            _ => record.State switch
+            {
+                "applied" => "active",
+                "none" => "none",
+                _ => record.State,
+            },
+        };
+        var applied = record.Applied;
+        return new ManagedStatusView(
+            record.State, record.Errors, admission,
+            Pending: operation is not null || record.State == "applying" || record.Candidate is not null,
+            Operation: operation,
+            AppliedSandboxId: applied?.SandboxId,
+            AppliedSandboxName: applied?.SandboxName,
+            Epoch: applied?.Epoch,
+            PolicyVersionId: applied?.PolicyVersionId,
+            PolicySha256: applied?.PolicySha256,
+            GatewayGeneration: applied?.GatewayGeneration,
+            Providers: applied?.AllProviders() ?? []);
     }
 }

@@ -1,4 +1,4 @@
-import type { ConfigEdits } from './types'
+import type { ConfigEdits, ManagedStatus } from './types'
 
 export type RuntimeEdits = Pick<Partial<ConfigEdits>, 'runtimeKind' | 'sandboxPolicyVersionId' | 'nativeAuthMode' | 'providerApiKeyEnvRef'>
 
@@ -42,4 +42,28 @@ export function revokeOutcome(status: number, body: { message?: string; error?: 
   if (status >= 200 && status < 300) return { ok: true, text: 'Runtime revoked' }
   const errors = Array.isArray(body?.errors) ? body!.errors.filter((e): e is string => typeof e === 'string') : []
   return { ok: false, text: `${body?.error ?? `Error ${status}`}${errors.length ? `: ${errors.join(', ')}` : ''}` }
+}
+
+/** #492: display lines for the applied binding and admission state; `revoking` is a local in-flight revoke. */
+export interface ManagedStatusLines { pending: boolean; pendingLabel: string | null; admission: string | null; binding: string[]; errors: string[] }
+
+export function managedStatusLines(status: ManagedStatus | null | undefined, revoking = false): ManagedStatusLines {
+  const short = (v: string | null | undefined, n = 8) => (v ? v.replace(/-/g, '').slice(0, n) : null)
+  const errors = status?.errors ?? []
+  const pending = revoking || !!status?.pending
+  const pendingLabel = revoking || status?.operation === 'revoke' ? 'revoking…'
+    : pending ? `${status?.operation ?? status?.state ?? 'pending'}…` : null
+  if (!status) return { pending, pendingLabel, admission: null, binding: [], errors }
+  const binding: string[] = []
+  const sandbox = status.appliedSandboxName && status.appliedSandboxId
+    ? `${status.appliedSandboxName} (${short(status.appliedSandboxId, 12)})`
+    : status.appliedSandboxName ?? short(status.appliedSandboxId, 12)
+  if (sandbox) binding.push(`sandbox ${sandbox}`)
+  if (status.epoch) binding.push(`epoch ${short(status.epoch)}`)
+  if (status.policySha256 || status.policyVersionId) {
+    binding.push(`policy ${status.policyVersionId ? `v${status.policyVersionId}` : ''}${status.policySha256 ? `${status.policyVersionId ? ' ' : ''}${short(status.policySha256, 12)}` : ''}`)
+  }
+  if (status.gatewayGeneration) binding.push(`gateway gen ${status.gatewayGeneration}`)
+  if (status.providers?.length) binding.push(`providers ${status.providers.join(', ')}`)
+  return { pending, pendingLabel, admission: status.admissionState.replace(/_/g, ' '), binding, errors }
 }

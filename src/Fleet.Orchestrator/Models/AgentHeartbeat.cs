@@ -65,6 +65,8 @@ public sealed class AgentState
     /// <summary>#492 managed binding state from the persisted record (never from a heartbeat).</summary>
     public string? ManagedState { get; set; }
     public IReadOnlyList<string>? ManagedErrors { get; set; }
+    /// <summary>#492 read-only applied-binding/lifecycle summary from the persisted record; never secrets.</summary>
+    public ManagedStatusView? Managed { get; set; }
     public required string AgentName     { get; init; }
     public string  ReportedStatus        { get; set; } = "unknown";
     public string? CurrentTask           { get; set; }
@@ -116,3 +118,21 @@ public sealed class AgentState
         }
     }
 }
+
+/// <summary>
+/// #492 compact, read-only view of the persisted managed record for the dashboard. Carries identifiers,
+/// hashes and generations only — never key material or key references.
+/// </summary>
+public sealed record ManagedStatusView(
+    string State,
+    IReadOnlyList<string> Errors,
+    string AdmissionState,
+    bool Pending,
+    string? Operation,
+    string? AppliedSandboxId,
+    string? AppliedSandboxName,
+    Guid? Epoch,
+    int? PolicyVersionId,
+    string? PolicySha256,
+    string? GatewayGeneration,
+    IReadOnlyList<string> Providers);

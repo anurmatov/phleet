@@ -119,4 +119,35 @@ public sealed class ManagedStockRuntimeBrokerReviewTests : IDisposable
             Microsoft.Extensions.Logging.Abstractions.NullLogger<HeartbeatConsumerService>.Instance,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<StockHeartbeatObserverService>.Instance).ManagedDirectory);
     }
+
+    [Fact]
+    public void AgentState_ManagedStatus_ExposesAppliedBindingAndPendingRevokeWithoutKeyMaterial()
+    {
+        var epoch = Guid.NewGuid();
+        var binding = new ManagedBinding("test-sandbox", "sb-1", epoch, "image:test", 17, "abc123", "api_key",
+            "TEST_KEY_REF", "test-provider", "gen-3") { ServiceProviders = ["test-telegram"] };
+        var json = new ManagedRecord { State = "applied", Operation = "revoke:instance-a", Applied = binding, Errors = ["broker:x"] }.Serialize();
+        var (state, errors, status) = AgentRegistry.ManagedView(json);
+        Assert.Equal("busy", state);
+        Assert.Equal(["broker:x"], errors!);
+        Assert.NotNull(status);
+        Assert.Equal("revoking", status!.AdmissionState);
+        Assert.True(status.Pending);
+        Assert.Equal("revoke", status.Operation);
+        Assert.Equal(("test-sandbox", "sb-1", epoch, 17, "abc123", "gen-3"),
+            (status.AppliedSandboxName, status.AppliedSandboxId, status.Epoch!.Value, status.PolicyVersionId!.Value, status.PolicySha256, status.GatewayGeneration));
+        Assert.Equal(["test-provider", "test-telegram"], status.Providers);
+        var serialized = System.Text.Json.JsonSerializer.Serialize(
+            new Fleet.Orchestrator.Models.AgentState { AgentName = "test-agent", Managed = status },
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.Contains("\"managed\":{\"state\":\"applied\"", serialized);
+        Assert.Contains("\"admissionState\":\"revoking\"", serialized);
+        Assert.DoesNotContain("TEST_KEY_REF", serialized);
+        Assert.DoesNotContain("instance-a", serialized);
+
+        var idle = AgentRegistry.ManagedView(new ManagedRecord { State = "applied", Applied = binding }.Serialize()).Status!;
+        Assert.Equal(("active", false), (idle.AdmissionState, idle.Pending));
+        Assert.Equal(("unreadable", (IReadOnlyList<string>?)null, (Fleet.Orchestrator.Models.ManagedStatusView?)null), AgentRegistry.ManagedView("{not json"));
+        Assert.Equal((null, null, null), AgentRegistry.ManagedView(null));
+    }
 }

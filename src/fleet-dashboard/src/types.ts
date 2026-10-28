@@ -25,12 +25,29 @@ export interface JournalHeartbeat {
   bindingFailed?: number
 }
 
+/** #492 read-only applied-binding/lifecycle summary from the persisted managed record. */
+export interface ManagedStatus {
+  state: string
+  errors: string[]
+  admissionState: string
+  pending: boolean
+  operation: string | null
+  appliedSandboxId: string | null
+  appliedSandboxName: string | null
+  epoch: string | null
+  policyVersionId: number | null
+  policySha256: string | null
+  gatewayGeneration: string | null
+  providers: string[]
+}
+
 export interface AgentState {
   runtimeKind?: string
   appliedRuntimeKind?: string
   runtimePending?: boolean
   managedState?: string | null
   managedErrors?: string[] | null
+  managed?: ManagedStatus | null
   agentName: string
   displayName: string | null
   shortName: string | null

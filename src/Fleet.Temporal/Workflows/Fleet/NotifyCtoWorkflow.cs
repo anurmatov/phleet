@@ -31,6 +31,7 @@ public class NotifyCtoWorkflow
     public async Task RunAsync(NotifyCtoWorkflowInput input)
     {
         var taskId = $"{Workflow.Info.WorkflowId}/notify";
+        AgentTaskResult? result = null;
 
         try
         {
@@ -38,7 +39,7 @@ public class NotifyCtoWorkflow
             // the compiler append every optional parameter's default, so adding one to the
             // activity (#347 repo) would silently change this workflow's input. These six are
             // exactly what the expression form scheduled.
-            await Workflow.ExecuteActivityAsync<AgentTaskResult>(
+            result = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
                 DelegateToAgentActivity.ActivityName,
                 new object?[]
                 {
@@ -56,15 +57,22 @@ public class NotifyCtoWorkflow
             // A caller that tracks delivery (#488's failure notifier) asks for the failure to close
             // the run Failed, so the outcome is visible. The message is fixed; no error text leaks.
             if (input.ReportDeliveryFailure)
-                throw new ApplicationFailureException(
-                    "notification delivery failed", errorType: DeliveryFailedErrorType, nonRetryable: true);
+                throw DeliveryFailed();
 
             // ignoreFailure=true — escalation channel must not surface errors to callers.
             Workflow.Logger.LogWarning(
                 "NotifyCtoWorkflow: delegation to {Agent} failed — ignoring",
                 input.TargetAgent);
         }
+
+        // A returned result can also mean nothing was delivered: "failed", or still "incomplete"
+        // after the retries. Only a completed answer confirms delivery; the result text never leaves.
+        if (input.ReportDeliveryFailure && result is not { IsCompleted: true })
+            throw DeliveryFailed();
     }
+
+    private static ApplicationFailureException DeliveryFailed() =>
+        new("notification delivery failed", errorType: DeliveryFailedErrorType, nonRetryable: true);
 }
 
 /// <summary>

@@ -19,12 +19,13 @@ A `Completed` run is never inferred to be a failure from its result. Deliberate 
 - Every poll interval, the bridge lists `Failed`/`TimedOut` runs closed within the lookback window, in each namespace in `TemporalBridge:Namespaces`. This runs from outside the failed workflow.
 - Each failure becomes a record in the state file: `pending`, `in_flight`, `delivered` or `parked`, with an attempt count and the last error category.
 - An attempt starts the existing `NotifyCtoWorkflow` (the `notify_cto` path) under `workflow-failure-<namespace>-<runId>-<attempt>`, with `ReportDeliveryFailure` on.
-  - That run completes only when the coordinator answered. If the broker or agent fails, it closes `Failed`.
+  - That run completes only when the coordinator's answer comes back `completed`. A broker or agent error, or a returned `failed`, `incomplete` or `idle` result, closes it `Failed` with a fixed error that copies none of the result text.
   - `notify_cto` itself is unchanged: the flag defaults to off.
 - A failure is `delivered` only after its notification run completed.
 - A failed hand-over (`handover_failed`) or a failed notification run (`delivery_failed`) is an attempt. The failure goes back to `pending` and is retried on a later poll, and after `MaxDeliveryAttempts` it is `parked`. Parked records are kept for 30 days.
 - The state file survives restarts whatever the failure's age; mount its directory (the example compose maps `${FLEET_BASE_DIR}/temporal-bridge`).
-  - If the file is lost, failures still inside the lookback are rebuilt from the per-attempt notification ids without notifying again.
+  - If the file is missing, failures still inside the lookback are rebuilt from the per-attempt notification ids without notifying again.
+  - If the file exists but cannot be read or holds an invalid record, the notifier holds: it does no discovery, sends nothing and writes nothing. The file is left untouched and the status reports `stateUnreadable: true`. Recover explicitly: repair or restore the file, or move it aside to start fresh. The notifier resumes on its next poll.
   - If the file cannot be written, state stays in memory and the status reports `durable: false`.
 - `GET /workflow-failures` on the bridge (port 3001) returns the counts and the pending, in-flight and parked records: identity, state, attempts and error category.
 

@@ -79,8 +79,9 @@ public sealed class WorkflowFailureNotifier : BackgroundService
     private readonly ILogger<WorkflowFailureNotifier> _logger;
 
     private readonly Lock _gate = new();
-    private readonly Dictionary<string, FailureRecord> _records;
+    private readonly Dictionary<string, FailureRecord> _records = new(StringComparer.Ordinal);
     private bool _warnedUnconfigured;
+    private bool _stateUnreadable;
 
     public WorkflowFailureNotifier(
         IOptions<WorkflowFailureNotifierOptions> options,
@@ -102,7 +103,34 @@ public sealed class WorkflowFailureNotifier : BackgroundService
         _logger = logger;
         _time = time ?? TimeProvider.System;
         _store = new WorkflowFailureStateFile(_options.StateFile, logger);
-        _records = _options.Enabled ? _store.Load() : new Dictionary<string, FailureRecord>(StringComparer.Ordinal);
+        if (_options.Enabled) TryLoadState();
+    }
+
+    /// <summary>
+    /// An unreadable or invalid state file is never replaced: the notifier holds (no discovery, no
+    /// sends, no writes) until someone repairs or restores it, or moves it aside to start fresh.
+    /// </summary>
+    private bool TryLoadState()
+    {
+        if (!_store.TryLoad(out var loaded))
+        {
+            if (!_stateUnreadable)
+                _logger.LogError(
+                    "Workflow failure notifier is held: state file {Path} is unreadable and is left untouched. " +
+                    "Repair or restore it, or move it aside to start fresh; the notifier resumes on its next poll",
+                    _options.StateFile);
+            _stateUnreadable = true;
+            return false;
+        }
+
+        lock (_gate)
+        {
+            _records.Clear();
+            foreach (var (key, record) in loaded) _records[key] = record;
+        }
+        if (_stateUnreadable) _logger.LogInformation("Workflow failure state {Path} readable again; resuming", _options.StateFile);
+        _stateUnreadable = false;
+        return true;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -136,6 +164,8 @@ public sealed class WorkflowFailureNotifier : BackgroundService
     /// <summary>One poll: discover, settle in-flight attempts, start pending ones, prune, persist.</summary>
     public async Task RunCycleAsync(CancellationToken ct)
     {
+        if (_stateUnreadable && !TryLoadState()) return;
+
         var now = _time.GetUtcNow().UtcDateTime;
         await DiscoverAsync(now.AddHours(-Math.Max(1, _options.LookbackHours)), now, ct);
         await SettleInFlightAsync(now, ct);
@@ -352,7 +382,8 @@ public sealed class WorkflowFailureNotifier : BackgroundService
             return new WorkflowFailureNotifierStatus(
                 Enabled: _options.Enabled,
                 CoordinatorConfigured: ResolveCoordinator() is not null,
-                Durable: _store.Durable,
+                Durable: _store.Durable && !_stateUnreadable,
+                StateUnreadable: _stateUnreadable,
                 Delivered: _records.Values.Count(r => r.State == FailureState.Delivered),
                 Pending: In(FailureState.Pending),
                 InFlight: In(FailureState.InFlight),
@@ -403,13 +434,14 @@ public sealed record FailureRecordView(
     string Namespace, string WorkflowId, string RunId, string Status, string State, int Attempts, string? LastError);
 
 public sealed record WorkflowFailureNotifierStatus(
-    bool Enabled, bool CoordinatorConfigured, bool Durable, int Delivered,
+    bool Enabled, bool CoordinatorConfigured, bool Durable, bool StateUnreadable, int Delivered,
     IReadOnlyList<FailureRecordView> Pending, IReadOnlyList<FailureRecordView> InFlight,
     IReadOnlyList<FailureRecordView> Parked);
 
 /// <summary>
 /// The durable record of failures, written atomically (temp file, then rename) after every poll.
-/// An empty path, or a directory that cannot be written, keeps state in memory and says so.
+/// An empty path, or a directory that cannot be written, keeps state in memory and says so. A file
+/// that cannot be read or holds an invalid record is reported, never treated as empty.
 /// </summary>
 public sealed class WorkflowFailureStateFile(string? path, ILogger logger)
 {
@@ -418,28 +450,45 @@ public sealed class WorkflowFailureStateFile(string? path, ILogger logger)
 
     public bool Durable => _writable;
 
-    public Dictionary<string, FailureRecord> Load()
+    /// <summary>
+    /// False when the file exists but cannot be read, is not a JSON array of records, or holds an
+    /// invalid record. A missing file is a successful empty load.
+    /// </summary>
+    public bool TryLoad(out Dictionary<string, FailureRecord> records)
     {
-        var records = new Dictionary<string, FailureRecord>(StringComparer.Ordinal);
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return records;
+        records = new Dictionary<string, FailureRecord>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return true;
+        var why = Read(records);
+        if (why is null) return true;
+        logger.LogError("Workflow failure state {Path} unreadable ({Reason})", path, why);
+        records.Clear();
+        return false;
+    }
+
+    /// <summary>Fills <paramref name="records"/>; returns why the file is unusable, or null.</summary>
+    private string? Read(Dictionary<string, FailureRecord> records)
+    {
         try
         {
-            foreach (var r in JsonSerializer.Deserialize<List<FailureRecord>>(File.ReadAllText(path), Json) ?? [])
+            var loaded = JsonSerializer.Deserialize<List<FailureRecord>>(File.ReadAllText(path!), Json);
+            if (loaded is null) return "not a record list";
+            foreach (var r in loaded)
             {
-                if (string.IsNullOrEmpty(r.Namespace) || string.IsNullOrEmpty(r.RunId) || !FailureState.IsKnown(r.State)) continue;
+                if (r is null || string.IsNullOrEmpty(r.Namespace) || string.IsNullOrEmpty(r.WorkflowId)
+                    || string.IsNullOrEmpty(r.RunId) || !FailureState.IsKnown(r.State) || r.Attempts < 0
+                    || !records.TryAdd(r.Identity, r))
+                    return "invalid record";
                 // Only fixed categories ever leave this process, even if the file was edited.
                 r.Cause = r.Cause is null ? null : WorkflowFailureClassifier.Known(r.Cause);
                 r.LastError = r.LastError is null ? null : WorkflowFailureClassifier.Known(r.LastError);
                 if (r.State == FailureState.InFlight && string.IsNullOrEmpty(r.NotificationId)) r.State = FailureState.Pending;
-                records[r.Identity] = r;
             }
+            return null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            // Unreadable: start empty. Per-attempt notification ids still rebuild failures in the lookback.
-            logger.LogError("Workflow failure state {Path} unreadable ({Error}); starting empty", path, ex.GetType().Name);
+            return ex.GetType().Name;
         }
-        return records;
     }
 
     public void Save(IReadOnlyCollection<FailureRecord> records)

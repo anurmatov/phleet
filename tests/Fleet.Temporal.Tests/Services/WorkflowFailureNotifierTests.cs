@@ -198,18 +198,54 @@ public sealed class WorkflowFailureNotifierTests : IDisposable
     }
 
     [Fact]
-    public async Task AnUnreadableStateFile_StartsEmptyAndKeepsWorking()
+    public async Task AnUnreadableStateFile_HoldsTheNotifierAndIsNeverOverwritten_UntilMovedAside()
     {
-        File.WriteAllText(StatePath, "{ not json");
+        const string corrupt = "{ not json";
+        File.WriteAllText(StatePath, corrupt);
         var source = new FakeSource();
         source.Add(Run("a"), WorkflowFailureClassifier.Unknown);
         var sender = new FakeSender();
 
         var notifier = Notifier(source, sender);
+        await Cycles(notifier, 2);
+
+        Assert.Equal((0, 0), (source.ListCalls, sender.StartCalls));
+        Assert.Equal(corrupt, File.ReadAllText(StatePath));
+        var status = notifier.Snapshot();
+        Assert.True(status.StateUnreadable);
+        Assert.False(status.Durable);
+
+        // Explicit recovery chosen by the operator: move the file aside to start fresh.
+        File.Move(StatePath, StatePath + ".bad");
         await notifier.RunCycleAsync(CancellationToken.None);
 
+        Assert.False(notifier.Snapshot().StateUnreadable);
         Assert.Single(sender.Started);
-        Assert.True(notifier.Snapshot().Durable);
+        Assert.Equal(corrupt, File.ReadAllText(StatePath + ".bad"));
+        Assert.Contains("run-a", File.ReadAllText(StatePath));
+    }
+
+    [Fact]
+    public async Task AnInvalidRecord_HoldsToo_AndARestoredFileResumesWithItsOldBacklog()
+    {
+        // Backlog older than the lookback, so only the file knows about it.
+        var old = Run("old", ageHours: 48);
+        var good = FailureRecord.From(old, Now.AddHours(-48));
+        var valid = System.Text.Json.JsonSerializer.Serialize(new[] { good });
+        File.WriteAllText(StatePath, valid.Replace("\"pending\"", "\"weird\""));
+        var sender = new FakeSender();
+
+        var notifier = Notifier(new FakeSource(), sender);
+        await notifier.RunCycleAsync(CancellationToken.None);
+        Assert.True(notifier.Snapshot().StateUnreadable);
+        Assert.Contains("weird", File.ReadAllText(StatePath));
+
+        // Explicit recovery: the operator repairs the file; the backlog is delivered, not dropped.
+        File.WriteAllText(StatePath, valid);
+        await notifier.RunCycleAsync(CancellationToken.None);
+
+        Assert.False(notifier.Snapshot().StateUnreadable);
+        Assert.Equal("workflow-failure-fleet-run-old-1", Assert.Single(sender.Started).Id);
     }
 
     [Fact]
@@ -389,7 +425,8 @@ public sealed class WorkflowFailureNotifierTests : IDisposable
 /// </summary>
 public class NotifyCtoDeliveryReportingTests
 {
-    private static Temporalio.Worker.TemporalWorker Worker(Temporalio.Client.ITemporalClient client, string queue) =>
+    private static Temporalio.Worker.TemporalWorker Worker(
+        Temporalio.Client.ITemporalClient client, string queue, Func<Fleet.Temporal.Models.AgentTaskResult>? answer = null) =>
         new(client, new Temporalio.Worker.TemporalWorkerOptions(queue)
             .AddWorkflow<Fleet.Temporal.Workflows.Fleet.NotifyCtoWorkflow>()
             .AddActivity(Temporalio.Activities.ActivityDefinition.Create(
@@ -397,7 +434,53 @@ public class NotifyCtoDeliveryReportingTests
                 typeof(Fleet.Temporal.Models.AgentTaskResult),
                 [typeof(string), typeof(string), typeof(string), typeof(bool), typeof(int), typeof(int), typeof(string)],
                 3,
-                _ => throw new IOException("broker unavailable"))));
+                _ => answer is null ? throw new IOException("broker unavailable") : answer())));
+
+    /// <summary>Runs NotifyCtoWorkflow against a delegation that returns <paramref name="status"/>.</summary>
+    private static async Task<(Temporalio.Api.Enums.V1.WorkflowExecutionStatus Status, ApplicationFailureException? Failure)> RunWithResult(
+        string status, bool report)
+    {
+        await using var env = await Temporalio.Testing.WorkflowEnvironment.StartTimeSkippingAsync();
+        var queue = $"notify-cto-{Guid.NewGuid():N}";
+        using var worker = Worker(env.Client, queue, () => new Fleet.Temporal.Models.AgentTaskResult("executor said sk-secret-xyz", status));
+        return await worker.ExecuteAsync(async () =>
+        {
+            var handle = await env.Client.StartWorkflowAsync(
+                (Fleet.Temporal.Workflows.Fleet.NotifyCtoWorkflow wf) =>
+                    wf.RunAsync(new Fleet.Temporal.Workflows.Fleet.NotifyCtoWorkflowInput("agent-a", "heads up", report)),
+                new Temporalio.Client.WorkflowOptions($"notify-cto-{Guid.NewGuid():N}", queue));
+            ApplicationFailureException? failure = null;
+            try { await handle.GetResultAsync(); }
+            catch (Temporalio.Exceptions.WorkflowFailedException ex) { failure = ex.InnerException as ApplicationFailureException; }
+            return ((await handle.DescribeAsync()).Status, failure);
+        });
+    }
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("incomplete")]
+    [InlineData("idle")]
+    [InlineData("")]
+    public async Task WithDeliveryReporting_AReturnedResultThatIsNotCompleted_ClosesTheRunFailed(string status)
+    {
+        var (closed, failure) = await RunWithResult(status, report: true);
+
+        Assert.Equal(Temporalio.Api.Enums.V1.WorkflowExecutionStatus.Failed, closed);
+        Assert.Equal("NotificationDeliveryFailed", failure!.ErrorType);
+        Assert.Equal("notification delivery failed", failure.Message);
+    }
+
+    [Fact]
+    public async Task WithDeliveryReporting_OnlyACompletedResultCompletesTheRun()
+    {
+        Assert.Equal(Temporalio.Api.Enums.V1.WorkflowExecutionStatus.Completed, (await RunWithResult("completed", report: true)).Status);
+    }
+
+    [Fact]
+    public async Task WithoutDeliveryReporting_AFailedResultStillCompletesAsBefore()
+    {
+        Assert.Equal(Temporalio.Api.Enums.V1.WorkflowExecutionStatus.Completed, (await RunWithResult("failed", report: false)).Status);
+    }
 
     [Fact]
     public async Task TheNotifyCtoInputShape_StillSwallowsAFailedDelegation()

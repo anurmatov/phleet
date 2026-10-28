@@ -8,8 +8,10 @@
 version = 2
 
 [openshell.gateway]
-# Private loopback listener on the gateway host only, never a public interface.
-bind_address        = "127.0.0.1:8080"
+# Listener on the gateway container's private fleet-net interface only (no published host port, so
+# no clash with temporal-ui on 8080). The orchestrator's stock CLI client endpoint is
+# https://openshell-gateway:8443; the server cert must carry that DNS SAN. Never a public interface.
+bind_address        = "0.0.0.0:8443"
 health_bind_address = "127.0.0.1:8081"
 log_level           = "info"
 compute_driver      = "docker"

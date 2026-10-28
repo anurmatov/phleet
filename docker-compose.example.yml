@@ -830,7 +830,9 @@ services:
 
   # Managed stock OpenShell gateway (#492), only with `--profile openshell`. Pin the exact stock image
   # by digest; copy deploy/openshell/gateway.toml.example to ${FLEET_BASE_DIR}/openshell/gateway.toml.
-  # Host networking keeps the loopback listener private to this host; the Docker socket is the
+  # The mTLS listener (8443 in the example TOML) is reachable only on fleet-net, with no host port
+  # (temporal-ui owns host 8080). The orchestrator's stock CLI client endpoint is
+  # https://openshell-gateway:8443 and the gateway cert needs that DNS SAN. The Docker socket is the
   # explicit trusted-control exception and is never mounted into a workload. restart "no": a
   # gateway restart must be planned (owned sandboxes stopped first), never automatic.
   openshell-gateway:
@@ -839,7 +841,8 @@ services:
     # real values when the managed runtime is enabled, and an unset image cannot be pulled.
     image: ${FLEET_STOCK_GATEWAY_IMAGE:-openshell-gateway-image-not-configured}
     container_name: openshell-gateway
-    network_mode: host
+    networks:
+      - fleet-net
     restart: "no"
     user: "1000:1000"
     group_add: ["${FLEET_DOCKER_GID:-nogroup}"]

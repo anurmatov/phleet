@@ -428,7 +428,9 @@ arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back t
 
 Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
 into the orchestrator at `/var/lib/fleet-openshell-client`:
-- stock CLI client metadata/trust (`XDG_CONFIG_HOME`);
+- stock CLI client metadata/trust (`XDG_CONFIG_HOME`); with the example `--profile openshell` gateway the
+  client endpoint is `https://openshell-gateway:8443` on `fleet-net` (no host port; the gateway cert
+  needs that DNS SAN), never the host loopback, which the orchestrator container cannot reach;
 - `managed-authority.json` (gateway issuer/audience/JWKS, assertion key paths, memory and broker hosts,
   optional `ServiceHosts` such as `{"temporal": "temporal.example.test", "telegram": "telegram.example.test"}`
   and optional `JournalHost` such as `"journal.example.test"`);

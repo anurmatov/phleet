@@ -30,7 +30,10 @@ esac
 token=${ORCHESTRATOR_AUTH_TOKEN:-}
 [[ -n "$token" ]] || refuse "target lacks managed capability and no operator token is configured for the preflight"
 url=${FLEET_ORCHESTRATOR_URL:-http://127.0.0.1:3600}
-body=$(curl -fsS --max-time 10 -H "Authorization: Bearer $token" "$url/api/managed-runtime/rollback-preflight") \
+# The header goes through curl's stdin config (-K -), never argv, so the token is not visible in ps.
+esc=${token//\\/\\\\}; esc=${esc//\"/\\\"}
+body=$(printf 'header = "Authorization: Bearer %s"\n' "$esc" \
+  | curl -fsS --max-time 10 -K - "$url/api/managed-runtime/rollback-preflight") \
   || refuse "rollback preflight unavailable"
 python3 - "$body" <<'PY' || refuse "managed bindings exist or the preflight answer is invalid"
 import json, sys

@@ -8,10 +8,12 @@
 # (TLS server cert/key, client CA, JWT signing/public key and kid under STATE_DIR/tls) must exist.
 # SQLite is copied with the stdlib online backup API (never a raw copy of an open DB/WAL) and
 # integrity-checked. Config and trust files are copied as-is, and their inode/mtime is compared
-# before and after; any change, missing file or failure leaves the snapshot marked INVALID and exits
-# nonzero so the operator alert fires. Directories are 0700, files 0600; seven complete snapshots
-# are kept. Snapshots hold key material: keep them host-local unless an operator-approved encrypted
-# transfer exists. Never upload them to a public share or an unencrypted sync.
+# before and after; any change, missing file or failure deletes the partial snapshot (it may hold
+# keys), stamps BACKUP_DIR/last-failure and exits nonzero so the operator alert fires. Directories
+# are 0700, files 0600; seven complete snapshots are kept. Snapshots hold key material: keep them
+# host-local unless an operator-approved encrypted transfer exists. Never upload them to a public
+# share or an unencrypted sync. Linked OS ancestors above STATE_DIR (macOS /var -> /private/var) are
+# resolved; a linked STATE_DIR or anything under it still refuses.
 set -euo pipefail
 umask 077
 
@@ -25,10 +27,17 @@ mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 snapshot="$BACKUP_DIR/gateway-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir "$snapshot"
+# A snapshot that never completes may already hold keys: delete it on any exit after reporting.
+trap '[[ -f "$snapshot/COMPLETE" ]] || rm -rf -- "$snapshot"' EXIT
 
-python3 - "$STATE_DIR" "$CONFIG_FILE" "$snapshot" <<'PY' || { : > "$snapshot/INVALID"; echo "backup_failed: snapshot marked INVALID" >&2; exit 1; }
+python3 - "$STATE_DIR" "$CONFIG_FILE" "$snapshot" <<'PY' || { date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUP_DIR/last-failure"; echo "backup_failed: partial snapshot deleted" >&2; exit 1; }
 import hashlib, os, shutil, sqlite3, stat, sys
-state, config, out = sys.argv[1], sys.argv[2], sys.argv[3]
+def anchored(path):
+    """Resolve OS-level links above the leaf (macOS /var -> /private/var) but keep the leaf itself."""
+    path = os.path.abspath(path)
+    return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+
+state, config, out = anchored(sys.argv[1]), anchored(sys.argv[2]), sys.argv[3]
 REQUIRED = ["tls/gateway.pem", "tls/gateway-key.pem", "tls/client-ca.pem",
             "tls/jwt/signing.pem", "tls/jwt/public.pem", "tls/jwt/kid"]
 
@@ -101,9 +110,10 @@ PY
 
 : > "$snapshot/COMPLETE"
 date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUP_DIR/last-success"
-# Keep the newest complete snapshots; invalid ones are left for the operator to inspect.
+# Keep the newest complete snapshots; INVALID ones left by older versions hold keys and are deleted.
 kept=0
 find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'gateway-*' | sort -r | while IFS= read -r dir; do
+  [[ ! -f "$dir/INVALID" ]] || { rm -rf -- "$dir"; continue; }
   [[ -f "$dir/COMPLETE" ]] || continue
   kept=$((kept + 1))
   [[ $kept -le $KEEP ]] || rm -rf -- "$dir"

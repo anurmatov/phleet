@@ -587,7 +587,9 @@ exit.** Administrator Docker commands that bypass this procedure are not protect
 operator's daily host job and before gateway changes. It refuses incomplete coverage (database, gateway TOML, TLS cert/key/client CA, JWT keys and kid), then takes a stdlib SQLite online backup with
 an integrity check, copies config and trust files, and checks their inode/mtime before and after.
 Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure or a
-changed trust file marks the snapshot `INVALID` and exits nonzero. Snapshots contain keys: keep
+changed trust file deletes the partial snapshot (it may already hold keys), stamps `BACKUP_DIR/last-failure`
+and exits nonzero. Linked OS ancestors above `STATE_DIR` (macOS `/var` -> `/private/var`) are resolved; a
+linked `STATE_DIR` or anything under it still refuses. Snapshots contain keys: keep
 them host-local unless an operator-approved encrypted transfer exists. To restore, stop the gateway
 and every owned workload first, verify integrity and bindings before any admission, and keep the
 unexpected-resume hold.

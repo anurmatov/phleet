@@ -24,6 +24,7 @@ class RolloutGuardTests(unittest.TestCase):
             stub.write_text(
                 "#!/usr/bin/env bash\n"
                 f'echo "{tool} $*" >> "{self.calls}"\n'
+                f'[[ " $* " != *" -K - "* ]] || sed "s/^/stdin: /" >> "{self.calls}"\n'
                 f'rc_var=STUB_{tool.upper()}_RC; out_var=STUB_{tool.upper()}_OUT\n'
                 'printf "%s" "${!out_var:-}"\n'
                 'exit "${!rc_var:-0}"\n')
@@ -145,10 +146,8 @@ class GatewayBackupTests(unittest.TestCase):
                 missing.write_text(content)
                 self.assertEqual(result.returncode, 1)
                 self.assertFalse((self.backups / "last-success").exists())
-                self.assertTrue(any((p / "INVALID").exists() for p in self.backups.glob("gateway-*")))
-                for p in self.backups.glob("gateway-*"):
-                    if (p / "INVALID").exists():
-                        import shutil; shutil.rmtree(p)
+                self.assertEqual(list(self.backups.glob("gateway-*")), [])  # partial key material deleted
+                self.assertTrue((self.backups / "last-failure").exists())
 
     def test_linked_trust_ancestor_or_state_dir_is_invalid(self):
         real = Path(self.tmp.name, "real-jwt")
@@ -158,7 +157,7 @@ class GatewayBackupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse((self.backups / "last-success").exists())
 
-    def test_keeps_seven_complete_snapshots_and_leaves_invalid_ones(self):
+    def test_keeps_seven_complete_snapshots_and_deletes_invalid_ones(self):
         self.backups.mkdir(mode=0o700)
         for day in range(1, 10):
             old = self.backups / f"gateway-2026010{day}T000000Z"
@@ -168,7 +167,7 @@ class GatewayBackupTests(unittest.TestCase):
         names = sorted(p.name for p in self.backups.iterdir() if p.name.startswith("gateway-"))
         complete = [n for n in names if (self.backups / n / "COMPLETE").exists()]
         self.assertEqual(len(complete), 7)
-        self.assertIn("gateway-20260105T000000Z", names)  # invalid kept for the operator
+        self.assertNotIn("gateway-20260105T000000Z", names)  # invalid snapshots hold keys: deleted
 
     def test_missing_database_fails_without_a_success_marker(self):
         result = self.run_backup(Path(self.tmp.name, "absent"))

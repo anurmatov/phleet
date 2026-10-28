@@ -63,10 +63,19 @@ public sealed class StockRuntimeMutationHold
             var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name);
             return agent is null ? null : applying
                 ? AgentPatchHelpers.RuntimeApplyFault(agent)
-                : agent.AppliedRuntimeKind != "docker" ? "managed_runtime_unavailable" : null;
+                : agent.AppliedRuntimeKind != "docker" || UnresolvedManaged(agent.AppliedRuntimeBinding)
+                    ? "managed_runtime_unavailable" : null;
         }
         catch (Exception ex) when (ex is System.Data.Common.DbException or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException)
         { return "runtime_state_unavailable"; }
+    }
+
+    // A Docker-applied agent with an in-flight candidate/operation or held managed record (e.g. an
+    // unresolved Docker→OpenShell apply) must not be started on Docker: two daemons would poll one bot.
+    private static bool UnresolvedManaged(string? binding)
+    {
+        try { return ManagedRecord.Parse(binding).Unresolved; }
+        catch (JsonException) { return true; } // unreadable is not absent
     }
 
     public bool HasEnrollment { get; }

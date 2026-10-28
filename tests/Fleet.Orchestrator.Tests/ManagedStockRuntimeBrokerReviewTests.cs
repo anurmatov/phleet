@@ -1,6 +1,9 @@
+using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Shared.Security;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Fleet.Orchestrator.Tests;
 
@@ -45,5 +48,30 @@ public sealed class ManagedStockRuntimeBrokerReviewTests : IDisposable
             .AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:ConfigDir"] = _root }).Build());
         Assert.True(hold.HoldsOrdinaryTraffic(name));
         Assert.False(hold.HoldsOrdinaryTraffic("agent2"));
+    }
+
+    [Theory]
+    [InlineData("applying", "managed_runtime_unavailable")]
+    [InlineData("needs_attention", "managed_runtime_unavailable")]
+    [InlineData("revoked", null)]
+    public async Task Docker_start_is_refused_while_a_managed_record_is_unresolved(string state, string? expected)
+    {
+        var services = new ServiceCollection();
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<OrchestratorDbContext>(o => o.UseInMemoryDatabase(dbName));
+        using var provider = services.BuildServiceProvider();
+        using (var scope = provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            var agent = ManagedStockRuntimeTests.Agent();
+            agent.AppliedRuntimeKind = "docker"; // Docker→OpenShell candidate still in flight
+            agent.AppliedRuntimeBinding = new ManagedRecord { State = state }.Serialize();
+            db.Agents.Add(agent);
+            await db.SaveChangesAsync();
+        }
+        var hold = new StockRuntimeMutationHold(new ConfigurationBuilder().Build(), provider.GetRequiredService<IServiceScopeFactory>());
+        Assert.Equal(expected, await hold.DescribeAppliedFaultAsync("agent1"));
+        if (expected is not null) // no registry or Docker service: any legacy Docker dispatch would throw
+            Assert.Equal(expected, await new Fleet.Orchestrator.Tools.StartAgentTool(null!, null!, hold).StartAgentAsync("agent1"));
     }
 }

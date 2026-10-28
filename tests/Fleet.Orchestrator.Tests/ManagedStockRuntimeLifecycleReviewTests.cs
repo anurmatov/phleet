@@ -104,4 +104,61 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
         Assert.Equal("revoked", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
+
+    [Fact]
+    public async Task Planned_gateway_restart_rebinds_a_durably_stopped_binding_on_start()
+    {
+        var binding = _t.Binding("fleet-agent1-66666666", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        var runtime = _t.Runtime();
+        _t._host.Generation = "gateway-2@planned";
+
+        // The status refresh leaves a durably stopped, quiescent binding alone.
+        await runtime.CheckGenerationAsync("agent1", default);
+        Assert.Equal("stopped", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+
+        var start = await runtime.StartAsync("agent1", default);
+
+        Assert.True(start.Ok, start.Code + ":" + string.Join(",", start.Errors));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("applied", record.State);
+        Assert.Equal("gateway-2@planned", record.Applied!.GatewayGeneration);
+    }
+
+    [Fact]
+    public async Task Planned_gateway_restart_never_permanently_refuses_reapply()
+    {
+        var binding = _t.Binding("fleet-agent1-77777777", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t._host.Generation = "gateway-2@planned";
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Code + ":" + string.Join(",", apply.Errors));
+        Assert.NotEqual("gateway_generation_changed", apply.Code);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.DoesNotContain("gateway_generation_changed", record.Errors);
+        Assert.Equal("gateway-2@planned", record.Applied!.GatewayGeneration);
+    }
+
+    [Fact]
+    public async Task Unplanned_generation_change_on_a_running_binding_still_holds_and_fans_out_on_start()
+    {
+        var binding = _t.Binding("fleet-agent1-88888888", Guid.NewGuid());
+        // Recorded stopped, but the sandbox is running: not a planned restart.
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t._host.Generation = "gateway-2@unexpected";
+
+        var start = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.Equal((409, "gateway_generation_changed"), (start.Status, start.Code));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Equal(binding.GatewayGeneration, record.Applied!.GatewayGeneration);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "start"));
+    }
 }

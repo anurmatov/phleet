@@ -163,7 +163,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     public async Task Changed_gateway_generation_holds_start_and_stops_the_owned_binding()
     {
         var binding = Binding("fleet-agent1-dddddddd", Guid.NewGuid());
-        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        // Running despite the stopped record: unplanned (a quiescent Stopped fleet rebinds, #492 review F6).
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
         _store.Add(ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
         _host.Generation = "gateway-2@later";
 

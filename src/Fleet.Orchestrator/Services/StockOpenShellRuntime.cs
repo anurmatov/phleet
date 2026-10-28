@@ -428,7 +428,9 @@ public sealed class StockOpenShellRuntime(
         try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
         catch (JsonException) { return; }
         if (record is not { Operation: null, Applied: { } binding } || record.State is "needs_attention" or "revoked") return;
-        if (await host.GatewayGenerationAsync(ct) is { } current && current != binding.GatewayGeneration)
+        if (await host.GatewayGenerationAsync(ct) is { } current && current != binding.GatewayGeneration
+            // A durably stopped, quiescent binding is a planned restart: Start/apply rebinds it after its checks.
+            && !(record.State == "stopped" && await StoppedQuiescentAsync(binding, ct) is null))
             await HandleUnexpectedRestartAsync(name, ct);
     }
 
@@ -709,7 +711,9 @@ public sealed class StockOpenShellRuntime(
         if (reuse)
         {
             var old = record.Applied!;
-            if (old.GatewayGeneration != generation) return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
+            // #489 planned restart: a durably stopped, quiescent fleet re-applies onto the new generation.
+            if (old.GatewayGeneration != generation && !await PlannedRestartAsync(agent.Name, record, old, ct))
+                return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
             if (old.Image != image) return (record, null, null, Result.Refused(409, "managed_image_change_requires_revoke"));
             if (await VerifyIdentityAsync(old, ct) is { } identity) return (record, null, null, identity);
         }
@@ -1020,7 +1024,17 @@ public sealed class StockOpenShellRuntime(
         // Unresolved holds survive Stop; only a clean revoke/apply reconciles them.
         if (record.State is "needs_attention" or "revoked" || record.Candidate is not null)
             return (record, null, null, Result.Refused(409, record.Candidate is not null ? "unresolved_candidate" : record.State, record.Errors));
-        if (await GenerationFaultAsync(binding, ct) is { } generation) return await HoldForGenerationAsync(agent, record, generation, ct);
+        if (await GenerationFaultAsync(binding, ct) is { } generation)
+        {
+            // #489 planned restart: rebind the recorded generation only after the same-UUID/Stopped/
+            // quiescent checks across every owned record and the gateway trust preflight; else hold.
+            if (generation != "gateway_generation_changed" || !await PlannedRestartAsync(agent.Name, record, binding, ct)
+                || await DescribePreflightFaultAsync(agent, ct) is not null || await host.GatewayGenerationAsync(ct) is not { } current)
+                return await HoldForGenerationAsync(agent, record, generation, ct);
+            binding = binding with { GatewayGeneration = current };
+            record = record with { Applied = binding };
+            await checkpoint(record);
+        }
         // A repeat Start on an applied, running binding never re-stages or stops it: success when
         // Ready, otherwise a mutation-free refusal.
         if (record.State == "applied" && await GetAsync(binding.SandboxName, ct) is { } live && live.Id == binding.SandboxId
@@ -1037,7 +1051,13 @@ public sealed class StockOpenShellRuntime(
     {
         if (agent.AppliedRuntimeKind != "openshell" || record.Applied is not { } binding)
             return (record, null, null, Result.Refused(409, "managed_binding_missing"));
-        if (await GenerationFaultAsync(binding, ct) is { } generation) return await HoldForGenerationAsync(agent, record, generation, ct);
+        if (await GenerationFaultAsync(binding, ct) is { } generation)
+        {
+            // Stop on a durably stopped, quiescent binding after a planned restart is already done.
+            if (generation == "gateway_generation_changed" && record.State == "stopped" && await StoppedQuiescentAsync(binding, ct) is null)
+                return (record, null, null, Result.Done("stopped"));
+            return await HoldForGenerationAsync(agent, record, generation, ct);
+        }
         var errors = new List<string>();
         if (await LifecycleAsync("stop", binding, ct) is { } fault) errors.Add(fault);
         else if (await QuiescentAsync(binding, ct) is { } quiet) errors.Add(quiet);
@@ -1063,6 +1083,39 @@ public sealed class StockOpenShellRuntime(
     {
         var errors = generation == "gateway_generation_changed" ? await RevokeFanoutAsync(agent.Name, record, ct) : [];
         return Hold(record, 409, generation, [.. errors]);
+    }
+
+    /// <summary>
+    /// #489 Gateway restart row: a generation change is planned only when this record is durably
+    /// stopped/revoked with no candidate or errors, its sandbox keeps the same UUID, Stopped and
+    /// quiescent, and every other owned managed record is likewise idle, stopped and quiescent.
+    /// </summary>
+    private async Task<bool> PlannedRestartAsync(string agentName, ManagedRecord record, ManagedBinding binding, CancellationToken ct)
+    {
+        if (record.State is not ("stopped" or "revoked") || record.Candidate is not null || record.Errors.Count > 0) return false;
+        if (await StoppedQuiescentAsync(binding, ct) is not null) return false;
+        IReadOnlyList<Agent> agents;
+        try { agents = await store.ListAsync(ct); }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return false; }
+        foreach (var other in agents.Where(a => !string.Equals(a.Name, agentName, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (string.IsNullOrEmpty(other.AppliedRuntimeBinding)) continue;
+            ManagedRecord owned;
+            try { owned = ManagedRecord.Parse(other.AppliedRuntimeBinding); }
+            catch (JsonException) { return false; }
+            if (owned.Applied is null && owned.Candidate is null) continue;
+            if (owned.Operation is not null || owned.Candidate is not null || owned.State is not ("stopped" or "revoked")) return false;
+            if (await StoppedQuiescentAsync(owned.Applied!, ct) is not null) return false;
+        }
+        return true;
+    }
+
+    private async Task<string?> StoppedQuiescentAsync(ManagedBinding binding, CancellationToken ct)
+    {
+        var sandbox = await GetAsync(binding.SandboxName, ct);
+        if (sandbox is null) return "sandbox_unobservable";
+        if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
+        return sandbox.Value.Phase == "Stopped" ? await QuiescentAsync(binding, ct) : "sandbox_not_stopped";
     }
 
     private async Task<string?> GenerationFaultAsync(ManagedBinding binding, CancellationToken ct) =>

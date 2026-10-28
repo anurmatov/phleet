@@ -50,6 +50,30 @@ With no recipient configured, failures are held as `pending` with zero attempts,
 Turning it on is an operator decision: set the key in `.env` and recreate `fleet-temporal-bridge`. On first enable, failures from the last `LookbackHours` are notified, at most 10 starts per poll.
 To roll back, set it to `false` and recreate the bridge. The state file can stay.
 
+## Real-broker acceptance (operator-run)
+
+`WorkflowFailureNotifierRealBrokerTests` is the only check that uses real AMQP end to end, and it is opt-in. Without `FLEET_TEST_RABBITMQ_HOST` it is reported as skipped, with an `UNRUN` reason. It exercises:
+- a real local Temporal server (downloaded by the test SDK);
+- the production source and sender, `NotifyCtoWorkflow`, `DelegateToAgentActivity` on a real `ConnectionFactory`, and `TemporalRelayListener`;
+- a synthetic coordinator that answers over AMQP.
+
+Every first attempt hits an unreachable endpoint (closed port, 3 s connect timeout) and its run closes `Failed`. Attempt 2 then goes through the real broker and is delivered. A restarted notifier sends nothing, and no synthetic secret reaches the coordinator.
+
+It consumes the reply queue `fleet.agent.temporal-bridge`, so run it only against a disposable broker that no real bridge uses:
+
+```bash
+docker run -d --rm --name phleet488-rabbit \
+  -p 127.0.0.1:5672:5672 rabbitmq:3-management
+until docker exec phleet488-rabbit \
+  rabbitmq-diagnostics -q ping; do sleep 2; done
+FLEET_TEST_RABBITMQ_HOST=127.0.0.1 \
+  dotnet test tests/Fleet.Temporal.Tests -c Release \
+  --filter "FullyQualifiedName~WorkflowFailureNotifierRealBroker"
+docker rm -f phleet488-rabbit
+```
+
+`FLEET_TEST_RABBITMQ_UNREACHABLE_PORT` (default `1`) sets the closed port used for the first attempts.
+
 ## Not covered
 
 - No recovery automation, reservation, decision ledger or dashboard panel.

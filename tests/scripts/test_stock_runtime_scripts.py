@@ -85,11 +85,17 @@ class DefaultOffComposeTests(unittest.TestCase):
     def test_default_off_compose_config_is_valid(self):
         probe = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True) if shutil.which("docker") else None
         if probe is None or probe.returncode != 0:
-            self.skipTest("docker compose unavailable here; CI runs this check")
-        env = {k: v for k, v in os.environ.items() if not k.startswith("FLEET_STOCK_") and k != "FLEET_DOCKER_GID"}
-        env.setdefault("FLEET_BASE_DIR", tempfile.gettempdir())
-        result = subprocess.run(["docker", "compose", "-f", str(ROOT / "docker-compose.example.yml"), "config", "--quiet"],
-                                env=env, capture_output=True, text=True)
+            if os.environ.get("CI"):
+                self.fail("docker compose is required for this check in CI")
+            self.skipTest("docker compose unavailable locally; CI runs this check")
+        # Isolated synthetic project: its own directory, .env and project name, never the checkout's .env.
+        with tempfile.TemporaryDirectory() as project:
+            env_file = Path(project, ".env")
+            env_file.write_text(f"FLEET_BASE_DIR={project}\nFLEET_STOCK_MANAGED_ENABLED=false\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("FLEET_")}
+            result = subprocess.run(["docker", "compose", "-p", "phleet-default-off-check", "--project-directory", project,
+                                     "--env-file", str(env_file), "-f", str(ROOT / "docker-compose.example.yml"), "config", "--quiet"],
+                                    env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
 

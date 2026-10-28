@@ -589,7 +589,12 @@ an integrity check, copies config and trust files, and checks their inode/mtime 
 Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure or a
 changed trust file deletes the partial snapshot (it may already hold keys), stamps `BACKUP_DIR/last-failure`
 and exits nonzero. Linked OS ancestors above `STATE_DIR` (macOS `/var` -> `/private/var`) are resolved; a
-linked `STATE_DIR` or anything under it still refuses. Snapshots contain keys: keep
+linked `STATE_DIR` or anything under it still refuses. Staleness is surfaced by
+`scripts/check-stock-gateway-backup.sh BACKUP_DIR [MAX_AGE_HOURS]` (default 26): it exits nonzero when
+`last-success` is missing, malformed, older than the limit or not newer than `last-failure`. With
+`FLEET_STOCK_MANAGED_ENABLED=true`, `upgrade.sh` runs it against `FLEET_STOCK_BACKUP_DIR` (limit
+`FLEET_STOCK_BACKUP_MAX_AGE_HOURS`) before the rollout guard and refuses on a missing, failed or stale
+backup; wire the same check into host monitoring. Snapshots contain keys: keep
 them host-local unless an operator-approved encrypted transfer exists. To restore, stop the gateway
 and every owned workload first, verify integrity and bindings before any admission, and keep the
 unexpected-resume hold.

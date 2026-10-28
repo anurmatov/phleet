@@ -38,3 +38,24 @@ stock_managed_preflight() {
   printf 'managed runtime preflight: %s\n' "${faults[@]}" >&2
   return 1
 }
+
+# #492 §16: only when FLEET_STOCK_MANAGED_ENABLED=true (upgrade.sh), refuse while the stock gateway
+# backup is missing, failed or stale: FLEET_STOCK_BACKUP_DIR/last-success must be newer than
+# last-failure and younger than FLEET_STOCK_BACKUP_MAX_AGE_HOURS (default 26).
+# Usage: stock_backup_freshness <env-file> <repo-dir>
+stock_backup_freshness() {
+  local env_file="$1" repo_dir="$2" dir out
+  [[ "$(_stock_env_get "$env_file" FLEET_STOCK_MANAGED_ENABLED)" == true ]] || return 0
+  dir=$(_stock_env_get "$env_file" FLEET_STOCK_BACKUP_DIR)
+  if [[ -z "$dir" ]]; then
+    echo "managed runtime preflight: FLEET_STOCK_BACKUP_DIR must name the scripts/backup-stock-gateway.sh backup dir" >&2
+    return 1
+  fi
+  if out=$(bash "$repo_dir/scripts/check-stock-gateway-backup.sh" "$dir" \
+      "$(_stock_env_get "$env_file" FLEET_STOCK_BACKUP_MAX_AGE_HOURS)" 2>&1); then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  printf 'managed runtime preflight: gateway backup %s\n' "$out" >&2
+  return 1
+}

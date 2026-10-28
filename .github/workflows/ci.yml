@@ -87,6 +87,14 @@ jobs:
           docker build -f src/fleet-dashboard/Dockerfile -t dashproxy-test:pr .
           DASHBOARD_IMAGE=dashproxy-test:pr bash tests/dashboard-proxy/run.sh
 
+      # #492: the orchestrator Dockerfile carries the managed-runtime label and the opt-in stock CLI
+      # install. Build it like the dashboard image above (local tag, never pushed) and prove the built
+      # image passes the rollout guard on its label alone (no preflight token in CI).
+      - name: Orchestrator image builds and declares managed bindings
+        run: |
+          docker build -f src/Fleet.Orchestrator/Dockerfile -t orchestrator-test:pr .
+          env -u ORCHESTRATOR_AUTH_TOKEN bash scripts/check-stock-runtime-rollout.sh --image orchestrator-test:pr
+
   # `npm test` is `node --test` over TypeScript sources, which needs Node >= 22.18 (type stripping
   # on by default) — the image build uses node:20 and only type-checks the tests.
   dashboard-tests:

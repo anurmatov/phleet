@@ -10,7 +10,7 @@ cp "$ROOT/scripts/lib/comms-profiles.sh" "$ROOT/scripts/lib/stock-managed-prefli
 cp "$ROOT/docker-compose.example.yml" "$DIR/"
 # upgrade.sh runs the #492 managed-runtime rollout guard against the orchestrator Dockerfile.
 mkdir -p "$DIR/src/Fleet.Orchestrator"
-cp "$ROOT/scripts/check-stock-runtime-rollout.sh" "$DIR/scripts/"
+cp "$ROOT/scripts/check-stock-runtime-rollout.sh" "$ROOT/scripts/check-stock-gateway-backup.sh" "$DIR/scripts/"
 cp "$ROOT/src/Fleet.Orchestrator/Dockerfile" "$DIR/src/Fleet.Orchestrator/"
 export CALLS="$DIR/calls"
 cat > "$DIR/bin/docker" <<'MOCK'
@@ -160,6 +160,7 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$DIR/nosqlite/python3"
 chmod +x "$DIR/nosqlite/python3"
 CLIENT="$DIR/fleet/openshell-client"
 MTLS="$CLIENT/openshell/gateways/fixture/mtls"
+BACKUPS="$DIR/gateway-backups"
 managed_fixture() {
   cat > "$ENV" <<'ENV'
 FLEET_COMMS_ENABLED=false
@@ -178,6 +179,9 @@ FLEET_STOCK_BROKER_ADMIN_PASSWORD_REF=FIXTURE_BROKER_PASSWORD
 FIXTURE_BROKER_USER=fixture-admin
 FIXTURE_BROKER_PASSWORD=fixture-password
 ENV
+  echo "FLEET_STOCK_BACKUP_DIR=$BACKUPS" >> "$ENV"
+  rm -rf "$BACKUPS"; mkdir -p "$BACKUPS"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUPS/last-success"
   rm -rf "$CLIENT"; mkdir -p "$MTLS"
   echo fixture-ca > "$CLIENT/broker-ca.pem"
   echo fixture-cert > "$MTLS/tls.crt"
@@ -206,6 +210,15 @@ managed_fixture; rm "$MTLS/tls.key"
 managed_refuses 'mTLS client cert/key'
 managed_fixture
 managed_refuses 'sqlite3' "$DIR/nosqlite:$PATH"
+# #492 §16: a missing, failed or stale gateway backup refuses an enabled managed upgrade.
+managed_fixture; sed -i.bak '/^FLEET_STOCK_BACKUP_DIR=/d' "$ENV"
+managed_refuses 'FLEET_STOCK_BACKUP_DIR must name'
+managed_fixture; rm "$BACKUPS/last-success"
+managed_refuses 'gateway backup STALE: no successful gateway backup'
+managed_fixture; echo 2020-01-01T00:00:00Z > "$BACKUPS/last-success"
+managed_refuses 'gateway backup STALE: last gateway backup is [0-9]*h old'
+managed_fixture; cp "$BACKUPS/last-success" "$BACKUPS/last-failure"
+managed_refuses 'gateway backup STALE: the latest gateway backup run failed'
 # Default-off: none of that trust exists and python3 lacks sqlite3, yet nothing changes.
 managed_fixture; rm -rf "$CLIENT"
 sed -i.bak -e 's/^FLEET_STOCK_MANAGED_ENABLED=true$/FLEET_STOCK_MANAGED_ENABLED=false/' -e '/^FLEET_STOCK_BROKER/d' "$ENV"

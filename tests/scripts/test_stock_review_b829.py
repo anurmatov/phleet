@@ -1,5 +1,6 @@
 """Review b829 regressions (F15, F17): token off curl argv, no kept key material in failed backups,
-and macOS-style linked system ancestors."""
+macOS-style linked system ancestors, and backup staleness."""
+import datetime
 import os
 import sqlite3
 import subprocess
@@ -10,6 +11,65 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 GUARD = ROOT / "scripts" / "check-stock-runtime-rollout.sh"
 BACKUP = ROOT / "scripts" / "backup-stock-gateway.sh"
+FRESHNESS = ROOT / "scripts" / "check-stock-gateway-backup.sh"
+
+
+def stamp(hours_ago):
+    when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours_ago)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ") + "\n"
+
+
+class BackupFreshnessTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def check(self, *extra):
+        return subprocess.run(["bash", str(FRESHNESS), str(self.dir), *extra], capture_output=True, text=True)
+
+    def test_recent_success_passes(self):
+        (self.dir / "last-success").write_text(stamp(1))
+        (self.dir / "last-failure").write_text(stamp(30))
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OK: last gateway backup", result.stdout)
+
+    def test_missing_stale_failed_or_malformed_refuses(self):
+        cases = {
+            "no successful gateway backup": {},
+            "27h old (limit 26h)": {"last-success": stamp(27)},
+            "latest gateway backup run failed": {"last-success": stamp(2), "last-failure": stamp(1)},
+            "malformed": {"last-success": "yesterday\n"},
+            "in the future": {"last-success": stamp(-2)},
+        }
+        for why, files in cases.items():
+            with self.subTest(why):
+                for name in ("last-success", "last-failure"):
+                    (self.dir / name).unlink(missing_ok=True)
+                for name, text in files.items():
+                    (self.dir / name).write_text(text)
+                result = self.check()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(why, result.stderr)
+
+    def test_max_age_is_configurable_and_validated(self):
+        (self.dir / "last-success").write_text(stamp(27))
+        self.assertEqual(self.check("48").returncode, 0)
+        self.assertEqual(self.check("0").returncode, 2)
+
+    def test_backup_run_writes_a_marker_the_check_accepts(self):
+        state = Path(self.tmp.name, "state")
+        BackupTests.make_state(None, state)
+        config = Path(self.tmp.name, "gateway.toml")
+        config.write_text("[openshell]\n")
+        backups = Path(self.tmp.name, "backups")
+        run = subprocess.run(["bash", str(BACKUP), str(backups), str(config), str(state)], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        result = subprocess.run(["bash", str(FRESHNESS), str(backups)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class RolloutTokenTests(unittest.TestCase):

@@ -149,6 +149,9 @@ fi
 # credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
 stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
   || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
+# #492 §16: an enabled managed runtime also needs a fresh, successful gateway backup before any upgrade.
+stock_backup_freshness "$ENV_FILE" "$SCRIPT_DIR" \
+  || { fail "managed runtime gateway backup is missing, failed or stale; run scripts/backup-stock-gateway.sh first"; exit 1; }
 
 # #492: after the other preflights and before anything is stopped or replaced, refuse an orchestrator that cannot read managed
 # bindings while any exist. An unavailable preflight refuses; it is never read as "none".

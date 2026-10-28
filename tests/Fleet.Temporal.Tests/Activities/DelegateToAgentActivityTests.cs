@@ -214,7 +214,8 @@ public class DelegateToAgentActivityTests
         // The cancellation path is not what broke in #321 and must not be removed — cancelling a
         // genuinely hung agent is correct, and the fix only stops it firing on a healthy one. So
         // assert it still reaches the orchestrator, for THIS task rather than the whole agent.
-        var h = Build(orchestratorUrl: "http://orchestrator.invalid");
+        var h = Build(orchestratorUrl: "http://orchestrator.invalid",
+            agentJson: """{"agentName":"reviewer-one","appliedRuntimeKind":"docker"}""");
         using var cts = new CancellationTokenSource();
         var env = new ActivityEnvironment { CancellationTokenSource = cts };
 

@@ -271,16 +271,33 @@ public sealed class DelegateToAgentActivity
     /// <summary>Named refusal for a workflow directive to a managed stock OpenShell agent (#492).</summary>
     public const string ManagedTargetUnsupported = "managed_route_unsupported:workflow_delegation";
 
+    /// <summary>Named refusal when the managed-runtime check cannot tell what the target runs on.</summary>
+    public const string ManagedTargetUnknown = "managed_route_unknown:workflow_delegation";
+
     /// <summary>
     /// A managed stock OpenShell agent (#492) only reads bridge control requests on its epoch broker, so an
     /// ordinary-broker directive would never be read and the task would silently wait out its budget.
     /// Refuse it up front, non-retryably, with a named code. Uses the orchestrator's agent state (applied
-    /// runtime); without an orchestrator URL, or when the lookup fails, delegation proceeds unchanged.
+    /// runtime).
+    ///
+    /// The directive leg alone would fit the epoch control principal (configure/write <c>fleet.group</c>),
+    /// but the correlated reply does not: the workflow reply is routed <c>temporal-bridge</c> to the queue
+    /// <c>fleet.agent.temporal-bridge</c>, which control may neither configure nor read (#489 §6 grants it
+    /// only <c>^(fleet\.group|fleet\.agent\.bridge)$</c>), and the one control-readable queue
+    /// <c>fleet.agent.bridge</c> is already consumed by the bridge's managed lane, so reading it here is the
+    /// extra consumer §6 rules out. Publishing the directive without a reply route would recreate the silent
+    /// wait, so the delegation stays refused until §6 is decided.
+    ///
+    /// With an orchestrator URL configured the check fails closed: an unreachable orchestrator, a non-success
+    /// status, an invalid body or an unknown applied runtime refuses this attempt (retryably) instead of
+    /// publishing on the ordinary broker. Without an orchestrator URL there is no managed-state source and
+    /// delegation is unchanged.
     /// </summary>
     private async Task GuardManagedTargetAsync(string agentName, string taskId, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(_bridgeConfig.OrchestratorUrl)) return;
-        string? applied = null;
+        string? applied;
+        string? fault = null;
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -291,30 +308,62 @@ public sealed class DelegateToAgentActivity
             if (!string.IsNullOrEmpty(_bridgeConfig.OrchestratorAuthToken))
                 request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _bridgeConfig.OrchestratorAuthToken);
             using var response = await client.SendAsync(request, cts.Token);
-            if (!response.IsSuccessStatusCode) return;
-            var body = await response.Content.ReadAsStringAsync(cts.Token);
-            if (string.IsNullOrWhiteSpace(body)) return;
-            using var document = JsonDocument.Parse(body);
-            if (document.RootElement.ValueKind != JsonValueKind.Object) return;
-            foreach (var property in document.RootElement.EnumerateObject())
-                if (string.Equals(property.Name, "appliedRuntimeKind", StringComparison.OrdinalIgnoreCase)
-                    && property.Value.ValueKind == JsonValueKind.String)
-                    applied = property.Value.GetString();
+            applied = response.IsSuccessStatusCode
+                ? AppliedRuntime(await response.Content.ReadAsStringAsync(cts.Token))
+                : null;
+            if (!response.IsSuccessStatusCode) fault = $"status {(int)response.StatusCode}";
+            else if (applied is null) fault = "invalid agent state";
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or JsonException or OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or OperationCanceledException)
         {
-            _logger.LogWarning("Managed-runtime lookup for {Agent} failed ({Type}); delegating unchanged", agentName, ex.GetType().Name);
-            return;
+            applied = null;
+            fault = ex.GetType().Name;
         }
-        if (applied != "openshell") return;
-        _logger.LogError("DelegateToAgent refused: {Agent} runs on the managed stock OpenShell runtime ({Code}), taskId={TaskId}",
-            agentName, ManagedTargetUnsupported, taskId);
+
+        if (applied == "docker") return;
+        if (applied == "openshell")
+        {
+            _logger.LogError("DelegateToAgent refused: {Agent} runs on the managed stock OpenShell runtime ({Code}), taskId={TaskId}",
+                agentName, ManagedTargetUnsupported, taskId);
+            throw new ApplicationFailureException(
+                $"{ManagedTargetUnsupported}: agent {agentName} runs on the managed stock OpenShell runtime, which does not " +
+                $"receive workflow directives or send workflow replies. Delegate to a Docker agent or switch it back. (taskId={taskId})",
+                errorType: "ManagedAgentWorkflowUnsupported",
+                nonRetryable: true);
+        }
+
+        fault ??= $"applied runtime '{Truncate(applied, 16)}'";
+        _logger.LogError("DelegateToAgent refused: runtime of {Agent} could not be determined ({Fault}, {Code}), taskId={TaskId}",
+            agentName, fault, ManagedTargetUnknown, taskId);
+        // Retryable: an orchestrator outage is transient, and a retry repeats this check before any publish.
         throw new ApplicationFailureException(
-            $"{ManagedTargetUnsupported}: agent {agentName} runs on the managed stock OpenShell runtime, which does not " +
-            $"receive workflow directives or send workflow signals. Delegate to a Docker agent or switch it back. (taskId={taskId})",
-            errorType: "ManagedAgentWorkflowUnsupported",
-            nonRetryable: true);
+            $"{ManagedTargetUnknown}: the runtime of agent {agentName} could not be determined ({fault}); the directive was " +
+            $"not published on the ordinary broker. (taskId={taskId})",
+            errorType: "ManagedAgentRuntimeUnknown");
     }
+
+    /// <summary><c>appliedRuntimeKind</c> of an orchestrator agent body, or null when the body is not a valid agent state.</summary>
+    private static string? AppliedRuntime(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
+            string? applied = null;
+            foreach (var property in document.RootElement.EnumerateObject())
+                if (string.Equals(property.Name, "appliedRuntimeKind", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (applied is not null || property.Value.ValueKind != JsonValueKind.String) return null; // duplicate or non-string
+                    applied = property.Value.GetString();
+                }
+            return applied;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static string Truncate(string? value, int max) =>
+        value is null ? "" : value.Length <= max ? value : value[..max];
 
     /// <summary>
     /// Waits for an agent response with heartbeating and periodic re-publication.

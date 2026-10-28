@@ -25,6 +25,13 @@ public class ManagedStockRuntimeTests
         Assert.NotEqual(SandboxPolicyValidation.Hash(PolicyYaml), SandboxPolicyValidation.Hash(PolicyYaml + "\n"));
     }
 
+    [Fact]
+    public void Plain_stock_integer_and_boolean_scalars_are_accepted()
+    {
+        Assert.Null(SandboxPolicyValidation.DescribeFault(
+            "version: 1\nfilesystem_policy: {include_workdir: false}\nnetwork_policies: {api: {endpoints: [{host: example.com, port: 443}]}}", new()));
+    }
+
     [Theory]
     [InlineData("version: 1\nversion: 2")]
     [InlineData("version: 1\nunknown: true")]
@@ -188,6 +195,28 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
         Assert.Equal(System.Net.HttpStatusCode.NotFound, (await Client.GetAsync(url + "/999")).StatusCode);
         Assert.Equal(System.Net.HttpStatusCode.Conflict, (await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Example policy", yaml = "version: 1" })).StatusCode);
     }
+    [Theory]
+    [InlineData("version: \"1\"")]
+    [InlineData("version: '1'")]
+    [InlineData("version: 1\nfilesystem_policy: {include_workdir: \"true\"}")]
+    [InlineData("version: 1\nfilesystem_policy: {include_workdir: 'false'}")]
+    [InlineData("version: 1\nnetwork_policies: {api: {endpoints: [{host: example.com, port: \"443\"}]}}")]
+    [InlineData("version: 1\nnetwork_policies: {api: {endpoints: [{host: example.com, port: '443'}]}}")]
+    public async Task Wrong_scalar_types_return_400_without_create_or_append_writes(string yaml)
+    {
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Wrong scalar", yaml })).StatusCode);
+        Assert.Equal(0, await WithDb(db => db.SandboxPolicies.CountAsync()));
+        Assert.Equal(0, await WithDb(db => db.SandboxPolicyVersions.CountAsync()));
+
+        var id = await CreatePolicy();
+        var url = $"/api/sandbox-policies/{id}/versions";
+        var original = await Client.GetStringAsync(url + "/1");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync(url, new { version = 2, yaml })).StatusCode);
+        Assert.Equal(1, await WithDb(db => db.SandboxPolicies.CountAsync()));
+        Assert.Equal(1, await WithDb(db => db.SandboxPolicyVersions.CountAsync()));
+        Assert.Equal(original, await Client.GetStringAsync(url + "/1"));
+    }
+
     [Fact]
     public async Task Invalid_policy_leaves_no_partial_policy_or_version()
     {

@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -142,11 +143,11 @@ internal static class SandboxPolicyValidation
             yaml.Load(new StringReader(text));
             Require(yaml.Documents.Count == 1, "Use one policy document.");
             var root = Map(yaml.Documents[0].RootNode, "version", "filesystem_policy", "process", "landlock", "network_policies");
-            Require(Scalar(root, "version") == "1", "Only policy version 1 is supported.");
+            Require(PlainScalar(root, "version") == "1", "Only policy version 1 is supported.");
             if (Get(root, "filesystem_policy") is { } fs)
             {
                 var map = Map(fs, "include_workdir", "read_only", "read_write");
-                if (Get(map, "include_workdir") is { } flag) Require(Value(flag) is "true" or "false", "include_workdir must be boolean.");
+                if (Get(map, "include_workdir") is { } flag) Require(flag is YamlScalarNode { Style: ScalarStyle.Plain } && Value(flag) is "true" or "false", "include_workdir must be a boolean, not a quoted string.");
                 foreach (var key in new[] { "read_only", "read_write" })
                     if (Get(map, key) is { } paths) foreach (var path in List(paths)) Require(Value(path).StartsWith('/'), "Filesystem paths must be absolute.");
             }
@@ -175,7 +176,7 @@ internal static class SandboxPolicyValidation
                     {
                         var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding");
                         Require(Regex.IsMatch(Scalar(endpoint, "host"), @"^[A-Za-z0-9*_.:-]{1,253}\z"), "Invalid endpoint host.");
-                        Require(int.TryParse(Scalar(endpoint, "port"), out var port) && port is >= 1 and <= 65535, "Invalid endpoint port.");
+                        Require(int.TryParse(PlainScalar(endpoint, "port"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) && port is >= 1 and <= 65535, "Invalid endpoint port.");
                         Option(endpoint, "protocol", "tcp", "rest", "mcp", "json-rpc", "websocket", "graphql", "sql");
                         Option(endpoint, "tls", ""); // stock automatic TLS is the empty/omitted value, not "auto"
                         Option(endpoint, "enforcement", "enforce", "audit");
@@ -211,6 +212,14 @@ internal static class SandboxPolicyValidation
     private static string Value(YamlNode node)
     { Require(node is YamlScalarNode { Value: not null }, "Expected a scalar."); return ((YamlScalarNode)node).Value!; }
     private static YamlNode? Get(YamlMappingNode map, string key) => map.Children.TryGetValue(new YamlScalarNode(key), out var value) ? value : null;
+    // YamlScalarNode.Value is text even for quoted strings. Preserve the parsed scalar style
+    // at numeric/boolean fields so strings cannot masquerade as stock integer/bool values.
+    private static string PlainScalar(YamlMappingNode map, string key)
+    {
+        var node = Get(map, key);
+        Require(node is YamlScalarNode { Style: ScalarStyle.Plain }, $"{key} must be an unquoted typed scalar.");
+        return Value(node!);
+    }
     private static string Scalar(YamlMappingNode map, string key) => Get(map, key) is { } node ? Value(node) : "";
     private static void Require(bool condition, string message) { if (!condition) throw new ArgumentException(message); }
 }

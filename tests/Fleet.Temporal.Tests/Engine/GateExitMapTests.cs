@@ -58,12 +58,22 @@ public sealed class GateExitMapTests
     [InlineData("UweDesignWorkflow")]
     [InlineData("UwePrImplementationWorkflow")]
     [InlineData("UweDocMaintenanceWorkflow")]
-    public void TheWakeupStep_IsTheLastStepOfTheRootSequence(string workflowName)
+    public void TheWakeupStep_IsTheLastSendingStepOfTheRootSequence(string workflowName)
     {
         var root = Definition(workflowName);
         var steps = root["steps"]!.AsArray();
+        var last = steps[^1]!;
 
-        Assert.Equal("signal_workflow", Type(steps[^1]!));
+        // #495: the PR workflow ends with its terminal-status branch. That branch only fails the run
+        // or does nothing, so the wakeup is still the last step that sends or schedules anything.
+        if (last["name"]?.GetValue<string>() == "fail_on_technical_outcome")
+        {
+            Assert.All(Descendants(last).Skip(1).Where(n => Type(n) is not null),
+                n => Assert.Contains(Type(n), new[] { "fail", "noop" }));
+            last = steps[^2]!;
+        }
+
+        Assert.Equal("signal_workflow", Type(last));
     }
 
     /// <summary>

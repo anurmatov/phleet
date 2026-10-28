@@ -261,8 +261,9 @@ public sealed partial class AcceptanceScenarioTests
     public async Task Parent_IncompleteImplementationNeverPinsOrStartsAChild()
     {
         var actor = new Actor { Incomplete = true };
-        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, (_, _) => Task.CompletedTask);
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, (_, _) => Task.CompletedTask, allowFailure: true);
         Assert.DoesNotContain(run.Calls, c => c.Step == "pin"); Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow"));
+        Assert.Equal(WorkflowExecutionStatus.Failed, run.Status); Assert.Equal(SeedReviewLimitTests.DeliveryFailed, run.FailureMessage);
     }
 
     [Fact]
@@ -421,7 +422,7 @@ public sealed partial class AcceptanceScenarioTests
             }
             // Exercise the test server's virtual clock, not a wall-clock sleep or a production timer.
             await h.AdvanceAsync(TimeSpan.FromSeconds(1));
-        }, captureWaiter: true);
+        }, captureWaiter: true, allowFailure: true);
         Assert.Equal(30, run.Calls.Count(c => c.Step == "pin"));
         Assert.Equal(approveIn59 ? 29 : 30, run.Calls.Count(c => c.Step == "revise_ceo_feedback"));
         if (approveIn59)
@@ -429,6 +430,7 @@ public sealed partial class AcceptanceScenarioTests
             Assert.Single(run.Calls, c => c.Step == "phase4_merge");
             Assert.Equal("approved", run.WaiterDecision);
             Assert.DoesNotContain(run.Calls, c => c.Step == "notify_outer_loop_exhausted");
+            Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
         }
         else
         {
@@ -436,6 +438,8 @@ public sealed partial class AcceptanceScenarioTests
             Assert.DoesNotContain(run.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned");
             Assert.Contains("60", Assert.Single(run.Calls, c => c.Step == "notify_outer_loop_exhausted").Instruction);
             Assert.Equal("cancelled", run.WaiterDecision);
+            Assert.Equal(WorkflowExecutionStatus.Failed, run.Status);
+            Assert.Equal(SeedReviewLimitTests.DeliveryPassesExhausted, run.FailureMessage);
         }
         ValidWrites(run);
     }

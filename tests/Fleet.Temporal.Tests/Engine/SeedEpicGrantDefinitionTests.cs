@@ -15,6 +15,7 @@ using Temporalio.Api.OperatorService.V1;
 using Temporalio.Client;
 using Temporalio.Common;
 using Temporalio.Converters;
+using Temporalio.Exceptions;
 using Temporalio.Testing;
 using Temporalio.Worker;
 
@@ -152,12 +153,14 @@ public sealed class SeedEpicGrantDefinitionTests
         {
             await h.WaitForGateVisitAsync(handle, "merge-approval:1");
             await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", HeadA)]);
-        });
+        }, allowFailure: true);
 
         var pinned = Assert.Single(run.Calls, c => c.Step == "phase4_merge_pinned");
         Assert.Contains($"--match-head-commit {HeadA}", pinned.Instruction);
         Assert.Single(run.Calls, c => c.Step == "notify_merge_failed");
         Assert.Empty(run.ChildStarts("UweDocMaintenanceWorkflow"));
+        Assert.Equal(WorkflowExecutionStatus.Failed, run.Status);
+        Assert.Equal(SeedReviewLimitTests.DeliveryFailed, run.FailureMessage);
 
         // An approving PUBLIC_SCRUB: pass is published beside the ref (D10 reads it).
         Assert.Equal(["", "pass"], run.Upserts("ReviewScrub"));
@@ -201,11 +204,14 @@ public sealed class SeedEpicGrantDefinitionTests
     [Fact]
     public async Task Pr_UnattestedReview_NeverPublishesOrReachesTheMergeGate()
     {
-        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, (_, _) => Task.CompletedTask);
+        var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", PrInput(), Respond, (_, _) => Task.CompletedTask,
+            allowFailure: true);
         Assert.All(run.Upserts("ReviewRef"), value => Assert.Equal("", value));
         Assert.Empty(run.Upserts("GateRef"));
         Assert.DoesNotContain(run.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned");
-        Assert.Equal(5, run.ConsensusInputs.Count);
+        Assert.Equal(50, run.ConsensusInputs.Count);
+        Assert.Equal(WorkflowExecutionStatus.Failed, run.Status);
+        Assert.Equal(SeedReviewLimitTests.ReviewRoundsExhausted, run.FailureMessage);
         static string Respond(Call call) => call.Step switch
         {
             "phase1_implement" => $"done\nPR_URL: {PrUrl}\nHEAD_SHA: {HeadA}",
@@ -283,7 +289,7 @@ public sealed class SeedEpicGrantDefinitionTests
         {
             await h.WaitForGateVisitAsync(handle, "merge-approval:1");
             await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", HeadA)]);
-        });
+        }, allowFailure: true);
 
         var verify = Assert.Single(run.Calls, c => c.Step == "verify_merge_status");
         Assert.Contains("--json state,mergedAt,mergeCommit", verify.Instruction);
@@ -293,11 +299,15 @@ public sealed class SeedEpicGrantDefinitionTests
         {
             Assert.Single(run.ChildStarts("UweDocMaintenanceWorkflow"));
             Assert.DoesNotContain(run.Calls, c => c.Step == "notify_merge_failed");
+            Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
+            Assert.Null(run.Failure);
         }
         else
         {
             Assert.Empty(run.ChildStarts("UweDocMaintenanceWorkflow"));
             Assert.Single(run.Calls, c => c.Step == "notify_merge_failed");
+            Assert.Equal(WorkflowExecutionStatus.Failed, run.Status);
+            Assert.Equal(SeedReviewLimitTests.DeliveryFailed, run.FailureMessage);
         }
 
         string Respond(Call call) => call.Step switch
@@ -578,6 +588,16 @@ internal sealed record SeedRun(
 {
     public string? WaiterDecision { get; init; }
 
+    /// <summary>The run's closed status, read from the server after it ended.</summary>
+    public WorkflowExecutionStatus Status { get; init; }
+
+    /// <summary>Set only when the caller allowed a failed run and it failed.</summary>
+    public WorkflowFailedException? Failure { get; init; }
+
+    public string? FailureMessage => (Failure?.InnerException as ApplicationFailureException)?.Message;
+
+    public string? FailureType => (Failure?.InnerException as ApplicationFailureException)?.ErrorType;
+
     public List<string> Upserts(string attribute) => SeedHarness.Upserts(History, attribute);
 
     /// <summary>The input of every child of this type the run started.</summary>
@@ -616,9 +636,15 @@ internal sealed class SeedHarness
         Func<Call, string> respond,
         Func<WorkflowHandle, SeedHarness, Task> drive,
         bool captureWaiter = false,
-        Action<JsonNode>? mutateSeed = null)
+        Action<JsonNode>? mutateSeed = null,
+        bool allowFailure = false,
+        bool localServer = false)
     {
-        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync();
+        // localServer: a real local Temporal dev server with wall-clock timers instead of the
+        // time-skipping test server, for checks that must observe the server's own terminal status.
+        await using var env = localServer
+            ? await WorkflowEnvironment.StartLocalAsync()
+            : await WorkflowEnvironment.StartTimeSkippingAsync();
         var register = new AddSearchAttributesRequest { Namespace = env.Client.Options.Namespace };
         foreach (var name in SearchAttributeTypeRegistry.GetNames())
         {
@@ -677,6 +703,8 @@ internal sealed class SeedHarness
 
         object? result = null;
         string? waiterDecision = null;
+        WorkflowFailedException? failure = null;
+        var status = WorkflowExecutionStatus.Unspecified;
         await worker.ExecuteAsync(async () =>
         {
             WorkflowHandle? waiter = null;
@@ -685,7 +713,15 @@ internal sealed class SeedHarness
             var handle = await env.Client.StartWorkflowAsync(
                 workflowType, [input], new WorkflowOptions(id: workflowId, taskQueue: taskQueue));
             await drive(handle, harness);
-            result = await handle.GetResultAsync<JsonElement?>().WaitAsync(TimeSpan.FromSeconds(120));
+            try
+            {
+                result = await handle.GetResultAsync<JsonElement?>().WaitAsync(TimeSpan.FromSeconds(120));
+            }
+            catch (WorkflowFailedException ex) when (allowFailure)
+            {
+                failure = ex;
+            }
+            status = (await handle.DescribeAsync()).Status;
             if (waiter is not null) waiterDecision = await waiter.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(10));
         });
 
@@ -693,7 +729,12 @@ internal sealed class SeedHarness
         await harness.CollectConsensusInputsAsync(env, history);
         return new SeedRun(
             result is JsonElement { ValueKind: JsonValueKind.Null } ? null : result,
-            history, harness.Calls, harness._consensus, logs.Count) { WaiterDecision = waiterDecision };
+            history, harness.Calls, harness._consensus, logs.Count)
+        {
+            WaiterDecision = waiterDecision,
+            Status = status,
+            Failure = failure,
+        };
     }
 
     private ActivityDefinition DelegateStub(Func<Call, string> respond) =>

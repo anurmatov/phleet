@@ -530,12 +530,18 @@ Refusal codes, all raised before the old runtime stops:
 - `managed_route_unsupported:journal`, when there is no `JournalHost`;
 - `journal_token_unresolved` also when the derived read or cross-chat token is missing.
 
-**Current limits, refused rather than dropped.** Every MCP name other than memory, the first-party
-receivers, `fleet-comms-journal` and the agent-local `fleet-journal-files` refuses apply with
-`managed_route_unsupported:<route>`. A supported endpoint without a configured receiving host
-(for `fleet-comms-journal`, no `JournalHost`) refuses with `managed_route_unsupported:mcp:<name>`. Tool-send receipts (#394) are not consumed in stock
-mode, because the epoch broker identity has no receipt queue, so journal capture together with a
-`fleet-telegram` MCP grant refuses with `managed_route_unsupported:journal_tool_send_receipts`. A dedicated Fleet.Temporal receiver still
+**Current limits, refused rather than dropped.** The agent's own bot, journal capture, the
+`fleet-comms-journal` read MCP and journal files/send/cross-chat (the agent-local
+`fleet-journal-files` listener) are routed as above. Every MCP endpoint other than memory, the
+first-party receivers and `fleet-comms-journal` refuses apply with `managed_route_unsupported:mcp:<name>`,
+as does a supported endpoint without a configured receiving host (for `fleet-comms-journal`, no
+`JournalHost`). Tool-send receipts (#394) are not consumed in stock mode: Fleet.Telegram publishes
+them on the ordinary broker (`fleet.journal.tool-sends`, queue `fleet.journal.tool-sends.<agent>`),
+and the only principals in the `stock-<epoch>` vhost are the workload, control and observer roles of
+#489 §6. Delivery would need a new per-epoch publishing principal handed to Fleet.Telegram, a grant
+on the ordinary vhost, or an orchestrator relay consumer, each of which widens that table. So journal
+capture together with a `fleet-telegram` MCP grant refuses with
+`managed_route_unsupported:journal_tool_send_receipts`. A dedicated Fleet.Temporal receiver still
 starts its configured workers and the relay consumer on the fixed `fleet.agent.temporal-bridge`
 queue, so it competes with the ordinary bridge on a shared broker. None of the following is
 qualified:

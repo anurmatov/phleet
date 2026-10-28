@@ -118,7 +118,14 @@ public interface IStockHostView
 
     /// <summary>States of containers with exactly this name; empty when absent, null when unobservable.</summary>
     Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct);
+
+    /// <summary>Every container labelled with the stock UUID (any state) and its isolation role; null when unobservable.</summary>
+    Task<IReadOnlyList<StockSandboxContainer>?> SandboxContainersAsync(string sandboxId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<StockSandboxContainer>?>(null);
 }
+
+/// <summary>One Docker container of a stock sandbox: full ID, Docker state and <c>openshell.ai/isolation-role</c>.</summary>
+public sealed record StockSandboxContainer(string Id, string State, string? Role);
 
 public sealed class DockerStockHostView(DockerService docker, IConfiguration config) : IStockHostView
 {
@@ -150,6 +157,12 @@ public sealed class DockerStockHostView(DockerService docker, IConfiguration con
         var containers = await docker.ListContainersByNameAsync(containerName, ct);
         return containers?.Select(c => c.State).ToList();
     }
+
+    public async Task<IReadOnlyList<StockSandboxContainer>?> SandboxContainersAsync(string sandboxId, CancellationToken ct)
+    {
+        var containers = await docker.ListLabelledContainersAsync("openshell.ai/sandbox-id=" + sandboxId, "openshell.ai/isolation-role", ct);
+        return containers?.Select(c => new StockSandboxContainer(c.Id, c.State, c.LabelValue)).ToList();
+    }
 }
 
 // ── Persisted binding and compare-and-set store ─────────────────────────────
@@ -162,6 +175,28 @@ public sealed record ManagedBinding(string SandboxName, string SandboxId, Guid E
 
     /// <summary>Every provider attached to this binding, native API key first.</summary>
     public IReadOnlyList<string> AllProviders() => [Provider, .. ServiceProviders];
+
+    /// <summary>Last observed Docker identities of the workload and native supervisor (#492 §7/§11); absent in older records.</summary>
+    public ManagedContainers? Containers { get; init; }
+}
+
+/// <summary>
+/// Docker container IDs of a binding's workload and native supervisor plus their observed status:
+/// running · stopped · removed (no labelled container left) · unobservable. Identifiers only.
+/// </summary>
+public sealed record ManagedContainers(string? WorkloadId, string? SupervisorId, string Status, DateTimeOffset ObservedAt)
+{
+    /// <summary>Folds one label read into the record; a failed or empty read keeps the last known IDs.</summary>
+    public static ManagedContainers From(IReadOnlyList<StockSandboxContainer>? containers, ManagedContainers? previous, DateTimeOffset now)
+    {
+        if (containers is null) return new(previous?.WorkloadId, previous?.SupervisorId, "unobservable", now);
+        if (containers.Count == 0) return new(previous?.WorkloadId, previous?.SupervisorId, "removed", now);
+        static bool Supervisor(StockSandboxContainer c) => c.Role?.Contains("supervisor", StringComparison.OrdinalIgnoreCase) == true;
+        var ordered = containers.OrderBy(c => c.Id, StringComparer.Ordinal).ToList();
+        var running = containers.Any(c => c.State is "running" or "restarting" or "paused");
+        return new(ordered.FirstOrDefault(c => !Supervisor(c))?.Id ?? previous?.WorkloadId,
+            ordered.FirstOrDefault(Supervisor)?.Id ?? previous?.SupervisorId, running ? "running" : "stopped", now);
+    }
 }
 
 /// <summary>JSON stored in <c>agents.AppliedRuntimeBinding</c>. Heartbeats never write it.</summary>
@@ -614,6 +649,9 @@ public sealed class StockOpenShellRuntime(
         }
 
         var final = outcome.Next with { Operation = null };
+        // #492 §7/§11: a verified outcome records the workload/supervisor identities it left behind.
+        if (outcome.Result.Ok && final.Applied is { } observed && final.State is "applied" or "stopped" or "revoked")
+            final = final with { Applied = observed with { Containers = await ObserveContainersAsync(observed) } };
         var finalJson = final.Serialize();
         try
         {
@@ -1334,6 +1372,19 @@ public sealed class StockOpenShellRuntime(
         }
         // The revoked allocation is still running: stop it explicitly rather than activating under it.
         return await LifecycleAsync("stop", binding, ct) ?? await QuiescentAsync(binding, ct);
+    }
+
+    /// <summary>Bounded, best-effort label read of the binding's containers; never fails the operation.</summary>
+    internal async Task<ManagedContainers> ObserveContainersAsync(ManagedBinding binding)
+    {
+        IReadOnlyList<StockSandboxContainer>? containers;
+        try
+        {
+            using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            containers = await host.SandboxContainersAsync(binding.SandboxId, bounded.Token);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { containers = null; }
+        return ManagedContainers.From(containers, binding.Containers, DateTimeOffset.UtcNow);
     }
 
     /// <summary>No workload or native-supervisor container left running for the UUID, by exact label query.</summary>

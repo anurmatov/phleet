@@ -1153,6 +1153,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             Task.FromResult<IReadOnlyList<string>?>([]);
         public IReadOnlyList<string>? DockerStates = [];
         public Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct) => Task.FromResult(DockerStates);
+        /// <summary>Labelled workload/supervisor containers; null (default) is an unobservable read.</summary>
+        public IReadOnlyList<StockSandboxContainer>? SandboxContainers;
+        public Task<IReadOnlyList<StockSandboxContainer>?> SandboxContainersAsync(string sandboxId, CancellationToken ct) => Task.FromResult(SandboxContainers);
     }
 
     internal sealed class FakeBroker : HttpMessageHandler

@@ -4,7 +4,14 @@ namespace Fleet.Shared.Security;
 
 public static class StockMemoryRequest
 {
-    public static void Validate(string method, byte[] body, string? session)
+    /// <summary>The memory route: only the fixed read-only tools are callable.</summary>
+    public static void Validate(string method, byte[] body, string? session) => Validate(method, body, session, StockServices.MemoryTools);
+
+    /// <summary>
+    /// The same MCP request shape for every receiving service; <paramref name="tools"/> decides which
+    /// <c>tools/call</c> names are callable (memory's fixed set, or the record's grants for that service).
+    /// </summary>
+    public static void Validate(string method, byte[] body, string? session, IReadOnlyCollection<string> tools)
     {
         if (body.Length > 262144 || method is not ("GET" or "POST" or "DELETE")
             || session is not null && (session.Length is < 1 or > 256 || session.Any(c => c is < '!' or > '~')))
@@ -28,7 +35,7 @@ public static class StockMemoryRequest
             if (rpc == "tools/call")
             {
                 var parameters = root.GetProperty("params"); StockRequestProof.Unique(parameters);
-                if (parameters.GetProperty("name").GetString() is not ("memory_get" or "memory_search" or "memory_list"))
+                if (parameters.GetProperty("name").GetString() is not { } name || !tools.Contains(name, StringComparer.Ordinal))
                     throw new StockIdentityDenied("tool_unsupported");
             }
         }

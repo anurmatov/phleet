@@ -4,6 +4,7 @@ using Fleet.Temporal.Engine;
 using Fleet.Temporal.Mcp;
 using Fleet.Temporal.Services;
 using Fleet.Temporal.Workflows.Fleet;
+using Fleet.Shared.Security;
 using RabbitMQ.Client;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -173,7 +174,11 @@ else
 var fleetWorkflowOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetWorkflowOptions>>().Value;
 FleetWorkflowConfig.Initialize(fleetWorkflowOptions);
 
-app.MapMcp();
+// #492: dedicated receiver for managed stock workloads, engaged exactly like fleet-memory's (only when
+// StockOpenShell:AuthorityFile is set). The verified outside assertion then supplies ?agent=, so the
+// existing caller checks run for the record's agent. Unset leaves the ordinary MCP route unchanged.
+if (app.UseStockServiceIdentity(app.Configuration, "temporal")) app.MapMcp("/mcp");
+else app.MapMcp();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-temporal-bridge" }));
 
 app.Run();

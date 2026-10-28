@@ -21,8 +21,13 @@
     </AssemblyAttribute>
   </ItemGroup>
 
+  <!-- StockServiceIdentityMiddleware (#492) is shared by the Memory, Temporal and Telegram receivers;
+       the framework also supplies Microsoft.Extensions.Logging.Abstractions. -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0-preview.1.25080.5" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
     <PackageReference Include="Telegram.Bot" Version="22.10.2" />
   </ItemGroup>

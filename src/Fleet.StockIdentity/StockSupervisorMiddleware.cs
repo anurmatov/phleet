@@ -73,22 +73,25 @@ public sealed class StockSupervisorMiddleware(StockAuthorityFile file) : Supervi
         try
         {
             Authenticate(context, null);
-            return Task.FromResult(new ValidateConfigResponse { Valid = ValidConfig(request.Config), Reason = "memory_only" });
+            return Task.FromResult(new ValidateConfigResponse { Valid = ConfiguredService(request.Config) is not null, Reason = "fixed_first_party_services" });
         }
         catch (StockIdentityDenied) { throw new RpcException(new Status(StatusCode.Unauthenticated, "identity_denied")); }
     }
-    private static bool ValidConfig(Struct? config) => config?.Fields.Count == 1
+    /// <summary>Exactly <c>{"service":"&lt;name&gt;"}</c> for one fixed first-party receiving service, else null.</summary>
+    private static string? ConfiguredService(Struct? config) => config?.Fields.Count == 1
         && config.Fields.TryGetValue("service", out var value) && value.KindCase == Value.KindOneofCase.StringValue
-        && value.StringValue == "memory";
+        && StockServices.IsReceiving(value.StringValue) ? value.StringValue : null;
 
     public override Task<HttpRequestResult> EvaluateHttpRequest(HttpRequestEvaluation request, ServerCallContext context)
     {
         try
         {
             var record = Authenticate(context, request.Context?.SandboxId ?? "");
-            if (request.Context?.SandboxId != record.SandboxId || !ValidConfig(request.Config)
+            // The service's host comes only from the selected record; an unenrolled service refuses.
+            var service = ConfiguredService(request.Config);
+            if (request.Context?.SandboxId != record.SandboxId || service is null
                 || request.Phase != SupervisorMiddlewarePhase.PreCredentials || request.Target is null
-                || request.Target.Scheme != "https" || request.Target.Host != record.MemoryHost || request.Target.Port != 443
+                || request.Target.Scheme != "https" || request.Target.Host != record.ServiceHost(service) || request.Target.Port != 443
                 || request.Target.Path != "/mcp" || request.Target.Query != "" || request.Body.Length > 262144
                 || request.Headers.Count > 128 || request.Headers.Sum(h => h.CalculateSize()) > 65536)
                 throw new StockIdentityDenied("request_scope");
@@ -104,10 +107,11 @@ public sealed class StockSupervisorMiddleware(StockAuthorityFile file) : Supervi
                     throw new StockIdentityDenied("identity_override");
                 if (header.Name.Equals("Mcp-Session-Id", StringComparison.OrdinalIgnoreCase)) session = header.Value;
             }
-            StockMemoryRequest.Validate(request.Target.Method, request.Body.ToByteArray(), session);
+            // Memory keeps its fixed read-only rule; another service's tools/call must be in the record's grants.
+            StockMemoryRequest.Validate(request.Target.Method, request.Body.ToByteArray(), session, record.ServiceTools(service));
             return Task.FromResult(new HttpRequestResult { Decision = Decision.Allow, HeaderMutations = {
                 new HeaderMutation { Write = new WriteHeader { Name = StockRequestProof.Header,
-                    Value = StockRequestProof.Issue(record, request.Target.Method, request.Body.ToByteArray(), session),
+                    Value = StockRequestProof.Issue(record, service, request.Target.Method, request.Body.ToByteArray(), session),
                     OnExisting = ExistingHeaderAction.Overwrite } } } });
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)

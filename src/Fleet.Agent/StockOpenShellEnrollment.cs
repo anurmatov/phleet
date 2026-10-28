@@ -154,10 +154,16 @@ public static class StockOpenShellEnrollment
             using var mcp = JsonDocument.Parse(StockEnrollmentAuthority.ReadBounded(Path.Combine(work!, ".mcp.json")));
             StockRequestProof.Unique(mcp.RootElement);
             var servers = mcp.RootElement.GetProperty("mcpServers"); StockRequestProof.Unique(servers);
-            var memory = servers.GetProperty("memory"); StockRequestProof.Unique(memory);
-            if (mcp.RootElement.EnumerateObject().Count() != 1 || servers.EnumerateObject().Count() != 1
-                || memory.EnumerateObject().Count() != 1 || memory.GetProperty("url").GetString() != $"https://{authority.MemoryHost}/mcp")
+            // Exactly memory plus each first-party service route in the outside record, each at its exact host.
+            var routes = McpRoutes(authority);
+            if (mcp.RootElement.EnumerateObject().Count() != 1 || servers.EnumerateObject().Count() != routes.Count)
                 Deny("stock_enrollment_mcp_route_invalid");
+            foreach (var (name, host, _) in routes)
+            {
+                var server = servers.GetProperty(name); StockRequestProof.Unique(server);
+                if (server.EnumerateObject().Count() != 1 || server.GetProperty("url").GetString() != $"https://{host}/mcp")
+                    Deny("stock_enrollment_mcp_route_invalid");
+            }
             if (!configuration.GetSection("Agent:AllowedTools").GetChildren().Any(c => c.Value is
                 "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list"))
                 Deny("stock_enrollment_memory_tools_missing");
@@ -188,13 +194,9 @@ public static class StockOpenShellEnrollment
             binding.RequireBinding(authority);
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
-            var tools = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value)
-                .Where(t => t is "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list")
-                .Select(t => t!["mcp__memory__".Length..]).ToArray();
             var placeholder = ApiPlaceholder(configuration, home, environment ?? Environment.GetEnvironmentVariable);
             var api = placeholder is not null;
-            var expected = (api ? ApiLogin : "") + root + "\n[mcp_servers.memory]\nurl = " + JsonSerializer.Serialize($"https://{authority.MemoryHost}/mcp")
-                + "\nenabled_tools = " + JsonSerializer.Serialize(tools) + "\n";
+            var expected = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority);
             var directory = Path.Combine(home, ".codex");
             if (api)
             {
@@ -215,6 +217,34 @@ public static class StockOpenShellEnrollment
     }
 
     private const string ApiLogin = "forced_login_method = \"api\"\n";
+
+    /// <summary>Memory, then each first-party service route of the outside record, as (MCP name, host, callable tools).</summary>
+    private static List<(string Name, string Host, IReadOnlyList<string> Tools)> McpRoutes(StockEnrollmentAuthority authority)
+    {
+        var routes = new List<(string, string, IReadOnlyList<string>)> { ("memory", authority.MemoryHost, StockServices.MemoryTools) };
+        foreach (var (service, route) in (authority.Services ?? new Dictionary<string, StockServiceRoute>()).OrderBy(p => p.Key, StringComparer.Ordinal))
+            routes.Add((StockServices.McpNames[service], route.Host, route.Tools));
+        return routes;
+    }
+
+    /// <summary>
+    /// The exact native MCP tables: one per route, enabled tools narrowed to the configured AllowedTools
+    /// that the route permits (memory's read-only set, or the record's grants), never widened.
+    /// </summary>
+    private static string NativeMcp(IConfiguration configuration, StockEnrollmentAuthority authority)
+    {
+        var allowed = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value).OfType<string>().ToArray();
+        var text = new System.Text.StringBuilder();
+        foreach (var (name, host, tools) in McpRoutes(authority))
+        {
+            var prefix = "mcp__" + name + "__";
+            var enabled = allowed.Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])
+                .Where(t => tools.Contains(t, StringComparer.Ordinal)).ToArray();
+            text.Append("\n[mcp_servers.").Append(name).Append("]\nurl = ").Append(JsonSerializer.Serialize($"https://{host}/mcp"))
+                .Append("\nenabled_tools = ").Append(JsonSerializer.Serialize(enabled)).Append('\n');
+        }
+        return text.ToString();
+    }
 
     // Syntax is a refusal check, NOT proof of stock issuance or secret isolation. Outside
     // provider attachment/readiness and exact runtime binding remain the orchestrator's job.
@@ -259,12 +289,7 @@ public static class StockOpenShellEnrollment
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
             if (StockEnrollmentAuthority.ReadText(rootFile) != root) Deny("stock_enrollment_native_config_mismatch");
-            var tools = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value)
-                .Where(t => t is "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list")
-                .Select(t => t!["mcp__memory__".Length..]).ToArray();
-            var config = (api ? ApiLogin : "") + root + "\n[mcp_servers.memory]\nurl = "
-                + JsonSerializer.Serialize($"https://{authority.MemoryHost}/mcp")
-                + "\nenabled_tools = " + JsonSerializer.Serialize(tools) + "\n";
+            var config = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority);
             var directory = Path.Combine(home, ".codex");
             RequireDirectoryAncestors(directory);
             if (api)

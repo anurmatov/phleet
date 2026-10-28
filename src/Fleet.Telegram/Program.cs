@@ -1,3 +1,4 @@
+using Fleet.Shared.Security;
 using Fleet.Telegram.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -18,7 +19,11 @@ builder.Services
 
 var app = builder.Build();
 
-app.MapMcp();
+// #492: dedicated receiver for managed stock workloads, engaged exactly like fleet-memory's (only when
+// StockOpenShell:AuthorityFile is set). The verified outside assertion then supplies ?agent= (and the
+// record's fixed formatting_mode), so bot selection runs for the record's agent. Unset changes nothing.
+if (app.UseStockServiceIdentity(app.Configuration, "telegram")) app.MapMcp("/mcp");
+else app.MapMcp();
 
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-telegram" }));
 

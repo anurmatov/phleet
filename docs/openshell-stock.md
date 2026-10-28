@@ -428,12 +428,13 @@ arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back t
 Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
 into the orchestrator at `/var/lib/fleet-openshell-client`:
 - stock CLI client metadata/trust (`XDG_CONFIG_HOME`);
-- `managed-authority.json` (gateway issuer/audience/JWKS, assertion key paths, memory and broker hosts);
+- `managed-authority.json` (gateway issuer/audience/JWKS, assertion key paths, memory and broker hosts,
+  optional `ServiceHosts` such as `{"temporal": "temporal.example.test", "telegram": "telegram.example.test"}`);
 - `broker-ca.pem`.
 
 The adapter writes per-agent records and control/observer broker passwords under
 `managed/authority/` (0600). Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
-`managed/authority` directory on `Fleet.StockIdentity` and the memory receiver, keeping
+`managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram), keeping
 `AuthorityFile` for gateway trust. The gateway-verified sandbox claim (hook) or the assertion's
 sandbox (receiver, still signature-verified against the selected record) is only an index hint:
 exactly one active, non-symlink record must claim it, else the request refuses. Broker control and
@@ -441,11 +442,34 @@ observer connections still bind one enrolled epoch per process. The orchestrator
 `LABEL org.phleet.managed-stock-runtime=1`; the stock CLI is installed only with the
 `OPENSHELL_CLI_URL` and `OPENSHELL_CLI_SHA256` build args (digest and version checked).
 
-**Current limits, refused rather than dropped.** Managed agents are memory-only, like the manual
-profile: Telegram, journal and non-memory MCP grants refuse apply with
-`managed_route_unsupported:<route>`. The receiving-service identity for those routes, the stock
-gateway Compose unit, dashboard revoke/state controls, and the upload-into-stopped-sandbox step
-are not qualified. #493 owns the exact-build trial, with no installation or activation implied.
+**First-party MCP routes.** Besides memory, managed apply routes the existing `fleet-temporal` and
+`fleet-telegram` HTTP MCP endpoints when `managed-authority.json` names a `ServiceHosts` entry for
+that service. The per-agent record then carries `Services.<service>` with:
+- that host;
+- exactly the agent's enabled DB tool grants on the endpoint;
+- for Telegram, the agent's formatting mode.
+
+Implicit provisioning grants, such as the Codex `notify_cto` auto-grant, are not added: grant them
+explicitly. The workspace `.mcp.json` and native MCP tables list memory plus each routed endpoint
+under its ordinary name, with no query identity. Grant changes apply on the next apply/reprovision,
+which also refreshes `.mcp.json`. As with memory, the authored sandbox policy must list each
+receiving host as an exact destination; nothing is generated. The hook accepts
+`{"service":"memory"|"temporal"|"telegram"}` and signs a `tools/call` only for a name in that
+service's grants. Each proof binds its receiving service, so it fails at any other receiver. Set
+`StockOpenShell:AuthorityFile` (plus `AuthorityDirectory`) on a dedicated Fleet.Temporal or
+Fleet.Telegram receiver exactly as on the memory receiver. It then serves only `/mcp` and `/health`,
+refuses caller query or `X-Fleet-*` identity, and supplies `?agent=` from the verified record, so the
+services' existing caller checks and bot selection run unchanged. Without those settings nothing
+changes.
+
+**Current limits, refused rather than dropped.** The agent's own Telegram bot, journal and every
+other MCP name still refuse apply with `managed_route_unsupported:<route>`. A supported endpoint
+without a configured receiving host refuses with `managed_route_unsupported:mcp:<name>`. A dedicated
+Fleet.Temporal receiver still starts its configured workers and the relay consumer on the fixed
+`fleet.agent.temporal-bridge` queue, so it competes with the ordinary bridge on a shared broker. That
+topology, the stock gateway Compose unit, dashboard revoke/state controls and the
+upload-into-stopped-sandbox step are not qualified. #493 owns the exact-build trial, with no
+installation or activation implied.
 
 **Rollout guard and rollback.** `scripts/check-stock-runtime-rollout.sh` runs in `upgrade.sh`
 before anything is stopped, and it is the operator rollback entrypoint (`--image IMAGE`). A target

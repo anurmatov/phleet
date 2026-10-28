@@ -7,6 +7,39 @@ namespace Fleet.Shared.Security;
 
 public sealed class StockIdentityDenied(string reason) : Exception(reason);
 
+/// <summary>
+/// The fixed first-party HTTP MCP receivers that verify the outside assertion (#492). Memory keeps its
+/// own <see cref="StockEnrollmentAuthority.MemoryHost"/> and read-only tool rule; every other service
+/// here is selected per agent by <see cref="StockEnrollmentAuthority.Services"/>. Any other MCP name
+/// has no receiving-service identity and stays refused in managed mode.
+/// </summary>
+public static class StockServices
+{
+    public const string Memory = "memory";
+    public static readonly IReadOnlyList<string> MemoryTools = ["memory_get", "memory_search", "memory_list"];
+
+    /// <summary>Receiving service → the ordinary MCP endpoint name whose existing tool grants it serves.</summary>
+    public static readonly IReadOnlyDictionary<string, string> McpNames = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["temporal"] = "fleet-temporal",
+        ["telegram"] = "fleet-telegram",
+    };
+
+    public static bool IsReceiving(string service) => service == Memory || McpNames.ContainsKey(service);
+}
+
+/// <summary>
+/// One non-memory receiving route: its exact HTTPS host, the agent's granted tool names on that
+/// service (from existing grants, never widened) and the fixed non-identity query the receiver appends
+/// after verified attribution (only Telegram's <c>formatting_mode</c>).
+/// </summary>
+public sealed record StockServiceRoute
+{
+    public string Host { get; init; } = "";
+    public IReadOnlyList<string> Tools { get; init; } = [];
+    public string Query { get; init; } = "";
+}
+
 // One operator-owned file, read afresh at each admission. This is NOT a lifecycle or grant store.
 public sealed record StockEnrollmentAuthority
 {
@@ -24,6 +57,32 @@ public sealed record StockEnrollmentAuthority
     public string BrokerHost { get; init; } = "";
     public string PolicySha256 { get; init; } = "";
     public string StockCommit { get; init; } = "";
+    /// <summary>Optional non-memory routes by receiving service; absent in memory-only and older records.</summary>
+    public IReadOnlyDictionary<string, StockServiceRoute>? Services { get; init; }
+
+    /// <summary>The exact receiving host for a service; an unenrolled service refuses.</summary>
+    public string ServiceHost(string service) => service == StockServices.Memory ? MemoryHost
+        : Services?.GetValueOrDefault(service)?.Host ?? throw new StockIdentityDenied("service_not_enrolled");
+
+    /// <summary>Callable tools: memory's fixed read-only set, otherwise exactly the record's grants.</summary>
+    public IReadOnlyList<string> ServiceTools(string service) => service == StockServices.Memory ? StockServices.MemoryTools
+        : Services?.GetValueOrDefault(service)?.Tools ?? throw new StockIdentityDenied("service_not_enrolled");
+
+    private static bool ValidServices(StockEnrollmentAuthority record)
+    {
+        if (record.Services is not { } services) return true;
+        var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { record.MemoryHost };
+        foreach (var (service, route) in services)
+        {
+            if (!StockServices.McpNames.ContainsKey(service) || route is null || Uri.CheckHostName(route.Host) != UriHostNameType.Dns
+                || !hosts.Add(route.Host) || route.Tools is null || route.Tools.Count > 128
+                || route.Tools.Any(t => t is null || !System.Text.RegularExpressions.Regex.IsMatch(t, @"\A[A-Za-z0-9_.-]{1,128}\z"))
+                || route.Tools.Distinct(StringComparer.Ordinal).Count() != route.Tools.Count
+                || route.Query != "" && !(service == "telegram" && System.Text.RegularExpressions.Regex.IsMatch(route.Query ?? "", @"\Aformatting_mode=[0-2]\z")))
+                return false;
+        }
+        return true;
+    }
 
     public static byte[] ReadBounded(string path)
     {
@@ -44,7 +103,7 @@ public sealed record StockEnrollmentAuthority
             using var document = JsonDocument.Parse(bytes);
             StockRequestProof.Unique(document.RootElement);
             var record = JsonSerializer.Deserialize<StockEnrollmentAuthority>(bytes,
-                new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow })!;
+                new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow, AllowDuplicateProperties = false })!;
             if (record.State != "active" || record.ExpiresAt <= DateTimeOffset.UtcNow || record.Epoch == Guid.Empty
                 || string.IsNullOrWhiteSpace(record.Agent) || record.Agent.Length > 64 || record.Agent.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '-' and not '_')
                 || string.IsNullOrWhiteSpace(record.SandboxId) || record.SandboxId.Length > 256
@@ -52,7 +111,7 @@ public sealed record StockEnrollmentAuthority
                 || !Path.IsPathFullyQualified(record.GatewayJwksPath)
                 || !Path.IsPathFullyQualified(record.AssertionPrivateKeyPath)
                 || !Path.IsPathFullyQualified(record.AssertionPublicKeyPath)
-                || Uri.CheckHostName(record.MemoryHost) != UriHostNameType.Dns)
+                || Uri.CheckHostName(record.MemoryHost) != UriHostNameType.Dns || !ValidServices(record))
                 throw new StockIdentityDenied("enrollment_denied");
             return record;
         }
@@ -62,8 +121,12 @@ public sealed record StockEnrollmentAuthority
     }
 }
 
+/// <summary>
+/// Outside-signed request proof bound to the receiving service, so a proof issued for one receiver
+/// never verifies at another. A proof without the service claim fails binding.
+/// </summary>
 public sealed record StockRequestProof(string Agent, string Sandbox, Guid Epoch, string Method, string SessionHash,
-    string BodyHash, long Expires, string Nonce)
+    string BodyHash, long Expires, string Nonce, string Service)
 {
     public const string Header = "X-Fleet-Assertion";
     public static string Hash(byte[] value) => Convert.ToHexStringLower(SHA256.HashData(value));
@@ -83,10 +146,11 @@ public sealed record StockRequestProof(string Agent, string Sandbox, Guid Epoch,
         foreach (var p in element.EnumerateObject())
             if (!names.Add(p.Name)) throw new StockIdentityDenied("duplicate_field");
     }
-    public static string Issue(StockEnrollmentAuthority record, string method, byte[] body, string? session)
+    public static string Issue(StockEnrollmentAuthority record, string service, string method, byte[] body, string? session)
     {
+        if (!StockServices.IsReceiving(service)) throw new StockIdentityDenied("service_unsupported");
         var proof = new StockRequestProof(record.Agent, record.SandboxId, record.Epoch, method, HashSession(session),
-            Hash(body), DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 15, Guid.NewGuid().ToString("N"));
+            Hash(body), DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 15, Guid.NewGuid().ToString("N"), service);
         using var key = ECDsa.Create(); key.ImportFromPem(StockEnrollmentAuthority.ReadText(record.AssertionPrivateKeyPath));
         RequireP256(key);
         var input = Encode(JsonSerializer.SerializeToUtf8Bytes(new { alg = "ES256", typ = "stock-memory-v1" })) + "."
@@ -94,7 +158,7 @@ public sealed record StockRequestProof(string Agent, string Sandbox, Guid Epoch,
         return input + "." + Encode(key.SignData(Encoding.ASCII.GetBytes(input), HashAlgorithmName.SHA256,
             DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
     }
-    public static StockRequestProof Verify(StockEnrollmentAuthority record, string token, string method, byte[] body, string? session)
+    public static StockRequestProof Verify(StockEnrollmentAuthority record, string service, string token, string method, byte[] body, string? session)
     {
         try
         {
@@ -111,7 +175,7 @@ public sealed record StockRequestProof(string Agent, string Sandbox, Guid Epoch,
                 new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow })!;
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             if (proof.Agent != record.Agent || proof.Sandbox != record.SandboxId || proof.Epoch != record.Epoch
-                || proof.Method != method || proof.BodyHash != Hash(body) || proof.SessionHash != HashSession(session)
+                || proof.Service != service || !StockServices.IsReceiving(service) || proof.Method != method || proof.BodyHash != Hash(body) || proof.SessionHash != HashSession(session)
                 || proof.Expires <= now || proof.Expires > now + 15 || !Guid.TryParseExact(proof.Nonce, "N", out _))
                 throw new StockIdentityDenied("assertion_binding");
             return proof;

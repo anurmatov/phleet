@@ -176,6 +176,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     [InlineData("telegram", "managed_route_unsupported:telegram")]
     [InlineData("journal", "managed_route_unsupported:journal")]
     [InlineData("mcp", "managed_route_unsupported:mcp:other")]
+    [InlineData("unrouted", "managed_route_unsupported:mcp:fleet-temporal")]
     [InlineData("version", "stock_cli_version_mismatch")]
     [InlineData("socket", "openshell_requires_codex_api_key_policy_and_no_socket")]
     public async Task Unsupported_or_missing_prerequisites_refuse_before_any_mutation(string fault, string code)
@@ -186,6 +187,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             case "telegram": agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" }); break;
             case "journal": agent.JournalEnabled = true; break;
             case "mcp": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "other", Url = "http://other/mcp", TransportType = "http" }); break;
+            case "unrouted": // a supported service, but this installation configured no receiving host for it
+                agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-temporal", Url = "https://temporal.example.test/mcp", TransportType = "http" });
+                _serviceHosts = new() { ["telegram"] = "telegram.example.test" };
+                break;
             case "version": _cli.Version = "openshell 0.2.0"; break;
             case "socket": agent.MountDockerSock = true; break;
         }
@@ -196,6 +201,44 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal(code, result.Code);
         Assert.Empty(_broker.Puts);
         Assert.DoesNotContain(_cli.Calls, c => c.Args.Count > 1 && c.Args[0] == "sandbox");
+    }
+
+    [Fact]
+    public async Task Supported_first_party_mcp_grants_apply_with_exactly_their_granted_tools()
+    {
+        var agent = ManagedAgent(desired: "openshell", applied: "docker");
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-temporal", Url = "https://temporal.example.test/mcp", TransportType = "http" });
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-telegram", Url = "https://telegram.example.test/mcp", TransportType = "http" });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-temporal__temporal_start_workflow" });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-temporal__temporal_terminate_workflow", IsEnabled = false });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-telegram__send_message" });
+        agent.FormattingMode = Fleet.Shared.FormattingMode.Rich;
+        _store.Add(agent);
+        var runtime = Runtime();
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        // Exactly the enabled DB grants per service (no disabled, implicit or cross-service tools), plus the
+        // operator's receiving host and Telegram's formatting mode for its receiver.
+        var authority = JsonNode.Parse(File.ReadAllText(AuthorityPath()))!;
+        Assert.Equal("{\"telegram\":{\"Host\":\"telegram.example.test\",\"Tools\":[\"send_message\"],\"Query\":\"formatting_mode=2\"},"
+            + "\"temporal\":{\"Host\":\"temporal.example.test\",\"Tools\":[\"temporal_start_workflow\"],\"Query\":\"\"}}",
+            authority["Services"]!.ToJsonString());
+        var guestFile = Path.Combine(_dir, "guest-enrollment.json");
+        File.WriteAllText(guestFile, _cli.Uploads.Last(u => u.Remote == "/trust/enrollment.json").Content!);
+        Assert.Equal(["temporal_start_workflow"], Fleet.Shared.Security.StockEnrollmentAuthority.Load(guestFile).ServiceTools("temporal"));
+        // The workload's MCP config names each routed service like memory: exact HTTPS host, no query identity.
+        var staged = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && c.Args[4] == "/workspace").Args[3];
+        Assert.Equal("{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"},"
+            + "\"fleet-telegram\":{\"url\":\"https://telegram.example.test/mcp\"},\"fleet-temporal\":{\"url\":\"https://temporal.example.test/mcp\"}}}",
+            File.ReadAllText(Path.Combine(staged, ".mcp.json")));
+
+        // Reprovision keeps the workspace but refreshes its routes from the current grants.
+        agent.McpEndpoints.RemoveAll(e => e.McpName == "fleet-telegram");
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        Assert.DoesNotContain("fleet-telegram", _cli.Uploads.Last(u => u.Remote == "/workspace/.mcp.json").Content!);
+        Assert.Equal(["temporal"], JsonNode.Parse(File.ReadAllText(AuthorityPath()))!["Services"]!.AsObject().Select(p => p.Key));
     }
 
     [Fact]
@@ -605,6 +648,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     private readonly List<string> _dockerProvisions = [];
     private (bool Ok, string Message) _dockerResult = (true, "provisioned");
+    private JsonObject? _serviceHosts = new() { ["temporal"] = "temporal.example.test", ["telegram"] = "telegram.example.test" };
     private string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
     private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null)
@@ -616,6 +660,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             ["GatewayIssuer"] = "synthetic-gateway", ["GatewayAudience"] = "synthetic-hook",
             ["GatewayJwksPath"] = "/trust/gateway.jwks", ["AssertionPrivateKeyPath"] = "/outside/private.pem",
             ["AssertionPublicKeyPath"] = "/outside/public.pem", ["MemoryHost"] = "memory.example.test", ["BrokerHost"] = "broker.example.test",
+            ["ServiceHosts"] = _serviceHosts?.DeepClone(),
         }.ToJsonString());
         var generated = Directory.CreateDirectory(Path.Combine(_dir, "generated")).FullName;
         File.WriteAllText(Path.Combine(generated, "appsettings.json"), "{\"Agent\":{\"Name\":\"agent1\"}}");

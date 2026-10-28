@@ -253,6 +253,9 @@ public sealed class StockOpenShellRuntime(
     public const string Entrypoint = "/app/stock-entrypoint.sh";
     internal static readonly string Instance = Guid.NewGuid().ToString("N");
     internal static readonly string[] MemoryTools = ["memory_get", "memory_search", "memory_list"];
+    /// <summary>Ordinary MCP endpoint name → first-party receiving service that verifies the outside assertion.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> ServiceByMcpName =
+        StockServices.McpNames.ToDictionary(p => p.Value, p => p.Key, StringComparer.Ordinal);
     /// <summary>Account/control state that never crosses a runtime switch with the workspace.</summary>
     internal static readonly string[] PrivateWorkspaceEntries = [".generated", "claude", ".claude", "codex", ".codex", ".codex-host", "gemini", ".gemini", ".ssh", ".mcp.json"];
 
@@ -470,11 +473,16 @@ public sealed class StockOpenShellRuntime(
         // Ordinary-service routes are not yet available in managed mode; refuse rather than drop them.
         if (ContainerProvisioningService.HasTelegramBot(agent)) return "managed_route_unsupported:telegram";
         if (agent.JournalEnabled) return "managed_route_unsupported:journal";
-        if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory") is { } extra) return "managed_route_unsupported:mcp:" + extra.McpName;
+        // Only first-party HTTP MCP receivers that verify the outside assertion are routed; others refuse.
+        if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory" && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)
+            return "managed_route_unsupported:mcp:" + extra.McpName;
         if (!agent.Tools.Any(t => t.IsEnabled && MemoryTools.Any(m => t.ToolName == "mcp__memory__" + m))) return "managed_memory_grant_missing";
         if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return "managed_agent_image_missing";
         if (DescribeConfigDirFault() is { } dirFault) return dirFault;
-        if (LoadTemplate() is null) return "managed_authority_template_invalid";
+        if (LoadTemplate() is not { } template) return "managed_authority_template_invalid";
+        // A supported service without an operator-configured receiving host has no route in this installation.
+        if (agent.McpEndpoints.FirstOrDefault(e => ServiceByMcpName.TryGetValue(e.McpName, out var service) && TemplateHost(template, service) is null) is { } unrouted)
+            return "managed_route_unsupported:mcp:" + unrouted.McpName;
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
         if (await broker.VerifyAccessAsync(ct) is { } accessFault) return accessFault;
         var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
@@ -673,7 +681,7 @@ public sealed class StockOpenShellRuntime(
         try
         {
             WriteBrokerPasswords(agent.Name, passwords);
-            WriteRecord(AuthorityPath(agent.Name), Authority(template, agent.Name, reuse ? candidate.SandboxId : "pending", epoch, policy.Sha256, "revoked"));
+            WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, reuse ? candidate.SandboxId : "pending", epoch, policy.Sha256, "revoked"));
             bundle = await BuildBundleAsync(agent, template, generated, epochDir, passwords["workload"], epoch, policy, reuse ? candidate.SandboxId : "pending");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
@@ -718,7 +726,8 @@ public sealed class StockOpenShellRuntime(
 
         // Staging: the launcher waits without a daemon, so transfers race no native task or file writer.
         if (await StageAsync(candidate, ct) is { } stage) return await HoldStoppedAsync(applying, candidate, stage, [], ct);
-        foreach (var (local, remote) in reuse ? new[] { ("app", "/app"), ("trust", "/trust") }
+        // Reuse keeps the workspace but refreshes its MCP routes, which follow the current grants.
+        foreach (var (local, remote) in reuse ? new[] { ("app", "/app"), ("trust", "/trust"), (Path.Combine("workspace", ".mcp.json"), "/workspace/.mcp.json") }
                      : [("app", "/app"), ("trust", "/trust"), ("workspace", "/workspace")])
             if (await UploadAsync(candidate, Path.Combine(bundle, local), remote, ct) is { } upload)
                 return await HoldStoppedAsync(applying, candidate, upload, [], ct);
@@ -739,7 +748,7 @@ public sealed class StockOpenShellRuntime(
         if (!created.Ok) return await HoldStoppedAsync(applying, candidate, created.Code!, [.. created.OwnedPartials], ct);
         try
         {
-            var active = Authority(template, agent.Name, candidate.SandboxId, epoch, policy.Sha256, "active");
+            var active = Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "active");
             WriteRecord(AuthorityPath(agent.Name), active);
             WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), active);
         }
@@ -1015,7 +1024,7 @@ public sealed class StockOpenShellRuntime(
     {
         var source = DockerWorkspaceDir(agent);
         if (Directory.Exists(source)) CopyTree(source, target, PrivateWorkspaceEntries);
-        WriteText(Path.Combine(target, ".mcp.json"), MemoryMcp(LoadTemplate()!));
+        WriteText(Path.Combine(target, ".mcp.json"), WorkloadMcp(LoadTemplate()!, agent));
     }
 
     /// <summary>
@@ -1064,18 +1073,29 @@ public sealed class StockOpenShellRuntime(
             if (node is null) return null;
             foreach (var field in new[] { "GatewayIssuer", "GatewayAudience", "GatewayJwksPath", "AssertionPrivateKeyPath", "AssertionPublicKeyPath", "MemoryHost", "BrokerHost" })
                 if (node[field]?.GetValue<string>() is not { Length: > 0 }) return null;
+            // Optional receiving hosts of non-memory first-party services: exact DNS names, distinct from memory and each other.
+            if (node["ServiceHosts"] is { } hosts)
+            {
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { node["MemoryHost"]!.GetValue<string>() };
+                foreach (var (service, host) in hosts.AsObject())
+                    if (!StockServices.McpNames.ContainsKey(service) || host?.GetValue<string>() is not { } name
+                        || Uri.CheckHostName(name) != UriHostNameType.Dns || !seen.Add(name)) return null;
+            }
             return node;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException
             or ArgumentException or StockIdentityDenied) { return null; }
     }
 
-    internal static JsonObject Authority(JsonObject template, string agent, string sandboxId, Guid epoch, string policySha, string state)
+    private static string? TemplateHost(JsonObject template, string service) =>
+        template["ServiceHosts"]?[service]?.GetValue<string>() is { Length: > 0 } host ? host : null;
+
+    internal static JsonObject Authority(JsonObject template, Agent agent, string sandboxId, Guid epoch, string policySha, string state)
     {
         var record = new JsonObject
         {
             ["State"] = state,
-            ["Agent"] = agent,
+            ["Agent"] = agent.Name,
             ["SandboxId"] = sandboxId,
             ["Epoch"] = epoch.ToString(),
             ["ExpiresAt"] = DateTimeOffset.UtcNow.AddDays(365).ToString("O"),
@@ -1084,13 +1104,42 @@ public sealed class StockOpenShellRuntime(
             record[field] = template[field]!.GetValue<string>();
         record["StockCommit"] = StockCommit;
         record["PolicySha256"] = policySha;
+        if (ServiceRoutes(template, agent) is { Count: > 0 } services) record["Services"] = services;
         return record;
     }
 
-    private static string MemoryMcp(JsonObject template) => new JsonObject
+    /// <summary>
+    /// One route per granted first-party service endpoint: the operator's receiving host and exactly the
+    /// agent's enabled DB tool grants on that endpoint (existing names, no implicit or widened tools).
+    /// Telegram also carries the agent's formatting mode, which its receiver appends after attribution.
+    /// </summary>
+    private static JsonObject ServiceRoutes(JsonObject template, Agent agent)
     {
-        ["mcpServers"] = new JsonObject { ["memory"] = new JsonObject { ["url"] = $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp" } },
-    }.ToJsonString();
+        var routes = new JsonObject();
+        foreach (var (service, mcpName) in StockServices.McpNames.OrderBy(p => p.Key, StringComparer.Ordinal))
+        {
+            if (!agent.McpEndpoints.Any(e => e.McpName == mcpName) || TemplateHost(template, service) is not { } host) continue;
+            var prefix = "mcp__" + mcpName + "__";
+            var tools = agent.Tools.Where(t => t.IsEnabled && t.ToolName.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(t => t.ToolName[prefix.Length..]).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+            routes[service] = new JsonObject
+            {
+                ["Host"] = host,
+                ["Tools"] = new JsonArray([.. tools.Select(t => (JsonNode)t)]),
+                ["Query"] = service == "telegram" ? $"formatting_mode={Math.Clamp((int)agent.FormattingMode, 0, 2)}" : "",
+            };
+        }
+        return routes;
+    }
+
+    /// <summary>The workload's MCP servers: memory plus each routed service under its ordinary endpoint name.</summary>
+    private static string WorkloadMcp(JsonObject template, Agent agent)
+    {
+        var servers = new JsonObject { ["memory"] = new JsonObject { ["url"] = $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp" } };
+        foreach (var (service, route) in ServiceRoutes(template, agent))
+            servers[StockServices.McpNames[service]] = new JsonObject { ["url"] = $"https://{route!["Host"]!.GetValue<string>()}/mcp" };
+        return new JsonObject { ["mcpServers"] = servers }.ToJsonString();
+    }
 
     private void WriteBrokerPasswords(string agent, IReadOnlyDictionary<string, string> passwords)
     {
@@ -1137,8 +1186,8 @@ public sealed class StockOpenShellRuntime(
             Path.Combine(bundle, "app", Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), overwrite: true);
         foreach (var dir in new[] { "roles", "projects" })
             if (Directory.Exists(Path.Combine(generated, dir))) CopyTree(Path.Combine(generated, dir), Path.Combine(bundle, "app", dir), []);
-        WriteText(Path.Combine(bundle, "workspace", ".mcp.json"), MemoryMcp(template));
-        WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent.Name, sandboxId, epoch, policy.Sha256, "revoked"));
+        WriteText(Path.Combine(bundle, "workspace", ".mcp.json"), WorkloadMcp(template, agent));
+        WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent, sandboxId, epoch, policy.Sha256, "revoked"));
         WriteText(Path.Combine(bundle, "trust", "workload-broker-password"), workloadPassword);
         return bundle;
     }

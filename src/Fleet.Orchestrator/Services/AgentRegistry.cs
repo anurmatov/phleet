@@ -50,6 +50,7 @@ public sealed class AgentRegistry
             AppliedRuntimeKind = dbAgent.AppliedRuntimeKind,
             RuntimePending = AgentPatchHelpers.RuntimePending(dbAgent),
         };
+        (state.ManagedState, state.ManagedErrors) = ManagedView(dbAgent.AppliedRuntimeBinding);
         // Only add if not already present (heartbeat may have arrived first)
         if (_agents.TryAdd(dbAgent.Name, state))
             BroadcastIfChanged(state, force: true);
@@ -62,6 +63,7 @@ public sealed class AgentRegistry
         state.RuntimeKind = agent.RuntimeKind;
         state.AppliedRuntimeKind = agent.AppliedRuntimeKind;
         state.RuntimePending = AgentPatchHelpers.RuntimePending(agent);
+        (state.ManagedState, state.ManagedErrors) = ManagedView(agent.AppliedRuntimeBinding);
         BroadcastIfChanged(state, force: true);
     }
 
@@ -286,4 +288,16 @@ public sealed class AgentRegistry
         int? JournalAuthFailed,
         int? JournalBindingFailed,
         int PriorityQueuedCount);
+
+    /// <summary>Content-free view of the managed record: state and error codes only.</summary>
+    internal static (string? State, IReadOnlyList<string>? Errors) ManagedView(string? binding)
+    {
+        if (string.IsNullOrEmpty(binding)) return (null, null);
+        try
+        {
+            var record = ManagedRecord.Parse(binding);
+            return (record.Operation is not null ? "busy" : record.State, record.Errors);
+        }
+        catch (System.Text.Json.JsonException) { return ("unreadable", null); }
+    }
 }

@@ -62,6 +62,9 @@ public sealed class AgentState
     public string RuntimeKind { get; set; } = "docker";
     public string AppliedRuntimeKind { get; set; } = "docker";
     public bool RuntimePending { get; set; }
+    /// <summary>#492 managed binding state from the persisted record (never from a heartbeat).</summary>
+    public string? ManagedState { get; set; }
+    public IReadOnlyList<string>? ManagedErrors { get; set; }
     public required string AgentName     { get; init; }
     public string  ReportedStatus        { get; set; } = "unknown";
     public string? CurrentTask           { get; set; }

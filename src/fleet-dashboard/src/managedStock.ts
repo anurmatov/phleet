@@ -19,3 +19,20 @@ export async function policyResponse<T>(response: Response): Promise<T> {
   }
   return response.json()
 }
+
+/** #492: what the card shows and allows for a managed runtime, from the persisted record only. */
+export interface ManagedRuntimeView { label: string | null; title: string; startBlocked: boolean; canRevoke: boolean }
+
+export function managedRuntimeView(agent: { runtimeKind?: string; appliedRuntimeKind?: string; managedState?: string | null; managedErrors?: string[] | null }): ManagedRuntimeView {
+  const applied = agent.appliedRuntimeKind === 'openshell'
+  if (!applied && agent.runtimeKind !== 'openshell') return { label: null, title: '', startBlocked: false, canRevoke: false }
+  const state = agent.managedState ?? (applied ? 'unknown' : 'pending apply')
+  const held = ['needs_attention', 'revoked', 'busy', 'applying', 'unreadable', 'unknown'].includes(state)
+  return {
+    label: `openshell · ${state.replace(/_/g, ' ')}`,
+    title: (agent.managedErrors ?? []).join(', '),
+    // Start targets the applied binding; a pending desired change still starts the applied Docker runtime.
+    startBlocked: applied && held,
+    canRevoke: applied && state !== 'busy' && state !== 'revoked',
+  }
+}

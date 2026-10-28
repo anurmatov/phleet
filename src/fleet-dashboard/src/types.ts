@@ -29,6 +29,8 @@ export interface AgentState {
   runtimeKind?: string
   appliedRuntimeKind?: string
   runtimePending?: boolean
+  managedState?: string | null
+  managedErrors?: string[] | null
   agentName: string
   displayName: string | null
   shortName: string | null

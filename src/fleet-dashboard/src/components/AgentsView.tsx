@@ -61,6 +61,7 @@ interface AgentsViewProps {
   onReprovisionConfirm: (agentName: string) => void
   onReprovisionCancel: (agentName: string) => void
   onStop: (agentName: string) => void
+  onRevoke: (agentName: string) => void
   onStart: (agentName: string) => void
   onCancel: (agentName: string) => void
   onCancelConfirm: (agentName: string) => void
@@ -135,6 +136,7 @@ export default function AgentsView({
   onReprovisionConfirm,
   onReprovisionCancel,
   onStop,
+  onRevoke,
   onStart,
   onCancel,
   onCancelConfirm,
@@ -214,6 +216,7 @@ export default function AgentsView({
             onReprovisionConfirm={() => onReprovisionConfirm(agent.agentName)}
             onReprovisionCancel={() => onReprovisionCancel(agent.agentName)}
             onStop={() => onStop(agent.agentName)}
+            onRevoke={() => onRevoke(agent.agentName)}
             onStart={() => onStart(agent.agentName)}
             onCancel={() => onCancel(agent.agentName)}
             onCancelConfirm={() => onCancelConfirm(agent.agentName)}

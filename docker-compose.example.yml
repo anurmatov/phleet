@@ -828,6 +828,31 @@ services:
     networks:
       - fleet-net
 
+  # Managed stock OpenShell gateway (#492), only with `--profile openshell`. Pin the exact stock image
+  # by digest; copy deploy/openshell/gateway.toml.example to ${FLEET_BASE_DIR}/openshell/gateway.toml.
+  # Host networking keeps the loopback listener private to this host; the Docker socket is the
+  # explicit trusted-control exception and is never mounted into a workload. restart "no": a
+  # gateway restart must be planned (owned sandboxes stopped first), never automatic.
+  openshell-gateway:
+    profiles: ["openshell"]
+    image: ${FLEET_STOCK_GATEWAY_IMAGE:?set FLEET_STOCK_GATEWAY_IMAGE to the pinned stock gateway image@sha256 digest}
+    container_name: openshell-gateway
+    network_mode: host
+    restart: "no"
+    user: "1000:1000"
+    group_add: ["${FLEET_DOCKER_GID:?set FLEET_DOCKER_GID to the host docker group id}"]
+    command: []
+    environment:
+      OPENSHELL_GATEWAY_CONFIG: /etc/openshell/gateway.toml
+      OPENSHELL_DB_URL: "sqlite:/var/lib/openshell/gateway.db?mode=rwc"
+      XDG_DATA_HOME: /var/lib/openshell
+      HOME: /var/lib/openshell
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same path inside and out (0700, owner 1000): the gateway hands these paths to the Docker driver.
+      - /var/lib/openshell:/var/lib/openshell
+      - ${FLEET_BASE_DIR}/openshell/gateway.toml:/etc/openshell/gateway.toml:ro
+
 volumes:
   qdrant_data:
   # Device registrations, enrollment state and tokens. Losing this volume locks the owner out of

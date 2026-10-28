@@ -1,3 +1,4 @@
+import { managedRuntimeView } from '../managedStock'
 import { useState, useRef, useEffect } from 'react'
 import type {
   AgentState,
@@ -43,6 +44,7 @@ interface AgentCardProps {
   onReprovisionCancel: () => void
   onStop: () => void
   onStart: () => void
+  onRevoke: () => void
   onCancel: () => void
   onCancelConfirm: () => void
   onCancelCancel: () => void
@@ -80,7 +82,7 @@ export default function AgentCard({
   workflows,
   onRestart, onRestartConfirm, onRestartCancel,
   onReprovision, onReprovisionConfirm, onReprovisionCancel,
-  onStop, onStart,
+  onStop, onStart, onRevoke,
   onCancel, onCancelConfirm, onCancelCancel,
   onDeleteClick, onDeleteConfirm, onDeleteCancel,
   onBgCancel,
@@ -91,6 +93,7 @@ export default function AgentCard({
   highlightedEntityId,
   onClearHighlight,
 }: AgentCardProps) {
+  const managed = managedRuntimeView(agent)
   const [overflowOpen, setOverflowOpen] = useState(false)
   const [historyExpanded, setHistoryExpanded] = useState(false)
   const isDead = agent.effectiveStatus === 'dead'
@@ -120,6 +123,7 @@ export default function AgentCard({
           <span className="agent-row-dot">{statusDot(agent.effectiveStatus)}</span>
           <span className="agent-row-name">{agent.agentName}</span>
           {agent.runtimePending && <span className="agent-row-queue-badge" title={`Desired ${agent.runtimeKind}; applied ${agent.appliedRuntimeKind}`}>runtime pending</span>}
+          {managed.label && agent.managedState && <span className="agent-row-queue-badge" title={managed.title || undefined}>{managed.label}</span>}
           {agent.model && <span className="agent-model agent-row-model">{agent.model}</span>}
           <span className="agent-row-task">
             {agent.currentTask
@@ -183,13 +187,16 @@ export default function AgentCard({
               {isEditingConfig ? 'close config' : 'edit config'}
             </button>
             {isDead
-              ? <button onClick={() => { onStart(); setOverflowOpen(false) }} disabled={sts === 'pending'}>
+              ? <button onClick={() => { onStart(); setOverflowOpen(false) }} disabled={sts === 'pending' || managed.startBlocked} title={managed.startBlocked ? 'Revoke or re-apply the managed runtime first' : undefined}>
                   {sts === 'pending' ? '…' : 'start'}
                 </button>
               : <button onClick={() => { onStop(); setOverflowOpen(false) }}>
                   {ss === 'confirming' ? 'confirm stop?' : 'stop'}
                 </button>
             }
+            {managed.canRevoke && (
+              <button onClick={() => { onRevoke(); setOverflowOpen(false) }}>revoke runtime</button>
+            )}
             <button
               className="overflow-delete"
               onClick={() => { onDeleteClick(); setOverflowOpen(false) }}
@@ -412,7 +419,7 @@ export default function AgentCard({
               {isEditingConfig ? '✎ close config' : '✎ edit config'}
             </button>
             {isDead
-              ? <button className="row-btn" onClick={onStart} disabled={sts === 'pending'}>
+              ? <button className="row-btn" onClick={onStart} disabled={sts === 'pending' || managed.startBlocked} title={managed.startBlocked ? 'Revoke or re-apply the managed runtime first' : undefined}>
                   {sts === 'pending' ? '…' : '▶ start'}
                 </button>
               : <button className="row-btn" onClick={onStop}>

@@ -749,6 +749,17 @@ export default function App() {
     setReprovisionAllState('idle')
   }
 
+  function handleRevoke(agentName: string) {
+    if (!window.confirm(`Revoke the managed runtime for ${agentName}? Its admission, provider, broker identity and sandbox are stopped; nothing is replaced.`)) return
+    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/revoke`, { method: 'POST' })
+      .then(async r => {
+        const b = await r.json().catch(() => ({}))
+        const detail = Array.isArray(b?.errors) && b.errors.length ? `: ${b.errors.join(', ')}` : ''
+        setStopMsg(prev => ({ ...prev, [agentName]: r.ok ? 'Runtime revoked' : `${b?.error ?? `Error ${r.status}`}${detail}` }))
+      })
+      .catch(() => setStopMsg(prev => ({ ...prev, [agentName]: 'Request failed' })))
+  }
+
   function handleStop(agentName: string) {
     const ss = stopStates[agentName] ?? 'idle'
     if (ss === 'pending') return
@@ -1852,6 +1863,7 @@ export default function App() {
             onReprovisionCancel={name => setAgentReprovisionState(name, 'idle')}
             onStop={handleStop}
             onStart={handleStart}
+            onRevoke={handleRevoke}
             onCancel={handleCancel}
             onCancelConfirm={handleCancelConfirm}
             onCancelCancel={name => setAgentCancelState(name, 'idle')}

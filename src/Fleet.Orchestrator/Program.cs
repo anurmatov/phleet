@@ -595,12 +595,19 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
 
     // Best-effort Docker deprovision — if container doesn't exist that's fine, proceed with DB delete. Review A2:
     // managed state (applied openshell binding, unresolved candidate/held record) keeps the row until revoked.
-    var (deprovision, keepRow) = await provisioning.DeprovisionForDeleteAsync(name);
+    var (deprovision, keepRow, claim) = await provisioning.DeprovisionForDeleteAsync(name);
     if (keepRow is not null)
-        return Results.Conflict(new { error = keepRow, message = $"Agent '{name}' was not deleted: revoke its managed runtime first" });
+        return Results.Conflict(new { error = keepRow, message = keepRow == ManagedDeleteClaim.Changed
+            ? $"Agent '{name}' was not deleted: its managed state changed concurrently"
+            : $"Agent '{name}' was not deleted: revoke its managed runtime first" });
 
-    db.Agents.Remove(agent);
-    await db.SaveChangesAsync();
+    // The delete claim stays live until the row is gone; a failed delete restores the inspected binding.
+    await using (claim)
+    {
+        db.Agents.Remove(agent);
+        await db.SaveChangesAsync();
+        claim?.Commit();
+    }
 
     // agent_project_access is keyed by name, not by a foreign key, so deleting the agent leaves its
     // rows behind. Deleting an agent unassigns every project, so the same hook applies: the rows it

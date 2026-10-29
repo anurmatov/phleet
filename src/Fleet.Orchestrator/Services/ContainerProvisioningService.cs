@@ -587,18 +587,31 @@ public sealed class ContainerProvisioningService(
     /// has succeeded, or the runtime hold denied the mutation. Docker deprovision stays best-effort; a cleanly
     /// revoked managed binding was already stopped by its revoke, so no managed Stop result is ever ignored.
     /// </summary>
-    public async Task<(ProvisionResult Deprovision, string? KeepRow)> DeprovisionForDeleteAsync(string agentName, CancellationToken ct = default)
+    public async Task<(ProvisionResult Deprovision, string? KeepRow, ManagedDeleteClaim? Claim)> DeprovisionForDeleteAsync(string agentName, CancellationToken ct = default)
     {
         Agent? agent;
         using (var scope = scopeFactory.CreateScope())
             agent = await scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents
                 .AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        if (agent is null) return (ProvisionResult.Fail(agentName, "agent not found in DB"), null);
-        if (DescribeManagedDeleteFault(agent) is { } managedFault) return (ProvisionResult.Fail(agentName, managedFault), managedFault);
-        if (agent.AppliedRuntimeKind != "docker") return (ProvisionResult.Ok(agentName, "managed binding revoked"), null);
+        if (agent is null) return (ProvisionResult.Fail(agentName, "agent not found in DB"), null, null);
+        if (DescribeManagedDeleteFault(agent) is { } managedFault) return (ProvisionResult.Fail(agentName, managedFault), managedFault, null);
+        if (BeforeDeleteClaim is not null) await BeforeDeleteClaim();
+        // Review A2: claim the exact inspected binding before anything is stopped or deleted. A concurrent apply,
+        // Start or revoke either changed it first (this CAS fails: conflict, row kept) or sees this live claim (409).
+        if (await ManagedDeleteClaim.TryClaimAsync(scopeFactory, agent, ct) is not { } claim)
+            return (ProvisionResult.Fail(agentName, ManagedDeleteClaim.Changed), ManagedDeleteClaim.Changed, null);
+        if (agent.AppliedRuntimeKind != "docker") return (ProvisionResult.Ok(agentName, "managed binding revoked"), null, claim);
         var deprovision = await DeprovisionAsync(agentName, ct);
-        return (deprovision, !deprovision.Success && deprovision.Message == StockRuntimeMutationHold.Reason ? deprovision.Message : null);
+        if (!deprovision.Success && deprovision.Message == StockRuntimeMutationHold.Reason)
+        {
+            await claim.DisposeAsync();
+            return (deprovision, deprovision.Message, null);
+        }
+        return (deprovision, null, claim);
     }
+
+    /// <summary>Test seam: runs after the managed-state inspection and before the delete claim (review A2).</summary>
+    internal Func<Task>? BeforeDeleteClaim { get; set; }
 
     /// <summary>Null only when no managed state would be dropped untracked with the agent row.</summary>
     internal static string? DescribeManagedDeleteFault(Agent agent)
@@ -1978,3 +1991,65 @@ internal sealed record ProjectContextPlan(IReadOnlyList<ProjectContextAssignment
 {
     public static readonly ProjectContextPlan Empty = new([]);
 }
+
+/// <summary>
+/// Review A2: exclusive ownership of an agent row being deleted. Taken by compare-and-set on the exact inspected
+/// binding and runtime kind, recorded as a live managed operation so every managed lifecycle call refuses with 409
+/// while it is held. Disposing without <see cref="Commit"/> restores the inspected binding (only if still claimed).
+/// </summary>
+public sealed class ManagedDeleteClaim : IAsyncDisposable
+{
+    public const string Changed = "managed_state_changed_during_delete";
+    private readonly IServiceScopeFactory _scopes;
+    private readonly int _agentId;
+    private readonly string? _inspected;
+    private readonly string _claimed;
+    private bool _committed;
+
+    private ManagedDeleteClaim(IServiceScopeFactory scopes, int agentId, string? inspected, string claimed, string operation)
+    {
+        _scopes = scopes; _agentId = agentId; _inspected = inspected; _claimed = claimed; Operation = operation;
+    }
+
+    public string Operation { get; }
+
+    internal static async Task<ManagedDeleteClaim?> TryClaimAsync(IServiceScopeFactory scopes, Agent agent, CancellationToken ct)
+    {
+        var record = string.IsNullOrEmpty(agent.AppliedRuntimeBinding) ? new ManagedRecord() : ManagedRecord.Parse(agent.AppliedRuntimeBinding);
+        var operation = StockOpenShellRuntime.RegisterLiveClaim("delete");
+        var claimed = (record with { Operation = operation, UpdatedAt = DateTimeOffset.UtcNow }).Serialize();
+        try
+        {
+            using var scope = scopes.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            var changed = await db.Agents
+                .Where(a => a.Id == agent.Id && a.AppliedRuntimeBinding == agent.AppliedRuntimeBinding && a.AppliedRuntimeKind == agent.AppliedRuntimeKind)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppliedRuntimeBinding, claimed), ct);
+            if (changed == 1) return new ManagedDeleteClaim(scopes, agent.Id, agent.AppliedRuntimeBinding, claimed, operation);
+        }
+        catch (Exception ex) when (ex is System.Data.Common.DbException or InvalidOperationException) { }
+        StockOpenShellRuntime.ReleaseLiveClaim(operation);
+        return null;
+    }
+
+    /// <summary>The row was deleted; nothing to restore.</summary>
+    public void Commit() => _committed = true;
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (_committed) return;
+            using var scope = _scopes.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            await db.Agents.Where(a => a.Id == _agentId && a.AppliedRuntimeBinding == _claimed)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppliedRuntimeBinding, _inspected));
+        }
+        catch (Exception ex) when (ex is System.Data.Common.DbException or InvalidOperationException)
+        {
+            // An unrestored claim reads as an interrupted operation (held), never as a free binding.
+        }
+        finally { StockOpenShellRuntime.ReleaseLiveClaim(Operation); }
+    }
+}
+

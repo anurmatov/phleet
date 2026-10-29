@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.Extensions.Configuration;
@@ -937,9 +938,11 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         await harness.SeedAsync(db => db.Agents.Add(new Agent { Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic",
             ContainerName = "agent1", IsEnabled = true, RuntimeKind = "openshell", AppliedRuntimeKind = applied, AppliedRuntimeBinding = record?.Serialize() }));
 
-        var (deprovision, kept) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+        var (deprovision, kept, claim) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+        await using var _ = claim;
 
         Assert.Equal(keepRow, kept);
+        Assert.Equal(keepRow is null, claim is not null);
         if (keepRow is not null)
         {
             Assert.False(deprovision.Success);
@@ -947,4 +950,80 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         }
         else if (applied == "openshell") Assert.True(deprovision.Success, deprovision.Message);
     }
+
+    private static async Task<string?> BindingAsync(Fleet.Orchestrator.Tests.Services.ProvisioningHarness harness)
+    {
+        string? binding = null;
+        await harness.MutateAsync(async db => binding = (await db.Agents.AsNoTracking().SingleAsync(a => a.Name == "agent1")).AppliedRuntimeBinding);
+        return binding;
+    }
+
+    private async Task<Fleet.Orchestrator.Tests.Services.ProvisioningHarness> RevokedAgentAsync(string? kind = "openshell")
+    {
+        var harness = Fleet.Orchestrator.Tests.Services.ProvisioningHarness.Create();
+        var revoked = new ManagedRecord { State = "revoked", Applied = _t.Binding("fleet-agent1-d1d1d1d1", Guid.NewGuid()) };
+        await harness.SeedAsync(db => db.Agents.Add(new Agent { Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic",
+            ContainerName = "agent1", IsEnabled = true, RuntimeKind = "openshell", AppliedRuntimeKind = kind, AppliedRuntimeBinding = revoked.Serialize() }));
+        return harness;
+    }
+
+    [Fact]
+    public async Task Agent_delete_conflicts_when_a_concurrent_apply_claims_the_binding_after_inspection()
+    {
+        // Review A2: inspection passed on a clean revoke, then an apply claimed the row before the delete claim.
+        await using var harness = await RevokedAgentAsync();
+        var applying = (ManagedRecord.Parse(await BindingAsync(harness)) with { Operation = "apply:other-process" }).Serialize();
+        harness.Service.BeforeDeleteClaim = () => harness.MutateAsync(async db =>
+            await db.Agents.Where(a => a.Name == "agent1").ExecuteUpdateAsync(u => u.SetProperty(a => a.AppliedRuntimeBinding, applying)));
+
+        var (deprovision, kept, claim) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+
+        Assert.Null(claim);
+        Assert.Equal(ManagedDeleteClaim.Changed, kept);
+        Assert.False(deprovision.Success);
+        Assert.Equal(applying, await BindingAsync(harness)); // the apply's claim is untouched
+        Assert.Equal(0, harness.DockerRequestCount);
+    }
+
+    [Fact]
+    public async Task Held_delete_claim_is_live_on_the_exact_binding_and_an_uncommitted_dispose_restores_it()
+    {
+        await using var harness = await RevokedAgentAsync();
+        var inspected = await BindingAsync(harness);
+
+        var (_, kept, claim) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+
+        Assert.Null(kept);
+        Assert.NotNull(claim);
+        var held = ManagedRecord.Parse(await BindingAsync(harness));
+        Assert.Equal(claim!.Operation, held.Operation);
+        Assert.True(StockOpenShellRuntime.OperationLive("agent1", claim.Operation));
+        Assert.True(held.Unresolved); // Docker lifecycle and managed calls refuse while it is held
+
+        await claim.DisposeAsync(); // e.g. SaveChanges threw: nothing was deleted
+
+        Assert.Equal(inspected, await BindingAsync(harness));
+        Assert.False(StockOpenShellRuntime.OperationLive("agent1", claim.Operation));
+    }
+
+    [Fact]
+    public async Task Managed_calls_refuse_with_conflict_while_a_delete_claim_is_live_then_read_it_as_interrupted()
+    {
+        var binding = _t.Binding("fleet-agent1-d2d2d2d2", Guid.NewGuid());
+        var operation = StockOpenShellRuntime.RegisterLiveClaim("delete");
+        try
+        {
+            _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell",
+                record: new ManagedRecord { State = "revoked", Applied = binding, Operation = operation }));
+            var runtime = _t.Runtime();
+
+            foreach (var call in new Func<Task<StockOpenShellRuntime.Result>>[]
+                { () => runtime.ApplyAsync("agent1", default), () => runtime.StartAsync("agent1", default), () => runtime.RevokeAsync("agent1", default) })
+                Assert.Equal("managed_operation_in_progress", (await call()).Code);
+            Assert.Equal(operation, ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Operation);
+            Assert.DoesNotContain(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        }
+        finally { StockOpenShellRuntime.ReleaseLiveClaim(operation); }
+    }
 }
+

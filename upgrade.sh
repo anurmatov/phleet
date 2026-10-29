@@ -106,6 +106,8 @@ add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_STOCK_MANAGED_ENABLED false
+# Review A7: the authorized (host operator) owner of openshell-client; an existing value is kept.
+add_missing_env_var FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."

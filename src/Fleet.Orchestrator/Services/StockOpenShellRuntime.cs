@@ -1633,10 +1633,17 @@ public sealed class StockOpenShellRuntime(
             // Owned by this process's effective UID, and no linked ancestor can redirect trust/state writes.
             try { RefuseLinkedAncestors(ConfigDir); }
             catch (IOException) { return "managed_config_dir_not_private"; }
-            if (OwnerUid(ConfigDir) is not { } owner || owner != GetEffectiveUid()) return "managed_config_dir_not_owned";
+            // Review A7: setup/upgrade create the dir as the host operator while the orchestrator container runs as root,
+            // so the operator uid they record (StockOpenShell:ConfigDirOwnerUid) is the other authorized owner.
+            if (OwnerUid(ConfigDir) is not { } owner || (owner != GetEffectiveUid() && owner != AuthorizedConfigDirOwner))
+                return "managed_config_dir_not_owned";
         }
         return null;
     }
+
+    /// <summary>The documented host-operator owner of ConfigDir (setup/upgrade record <c>id -u</c>); null when unset.</summary>
+    private uint? AuthorizedConfigDirOwner =>
+        uint.TryParse(config["StockOpenShell:ConfigDirOwnerUid"], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var uid) ? uid : null;
 
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
     private static extern uint GetEffectiveUid();

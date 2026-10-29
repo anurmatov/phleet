@@ -706,6 +706,8 @@ fi
 # #492: the private managed-runtime client directory always exists (0700), even while disabled,
 # so the orchestrator bind never creates a root-owned world-readable directory.
 $DRY_RUN || { mkdir -p "$FLEET_BASE_DIR/openshell-client" && chmod 700 "$FLEET_BASE_DIR/openshell-client"; }
+# Review A7: it is owned by this operator, not the orchestrator container's root; record the authorized owner.
+write_env_var "$ENV_FILE" FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"
 # #492 W5: the read-only gateway backup bind source too, resolved like compose (a shell export, then
 # .env, then the default). Created only when absent; an existing path's owner and mode are never changed.
 STOCK_BACKUP_SRC=${FLEET_STOCK_BACKUP_DIR:-$(read_env_var "$ENV_FILE" FLEET_STOCK_BACKUP_DIR)}; STOCK_BACKUP_SRC=${STOCK_BACKUP_SRC:-$FLEET_BASE_DIR/openshell-backup}

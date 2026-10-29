@@ -276,6 +276,31 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Contains("interrupted_stop", errors!);
     }
 
+    [Fact]
+    public async Task Config_dir_owned_by_the_recorded_operator_uid_is_accepted_and_any_other_owner_refused()
+    {
+        var runtime = _t.Runtime(); // creates the fixture's private ConfigDir
+        if (StockOpenShellRuntime.OwnerUid(_t._dir) != 0) return; // chown needs root
+        StockOpenShellRuntime WithOwner(string? uid) => new(new ConfigurationBuilder().AddInMemoryCollection(
+                new Dictionary<string, string?> { ["StockOpenShell:ManagedEnabled"] = "true", ["StockOpenShell:ConfigDir"] = _t._dir, ["StockOpenShell:ConfigDirOwnerUid"] = uid }).Build(),
+            _t._cli, null!, _t._store, _t._host, _t._broker.Credentials, new ServiceCollection().BuildServiceProvider(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<StockOpenShellRuntime>.Instance);
+        // setup.sh/upgrade.sh create openshell-client as the host operator (here 1000) and record FLEET_STOCK_CONFIG_DIR_UID.
+        Assert.Equal(0, Chown(_t._dir, 1000, 1000));
+        try
+        {
+            Assert.Null(await DirFault(WithOwner("1000")));
+            Assert.Equal("managed_config_dir_not_owned", await DirFault(WithOwner(null)));
+            Assert.Equal("managed_config_dir_not_owned", await DirFault(WithOwner("1001")));
+            Assert.Equal("managed_config_dir_not_owned", await DirFault(WithOwner("-1")));
+            Assert.Equal(0, Chown(_t._dir, 65534, 65534));
+            Assert.Equal("managed_config_dir_not_owned", await DirFault(WithOwner("1000")));
+        }
+        finally { Chown(_t._dir, 0, 0); }
+        Assert.Null(await DirFault(WithOwner("1000"))); // the container's own (root) uid stays accepted
+        Assert.Null(await DirFault(runtime));
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

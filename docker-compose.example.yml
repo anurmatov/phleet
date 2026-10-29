@@ -466,6 +466,8 @@ services:
       # authority records and broker CA live in the private 0700 openshell-client directory.
       - StockOpenShell__ManagedEnabled=${FLEET_STOCK_MANAGED_ENABLED:-false}
       - StockOpenShell__ConfigDir=/var/lib/fleet-openshell-client
+      # Host operator uid that setup/upgrade created openshell-client as (the container itself runs as root).
+      - StockOpenShell__ConfigDirOwnerUid=${FLEET_STOCK_CONFIG_DIR_UID:-}
       - StockOpenShell__BrokerCaFile=/var/lib/fleet-openshell-client/broker-ca.pem
       - StockOpenShell__AgentImage=${FLEET_STOCK_AGENT_IMAGE:-}
       - StockOpenShell__GatewayContainer=${FLEET_STOCK_GATEWAY_CONTAINER:-openshell-gateway}

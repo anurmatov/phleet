@@ -37,8 +37,10 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     private readonly Dictionary<string, DateTimeOffset> _lastPublishTime = new();
     // Managed workflow directives (#492) admitted on the control lane: TaskId -> session nonce for the reply.
-    // Bounded (#492 W6): the reply frees its entry; at the bound the oldest unreplied session is dropped, so
-    // unreplied (cancelled or timed-out) tasks can never fill the map and refuse every later directive.
+    // Bounded (#492 W6): only a successfully published final reply frees its entry (#492 R5) — a failed
+    // publication or a partial response keeps it, so a retried reply or a re-sent directive still carries the
+    // context; at the bound the oldest unreplied session is dropped, so unreplied (cancelled or timed-out) tasks
+    // can never fill the map and refuse every later directive.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Session, long Order)> _workflowSessions = new(StringComparer.Ordinal);
     private long _workflowSessionOrder;
     internal const int MaxWorkflowSessions = 256;
@@ -251,11 +253,13 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         {
             var routingKey = targetAgent.ToLowerInvariant();
             var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName);
+            string? workflowSession = null;
             if (_stockBroker is not null && targetAgent == TemporalBridgeRoute
                 && type is RelayMessageType.Response or RelayMessageType.PartialResponse
-                && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryRemove(taskId, out var admitted))
+                && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryGetValue(taskId, out var admitted))
             {
-                var session = admitted.Session;
+                // Read, not consumed (#492 R5): the session is freed only once the final reply is published.
+                var session = workflowSession = admitted.Session;
                 // Typed workflow reply (#492): the existing bridge reply route as the workload principal,
                 // carrying agent (sender), sandbox, epoch, session and TaskId for the Bridge and Temporal to check.
                 routingKey = "bridge";
@@ -269,6 +273,9 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             var props = _stockBroker?.Properties() ?? new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
             await _publishChannel.BasicPublishAsync(
                 _rabbitConfig.Exchange, routingKey: routingKey, mandatory: false, basicProperties: props, body: body);
+
+            if (workflowSession is not null && type == RelayMessageType.Response)
+                ForgetWorkflowSession(taskId!, workflowSession);
 
             _lastPublishTime[targetAgent] = DateTimeOffset.UtcNow;
 
@@ -468,6 +475,16 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             _logger.LogWarning("Dropped {Count} oldest unreplied managed workflow sessions (bound {Bound})", excess, MaxWorkflowSessions);
         }
         return message with { Type = RelayMessageType.Directive, CorrelationId = null, Epoch = null, Sandbox = null };
+    }
+
+    /// <summary>
+    /// Frees the workflow session for <paramref name="taskId"/> only while it still holds
+    /// <paramref name="session"/>, so a concurrent re-admission with a different session is left alone.
+    /// </summary>
+    private void ForgetWorkflowSession(string taskId, string session)
+    {
+        while (_workflowSessions.TryGetValue(taskId, out var current) && current.Session == session)
+            if (_workflowSessions.TryRemove(new KeyValuePair<string, (string Session, long Order)>(taskId, current))) return;
     }
 
     private static string TruncateForLog(string text) =>

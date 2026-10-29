@@ -63,8 +63,80 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         Assert.Equal("synthetic-sandbox", reply.RootElement.GetProperty("Sandbox").GetString());
 
         // The session is consumed: a second reply for the same TaskId is not a workflow reply any more.
+        Assert.Equal(0, relay.WorkflowSessionCount);
         await relay.PublishToAgentAsync("temporal-bridge", 0, "again", RelayMessageType.Response, taskId: "wf/task-1");
         Assert.Single(Publishes(fixture.Channel));
+    }
+
+    private static void AssertWorkflowReply(byte[] body, string type, string session, Guid epoch)
+    {
+        using var reply = JsonDocument.Parse(body);
+        Assert.Equal("agent1", reply.RootElement.GetProperty("Sender").GetString());
+        Assert.Equal(type, reply.RootElement.GetProperty("Type").GetString());
+        Assert.Equal("wf/task-1", reply.RootElement.GetProperty("TaskId").GetString());
+        Assert.Equal(session, reply.RootElement.GetProperty("CorrelationId").GetString());
+        Assert.Equal(epoch, reply.RootElement.GetProperty("Epoch").GetGuid());
+        Assert.Equal("synthetic-sandbox", reply.RootElement.GetProperty("Sandbox").GetString());
+    }
+
+    // ---- #492 R5: the agent-side session survives a failed reply publication ----
+
+    [Fact]
+    public async Task FailedFirstReplyPublication_KeepsTheSession_AndTheRetryPublishesTheOriginalContextOnce()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        var outage = true;
+        var published = new List<(string RoutingKey, byte[] Body)>();
+        fixture.Channel.BasicPublishAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<BasicProperties>(),
+            Arg.Any<ReadOnlyMemory<byte>>(), Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            if (outage) return ValueTask.FromException(new IOException("synthetic publish outage"));
+            published.Add(((string)call[1], ((ReadOnlyMemory<byte>)call[4]).ToArray()));
+            return ValueTask.CompletedTask;
+        });
+        await using var relay = fixture.Relay();
+        await relay.InitializeAsync(default);
+        var session = Guid.NewGuid().ToString("N");
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1",
+            new BasicProperties { UserId = fixture.Binding.Principal("control") }, Directive(fixture.Epoch, session: session));
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, taskId: "wf/task-1");
+        Assert.Single(Publishes(fixture.Channel)); // the broker was attempted and failed
+        Assert.Empty(published);
+        Assert.Equal(1, relay.WorkflowSessionCount); // retained for the retry
+
+        outage = false;
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, taskId: "wf/task-1");
+        var reply = Assert.Single(published);
+        Assert.Equal("bridge", reply.RoutingKey);
+        AssertWorkflowReply(reply.Body, "response", session, fixture.Epoch);
+        Assert.Equal(0, relay.WorkflowSessionCount); // freed only by the successful final publish
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "again", RelayMessageType.Response, taskId: "wf/task-1");
+        Assert.Single(published);
+        Assert.Equal(2, Publishes(fixture.Channel).Length); // no third broker attempt
+    }
+
+    [Fact]
+    public async Task PartialResponse_DoesNotConsumeTheSession_SoTheFinalReplyCarriesTheContextToo()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        await using var relay = fixture.Relay();
+        await relay.InitializeAsync(default);
+        var session = Guid.NewGuid().ToString("N");
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1",
+            new BasicProperties { UserId = fixture.Binding.Principal("control") }, Directive(fixture.Epoch, session: session));
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "partial", RelayMessageType.PartialResponse, taskId: "wf/task-1");
+        Assert.Equal(1, relay.WorkflowSessionCount);
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "final", RelayMessageType.Response, taskId: "wf/task-1");
+        Assert.Equal(0, relay.WorkflowSessionCount);
+
+        var publishes = Publishes(fixture.Channel);
+        Assert.Equal(2, publishes.Length);
+        Assert.All(publishes, p => Assert.Equal("bridge", p[1]));
+        AssertWorkflowReply(((ReadOnlyMemory<byte>)publishes[0][4]!).ToArray(), "partial-response", session, fixture.Epoch);
+        AssertWorkflowReply(((ReadOnlyMemory<byte>)publishes[1][4]!).ToArray(), "response", session, fixture.Epoch);
     }
 
     public static TheoryData<string> Foreign() => new()

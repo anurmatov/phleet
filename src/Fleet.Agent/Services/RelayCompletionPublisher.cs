@@ -103,7 +103,8 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
                 {
                     var type = isPartial ? RelayMessageType.PartialResponse : RelayMessageType.Response;
                     var text = taskId is not null ? FormatTaskResponse(result, isPartial, kind) : result;
-                    await _relay.PublishToAgentAsync(relaySender, chatId, text, type: type, taskId: taskId);
+                    // The turn's own session (#492 F1): a managed reply is published only for the session it was admitted with.
+                    await _relay.PublishToAgentAsync(relaySender, chatId, text, type: type, correlationId: correlationId, taskId: taskId);
                     _counter.Published(type.ToString());
                 }
             }

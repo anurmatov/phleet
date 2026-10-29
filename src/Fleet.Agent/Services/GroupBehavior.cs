@@ -451,8 +451,9 @@ public sealed class GroupBehavior
             var prompt = _prompts.ForRelayDirective(buffer, sender, text);
             buffer.MarkChecked();
             var displayText = $"[From: {sender}] {TaskManager.TruncateText(text, 500)}";
+            // A managed workflow directive carries its session (#492 F1); ordinary directives carry none.
             _ = _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
-                source: TaskSource.Relay, relaySender: sender, taskId: taskId);
+                source: TaskSource.Relay, relaySender: sender, correlationId: correlationId, taskId: taskId);
         });
     }
 

@@ -53,9 +53,10 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
             new BasicProperties { UserId = fixture.Binding.Principal("control") }, Directive(fixture.Epoch, session: session));
 
         var admitted = Assert.Single(received);
-        Assert.Equal(("temporal-bridge", RelayMessageType.Directive, (string?)null, (string?)"wf/task-1"), admitted);
+        // #492 F1: the turn carries its own session, so only that session can answer it.
+        Assert.Equal(("temporal-bridge", RelayMessageType.Directive, (string?)session, (string?)"wf/task-1"), admitted);
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         var publish = Assert.Single(Publishes(fixture.Channel));
         Assert.Equal("fleet.group", publish[0]);
         Assert.Equal("bridge", publish[1]);
@@ -70,7 +71,7 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
 
         // The session is consumed: a second reply for the same TaskId is not a workflow reply any more.
         Assert.Equal(0, relay.WorkflowSessionCount);
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "again", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "again", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         Assert.Single(Publishes(fixture.Channel));
     }
 
@@ -106,19 +107,19 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1",
             new BasicProperties { UserId = fixture.Binding.Principal("control") }, Directive(fixture.Epoch, session: session));
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         Assert.Single(Publishes(fixture.Channel)); // the broker was attempted and failed
         Assert.Empty(published);
         Assert.Equal(1, relay.WorkflowSessionCount); // retained for the retry
 
         outage = false;
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         var reply = Assert.Single(published);
         Assert.Equal("bridge", reply.RoutingKey);
         AssertWorkflowReply(reply.Body, "response", session, fixture.Epoch);
         Assert.Equal(0, relay.WorkflowSessionCount); // freed only by the successful final publish
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "again", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "again", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         Assert.Single(published);
         Assert.Equal(2, Publishes(fixture.Channel).Length); // no third broker attempt
     }
@@ -133,9 +134,9 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1",
             new BasicProperties { UserId = fixture.Binding.Principal("control") }, Directive(fixture.Epoch, session: session));
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "partial", RelayMessageType.PartialResponse, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "partial", RelayMessageType.PartialResponse, correlationId: session, taskId: "wf/task-1");
         Assert.Equal(1, relay.WorkflowSessionCount);
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "final", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "final", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         Assert.Equal(0, relay.WorkflowSessionCount);
 
         var publishes = Publishes(fixture.Channel);
@@ -154,9 +155,10 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         await using var relay = fixture.Relay();
         await relay.InitializeAsync(default);
         var props = new BasicProperties { UserId = fixture.Binding.Principal("control") };
-        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props, Directive(fixture.Epoch));
+        var (session, other) = (Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"));
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props, Directive(fixture.Epoch, session: session));
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props,
-            Directive(fixture.Epoch, taskId: "wf/other"));
+            Directive(fixture.Epoch, taskId: "wf/other", session: other));
         Assert.Equal(2, relay.WorkflowSessionCount);
 
         var builder = Microsoft.AspNetCore.Builder.WebApplication.CreateBuilder();
@@ -177,9 +179,9 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         Assert.Equal(200, (int)response.StatusCode);
         Assert.Equal(1, relay.WorkflowSessionCount); // only the cancelled task's session is freed
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "Task cancelled.", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "Task cancelled.", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         Assert.Empty(Publishes(fixture.Channel));
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "other result", RelayMessageType.Response, taskId: "wf/other");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "other result", RelayMessageType.Response, correlationId: other, taskId: "wf/other");
         Assert.Equal("bridge", Assert.Single(Publishes(fixture.Channel))[1]);
     }
 
@@ -195,8 +197,9 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         var session = Guid.NewGuid().ToString("N");
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props,
             Directive(fixture.Epoch, session: session));
+        var timedOut = Guid.NewGuid().ToString("N");
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props,
-            Directive(fixture.Epoch, taskId: "wf/timed-out"));
+            Directive(fixture.Epoch, taskId: "wf/timed-out", session: timedOut));
 
         // Temporal still waiting on wf/task-1 re-sends it (same session); wf/timed-out is never re-sent.
         now += Fleet.Agent.Services.GroupRelayService.WorkflowSessionIdleTimeout / 2;
@@ -204,11 +207,11 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
             Directive(fixture.Epoch, session: session));
         now += Fleet.Agent.Services.GroupRelayService.WorkflowSessionIdleTimeout / 2 + TimeSpan.FromSeconds(1);
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "late result", RelayMessageType.Response, taskId: "wf/timed-out");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "late result", RelayMessageType.Response, correlationId: timedOut, taskId: "wf/timed-out");
         Assert.Empty(Publishes(fixture.Channel));
         Assert.Equal(1, relay.WorkflowSessionCount);
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         var publish = Assert.Single(Publishes(fixture.Channel));
         AssertWorkflowReply(((ReadOnlyMemory<byte>)publish[4]!).ToArray(), "response", session, fixture.Epoch);
         Assert.Equal(0, relay.WorkflowSessionCount);
@@ -228,15 +231,16 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         // The activity's own deadline is four idle bounds away; wf/legacy carries none (an older sender).
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props,
             Directive(fixture.Epoch, session: session, deadline: now + idle * 4));
+        var legacy = Guid.NewGuid().ToString("N");
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props,
-            Directive(fixture.Epoch, taskId: "wf/legacy"));
+            Directive(fixture.Epoch, taskId: "wf/legacy", session: legacy));
 
         // Temporal cannot publish any resend for three idle bounds (#492 X4): the deadline keeps wf/task-1.
         now += idle * 3;
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "late legacy result", RelayMessageType.Response, taskId: "wf/legacy");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "late legacy result", RelayMessageType.Response, correlationId: legacy, taskId: "wf/legacy");
         Assert.Empty(Publishes(fixture.Channel));
         Assert.Equal(1, relay.WorkflowSessionCount);
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "late result", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "late result", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         var publish = Assert.Single(Publishes(fixture.Channel));
         AssertWorkflowReply(((ReadOnlyMemory<byte>)publish[4]!).ToArray(), "response", session, fixture.Epoch);
         Assert.Equal(0, relay.WorkflowSessionCount);
@@ -254,7 +258,7 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
             Directive(fixture.Epoch, taskId: "wf/probe")); // admission runs the expiry pass
         Assert.Equal(2, relay.WorkflowSessionCount);
         now += idle / 2; // past wf/expiring's deadline; wf/probe is still within its idle bound
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "too late", RelayMessageType.Response, taskId: "wf/expiring");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "too late", RelayMessageType.Response, correlationId: expiring, taskId: "wf/expiring");
         Assert.Single(Publishes(fixture.Channel));
         Assert.Equal(1, relay.WorkflowSessionCount);
     }
@@ -276,14 +280,15 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         await relay.InitializeAsync(default);
 
         var user = fault switch { "workload user" => fixture.Binding.Principal("workload"), "no user" => null, _ => fixture.Binding.Principal("control") };
+        var session = Guid.NewGuid().ToString("N");
         var body = fault switch
         {
-            "foreign epoch" => Directive(Guid.NewGuid()),
-            "foreign sandbox" => Directive(fixture.Epoch, sandbox: "other-sandbox"),
-            "no task" => Directive(fixture.Epoch, taskId: null),
+            "foreign epoch" => Directive(Guid.NewGuid(), session: session),
+            "foreign sandbox" => Directive(fixture.Epoch, sandbox: "other-sandbox", session: session),
+            "no task" => Directive(fixture.Epoch, taskId: null, session: session),
             "bad session" => Directive(fixture.Epoch, session: "not-a-session"),
-            "foreign sender" => Directive(fixture.Epoch, sender: "agent2"),
-            _ => Directive(fixture.Epoch),
+            "foreign sender" => Directive(fixture.Epoch, sender: "agent2", session: session),
+            _ => Directive(fixture.Epoch, session: session),
         };
         if (fault == "revoked") fixture.Save("revoked");
         await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false,
@@ -291,7 +296,7 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
             new BasicProperties { UserId = user }, body);
 
         Assert.Equal(0, received);
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "must not publish", RelayMessageType.Response, taskId: "wf/task-1");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "must not publish", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
         Assert.Empty(Publishes(fixture.Channel));
     }
 
@@ -318,11 +323,115 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
             props, Directive(fixture.Epoch, taskId: "wf/fresh", session: session));
         Assert.Equal(Fleet.Agent.Services.GroupRelayService.MaxWorkflowSessions + 6, received);
 
-        await relay.PublishToAgentAsync("temporal-bridge", 0, "fresh result", RelayMessageType.Response, taskId: "wf/fresh");
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "fresh result", RelayMessageType.Response, correlationId: session, taskId: "wf/fresh");
         var publish = Assert.Single(Publishes(fixture.Channel));
         using var reply = JsonDocument.Parse((ReadOnlyMemory<byte>)publish[4]!);
         Assert.Equal(session, reply.RootElement.GetProperty("CorrelationId").GetString());
         Assert.Equal(Fleet.Agent.Services.GroupRelayService.MaxWorkflowSessions - 1, relay.WorkflowSessionCount); // the reply frees its entry
+    }
+
+    // ---- #492 F1/F3: a turn answers only its own session; an expired delivery is refused ----
+
+    [Fact]
+    public async Task RetriedDirectiveWithANewSession_DoesNotRetagTheRunningTurnsCompletion()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        // The fixture's relay, with a log capture so the refused completion can be awaited.
+        var log = new HostedProviderForwarderTests.ListLoggerProvider();
+        using var logs = LoggerFactory.Create(b => b.AddProvider(log));
+        var connection = Substitute.For<IConnection>();
+        connection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult(fixture.Channel));
+        await using var relay = new Fleet.Agent.Services.GroupRelayService(
+            Options.Create(new Fleet.Agent.Configuration.AgentOptions { Name = "agent1", ShortName = "agent1", Role = "synthetic", WorkDir = fixture.WorkDir }),
+            Options.Create(new Fleet.Agent.Configuration.RabbitMqOptions { Host = "broker.example.test" }),
+            logs.CreateLogger<Fleet.Agent.Services.GroupRelayService>(), fixture.Binding)
+        { Connect = (_, _) => Task.FromResult(connection) };
+        await relay.InitializeAsync(default);
+
+        // Actual intake and completion; only inference is replaced, and the first turn runs until released.
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var options = Options.Create(new Fleet.Agent.Configuration.AgentOptions { Name = "agent1", Role = "synthetic", WorkDir = fixture.WorkDir });
+        var executor = Substitute.For<Fleet.Agent.Services.IAgentExecutor>();
+        executor.ExecuteAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<MessageImage>?>(), Arg.Any<IReadOnlyList<MessageDocument>?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => HeldTurn(started, release.Task));
+        var manager = new Fleet.Agent.Services.TaskManager(options, executor, new Fleet.Agent.Services.SessionManager(),
+            logs.CreateLogger<Fleet.Agent.Services.TaskManager>(), sink: new Fleet.Agent.Services.MessageSinkHolder());
+        var telegram = Options.Create(new Fleet.Agent.Configuration.TelegramOptions());
+        var behavior = new Fleet.Agent.Services.GroupBehavior(options, telegram, new Fleet.Agent.Services.AllowlistHolder(telegram), executor, relay, manager,
+            new Fleet.Agent.Services.CommandDispatcher(manager, executor, options, NullLogger<Fleet.Agent.Services.CommandDispatcher>.Instance),
+            new Fleet.Agent.Services.PromptAssembler(executor), NullLogger<Fleet.Agent.Services.GroupBehavior>.Instance);
+        relay.MessageReceived += behavior.OnRelayMessage;
+        using var publisher = new Fleet.Agent.Services.RelayCompletionPublisher(manager, relay, NullLogger<Fleet.Agent.Services.RelayCompletionPublisher>.Instance);
+
+        var props = new BasicProperties { UserId = fixture.Binding.Principal("control") };
+        var (first, retry) = (Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"));
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props, Directive(fixture.Epoch, session: first));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // Temporal retries the same TaskId with a new session while the first turn is still running.
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props, Directive(fixture.Epoch, session: retry));
+        Assert.Equal(1, relay.WorkflowSessionCount);
+        // Its intake is the in-flight duplicate, so the next completion for this TaskId is the first turn's.
+        Assert.True(SpinWait.SpinUntil(() => log.Lines.Any(l => l.StartsWith("Duplicate taskId=wf/task-1 ignored", StringComparison.Ordinal)), TimeSpan.FromSeconds(5)));
+
+        release.SetResult();
+        Assert.True(SpinWait.SpinUntil(() => log.Lines.Contains("Stock broker publication denied"), TimeSpan.FromSeconds(5)));
+        Assert.Empty(Publishes(fixture.Channel)); // the first turn's completion is not retagged as the retry's
+        Assert.Equal(1, relay.WorkflowSessionCount); // the retry keeps its own session
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "retry result", RelayMessageType.Response, correlationId: retry, taskId: "wf/task-1");
+        AssertWorkflowReply(((ReadOnlyMemory<byte>)Assert.Single(Publishes(fixture.Channel))[4]!).ToArray(), "response", retry, fixture.Epoch);
+
+        // Control: an unreplaced turn's own completion goes through the same chain tagged with its session.
+        var own = Guid.NewGuid().ToString("N");
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 3, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/task-2", session: own));
+        Assert.True(SpinWait.SpinUntil(() => Publishes(fixture.Channel).Length == 2, TimeSpan.FromSeconds(5)));
+        using var reply = JsonDocument.Parse((ReadOnlyMemory<byte>)Publishes(fixture.Channel)[1][4]!);
+        Assert.Equal("wf/task-2", reply.RootElement.GetProperty("TaskId").GetString());
+        Assert.Equal(own, reply.RootElement.GetProperty("CorrelationId").GetString());
+        Assert.Equal(0, relay.WorkflowSessionCount);
+    }
+
+    private static async IAsyncEnumerable<AgentProgress> HeldTurn(TaskCompletionSource started, Task release)
+    {
+        started.TrySetResult();
+        await release;
+        yield return new AgentProgress { EventType = "result", Summary = "first turn", FinalResult = "first turn" };
+    }
+
+    [Fact]
+    public async Task DirectiveDeliveredAfterItsActivityDeadline_IsRefusedBeforeIntake_AndRefreshesNoSession()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        await using var relay = fixture.Relay();
+        var received = 0;
+        relay.MessageReceived += (_, _, _, _, _, _, _, _) => received++;
+        var now = DateTimeOffset.UtcNow;
+        relay.WorkflowClock = () => now;
+        await relay.InitializeAsync(default);
+        var props = new BasicProperties { UserId = fixture.Binding.Principal("control") };
+        var idle = Fleet.Agent.Services.GroupRelayService.WorkflowSessionIdleTimeout;
+
+        // A delivery delayed past its deadline: no turn, no session.
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/late", deadline: now - TimeSpan.FromSeconds(1)));
+        Assert.Equal(0, received);
+        Assert.Equal(0, relay.WorkflowSessionCount);
+
+        // A held session is not refreshed by a delayed resend: it still expires on its original idle bound.
+        var session = Guid.NewGuid().ToString("N");
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, session: session, deadline: now + idle / 2));
+        Assert.Equal(1, received);
+        now += idle / 2;
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 3, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, session: session, deadline: now));
+        Assert.Equal(1, received);
+        now += idle / 2 + TimeSpan.FromSeconds(1);
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "too late", RelayMessageType.Response, correlationId: session, taskId: "wf/task-1");
+        Assert.Empty(Publishes(fixture.Channel));
+        Assert.Equal(0, relay.WorkflowSessionCount);
     }
 
     [Fact]

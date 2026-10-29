@@ -268,8 +268,11 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             if (_stockBroker is not null) ExpireIdleWorkflowSessions(); // a timed-out workflow no longer takes the reply
             if (_stockBroker is not null && targetAgent == TemporalBridgeRoute
                 && type is RelayMessageType.Response or RelayMessageType.PartialResponse
-                && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryGetValue(taskId, out var admitted))
+                && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryGetValue(taskId, out var admitted)
+                && correlationId is not null && admitted.Session == correlationId)
             {
+                // #492 F1: only the turn admitted with this session may answer it; a turn whose TaskId now holds
+                // another session is refused below rather than retagged.
                 // Read, not consumed (#492 R5): the session is freed only once the final reply is published.
                 var session = workflowSession = admitted.Session;
                 // Typed workflow reply (#492): the existing bridge reply route as the workload principal,
@@ -478,8 +481,11 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             || !Guid.TryParseExact(message.CorrelationId, "N", out _) || message.TaskId is not { Length: > 0 and <= 512 }
             || message.WorkflowId is not null || message.SignalName is not null)
             throw new StockIdentityDenied("broker_route_denied");
-        ExpireIdleWorkflowSessions();
         var now = WorkflowClock();
+        // #492 F3: a delivery already past its activity's deadline has no waiter left; refuse it before intake,
+        // so it neither starts a turn nor refreshes a held session.
+        if (message.Deadline is { } passed && passed <= now) throw new StockIdentityDenied("workflow_deadline_passed");
+        ExpireIdleWorkflowSessions();
         var expires = now + WorkflowSessionIdleTimeout;
         if (message.Deadline is { } deadline)
         {
@@ -497,7 +503,9 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
                 _workflowSessions.TryRemove(oldest);
             _logger.LogWarning("Dropped {Count} oldest unreplied managed workflow sessions (bound {Bound})", excess, MaxWorkflowSessions);
         }
-        return message with { Type = RelayMessageType.Directive, CorrelationId = null, Epoch = null, Sandbox = null, Deadline = null };
+        // #492 F1: the session rides with the turn, so its reply is tagged only with its own session, never with a
+        // later directive's session for the same TaskId.
+        return message with { Type = RelayMessageType.Directive, Epoch = null, Sandbox = null, Deadline = null };
     }
 
     /// <summary>

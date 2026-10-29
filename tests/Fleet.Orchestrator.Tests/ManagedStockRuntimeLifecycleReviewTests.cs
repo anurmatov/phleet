@@ -335,12 +335,13 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
     }
 
     [Theory]
-    [InlineData("staging_cancelled")]
-    [InlineData("activation_cancelled")]
+    [InlineData("staging_unconfirmed")]
+    [InlineData("activation_unconfirmed")]
     public async Task Client_disconnect_during_staging_or_activation_still_reaches_the_bounded_stop(string code)
     {
-        // The poll for the staged/ready marker waits on the cancelled request token (review N2).
-        _t._cli.OnExec = script => code == "staging_cancelled"
+        // Review A8: the client token no longer reaches Start's legs; the never-ready poll ends on Start's own
+        // bound and still reaches the bounded stop (review N2).
+        _t._cli.OnExec = script => code == "staging_unconfirmed"
             ? (script.Contains("-f \"$HOME/.fleet-staged\"") && !script.Contains('!') ? 1 : 0)
             : (script == StockOpenShellRuntime.DaemonReadyScript ? 1 : 0);
         var binding = _t.Binding("fleet-agent1-ffffffff", Guid.NewGuid());

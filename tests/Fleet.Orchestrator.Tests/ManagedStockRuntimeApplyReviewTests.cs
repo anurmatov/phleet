@@ -254,24 +254,26 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
     {
         var binding = _t.Binding("fleet-agent1-f6f6f6f6", Guid.NewGuid());
         _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
-        var agent = _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var agent = _t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding });
+        agent.Name = "agent-a8c"; // the process-wide live-call set is shared with concurrently running "agent1" tests
+        _t._store.Add(agent);
         var registry = new AgentRegistry(new TaskHistoryStore(), Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRegistry>.Instance);
         registry.PreloadFromDbConfig(agent);
         // The final (claim-clearing) commit fails without committing: the call returns and its claim stays stored.
         _t._store.OnSwap = (_, next) => ManagedRecord.Parse(next).Operation is null
             ? throw new InvalidOperationException("synthetic_db_failure") : Task.CompletedTask;
 
-        var stop = await _t.Runtime(registry: registry).StopAsync("agent1", default);
+        var stop = await _t.Runtime(registry: registry).StopAsync("agent-a8c", default);
 
         Assert.Equal("stop_state_unknown", stop.Code);
-        var stored = _t._store.Get("agent1").AppliedRuntimeBinding;
+        var stored = _t._store.Get("agent-a8c").AppliedRuntimeBinding;
         Assert.StartsWith("stop:", ManagedRecord.Parse(stored).Operation);
-        var shown = registry.Get("agent1")!;
+        var shown = registry.Get("agent-a8c")!;
         Assert.Equal("needs_attention", shown.ManagedState);
         Assert.Contains("interrupted_stop", shown.ManagedErrors!);
         Assert.False(shown.Managed!.Pending);
         // A later reload of the same stored record (fresh registry) agrees.
-        var (state, errors, status) = AgentRegistry.ManagedView(stored, agentName: "agent1");
+        var (state, errors, status) = AgentRegistry.ManagedView(stored, agentName: "agent-a8c");
         Assert.Equal(("needs_attention", false), (state, status!.Pending));
         Assert.Contains("interrupted_stop", errors!);
     }

@@ -96,6 +96,7 @@ FLEET_EPIC_GRANTS_ENABLED=false
 FLEET_EPIC_GRANTS_MAX_DAYS=14
 FLEET_EPIC_GRANTS_DENIED_REPOS=
 FLEET_AUTONOMY_ENABLED=false
+FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false
 FLEET_STOCK_MANAGED_ENABLED=false
 ENV
 echo "FLEET_STOCK_CONFIG_DIR_UID=$(id -u)" >> "$ENV"
@@ -118,12 +119,12 @@ echo 'PASS default-off upgrade pre-creates the backup bind source 0700'
 # glues a key onto a last line that has no newline.
 printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
-[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_STOCK_MANAGED_ENABLED=false\nFLEET_STOCK_CONFIG_DIR_UID=%s' "$(id -u)")" ]]
+[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false\nFLEET_STOCK_MANAGED_ENABLED=false\nFLEET_STOCK_CONFIG_DIR_UID=%s' "$(id -u)")" ]]
 echo 'PASS upgrade adds missing epic watcher/grant keys with defaults and keeps present values'
 sed -i.bak 's/^FLEET_AUTONOMY_ENABLED=false$/FLEET_AUTONOMY_ENABLED=true/' "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
 [[ "$(grep -c '^FLEET_AUTONOMY_ENABLED=' "$ENV")" == 1 ]]
-grep -qx FLEET_AUTONOMY_ENABLED=true "$ENV"
+grep -qx 'FLEET_AUTONOMY_ENABLED=true' "$ENV"
 echo 'PASS upgrade preserves existing autonomy values'
 
 # Pull failure must also precede every lifecycle operation.

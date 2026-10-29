@@ -1,6 +1,7 @@
 using Fleet.Temporal.Activities;
 using Fleet.Temporal.Models;
 using Microsoft.Extensions.Logging;
+using Temporalio.Exceptions;
 using Temporalio.Workflows;
 
 namespace Fleet.Temporal.Workflows.Fleet;
@@ -17,6 +18,8 @@ namespace Fleet.Temporal.Workflows.Fleet;
 [Workflow]
 public class NotifyCtoWorkflow
 {
+    internal const string DeliveryFailedErrorType = "NotificationDeliveryFailed";
+
     private static readonly ActivityOptions DelegateOptions = new()
     {
         StartToCloseTimeout = TimeSpan.FromMinutes(17), // 15 min task + 2 min buffer
@@ -28,6 +31,7 @@ public class NotifyCtoWorkflow
     public async Task RunAsync(NotifyCtoWorkflowInput input)
     {
         var taskId = $"{Workflow.Info.WorkflowId}/notify";
+        AgentTaskResult? result = null;
 
         try
         {
@@ -35,7 +39,7 @@ public class NotifyCtoWorkflow
             // the compiler append every optional parameter's default, so adding one to the
             // activity (#347 repo) would silently change this workflow's input. These six are
             // exactly what the expression form scheduled.
-            await Workflow.ExecuteActivityAsync<AgentTaskResult>(
+            result = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
                 DelegateToAgentActivity.ActivityName,
                 new object?[]
                 {
@@ -50,13 +54,29 @@ public class NotifyCtoWorkflow
         }
         catch (Exception)
         {
+            // A caller that tracks delivery (#488's failure notifier) asks for the failure to close
+            // the run Failed, so the outcome is visible. The message is fixed; no error text leaks.
+            if (input.ReportDeliveryFailure)
+                throw DeliveryFailed();
+
             // ignoreFailure=true — escalation channel must not surface errors to callers.
             Workflow.Logger.LogWarning(
                 "NotifyCtoWorkflow: delegation to {Agent} failed — ignoring",
                 input.TargetAgent);
         }
+
+        // A returned result can also mean nothing was delivered: "failed", or still "incomplete"
+        // after the retries. Only a completed answer confirms delivery; the result text never leaves.
+        if (input.ReportDeliveryFailure && result is not { IsCompleted: true })
+            throw DeliveryFailed();
     }
+
+    private static ApplicationFailureException DeliveryFailed() =>
+        new("notification delivery failed", errorType: DeliveryFailedErrorType, nonRetryable: true);
 }
 
-/// <summary>Input for <see cref="NotifyCtoWorkflow"/>.</summary>
-public record NotifyCtoWorkflowInput(string TargetAgent, string TaskDescription);
+/// <summary>
+/// Input for <see cref="NotifyCtoWorkflow"/>. <paramref name="ReportDeliveryFailure"/> defaults to
+/// false, so <c>notify_cto</c> and runs started before it existed keep swallowing failures.
+/// </summary>
+public record NotifyCtoWorkflowInput(string TargetAgent, string TaskDescription, bool ReportDeliveryFailure = false);

@@ -20,6 +20,7 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS FLEET_STOCK_MANAGED_ENABLED
+unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED
 # The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
 # generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
 # way; it is additive.
@@ -105,6 +106,7 @@ add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
 add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
+add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
 add_missing_env_var FLEET_STOCK_MANAGED_ENABLED false
 # Review A7: the authorized (host operator) owner of openshell-client; an existing value is kept.
 add_missing_env_var FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"

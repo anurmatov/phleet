@@ -213,6 +213,42 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal(StockBrokerProvisioner.Roles.Length + 1, _t._broker.Deletes.Count(d => d.StartsWith("/api/permissions/", StringComparison.Ordinal)));
     }
 
+    [Fact]
+    public async Task Stop_ends_within_its_own_overall_bound_when_every_leg_hangs()
+    {
+        var binding = _t.Binding("fleet-agent1-d4d4d4d4", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _t._cli.Hang.Add(binding.SandboxName); // every leg on the sandbox ignores its own leg bound
+
+        var stop = _t.Runtime().StopAsync("agent1", default);
+        var done = await Task.WhenAny(stop, Task.Delay(TimeSpan.FromSeconds(30)));
+
+        Assert.Same(stop, done); // the fixture's 5 s FanoutTimeout, not an unbounded wait
+        Assert.Equal("stop_unknown", (await stop).Code);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Null(record.Operation);
+    }
+
+    [Fact]
+    public async Task Start_legs_ignore_a_client_disconnect()
+    {
+        var binding = _t.Binding("fleet-agent1-e5e5e5e5", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        using var client = new CancellationTokenSource();
+        var probes = 0;
+        // The client disconnects (RequestAborted) during staging; the next poll still runs on Start's own deadline.
+        _t._cli.OnExec = script => { if (script.Contains(".fleet-staged") && probes++ == 0) { client.Cancel(); return 1; } return 0; };
+
+        var start = await _t.Runtime().StartAsync("agent1", client.Token);
+
+        Assert.True(start.Ok, start.Message);
+        Assert.Equal("started", start.Code);
+        Assert.Equal("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

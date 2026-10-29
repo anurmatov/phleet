@@ -396,11 +396,22 @@ public sealed class StockOpenShellRuntime(
     // ── public lifecycle ───────────────────────────────────────────────────
 
     public Task<Result> ApplyAsync(string name, CancellationToken ct) => RunAsync(name, "apply", ApplyCoreAsync, ct);
-    public Task<Result> StartAsync(string name, CancellationToken ct) => RunAsync(name, "start", StartCoreAsync, ct);
+    // Review A8: Start is a lifecycle action like Stop: a client disconnect never cancels it midway.
+    public Task<Result> StartAsync(string name, CancellationToken ct) => RunAsync(name, "start", Bounded(StartCoreAsync), CancellationToken.None);
     // Stop and revoke are cleanup: every leg has its own bounded deadline, and a caller (client)
-    // disconnect never cancels them midway.
-    public Task<Result> StopAsync(string name, CancellationToken ct) => RunAsync(name, "stop", StopCoreAsync, CancellationToken.None);
+    // disconnect never cancels them midway. Review A8: Start/Stop also share one overall bound across legs.
+    public Task<Result> StopAsync(string name, CancellationToken ct) => RunAsync(name, "stop", Bounded(StopCoreAsync), CancellationToken.None);
     public Task<Result> RevokeAsync(string name, CancellationToken ct) => RunAsync(name, "revoke", RevokeCoreAsync, CancellationToken.None);
+
+    /// <summary>
+    /// The step's legs run under their own <see cref="FanoutTimeout"/> deadline, never the caller's token; an expiry
+    /// mid-step ends as the envelope's held <c>KIND_unknown</c> (bounded staging/activation faults still Stop first).
+    /// </summary>
+    private Step Bounded(Step step) => async (agent, record, checkpoint, _) =>
+    {
+        using var deadline = new CancellationTokenSource(FanoutTimeout);
+        return await step(agent, record, checkpoint, deadline.Token);
+    };
 
     public async Task<Result> RestartAsync(string name, CancellationToken ct)
     {

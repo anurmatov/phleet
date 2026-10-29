@@ -335,6 +335,8 @@ services:
       # If you're not using gemini, create an empty placeholder file:
       #   touch ${FLEET_BASE_DIR}/.gemini-credentials.json
       - ${FLEET_BASE_DIR}/.gemini-credentials.json:/root/.gemini/oauth_creds.json
+      # #488: durable record of workflow failures not yet delivered (used only when the notifier is on).
+      - ${FLEET_BASE_DIR}/temporal-bridge:/var/lib/fleet-temporal-bridge
     environment:
       - RabbitMq__Host=rabbitmq
       - TemporalBridge__TemporalAddress=temporal-server:7233
@@ -342,6 +344,8 @@ services:
       - TemporalBridge__AgentTimeoutSeconds=1800
       - TemporalBridge__OrchestratorAuthToken=${ORCHESTRATOR_AUTH_TOKEN}
       - TemporalBridge__OrchestratorUrl=http://fleet-orchestrator:3600
+      # #488: notify FLEET_CTO_AGENT when a workflow closes Failed/TimedOut (off by default).
+      - WorkflowFailureNotifier__Enabled=${FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED:-false}
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq

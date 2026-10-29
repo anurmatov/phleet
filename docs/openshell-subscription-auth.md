@@ -2,11 +2,14 @@
 
 **UNQUALIFIED — documentation and an operator-imported profile, not a supported production mode.**
 Refs [#498](https://github.com/anurmatov/phleet/issues/498), approved body
-`e960764c036d6767a6c0538272f4af79ddf562c284851da8ec11aeef8904f4d4`.
+`30994a396679bae842c3a6cf16793ff650f514feb7a4a2493068ad264cc53c89`.
+This is the bounded HTTP-descriptor amendment to the guide shipped in
+[PR #499](https://github.com/anurmatov/phleet/pull/499), not reopened native qualification.
 All A0–A9 runtime outcomes remain **UNRUN** in this source patch.
 A source review, profile check or merge cannot qualify native credential isolation.
-**TRANSPORT BLOCKED:** effective HTTP/SSE selection at the pinned native client
-has not been established; no native trial startup is authorized by this runbook.
+**Transport candidate: source-supported stock HTTP descriptor only.**
+Loaded configuration and actual native HTTP selection remain UNRUN, with no
+credential/native action authorized by this documentation change.
 
 This is one native-cache candidate on unmodified OpenShell 0.1.5 and Codex 0.164.0.
 The alternative external-token RPC is not this handoff: it parses an access-token JWT.
@@ -115,26 +118,41 @@ placeholders, never literal values to launch):
 The ID-token-shaped stub follows the pinned example's base64url header/payload
 and non-secret signature segment, never a real ID token or fabricated access JWT.
 It is local parsing metadata only, not issuer identity, plan or entitlement proof.
-Write a separate native `config.toml` before startup:
+
+### Native TOML / stock HTTP descriptor
+
+Retain the forced login/workspace selection and select a non-reserved descriptor in the unmodified pinned native client, no built-in `openai` override and no new provider code
 
 ```toml
 forced_login_method = "chatgpt"
 forced_chatgpt_workspace_id = "<selected-account-id>"
+model_provider = "openai-http"
+
+[model_providers.openai-http]
+name = "OpenAI"
+requires_openai_auth = true
+supports_websockets = false
+supports_standalone_web_search = true
+http_headers = { version = "0.164.0" }
 ```
 
-This config sets authentication intent only, not effective HTTP transport.
-At Codex 0.164.0, the built-in OpenAI provider sets `supports_websockets: true`
-([provider definition](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L528-L567)).
-Its configured-provider merge uses `model_providers.entry(key).or_insert(provider)`
-([merge rules](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L696-L740)),
-so an `openai` table cannot replace that built-in transport capability.
-Do not add an ineffective `supports_websockets = false` override or claim that
-the desired HTTP Responses/SSE baseline is selected by the auth configuration.
-The coordinator must obtain pinned-supported effective-config/source proof of
-HTTP selection before an authorized native trial can start; absent that proof,
-record `blocked:transport_unqualified`, with native checks UNRUN.
-No endpoint widening, additional provider implementation, proxy or helper
-framework is authorized to resolve this prerequisite here.
+Descriptor fields `base_url`, `env_key`, `experimental_bearer_token`, `auth` and `aws` **ABSENT**, not blank, null-like or supplied by an inherited override, preserving the cached subscription-auth path rather than introducing another auth source
+`wire_api` omitted deliberately, pinned default `Responses`, public version header and standalone-web-search capability copied from the built-in descriptor, capability not permission to make additional requests or widen the three-endpoint policy
+
+| pinned source | source-supported consequence / remaining limit |
+|---|---|
+| [Descriptor merge](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L696-L732) and [selection](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/config/mod.rs#L3972-L3990) | Non-reserved `openai-http` inserted by stock `or_insert`, selected by `model_provider`, unlike an ignored built-in OpenAI table override |
+| [AuthManager and cached auth](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider/src/auth.rs#L236-L271) | Absent `auth` retains the base `AuthManager`, absent bearer/env key plus `requires_openai_auth=true` selects cached `CodexAuth`, existing placeholder-bearing `ChatgptAuthTokens` cache and single outside stock refresh owner retained, no OAuth-to-API-key conversion |
+| [First-party auth/account path](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider/src/provider.rs#L335-L341) and [account state](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider/src/provider.rs#L519) | Descriptor follows the existing first-party/account state path in source, real selected-account discovery/authority still unrun and mandatory |
+| [Cached mode and backend](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider/src/provider.rs#L215) plus [base-URL selection](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L429-L447) | `ChatgptAuthTokens` and absent `base_url` select `https://chatgpt.com/backend-api/codex`, not the usage-based API endpoint, no billing-mode change authorized |
+| [OpenAI name predicate](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L618-L629) and [model catalog](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider/src/models_endpoint.rs#L214-L217) | `is_openai()` keys on exact `name="OpenAI"`, not descriptor ID, preserving the Codex-backend catalog branch in source, actual catalog resolution under a stock handle still unrun |
+| [Internal metadata](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider/src/provider.rs#L121-L128) and [built-in parity](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L541-L564) | HTTPS chatgpt.com origin enables internal metadata in source, no authored `include_internal_metadata` field because it is `serde(skip)`, pinned version header/web-search capability copied, no new endpoint authority |
+| [WebSocket guard](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/client.rs#L1146-L1154), [stream selection](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/client.rs#L2403-L2445) and [Responses path](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/codex-api/src/endpoint/responses.rs#L67) | Selected descriptor `supports_websockets=false` takes `stream_responses_http`, POST `/responses` fits existing `POST /backend-api/codex/responses`, no WSS GET upgrade admitted, actual effective selection/HTTP turn still unrun |
+| [API-key cyber-program ID exception](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/cyber_access_program.rs#L22-L36) | Non-`openai` descriptor ID makes `ApiKeyCyberAccessPrograms` report `UnsupportedProvider`, API-key-program behavior not subscription-turn parity, not in this candidate's scope |
+
+Source proof only, not an effective-config dump, native initialization/HTTP turn, stock-handle account/catalog/refresh test or isolation pass
+No real OAuth token in the proposed workload cache is a design requirement, not observed isolation, all A0–A9 outcomes UNRUN and UNQUALIFIED status retained
+The approved amendment is adopted here as documentation only; independent PR review and human merge approval remain required, with a separate exact operator scope before any credential or native action
 
 Only the private stdio app-server is selected, with no remote listener or
 `account/login/start` token injection.
@@ -155,7 +173,7 @@ another origin, stop instead of widening policy or adding a helper service.
 | [Stock refresh/handle contract](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/docs/how-it-works/providers/profiles.mdx#L168-L179) | Gateway-managed rotation retains an opaque access handle, while reconfiguration/detach invalidates it |
 | [Official OpenAI authentication](https://learn.chatgpt.com/docs/auth#login-caching) | Subscription sign-in distinct from API-key billing, ordinary native credentials cached and refreshed by Codex |
 
-Chosen candidate only: the stock example's **native cache route**, with all usable OAuth material outside the workload and the stock gateway as sole refresh owner, not the external-token RPC route or an OAuth-to-API-key conversion
+Chosen candidate only: the stock example's **native cache route** with the stock `openai-http` configuration descriptor above, all usable OAuth material outside the workload and the stock gateway as sole refresh owner, not a provider implementation, external-token RPC route or OAuth-to-API-key conversion
 
 | handoff stage | exact contract / stop condition |
 |---|---|
@@ -163,16 +181,16 @@ Chosen candidate only: the stock example's **native cache route**, with all usab
 | Outside grant | One separately authorized human login into a fresh outside-owned cache for primary fixture P only, no copying an existing agent grant and no second native client sharing it, private operator custody with directory 0700/files 0600, synthetic-only fixture F with no real login or grant |
 | Provider import | Separate operator authorization may create/configure/import/delete only the disposable stock providers in P/F, never an external account or an existing provider, access material supplied through explicitly selected environment-only discovery rather than credential-valued arguments, enrollment client stopped before gateway ownership, refresh material only through stock `--secret-material-env`, no shell tracing/history/value output |
 | Refresh owner | Stock gateway alone, `oauth2-refresh-token`, `refresh_before_seconds: 300`, `max_lifetime_seconds: 3600`, `https://auth.openai.com/oauth/token`, native OAuth client ID `app_EMoamEEZ73f0CkXaXp7hrann` from [pinned CLIENT_ID](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/login/src/auth/manager.rs#L1783-L1790), no client-ID override, native refresh token or parallel refresh owner |
-| Workload cache | Private non-root native home, cache 0600, `auth_mode="chatgptAuthTokens"`, `OPENAI_API_KEY=null`, `forced_login_method="chatgpt"`, fixed `forced_chatgpt_workspace_id` from approved non-secret metadata, access token equal to the exact supervisor-issued handle, empty refresh token, no real ID token and no credential source mount |
+| Workload cache | Private non-root native home, cache 0600, `auth_mode="chatgptAuthTokens"`, `OPENAI_API_KEY=null`, existing forced ChatGPT/workspace config plus exact stock `openai-http` descriptor above, access token equal to the exact supervisor-issued handle, empty refresh token, no real ID token and no credential source mount |
 | Local parsing | Non-secret ID-token-shaped metadata stub following the stock example, used only for native parsing, never sent as authentication or trusted as proof of issuer identity/plan/entitlements; unaccepted stub or a required real access-token JWT = stop |
 | Account metadata | Authorized operator writes `{ "account_id": "<selected-account-id>" }` to `<trial-root>/inputs/account-metadata.json` as 0600 under a 0700 directory, uploads only this non-secret file with `openshell sandbox upload <sandbox> <local-file> <native-home>/.codex/account-metadata.json`, verifies workload UID ownership/mode 0600, then invokes a non-root one-shot cache writer to read that file and the supervisor-issued access handle, atomically write `auth.json` 0600 with `tokens.account_id` from that metadata and a separate native `config.toml` with the same `forced_chatgpt_workspace_id` before native startup, no secret/cache source upload or ID in public evidence |
 | Account authority | Outside-owned grant and policy binding to that one account, with mandatory cross-account refusal test; native `forced_chatgpt_workspace_id` alone not a security boundary because workload configuration is writable; absence of a stock/issuer-enforced boundary = stop |
 | Native client | Existing Codex app-server over private stdio, no exposed WebSocket listener or remote client; no `account/login/start` injection of opaque access handles and no auth-refresh callback returning real tokens |
 | Endpoint boundary | Stock-inspected HTTPS only to `chatgpt.com:443`: `GET /backend-api/wham/accounts/check`, `GET /backend-api/codex/models`, `POST /backend-api/codex/responses`; no wildcard provider endpoint, API-key endpoint, direct egress or TLS-skip route |
-| Transport/routing | **TRANSPORT BLOCKED** until pinned-supported effective HTTP Responses/SSE selection has offline effective-config/source proof; the built-in OpenAI provider ignores the proposed table override, so no native startup or HTTP baseline claim from that setting; required extra paths, WebSocket-only behavior, redirects or another origin = blocked evidence, no automatic allowlist widening or new helper; optional egress only under the explicit rule below |
+| Transport/routing | Source-supported stock `openai-http` descriptor above selects HTTP Responses/SSE in pinned source, effective-config/native/account/catalog/refresh checks still UNRUN, documentation adoption only, exact operator authority required before any native action, extra bootstrap paths, WebSocket-only behavior, redirects or another origin remain blocked, no WSS GET/endpoint widening, optional non-credential denials only under the explicit rule below |
 | Long-lived use | Stable handle resolves to the currently committed gateway token after refresh without restarting the workload; a changed account, refresh owner, provider configuration epoch or endpoint set requires detach and a new authorization, not silent rebinding |
 
-Source evidence supports this candidate's cache parsing and refresh primitives, not complete native discovery, account isolation, refresh, cancellation or restore compatibility at the combined pins
+Source evidence supports descriptor merge/auth/routing/HTTP branches plus the existing cache/refresh primitives, not an observed effective configuration, native discovery/catalog/HTTP turn, account isolation, refresh, cancellation or restore pass at the combined pins
 
 
 ## Trial isolation and planned outcomes
@@ -353,6 +371,9 @@ issuer-side OAuth grant revocation; record their distinct outcomes and custody.
 | MUST NOT enable automatic host-credential discovery, expose native remote listeners or widen endpoints on failure | Explicit environment-only import into disposable P/F providers is the sole exception, never existing provider/account authority |
 | MUST NOT call detach, local logout, cancel or placeholder invalidation issuer-side OAuth revocation | Upstream grant revocation has a separate authority and lifecycle |
 | MUST NOT migrate subscription agents, change API billing or rewrite #497/#493 acceptance | This design neither changes existing auth owners nor waives their independent gates |
+| MUST NOT set descriptor `base_url`, `env_key`, `experimental_bearer_token`, `auth` or `aws`, change exact `name="OpenAI"` or replace the descriptor ID with built-in `openai` | Those changes break the traced cache/auth/backend/catalog or merge selection, requiring fresh design rather than implied equivalence |
+| MUST NOT treat the stock descriptor table as a new provider implementation or source proof as observed isolation | Unmodified stock parsing is the only selected path, real effective-config/native/account/catalog/refresh evidence remains required |
+| MUST NOT enable API-key cyber programs or add WSS GET/web-search endpoints through this descriptor | The provider-ID API-key exception and capability flags grant no subscription or network scope beyond the existing three routes |
 
 ## Acceptance ledger (A0–A9)
 
@@ -360,17 +381,51 @@ All commands below planned only after the design and exact isolated operator sco
 
 | id | command / explicit manual check | expected result |
 |---|---|---|
-| A0 | `openshell --version`, `codex --version`, `sqlite3 --version`, binary SHA-256 and gateway/supervisor/runtime image inspections | Exact selected pin ledger, no missing identity or tag-only claim, otherwise immediate blocked outcome |
+| A0 | `openshell --version`, `codex --version`, `sqlite3 --version`, binary SHA-256 and gateway/supervisor/runtime image inspections, compare authored native TOML with the exact descriptor above before any trial | Exact selected pins and descriptor fields match, the reported Codex version component must equal the descriptor `http_headers.version` literal and both must be `0.164.0`, all five forbidden fields absent, any mismatch/drift/missing identity blocks before trial, not proof of effective native behavior |
 | A1 | `openshell provider profile lint --file deploy/openshell/codex-subscription.yaml` | Exit 0, gateway-only refresh material, only access handle published, exact endpoints and actual native binary allowlist |
-| A2 | Inspect pinned native source/cache schema before the trial, then use a fresh synthetic cache with network denied at the fixture boundary and initialize only, no account/model request | ID-token metadata stub accepted without a real token, API key/refresh token absent, direct opaque external-token RPC recorded as incompatible, no login/refresh/model request from this synthetic check |
-| A3 | Under separately authorized P grant, verify operator metadata file/cache ownership and values privately, initialize/account-read and one model turn within 120 seconds | Correct selected account and exact handle cache, required traffic only at admitted paths, non-credential optional telemetry denials recorded without blocking successful work, no real token in workload files/env/logs/process/RPC and no workload refresh |
+| A2 | With fresh synthetic cache and network denied, complete `initialize` / `initialized` over authorized private stdio, then call stock `config/read` with `includeLayers:true` and the owned `cwd`, using the exact observation below | Returned loaded `model_provider`, required descriptor fields and forced login/workspace keys match, five optional base-URL/alternate-auth fields unset as missing keys or JSON `null`, layer/origin conflicts or missing required fields block, ID-token stub accepted without real token and no login/model call, full response stays private with public match booleans only, loaded configuration not proof of HTTP selection, A3 must observe actual POST and no WSS GET |
+| A3 | Under separately authorized P grant and approved descriptor, verify private account metadata/cache values, initialize/account-read, actual catalog resolution and one native HTTP Responses turn within 120 seconds | Correct selected account/catalog and exact handle cache, HTTP POST selected with only existing GET account/GET models/POST responses routes and no WSS GET, source name/catalog/internal-metadata routing verified by secret-free observations, optional non-credential denials recorded, no real token in workload files/env/logs/process/RPC and no workload refresh |
 | A4 | P: one `openshell provider refresh rotate <provider> --credential-key CODEX_AUTH_ACCESS_TOKEN`, observe `provider refresh status` within 60 seconds, native process unchanged; F: synthetic invalid refresh material through the same command, then expire its synthetic access credential using stock `provider update --credential-expires-at` | P: committed new generation, empty refresh error and next native request succeeds through the same opaque handle, queued/exit-0 alone not pass; F: predeclared failed-refresh state and expired-handle refusal with zero credential/model forwarding = passing negative probes, no real grant consumed, any real invalid_grant needs separately approved re-login for a new trial |
 | A5 | P: foreign-sandbox, wrong-account, foreign origin/path, redirect and TLS-skip/direct-egress probes; F: retain a handle then explicitly reconfigure refresh once to create a new authorization epoch | Every predeclared unauthorized probe refused within 30 seconds without credential forwarding/model turn, old F handle rejected at stock boundary rather than merely upstream 401, unknown outside account enforcement or an unexpected outcome blocks the whole qualification |
 | A6 | Cancel an active native turn, then detach provider while the process/connection is retained | Cancel acknowledgement within 30 seconds, detach acknowledgement within 30 seconds and verified stopped/quiescent state within 120 seconds overall, cancellation distinct from credential revoke, no later authenticated request through detached/old handles, issuer grant not falsely reported revoked |
 | A7 | P after A6: perform the exact stopped snapshot/restore table in the stopped snapshot/restore section and verify authenticated gateway readiness and old-handle refusal | Dedicated state only, required DB/KEK/trust coverage complete, hashes match and integrity `ok`, latest credential-generation/owner reconciled, detached state not resurrected and no blind issuer-token replay |
 | A8 | After P/F owned cleanup, compare fresh/default-off and existing API-key/manual configuration, gateway/provider/state mappings and runtime identity baselines | No P/F gateway, supervisor, state directory, volume, key, DB, client trust or provider shared with existing agents/providers, no existing config/credential/refresh/workflow/runtime/grant/billing change |
-| A9 | Independent security/ops/code review of exact P/F ledger in the declared order, including expected-refusal assertions and final baseline | All required positive steps and matching expected-negative probes pass before qualification, intentional denials not trial failures, first unexpected result blocks and leaves remaining checks unrun, no fallback/managed implementation |
+| A9 | Independent security/ops/code review of exact pins/descriptor/P-F ledger in the declared order, distinguishing static source trace from observed effective-config/native/account/catalog/refresh results | All required positive and matching expected-negative assertions pass before qualification, no source-only isolation/HTTP/catalog success claim, first unexpected result blocks with remaining checks unrun, no fallback/managed implementation or automatic adoption |
 
+
+### A2 executable loaded-config observation
+
+Only within the separately authorized network-denied fixture, after the native private-stdio session completes `initialize` and the `initialized` notification, send this stock request using the verified owned workspace path
+
+```json
+{
+  "id": "a2-config",
+  "method": "config/read",
+  "params": {
+    "cwd": "<owned-workspace>",
+    "includeLayers": true
+  }
+}
+```
+
+| returned configuration / comparison | required loaded value |
+|---|---|
+| `config.model_provider` | Exact `openai-http` |
+| `config.model_providers.openai-http.name` | Exact `OpenAI` |
+| `config.model_providers.openai-http.requires_openai_auth` | Boolean `true` |
+| `config.model_providers.openai-http.supports_websockets` | Boolean `false` |
+| `config.model_providers.openai-http.supports_standalone_web_search` | Boolean `true` |
+| `config.model_providers.openai-http.http_headers.version` | Exact `0.164.0`, equal to A0's reported binary version component |
+| `config.forced_login_method` | Exact `chatgpt` |
+| `config.forced_chatgpt_workspace_id` | Exact private account-metadata selection, compare privately rather than publishing its value |
+| Descriptor `base_url`, `env_key`, `experimental_bearer_token`, `auth`, `aws` | In the returned JSON, each key missing or JSON `null` means unset, reject every non-null value including `""`, `false`, `0`, `{}` or `[]`, A0 still requires literal omission from authored TOML |
+| Returned `layers` and `origins` | Inspect active layer/origin precedence for the selected descriptor and forced login/workspace fields, no conflicting/disabled-only layer offered as proof of the loaded configuration |
+
+Missing/errored response, unexpected schema/type/value, unavailable layer/origin evidence, missing required positive descriptor field or any mismatch = stop A2 as blocked, the five optional fields alone may be missing or JSON `null`, no guessed defaults or runtime/transport success claim
+A0 remains the literal-absence proof for authored TOML, A2 accepts the pinned serializer's normal JSON representation of unset optional fields without weakening that authored-config requirement
+Full `config/read` response including `config`, `layers` and `origins` contains the real workspace ID and remains only in `<trial-root>/receipts/a2-config-read.json`, directory 0700/file 0600 under the existing private custody/retention contract, public evidence only per-field match yes/no booleans, no raw response, IDs, paths or layer contents
+This observation proves loaded configuration only, not application of built-in merge semantics, actual provider/runtime behavior or HTTP selection, A3 must independently observe the permitted HTTP POST with no WSS GET and retain its account/catalog/isolation checks
+No `config/read` or native process is run by this source patch, all A0–A9 outcomes remain UNRUN/UNQUALIFIED pending the existing review, human approval and exact operator gates
 
 ### A4 exact refresh/failure recipe
 

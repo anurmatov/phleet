@@ -1222,7 +1222,7 @@ public sealed class StockOpenShellRuntime(
             try
             {
                 var path = AuthorityPath(other.Name);
-                retired = File.Exists(path) && new FileInfo(path).LinkTarget is null
+                retired = AuthorityEntry(path) == true
                     && JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))?["State"]?.GetValue<string>() == StockAuthoritySource.RetiredState;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
@@ -1739,18 +1739,56 @@ public sealed class StockOpenShellRuntime(
         try
         {
             var path = AuthorityPath(agentName);
-            if (!File.Exists(path)) return true;
-            if (new FileInfo(path).LinkTarget is not null) return false;
+            // Review F6: lstat semantics; only verified absence or a verified retired write is success.
+            if (AuthorityEntry(path) is not { } regular) return true;
+            if (!regular) return false;
             var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
             if (current["State"]?.GetValue<string>() is not ("revoked" or StockAuthoritySource.RetiredState)) return false;
             current["State"] = StockAuthoritySource.RetiredState;
             WriteRecord(path, current);
-            return true;
+            return AuthorityEntry(path) == true
+                && JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))?["State"]?.GetValue<string>() == StockAuthoritySource.RetiredState;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
             or InvalidOperationException or StockIdentityDenied)
         { logger.LogWarning("Retiring the managed record for {Agent} failed; ordinary traffic stays held", agentName); }
         return false;
+    }
+
+    /// <summary>
+    /// No-follow entry check (lstat semantics): <c>null</c> when nothing at all exists at the path (a dangling link
+    /// is not absence), <c>true</c> for a plain regular file, <c>false</c> for a link, directory or other entry.
+    /// </summary>
+    internal static bool? AuthorityEntry(string path)
+    {
+        var info = new FileInfo(path);
+        if (info.LinkTarget is not null) return false;
+        var attributes = info.Attributes;
+        if ((int)attributes == -1) return Directory.Exists(path) ? false : null;
+        const FileAttributes unsafeKinds = FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device;
+        if ((attributes & unsafeKinds) != 0 || !info.Exists) return false;
+        return IsRegularFile(path);
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int LibcOpen(string path, int flags);
+
+    /// <summary>
+    /// Regular-file proof without following or blocking: Linux opens O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, so a
+    /// FIFO never blocks and a link fails, and only a seekable entry (never a FIFO or socket) is regular.
+    /// </summary>
+    private static bool IsRegularFile(string path)
+    {
+        if (!OperatingSystem.IsLinux()) return true;
+        try
+        {
+            var fd = LibcOpen(path, 0x800 | 0x20000 | 0x80000);
+            if (fd < 0) return false;
+            using var handle = new Microsoft.Win32.SafeHandles.SafeFileHandle(fd, ownsHandle: true);
+            using var stream = new FileStream(handle, FileAccess.Read, 1);
+            return stream.CanSeek;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or DllNotFoundException) { return false; }
     }
 
     private static void WriteRecord(string path, JsonObject record) => WriteText(path, record.ToJsonString());

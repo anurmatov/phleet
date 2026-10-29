@@ -324,6 +324,47 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
     }
 
+    [Theory]
+    [InlineData("directory")]
+    [InlineData("dangling_link")]
+    [InlineData("fifo")]
+    public void Authority_retirement_never_treats_an_unsafe_entry_as_absent(string kind)
+    {
+        var path = _t.AuthorityPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        if (kind == "fifo" && !OperatingSystem.IsLinux()) return;
+        switch (kind)
+        {
+            case "directory": Directory.CreateDirectory(path); break;
+            case "dangling_link": File.CreateSymbolicLink(path, Path.Combine(_t._dir, "missing.json")); break;
+            default: System.Diagnostics.Process.Start("mkfifo", path)!.WaitForExit(); break;
+        }
+
+        // Review F6: only verified absence or a verified retired write is success.
+        Assert.False(_t.Runtime().RetireAuthority("agent1"));
+        Assert.Null(StockOpenShellRuntime.AuthorityEntry(Path.Combine(_t._dir, "managed", "authority", "absent.json")));
+    }
+
+    [Fact]
+    public async Task Directory_in_place_of_the_authority_keeps_the_docker_handoff_unresolved()
+    {
+        var binding = _t.Binding("fleet-agent1-f6f6f6f6", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _t.WriteAuthority("active");
+        _t._cli.OnExec = _ =>
+        {
+            File.Delete(_t.AuthorityPath());
+            Directory.CreateDirectory(_t.AuthorityPath());
+            return 0;
+        };
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("docker_handoff_unresolved", result.Code);
+        Assert.Contains("authority_retire_failed", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Errors);
+    }
+
     [Fact]
     public async Task Failed_authority_retirement_is_persisted_and_reported_as_an_unresolved_docker_handoff()
     {

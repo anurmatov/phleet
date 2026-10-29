@@ -144,6 +144,10 @@ It is a bounded, experimental profile, not automatic provisioning or a general r
 Each deployment needs explicit operator enrollment and its own exact-build runtime qualification;
 CI and source fixtures do not establish that qualification.
 
+| OpenShell capability | Status |
+|---|---|
+| Isolated Codex subscriptions | **UNQUALIFIED** at stock 0.1.5 / Codex 0.164.0; [separate docs/profile qualification](docs/openshell-subscription-auth.md), no migration or managed subscription support |
+
 ## Platform support
 
 | Platform | Provider | Status |

@@ -239,6 +239,10 @@ runtime acceptance: an authorized exact-build whole-agent E2E, review and CI rem
 `EnrollmentFile` and `AuthorityFile` select the same operator-owned public enrollment record on the workload.
 Default provisioning and the ordinary memory receiver remain unchanged without opt-in configuration.
 
+| Stock auth capability | Boundary |
+|---|---|
+| Isolated Codex subscriptions | **UNQUALIFIED**; [docs/profile trial contract](docs/openshell-subscription-auth.md) pins stock 0.1.5 / Codex 0.164.0 and retains all A0–A9/operator gates, without changing API-key/manual behavior |
+
 ## Project contexts
 
 Every assignment renders the project's canonical context (the version row `CurrentVersion` points

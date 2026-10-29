@@ -244,8 +244,11 @@ public sealed class AgentRegistry
     }
 
     /// <summary>Removes an agent from the in-memory registry. Called after DB deletion to prevent ghost entries.</summary>
-    public void Remove(string agentName) =>
+    public void Remove(string agentName)
+    {
         _agents.TryRemove(agentName, out _);
+        _observedContainers.TryRemove(agentName, out _);
+    }
 
     public void AddSocket(WebSocket socket) => _sockets.Add(socket);
 

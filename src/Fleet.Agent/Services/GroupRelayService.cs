@@ -37,8 +37,15 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     private readonly Dictionary<string, DateTimeOffset> _lastPublishTime = new();
     // Managed workflow directives (#492) admitted on the control lane: TaskId -> session nonce for the reply.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _workflowSessions = new(StringComparer.Ordinal);
-    private const int MaxWorkflowSessions = 256;
+    // Bounded (#492 W6): the reply frees its entry; at the bound the oldest unreplied session is dropped, so
+    // unreplied (cancelled or timed-out) tasks can never fill the map and refuse every later directive.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Session, long Order)> _workflowSessions = new(StringComparer.Ordinal);
+    private long _workflowSessionOrder;
+    internal const int MaxWorkflowSessions = 256;
+    internal int WorkflowSessionCount => _workflowSessions.Count;
+
+    /// <summary>Named refusal for a workflow signal from a managed agent: the managed lane carries none (#492 W6).</summary>
+    public const string ManagedWorkflowSignalUnsupported = "workflow_signal_unsupported:managed_lane";
     private const string WorkflowDirectiveType = "workflow-directive";
     private const string TemporalBridgeRoute = "temporal-bridge";
     public IReadOnlyDictionary<string, DateTimeOffset> LastPublishTime => _lastPublishTime;
@@ -246,8 +253,9 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName);
             if (_stockBroker is not null && targetAgent == TemporalBridgeRoute
                 && type is RelayMessageType.Response or RelayMessageType.PartialResponse
-                && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryRemove(taskId, out var session))
+                && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryRemove(taskId, out var admitted))
             {
+                var session = admitted.Session;
                 // Typed workflow reply (#492): the existing bridge reply route as the workload principal,
                 // carrying agent (sender), sandbox, epoch, session and TaskId for the Bridge and Temporal to check.
                 routingKey = "bridge";
@@ -418,14 +426,26 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// <summary>
     /// Publish a workflow-signal message to the temporal-bridge queue so Temporal can deliver it as a signal.
     /// </summary>
+    /// <remarks>
+    /// A managed stock agent has no workflow-signal route on its lanes, so this refuses by name with
+    /// <see cref="ManagedWorkflowSignalUnsupported"/> instead of being swallowed as a denied publication (#492 W6).
+    /// </remarks>
     public Task PublishWorkflowSignalAsync(string workflowId, string signalName, string payload)
-        => PublishToAgentAsync(
+    {
+        if (_stockBroker is not null)
+        {
+            _logger.LogError("Workflow signal refused ({Code}): a managed agent has no workflow-signal route", ManagedWorkflowSignalUnsupported);
+            throw new InvalidOperationException(
+                $"{ManagedWorkflowSignalUnsupported}: a managed stock agent cannot publish workflow signals; nothing was published.");
+        }
+        return PublishToAgentAsync(
             targetAgent: "temporal-bridge",
             chatId: 0,
             text: payload,
             type: RelayMessageType.WorkflowSignal,
             workflowId: workflowId,
             signalName: signalName);
+    }
 
     /// <summary>
     /// Admits a typed workflow directive (#492) already verified as the epoch control principal on
@@ -439,9 +459,14 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             || !Guid.TryParseExact(message.CorrelationId, "N", out _) || message.TaskId is not { Length: > 0 and <= 512 }
             || message.WorkflowId is not null || message.SignalName is not null)
             throw new StockIdentityDenied("broker_route_denied");
-        if (!_workflowSessions.ContainsKey(message.TaskId) && _workflowSessions.Count >= MaxWorkflowSessions)
-            throw new StockIdentityDenied("broker_capacity");
-        _workflowSessions[message.TaskId] = message.CorrelationId!; // a resend carries the same session
+        _workflowSessions[message.TaskId] = (message.CorrelationId!, Interlocked.Increment(ref _workflowSessionOrder)); // a resend carries the same session
+        var excess = _workflowSessions.Count - MaxWorkflowSessions;
+        if (excess > 0)
+        {
+            foreach (var oldest in _workflowSessions.Where(e => e.Key != message.TaskId).OrderBy(e => e.Value.Order).Take(excess).ToList())
+                _workflowSessions.TryRemove(oldest);
+            _logger.LogWarning("Dropped {Count} oldest unreplied managed workflow sessions (bound {Bound})", excess, MaxWorkflowSessions);
+        }
         return message with { Type = RelayMessageType.Directive, CorrelationId = null, Epoch = null, Sandbox = null };
     }
 

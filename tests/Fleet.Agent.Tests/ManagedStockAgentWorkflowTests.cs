@@ -102,6 +102,49 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         await relay.PublishToAgentAsync("temporal-bridge", 0, "must not publish", RelayMessageType.Response, taskId: "wf/task-1");
         Assert.Empty(Publishes(fixture.Channel));
     }
+
+    // ---- #492 W6 lows ----
+
+    [Fact]
+    public async Task UnrepliedSessions_AreBounded_SoLaterDirectivesAreStillAdmitted_AndAnswerable()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        await using var relay = fixture.Relay();
+        var received = 0;
+        relay.MessageReceived += (_, _, _, _, _, _, _, _) => received++;
+        await relay.InitializeAsync(default);
+        var props = new BasicProperties { UserId = fixture.Binding.Principal("control") };
+
+        // More unreplied (cancelled or timed-out) tasks than the bound: none may wedge the map.
+        for (var i = 0; i < Fleet.Agent.Services.GroupRelayService.MaxWorkflowSessions + 5; i++)
+            await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", (ulong)i + 1, false, "fleet.group", "agent1",
+                props, Directive(fixture.Epoch, taskId: "wf/unreplied-" + i));
+        Assert.Equal(Fleet.Agent.Services.GroupRelayService.MaxWorkflowSessions, relay.WorkflowSessionCount);
+
+        var session = Guid.NewGuid().ToString("N");
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 9999, false, "fleet.group", "agent1",
+            props, Directive(fixture.Epoch, taskId: "wf/fresh", session: session));
+        Assert.Equal(Fleet.Agent.Services.GroupRelayService.MaxWorkflowSessions + 6, received);
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "fresh result", RelayMessageType.Response, taskId: "wf/fresh");
+        var publish = Assert.Single(Publishes(fixture.Channel));
+        using var reply = JsonDocument.Parse((ReadOnlyMemory<byte>)publish[4]!);
+        Assert.Equal(session, reply.RootElement.GetProperty("CorrelationId").GetString());
+        Assert.Equal(Fleet.Agent.Services.GroupRelayService.MaxWorkflowSessions - 1, relay.WorkflowSessionCount); // the reply frees its entry
+    }
+
+    [Fact]
+    public async Task WorkflowSignal_FromAManagedAgent_IsRefusedByName_NotSwallowed()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        await using var relay = fixture.Relay();
+        await relay.InitializeAsync(default);
+
+        var refused = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            relay.PublishWorkflowSignalAsync("wf-1", "approved", "{}"));
+        Assert.StartsWith(Fleet.Agent.Services.GroupRelayService.ManagedWorkflowSignalUnsupported, refused.Message);
+        Assert.Empty(Publishes(fixture.Channel));
+    }
 }
 
 /// <summary>

@@ -33,6 +33,7 @@ public sealed class ToolSendReceiptPublisher : BackgroundService
     public static readonly TimeSpan WarningInterval = TimeSpan.FromMinutes(1);
 
     private readonly IToolSendReceiptTransport? _transport;
+    private readonly IManagedToolSendReceiptTransport? _managed;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
 
@@ -44,10 +45,16 @@ public sealed class ToolSendReceiptPublisher : BackgroundService
     private long _lastWarningTicks;
 
     /// <param name="transport">Null when receipts are off.</param>
+    /// <param name="managed">
+    /// The managed stock control lane (#492), only with receipts on and an authority directory. A
+    /// managed receipt goes there or nowhere: never to the ordinary <paramref name="transport"/>.
+    /// </param>
     public ToolSendReceiptPublisher(
-        IToolSendReceiptTransport? transport, ILogger<ToolSendReceiptPublisher> logger, TimeProvider? time = null)
+        IToolSendReceiptTransport? transport, ILogger<ToolSendReceiptPublisher> logger, TimeProvider? time = null,
+        IManagedToolSendReceiptTransport? managed = null)
     {
         _transport = transport;
+        _managed = transport is null ? null : managed;
         _logger = logger;
         _time = time ?? TimeProvider.System;
     }
@@ -90,14 +97,25 @@ public sealed class ToolSendReceiptPublisher : BackgroundService
 
         try
         {
-            await transport.PublishAsync(
-                ToolSendReceipts.RoutingKey(receipt.Agent), ToolSendReceipts.Serialize(receipt), linked.Token);
+            if (receipt.Managed is not null)
+            {
+                if (_managed is null) { Dropped("managed_unavailable"); return; }
+                await _managed.PublishAsync(receipt, linked.Token);
+            }
+            else
+                await transport.PublishAsync(
+                    ToolSendReceipts.RoutingKey(receipt.Agent), ToolSendReceipts.Serialize(receipt), linked.Token);
             Counters.CountPublished();
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             Dropped("shutdown");
             throw;
+        }
+        catch (Fleet.Shared.Security.StockIdentityDenied e)
+        {
+            // Stale, revoked or foreign context: refused, never retargeted. Fixed code only.
+            Dropped("stale_context", e);
         }
         catch (Exception e)
         {
@@ -157,9 +175,15 @@ public static class ToolSendReceiptRegistration
 
         services.AddSingleton<IToolSendReceiptTransport>(sp => new RabbitMqToolSendReceiptTransport(
             brokerUrl, sp.GetRequiredService<ILogger<RabbitMqToolSendReceiptTransport>>()));
+        // #492: managed mode (stock identity with an authority directory) adds the control-lane producer.
+        var directory = configuration[Fleet.Shared.Security.StockServiceIdentityMiddleware.AuthorityDirectoryKey];
+        var managed = !string.IsNullOrEmpty(configuration[Fleet.Shared.Security.StockServiceIdentityMiddleware.AuthorityFileKey])
+            && !string.IsNullOrEmpty(directory) && Path.IsPathFullyQualified(directory);
         services.AddSingleton(sp => new ToolSendReceiptPublisher(
             sp.GetRequiredService<IToolSendReceiptTransport>(),
-            sp.GetRequiredService<ILogger<ToolSendReceiptPublisher>>()));
+            sp.GetRequiredService<ILogger<ToolSendReceiptPublisher>>(),
+            managed: managed ? new StockControlReceiptTransport(directory!,
+                sp.GetRequiredService<ILogger<StockControlReceiptTransport>>()) : null));
         services.AddHostedService(sp => sp.GetRequiredService<ToolSendReceiptPublisher>());
 
         return services;

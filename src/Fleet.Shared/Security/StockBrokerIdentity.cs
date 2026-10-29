@@ -59,6 +59,13 @@ public sealed class StockBrokerIdentity
             throw new StockIdentityDenied("broker_enrollment_changed");
     }
 
+    /// <summary>True when the pinned context names this still-current enrollment (agent, sandbox, epoch).</summary>
+    public bool Pins(string agent, string sandbox, Guid epoch)
+    {
+        Current();
+        return agent == _agent && sandbox == _sandbox && epoch == _epoch;
+    }
+
     public void Configure(ConnectionFactory factory)
     {
         Current();

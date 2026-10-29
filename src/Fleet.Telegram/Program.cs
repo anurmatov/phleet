@@ -22,7 +22,8 @@ var app = builder.Build();
 // #492: dedicated receiver for managed stock workloads, engaged exactly like fleet-memory's (only when
 // StockOpenShell:AuthorityFile is set). The verified outside assertion then supplies ?agent= (and the
 // record's fixed formatting_mode), so bot selection runs for the record's agent. Unset changes nothing.
-if (app.UseStockServiceIdentity(app.Configuration, "telegram")) app.MapMcp("/mcp");
+// A verified tool call also pins its receipt context (agent, sandbox, epoch, session) from that record.
+if (app.UseStockServiceIdentity(app.Configuration, "telegram", ManagedToolSendReceipts.Pin)) app.MapMcp("/mcp");
 else app.MapMcp();
 
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-telegram" }));

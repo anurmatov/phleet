@@ -87,6 +87,7 @@ test('workload/supervisor IDs are shortened and stopped/removed status and backu
 test('backup age is unknown without a last-success stamp and never reads as fresh', () => {
   assert.equal(backupLine({ backupState: 'unknown', backupAgeSeconds: null }), 'backup unknown')
   assert.equal(backupLine({ backupState: 'recorded' }), 'backup unknown')
+  assert.equal(backupLine({ backupState: 'unmounted', backupAgeSeconds: null }), 'backup dir not mounted')
   assert.equal(backupLine({ backupState: 'failed', backupAgeSeconds: 90000 }), 'backup failed (last success 1d ago)')
   assert.deepEqual([formatAge(45), formatAge(720), formatAge(-5)], ['45s', '12m', '0s'])
 })

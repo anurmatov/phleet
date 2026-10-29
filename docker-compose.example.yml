@@ -414,6 +414,9 @@ services:
       - ${FLEET_BASE_DIR}:${FLEET_BASE_DIR}
       # #492 managed runtime client trust, authority records and broker CA (0700, created by setup/upgrade).
       - ${FLEET_BASE_DIR}/openshell-client:/var/lib/fleet-openshell-client
+      # #492 §16 gateway backup stamps for the status view, read-only. Dormant unless FLEET_STOCK_BACKUP_DIR
+      # is set (BackupDir below stays empty); an unmounted configured dir reports "unmounted".
+      - ${FLEET_STOCK_BACKUP_DIR:-${FLEET_BASE_DIR}/openshell-backup}:/var/lib/fleet-stock-backup:ro
     env_file:
       - .env
     environment:
@@ -448,7 +451,7 @@ services:
       - StockOpenShell__BrokerManagementUrl=${FLEET_STOCK_BROKER_MANAGEMENT_URL:-}
       - StockOpenShell__BrokerAdminUserRef=${FLEET_STOCK_BROKER_ADMIN_USER_REF:-}
       - StockOpenShell__BrokerAdminPasswordRef=${FLEET_STOCK_BROKER_ADMIN_PASSWORD_REF:-}
-      - StockOpenShell__BackupDir=${FLEET_STOCK_BACKUP_DIR:-}
+      - StockOpenShell__BackupDir=${FLEET_STOCK_BACKUP_DIR:+/var/lib/fleet-stock-backup}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:

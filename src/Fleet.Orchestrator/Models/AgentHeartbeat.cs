@@ -146,7 +146,7 @@ public sealed record ManagedStatusView(
     public DateTimeOffset? ContainersObservedAt { get; init; }
     /// <summary>Gateway backup <c>last-success</c> stamp; null when unconfigured, missing or malformed (unknown).</summary>
     public DateTimeOffset? BackupLastSuccessAt { get; init; }
-    /// <summary>unknown · failed (the latest run failed) · recorded. Never "fresh": freshness is the operator check.</summary>
+    /// <summary>unknown · unmounted (BackupDir configured but not mounted) · failed (the latest run failed) · recorded. Never "fresh": freshness is the operator check.</summary>
     public string BackupState { get; init; } = "unknown";
     /// <summary>Whole seconds since the last successful gateway backup, computed at read time; null when unknown.</summary>
     public long? BackupAgeSeconds => BackupLastSuccessAt is { } at ? Math.Max(0, (long)(DateTimeOffset.UtcNow - at).TotalSeconds) : null;
@@ -158,6 +158,8 @@ public static class ManagedBackupStamp
     public static (DateTimeOffset? LastSuccess, string State) Read(string? backupDir)
     {
         if (string.IsNullOrWhiteSpace(backupDir)) return (null, "unknown");
+        // Configured but not visible in this container (no read-only mount): distinct from "no backup yet".
+        if (!System.IO.Directory.Exists(backupDir)) return (null, "unmounted");
         var success = Stamp(System.IO.Path.Combine(backupDir, "last-success"));
         if (success is null) return (null, "unknown");
         var failure = Stamp(System.IO.Path.Combine(backupDir, "last-failure"));

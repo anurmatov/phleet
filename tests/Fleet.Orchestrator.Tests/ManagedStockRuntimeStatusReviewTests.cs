@@ -227,6 +227,14 @@ public sealed class ManagedStockRuntimeStatusReviewTests : IDisposable
         Assert.Equal("removed", registry.Get(agent.Name)!.Managed!.ContainerStatus);
     }
 
+    [Fact]
+    public void A_configured_backup_dir_that_is_not_mounted_reports_unmounted_not_unknown()
+    {
+        var record = new ManagedRecord { State = "applied", Applied = _t.Binding("fleet-agent1-58585858", Guid.NewGuid()) };
+        Assert.Equal(("unmounted", null, null), Backup(AgentRegistry.ManagedStatus(record, Path.Combine(_backup, "not-mounted"))));
+        Assert.Equal(("unknown", null, null), Backup(AgentRegistry.ManagedStatus(record, _backup)));
+    }
+
     private static (string, DateTimeOffset?, long?) Backup(ManagedStatusView status) =>
         (status.BackupState, status.BackupLastSuccessAt, status.BackupAgeSeconds);
 }

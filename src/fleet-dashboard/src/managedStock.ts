@@ -85,6 +85,7 @@ export function formatAge(seconds: number): string {
 
 /** Gateway backup age from the last-success stamp; a missing stamp is unknown, never fresh. */
 export function backupLine(status: Pick<ManagedStatus, 'backupState' | 'backupAgeSeconds'>): string {
+  if (status.backupState === 'unmounted') return 'backup dir not mounted'
   const age = typeof status.backupAgeSeconds === 'number' ? formatAge(status.backupAgeSeconds) : null
   if (!age) return 'backup unknown'
   return status.backupState === 'failed' ? `backup failed (last success ${age} ago)` : `backup ${age} ago`

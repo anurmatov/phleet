@@ -37,6 +37,9 @@ public static class AgentHttpControl
         {
             var taskManager = sp.GetRequiredService<TaskManager>();
             var decoded = Uri.UnescapeDataString(taskId);
+            // Temporal's per-task cancel (#492): free the managed workflow session first, so the cancelled turn's
+            // completion is never published as a workflow reply and the entry does not linger.
+            sp.GetService<GroupRelayService>()?.ForgetWorkflowSession(decoded);
             var cancelled = await taskManager.CancelByBridgeTaskIdAsync(decoded);
             return Results.Ok(new { cancelled, taskId = decoded });
         });

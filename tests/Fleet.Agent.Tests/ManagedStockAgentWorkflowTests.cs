@@ -1,9 +1,14 @@
 using System.Text.Json;
+using Fleet.Agent;
 using Fleet.Agent.Models;
 using Fleet.Bridge.Configuration;
 using Fleet.Bridge.Services;
 using Fleet.Shared.Security;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -137,6 +142,75 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         Assert.All(publishes, p => Assert.Equal("bridge", p[1]));
         AssertWorkflowReply(((ReadOnlyMemory<byte>)publishes[0][4]!).ToArray(), "partial-response", session, fixture.Epoch);
         AssertWorkflowReply(((ReadOnlyMemory<byte>)publishes[1][4]!).ToArray(), "response", session, fixture.Epoch);
+    }
+
+    // ---- #492: cancel and timeout free the agent-side session ----
+
+    [Fact]
+    public async Task TemporalCancel_ThroughTheRealCancelEndpoint_FreesOnlyThatSession_AndTheCancelledReplyIsNotPublished()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        await using var relay = fixture.Relay();
+        await relay.InitializeAsync(default);
+        var props = new BasicProperties { UserId = fixture.Binding.Principal("control") };
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props, Directive(fixture.Epoch));
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/other"));
+        Assert.Equal(2, relay.WorkflowSessionCount);
+
+        var builder = Microsoft.AspNetCore.Builder.WebApplication.CreateBuilder();
+        builder.Configuration.Sources.Clear(); // no baked Kestrel endpoint: an ephemeral loopback port only
+        builder.WebHost.ConfigureKestrel(k => k.Listen(System.Net.IPAddress.Loopback, 0));
+        builder.Logging.ClearProviders();
+        var options = Options.Create(new Fleet.Agent.Configuration.AgentOptions { Name = "test", Role = "test", WorkDir = "/tmp", Provider = "codex" });
+        builder.Services.AddSingleton(new Fleet.Agent.Services.TaskManager(options, Substitute.For<Fleet.Agent.Services.IAgentExecutor>(),
+            new Fleet.Agent.Services.SessionManager(), NullLogger<Fleet.Agent.Services.TaskManager>.Instance));
+        builder.Services.AddSingleton(relay);
+        await using var app = builder.Build();
+        app.UseControlGuard(stockMode: true, managedStock: true);
+        app.MapCancelEndpoints();
+        await app.StartAsync();
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.First()) };
+
+        using var response = await client.PostAsync("/cancel/wf%2Ftask-1", null);
+        Assert.Equal(200, (int)response.StatusCode);
+        Assert.Equal(1, relay.WorkflowSessionCount); // only the cancelled task's session is freed
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "Task cancelled.", RelayMessageType.Response, taskId: "wf/task-1");
+        Assert.Empty(Publishes(fixture.Channel));
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "other result", RelayMessageType.Response, taskId: "wf/other");
+        Assert.Equal("bridge", Assert.Single(Publishes(fixture.Channel))[1]);
+    }
+
+    [Fact]
+    public async Task TimedOutWorkflow_SessionIdlePastTheTimeout_IsFreed_WhileAResentDirectiveKeepsItsSessionAlive()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        await using var relay = fixture.Relay();
+        var now = DateTimeOffset.UtcNow;
+        relay.WorkflowClock = () => now;
+        await relay.InitializeAsync(default);
+        var props = new BasicProperties { UserId = fixture.Binding.Principal("control") };
+        var session = Guid.NewGuid().ToString("N");
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, session: session));
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/timed-out"));
+
+        // Temporal still waiting on wf/task-1 re-sends it (same session); wf/timed-out is never re-sent.
+        now += Fleet.Agent.Services.GroupRelayService.WorkflowSessionIdleTimeout / 2;
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 3, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, session: session));
+        now += Fleet.Agent.Services.GroupRelayService.WorkflowSessionIdleTimeout / 2 + TimeSpan.FromSeconds(1);
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "late result", RelayMessageType.Response, taskId: "wf/timed-out");
+        Assert.Empty(Publishes(fixture.Channel));
+        Assert.Equal(1, relay.WorkflowSessionCount);
+
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "synthetic result", RelayMessageType.Response, taskId: "wf/task-1");
+        var publish = Assert.Single(Publishes(fixture.Channel));
+        AssertWorkflowReply(((ReadOnlyMemory<byte>)publish[4]!).ToArray(), "response", session, fixture.Epoch);
+        Assert.Equal(0, relay.WorkflowSessionCount);
     }
 
     public static TheoryData<string> Foreign() => new()

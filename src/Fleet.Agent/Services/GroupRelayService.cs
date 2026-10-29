@@ -41,10 +41,16 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     // publication or a partial response keeps it, so a retried reply or a re-sent directive still carries the
     // context; at the bound the oldest unreplied session is dropped, so unreplied (cancelled or timed-out) tasks
     // can never fill the map and refuse every later directive.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Session, long Order)> _workflowSessions = new(StringComparer.Ordinal);
+    // Cancel (Temporal's per-task cancel) and timeout also free it: a session no directive (re-)admitted within
+    // WorkflowSessionIdleTimeout is dropped — while Temporal waits it re-sends the directive every five minutes,
+    // so an idle session means the workflow cancelled or timed out and no longer accepts the reply.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Session, long Order, DateTimeOffset Admitted)> _workflowSessions = new(StringComparer.Ordinal);
     private long _workflowSessionOrder;
     internal const int MaxWorkflowSessions = 256;
+    internal static readonly TimeSpan WorkflowSessionIdleTimeout = TimeSpan.FromMinutes(30);
     internal int WorkflowSessionCount => _workflowSessions.Count;
+    /// <summary>Stands in for the wall clock in tests.</summary>
+    internal Func<DateTimeOffset> WorkflowClock { get; set; } = () => DateTimeOffset.UtcNow;
 
     /// <summary>Named refusal for a workflow signal from a managed agent: the managed lane carries none (#492 W6).</summary>
     public const string ManagedWorkflowSignalUnsupported = "workflow_signal_unsupported:managed_lane";
@@ -254,6 +260,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             var routingKey = targetAgent.ToLowerInvariant();
             var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName);
             string? workflowSession = null;
+            if (_stockBroker is not null) ExpireIdleWorkflowSessions(); // a timed-out workflow no longer takes the reply
             if (_stockBroker is not null && targetAgent == TemporalBridgeRoute
                 && type is RelayMessageType.Response or RelayMessageType.PartialResponse
                 && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryGetValue(taskId, out var admitted))
@@ -466,7 +473,8 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             || !Guid.TryParseExact(message.CorrelationId, "N", out _) || message.TaskId is not { Length: > 0 and <= 512 }
             || message.WorkflowId is not null || message.SignalName is not null)
             throw new StockIdentityDenied("broker_route_denied");
-        _workflowSessions[message.TaskId] = (message.CorrelationId!, Interlocked.Increment(ref _workflowSessionOrder)); // a resend carries the same session
+        ExpireIdleWorkflowSessions();
+        _workflowSessions[message.TaskId] = (message.CorrelationId!, Interlocked.Increment(ref _workflowSessionOrder), WorkflowClock()); // a resend carries the same session and refreshes it
         var excess = _workflowSessions.Count - MaxWorkflowSessions;
         if (excess > 0)
         {
@@ -484,7 +492,35 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     private void ForgetWorkflowSession(string taskId, string session)
     {
         while (_workflowSessions.TryGetValue(taskId, out var current) && current.Session == session)
-            if (_workflowSessions.TryRemove(new KeyValuePair<string, (string Session, long Order)>(taskId, current))) return;
+            if (_workflowSessions.TryRemove(new KeyValuePair<string, (string Session, long Order, DateTimeOffset Admitted)>(taskId, current))) return;
+    }
+
+    /// <summary>
+    /// Cancel (#492): frees the workflow session for <paramref name="taskId"/> when Temporal cancels that task,
+    /// so the cancelled turn's reply is not published as a workflow reply and the entry does not linger.
+    /// </summary>
+    public bool ForgetWorkflowSession(string taskId)
+    {
+        if (!_workflowSessions.TryRemove(taskId, out _)) return false;
+        _logger.LogInformation("Freed the managed workflow session of a cancelled task");
+        return true;
+    }
+
+    /// <summary>
+    /// Timeout (#492): drops sessions no directive (re-)admitted within <see cref="WorkflowSessionIdleTimeout"/>;
+    /// returns how many were dropped.
+    /// </summary>
+    private int ExpireIdleWorkflowSessions()
+    {
+        if (_workflowSessions.IsEmpty) return 0;
+        var cutoff = WorkflowClock() - WorkflowSessionIdleTimeout;
+        var expired = 0;
+        foreach (var entry in _workflowSessions)
+            if (entry.Value.Admitted <= cutoff && _workflowSessions.TryRemove(entry)) expired++;
+        if (expired > 0)
+            _logger.LogWarning("Dropped {Count} managed workflow sessions idle past {Timeout} (cancelled or timed out)",
+                expired, WorkflowSessionIdleTimeout);
+        return expired;
     }
 
     private static string TruncateForLog(string text) =>

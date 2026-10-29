@@ -342,7 +342,13 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         bridge.Lanes!.ReconcileDelay = TimeSpan.FromHours(1); // no watcher reconcile can mask a wrong close
         await bridge.InitializeAsync(default);
 
+        // The reconcile's close pass has run, but the concurrent ask publishes after it leaves the gate on its
+        // own schedule (#492 C1): wait for that publish rather than assume it precedes InitializeAsync's return.
+        Assert.NotNull(ask);
+        await WaitFor(() => Snapshot().Any(l => l.Factory.VirtualHost == Vhost("agent2")
+            && Publishes(l.Channel) == 1) || ask.IsCompleted);
         var lane = Snapshot().Single(l => l.Factory.VirtualHost == Vhost("agent2"));
+        Assert.False(ask.IsCompleted); // still pending on the lane, not refused
         Assert.False(Closed(lane.Connection));
         Assert.Equal("agent2", Published(lane.Channel)[1]);
         await Complete(lane.Channel, "agent2", Vhost("agent2") + "-workload");

@@ -575,21 +575,41 @@ retargeted or sent to the ordinary `fleet.journal.tool-sends` exchange. The work
 from its own queue only with the control user-id, exchange `fleet.group`, its own routing key and a
 pinned agent/sandbox/epoch that is its current enrollment, then applies the usual own-bot, privacy and
 capture rules, writes the spool before the ack and ignores a duplicate in the same life. Broker
-users, permissions, queues and consumers are unchanged. Workflow directives and signals are not
-routed either: a managed agent's epoch identity reads only bridge control requests, and its relay
-publishes only bridge responses, so Temporal `DelegateToAgent` (and any workflow signal it would
-send back) has no lane. With `TemporalBridge:OrchestratorUrl` set, `DelegateToAgent` reads the
-target's applied runtime and fails non-retryably with `managed_route_unsupported:workflow_delegation`
-(error type `ManagedAgentWorkflowUnsupported`) instead of publishing a directive nobody reads; after a
-verified handoff back to Docker, delegation works again. The check fails closed: when the
-orchestrator is unreachable, answers non-success, or returns no valid `appliedRuntimeKind`
-(`docker`/`openshell`), the attempt fails retryably with `managed_route_unknown:workflow_delegation`
-(error type `ManagedAgentRuntimeUnknown`) and nothing is published on the ordinary broker. The
-directive leg alone would fit the control role (configure/write `fleet.group`), but the correlated
-reply does not: it is routed `temporal-bridge` to `fleet.agent.temporal-bridge`, which control may
-neither configure nor read, and the only control-readable queue, `fleet.agent.bridge`, is already
-consumed by the bridge's managed lane, so a Temporal reader there is the extra consumer §6 rules
-out. Routing workflow replies needs a §6 decision. A dedicated Fleet.Temporal receiver
+users, permissions, queues and consumers are unchanged.
+
+**Workflow delegation (existing-role routing).** Managed mode for Temporal is on only when
+`StockOpenShell:AuthorityDirectory` is configured on Fleet.Temporal. Without it (the default),
+`DelegateToAgent` never reads the orchestrator for the target's runtime, so an orchestrator restart,
+401, 404 or timeout cannot fail an ordinary delegation. With it, the orchestrator's
+`appliedRuntimeKind` decides and the check fails closed: unreachable, non-success, invalid body or an
+unknown runtime fails the attempt retryably with `managed_route_unknown:workflow_delegation` (error
+type `ManagedAgentRuntimeUnknown`), and nothing is published on the ordinary broker. `docker` keeps
+the ordinary directive. For `openshell`, Temporal reads only the agent's current active record and its
+`<agent>.control.password` beside it (never admin or observer credentials) and publishes a typed
+`workflow-directive` producer-only, as the epoch `control` principal (validated user-id), to
+`fleet.group` routed to the agent. It carries the TaskId, the record's sandbox and epoch and a fresh
+session nonce. The expected agent, sandbox, epoch and session are registered with the TaskId. A
+missing, revoked, ambiguous or unreadable record, or an unusable control credential, fails
+non-retryably with `managed_route_denied:workflow_delegation` (error type `ManagedAgentContextDenied`)
+and is never retargeted to the ordinary broker. Resends and continuation retries use the same lane and
+session. Cancellation goes through the orchestrator's targeted cancel (the managed loopback cancel),
+and a managed agent gets no ordinary `/cancel all` fallback. The agent admits the directive only
+from the control principal on `fleet.group` routed to itself, with its own sandbox and epoch, a TaskId
+and a session. It then runs as an ordinary Temporal directive. The reply goes out as a typed
+`response`/`partial-response` on the existing bridge reply route (`bridge`, workload user-id), carrying
+agent, sandbox, epoch, session and TaskId. The Bridge's managed lane is the sole consumer of
+`fleet.agent.bridge` in that vhost. It admits the reply only with the workload principal and its own
+agent, sandbox and epoch, then forwards it on the ordinary connection to the existing
+`temporal-bridge` receiver route. Anything else is refused with a content-free log. The Temporal
+registry completes the TaskId only when agent, sandbox, epoch and session equal the registered
+expectation. An ordinary reply cannot complete a managed TaskId, and a reply claiming a managed
+context cannot complete an ordinary one. The Bridge opens the lanes of all active records when it
+starts, and any other lane on its first bridge ask. A workflow reply from an agent enrolled after the
+Bridge started waits in its epoch queue until that lane opens. No user, permission, queue, consumer,
+poller or broker is added, and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals
+from a managed agent remain unrouted.
+
+A dedicated Fleet.Temporal receiver
 (`StockOpenShell:AuthorityFile` set) is receiver-only: it serves the authenticated `/mcp` route but
 starts no namespace workers and no relay consumer on the fixed `fleet.agent.temporal-bridge` queue,
 so it never competes with the ordinary bridge for replies on a shared broker. None of the following is

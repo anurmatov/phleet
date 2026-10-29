@@ -22,7 +22,11 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
     /// <summary>Ordinary target: not managed. Managed: use <see cref="Lane"/>, or refuse when it is null.</summary>
     internal readonly record struct Route(bool Managed, BridgeRelayService? Lane);
 
-    private sealed record Entry(StockActiveRecord Source, BridgeRelayService? Relay);
+    /// <summary>A lane for one record binding; a failed open (null relay) is retried a bounded number of times.</summary>
+    private sealed record Entry(StockActiveRecord Source, BridgeRelayService? Relay, int Attempts = 1, DateTimeOffset RetryAt = default);
+
+    /// <summary>Opens of one record binding before its failed lane stays held until the binding changes.</summary>
+    internal const int MaxLaneAttempts = 5;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<string, Entry> _lanes = new(StringComparer.Ordinal);
@@ -38,14 +42,94 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
     /// <summary>First backoff before a lane requeues a reply whose forward failed (#492 R4).</summary>
     internal TimeSpan ForwardRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
 
-    /// <summary>Opens the lane of every currently active record (best effort); refused lanes stay held.</summary>
+    /// <summary>First backoff before a failed lane of an unchanged binding is reopened; doubles per attempt.</summary>
+    internal TimeSpan LaneRetryDelay { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Quiet period after a trusted-directory change before the lanes are reconciled.</summary>
+    internal TimeSpan ReconcileDelay { get; set; } = TimeSpan.FromMilliseconds(200);
+
+    private readonly CancellationTokenSource _stopping = new();
+    private FileSystemWatcher? _watcher;
+    private int _reconcilePending;
+
+    /// <summary>
+    /// Opens the lane of every currently active record and keeps the lanes reconciled with the trusted
+    /// authority directory (#492 R3): enrollment or re-epoch opens or replaces the agent's lane (declaring its
+    /// epoch reply queue and its sole consumer) without waiting for a bridge ask, and a vanished, revoked or
+    /// ambiguous record closes it. The trigger is a watcher on that local directory, not a broker poller.
+    /// </summary>
     internal async Task OpenActiveAsync(CancellationToken ct)
+    {
+        Watch();
+        await ReconcileAsync(ct);
+    }
+
+    /// <summary>Opens, replaces or retries the lane of each active record and closes lanes without one.</summary>
+    internal async Task ReconcileAsync(CancellationToken ct)
     {
         IReadOnlyDictionary<string, StockActiveRecord?> active;
         try { active = StockAuthoritySource.Active(directory); }
-        catch (StockIdentityDenied) { logger.LogWarning("Stock control lanes not opened: authority unavailable"); return; }
+        catch (StockIdentityDenied) { logger.LogWarning("Stock control lanes not reconciled: authority unavailable"); return; }
         foreach (var (agent, record) in active)
             if (record is not null) await RouteAsync(agent, connect: true, ct);
+        await _gate.WaitAsync(ct);
+        try
+        {
+            foreach (var agent in _lanes.Keys.Where(a => active.GetValueOrDefault(a) is null).ToList())
+            {
+                // Removed, revoked or ambiguous: the old epoch connection never serves the agent again.
+                var entry = _lanes[agent];
+                _lanes.Remove(agent);
+                await CloseAsync(entry.Relay);
+            }
+        }
+        finally { _gate.Release(); }
+    }
+
+    private void Watch()
+    {
+        if (_watcher is not null) return;
+        try
+        {
+            var watcher = new FileSystemWatcher(directory)
+            {
+                IncludeSubdirectories = false,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.Attributes
+            };
+            watcher.Created += OnAuthorityChanged;
+            watcher.Changed += OnAuthorityChanged;
+            watcher.Deleted += OnAuthorityChanged;
+            watcher.Renamed += OnAuthorityChanged;
+            watcher.Error += (_, _) => ScheduleReconcile(ReconcileDelay); // overflow: re-read the whole directory
+            watcher.EnableRaisingEvents = true;
+            _watcher = watcher;
+        }
+        catch (Exception)
+        {
+            logger.LogWarning("Stock authority directory not watched; lanes reconcile only at startup and on bridge asks");
+        }
+    }
+
+    private void OnAuthorityChanged(object sender, FileSystemEventArgs e)
+    {
+        // Coalesce a burst (record and password written together) into one reconcile after a quiet period.
+        if (Interlocked.Exchange(ref _reconcilePending, 1) == 0) ScheduleReconcile(ReconcileDelay, coalesced: true);
+    }
+
+    private void ScheduleReconcile(TimeSpan delay, bool coalesced = false)
+    {
+        if (_stopping.IsCancellationRequested) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, _stopping.Token);
+                if (coalesced) Interlocked.Exchange(ref _reconcilePending, 0);
+                await ReconcileAsync(_stopping.Token);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception) { logger.LogWarning("Stock control lane reconciliation failed; manual reconciliation required"); }
+        });
     }
 
     /// <summary>Selects the route for a target; with <paramref name="connect"/> opens or replaces its lane.</summary>
@@ -72,6 +156,7 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
         await _gate.WaitAsync(ct);
         try
         {
+            if (_stopping.IsCancellationRequested) return new(true, null); // disposed: never reopen
             if (_lanes.TryGetValue(agent, out var entry) && (fresh is null || !entry.Source.SameBinding(fresh)))
             {
                 // Re-enrolled, revoked or removed: the old epoch connection never serves the agent again.
@@ -80,10 +165,17 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
                 entry = null;
             }
             if (fresh is null) return new(true, null);
-            if (entry is null)
+            // A failed lane of the same binding is retried with a doubling backoff, at most MaxLaneAttempts
+            // opens in all; after that it stays held (refusing) until re-enrollment changes the binding.
+            if (entry is null || (entry.Relay is null && entry.Attempts < MaxLaneAttempts && DateTimeOffset.UtcNow >= entry.RetryAt))
             {
-                entry = new(fresh, await OpenAsync(agent, fresh, ct));
+                var attempts = entry is null ? 1 : entry.Attempts + 1;
+                var relay = await OpenAsync(agent, fresh, ct);
+                var delay = LaneRetryDelay * (1 << (attempts - 1));
+                entry = new(fresh, relay, attempts, DateTimeOffset.UtcNow + delay);
                 _lanes[agent] = entry;
+                // Bounded retry of this binding only; it reads the local directory again, not the broker.
+                if (relay is null && attempts < MaxLaneAttempts) ScheduleReconcile(delay + TimeSpan.FromMilliseconds(50));
             }
             return new(true, entry.Relay);
         }
@@ -108,8 +200,8 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
         {
             await CloseAsync(relay);
             if (ct.IsCancellationRequested) throw new OperationCanceledException(ct); // not a lane outcome
-            // Like the single-file relay there is no stock reconnect loop: the failed lane stays held
-            // (refusing) until this agent's record binding changes, i.e. re-enrollment reconciles it.
+            // No reconnect loop: the caller retries this binding a bounded number of times, then the failed
+            // lane stays held (refusing) until this agent's record binding changes.
             logger.LogWarning("Stock control lane for {Agent} refused; manual reconciliation required", agent);
             return null;
         }
@@ -124,6 +216,8 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
 
     public async ValueTask DisposeAsync()
     {
+        _stopping.Cancel();
+        _watcher?.Dispose();
         await _gate.WaitAsync();
         try
         {

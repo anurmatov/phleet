@@ -62,7 +62,7 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
             var channel = Substitute.For<IChannel>();
             var laneConnection = lane?.Invoke(factory) ?? Substitute.For<IConnection>();
             laneConnection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult(channel));
-            _lanes.Add((factory, laneConnection, channel));
+            lock (_lanes) _lanes.Add((factory, laneConnection, channel));
             return Task.FromResult(laneConnection);
         };
         return bridge;
@@ -204,7 +204,7 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         Assert.Equal(Denied, await bridge.AskAsync("fails", "operator", null, 1, default));
         failing = false;
         Assert.Equal(Denied, await bridge.AskAsync("held", "operator", null, 1, default));
-        Assert.DoesNotContain(_lanes, l => l.Factory.VirtualHost == Vhost("agent1")); // no reconnect attempt for the same binding
+        Assert.DoesNotContain(_lanes, l => l.Factory.VirtualHost == Vhost("agent1")); // no reconnect before the backoff
 
         bridge.TargetAgent = "agent2";
         var other = bridge.AskAsync("other", "operator", null, 5, default);
@@ -217,6 +217,101 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         Assert.Equal(Vhost("agent1"), _lanes[^1].Factory.VirtualHost);
         await Complete(Lane("agent1").Channel, "agent1", Vhost("agent1") + "-workload");
         Assert.Equal("synthetic completion", await reenrolled.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(0, Publishes(_ordinary));
+    }
+
+    private (ConnectionFactory Factory, IConnection Connection, IChannel Channel)[] Snapshot()
+    {
+        lock (_lanes) return [.. _lanes];
+    }
+
+    private static async Task WaitFor(Func<bool> condition)
+    {
+        for (var i = 0; i < 100 && !condition(); i++) await Task.Delay(50);
+        Assert.True(condition());
+    }
+
+    private static bool Closed(IConnection connection) =>
+        connection.ReceivedCalls().Any(c => c.GetMethodInfo().Name == "CloseAsync");
+
+    private static int Calls(IChannel channel, string method, object? first = null) => channel.ReceivedCalls()
+        .Count(c => c.GetMethodInfo().Name == method && (first is null || Equals(c.GetArguments()[0], first)));
+
+    [Fact]
+    public async Task LateEnrollment_OpensTheReplyLaneAndItsSoleConsumer_WithoutAnAsk_AndForwardsItsReply()
+    {
+        Save("agent1", "sandbox-1");
+        await using var bridge = Bridge();
+        bridge.Lanes!.ReconcileDelay = TimeSpan.FromMilliseconds(20);
+        await bridge.InitializeAsync(default);
+        Assert.Single(Snapshot());
+
+        Save("agent2", "sandbox-2"); // enrolled after the Bridge started; no bridge ask, no restart
+        await WaitFor(() => Snapshot().Any(l => l.Factory.VirtualHost == Vhost("agent2")));
+        var (factory, _, channel) = Snapshot().Single(l => l.Factory.VirtualHost == Vhost("agent2"));
+        Assert.Equal(Vhost("agent2") + "-control", factory.UserName);
+        Assert.Equal(1, Calls(channel, "QueueDeclareAsync", "fleet.agent.bridge")); // the epoch reply queue exists
+        Assert.Equal(1, Calls(channel, "BasicConsumeAsync", "fleet.agent.bridge")); // with its one consumer
+        Assert.Equal(2, Snapshot().Length);
+
+        var body = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            ChatId = 7, Sender = "agent2", Text = "synthetic result", Timestamp = DateTimeOffset.UtcNow, Type = "response",
+            CorrelationId = Guid.NewGuid().ToString("N"), TaskId = "wf/task-2", Epoch = _epochs["agent2"], Sandbox = "sandbox-2"
+        });
+        await Consumer(channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "bridge",
+            new BasicProperties { UserId = Vhost("agent2") + "-workload" }, body);
+        Assert.Equal("temporal-bridge", Published(_ordinary)[1]);
+        Assert.Equal(1, Publishes(_ordinary));
+    }
+
+    [Fact]
+    public async Task ReEpoch_ReplacesTheLaneWithoutAnAsk_AndRevocationClosesIt()
+    {
+        Save("agent1", "sandbox-1");
+        await using var bridge = Bridge();
+        bridge.Lanes!.ReconcileDelay = TimeSpan.FromMilliseconds(20);
+        await bridge.InitializeAsync(default);
+        var old = Snapshot().Single();
+
+        Save("agent1", "sandbox-1"); // new epoch
+        await WaitFor(() => Snapshot().Any(l => l.Factory.VirtualHost == Vhost("agent1")) && Closed(old.Connection));
+        var current = Snapshot().Single(l => l.Factory.VirtualHost == Vhost("agent1"));
+        Assert.NotEqual(old.Factory.VirtualHost, current.Factory.VirtualHost);
+        Assert.Equal(1, Calls(current.Channel, "BasicConsumeAsync", "fleet.agent.bridge"));
+
+        Save("agent1", "sandbox-1", state: "revoked", epoch: _epochs["agent1"]);
+        await WaitFor(() => Closed(current.Connection));
+        bridge.TargetAgent = "agent1";
+        Assert.Equal(Denied, await bridge.AskAsync("revoked", "operator", null, 1, default));
+        Assert.Equal(2, Snapshot().Length);
+        Assert.Equal(0, Publishes(_ordinary));
+    }
+
+    [Fact]
+    public async Task FailedLane_IsRetriedWithoutAnAsk_ABoundedNumberOfTimes()
+    {
+        Save("agent1", "sandbox-1");
+        Save("agent2", "sandbox-2");
+        var attempts = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+        await using var bridge = Bridge(factory =>
+        {
+            var count = attempts.AddOrUpdate(factory.VirtualHost, 1, (_, n) => n + 1);
+            // agent1 recovers after its first failed open; agent2 never does.
+            return factory.VirtualHost == Vhost("agent2") || count == 1
+                ? throw new IOException("synthetic connect failure") : Substitute.For<IConnection>();
+        });
+        bridge.Lanes!.LaneRetryDelay = TimeSpan.FromMilliseconds(20);
+        await bridge.InitializeAsync(default);
+
+        await WaitFor(() => Snapshot().Any(l => l.Factory.VirtualHost == Vhost("agent1")));
+        Assert.Equal(2, attempts[Vhost("agent1")]);
+        await WaitFor(() => attempts.GetValueOrDefault(Vhost("agent2")) == BridgeControlLanes.MaxLaneAttempts);
+        await Task.Delay(800); // past the next backoff: the held lane is not reopened again
+        Assert.Equal(BridgeControlLanes.MaxLaneAttempts, attempts[Vhost("agent2")]);
+        bridge.TargetAgent = "agent2";
+        Assert.Equal(Denied, await bridge.AskAsync("held", "operator", null, 1, default));
+        Assert.Equal(BridgeControlLanes.MaxLaneAttempts, attempts[Vhost("agent2")]);
         Assert.Equal(0, Publishes(_ordinary));
     }
 

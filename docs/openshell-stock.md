@@ -614,9 +614,14 @@ Anything else is refused with a content-free log and rejected without requeue. T
 registry completes the TaskId only when agent, sandbox, epoch and session equal the registered
 expectation. An ordinary reply cannot complete a managed TaskId, and a reply claiming a managed
 context cannot complete an ordinary one. The Bridge opens the lanes of all active records when it
-starts, and any other lane on its first bridge ask. A workflow reply from an agent enrolled after the
-Bridge started waits in its epoch queue until that lane opens. No user, permission, queue, consumer,
-poller or broker is added, and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals
+starts and keeps them reconciled with the trusted authority directory through a local file watcher
+(not a broker poller). Opening a lane declares its epoch `fleet.agent.bridge` queue and attaches the
+sole consumer. Enrollment opens the agent's lane, a new epoch replaces it, and a removed, revoked or
+ambiguous record closes it, all without a bridge ask or a restart. A lane that fails to open is
+retried at most five times with a doubling backoff (5 s first), then stays refused until
+re-enrollment. Until the lane is open, the epoch has no reply queue. Then a workflow reply is
+unroutable, not queued, and the delegation stays unconfirmed and resends. No user, permission, queue,
+consumer, poller or broker is added, and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals
 from a managed agent remain unrouted.
 
 A dedicated Fleet.Temporal receiver

@@ -619,8 +619,8 @@ starts and keeps them reconciled with the trusted authority directory through a 
 sole consumer. Enrollment opens the agent's lane, a new epoch replaces it, and a removed, revoked or
 ambiguous record closes it, all without a bridge ask or a restart. A lane that fails to open is
 retried at most five times with a doubling backoff (5 s first), then stays refused until
-re-enrollment. Until the lane is open, the epoch has no reply queue. Then a workflow reply is
-unroutable, not queued, and the delegation stays unconfirmed and resends. No user, permission, queue,
+re-enrollment. A workflow reply sent before its lane opens finds no epoch reply queue: it is
+unroutable, not queued, so the delegation stays unconfirmed and resends. No user, permission, queue,
 consumer, poller or broker is added, and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals
 from a managed agent remain unrouted.
 

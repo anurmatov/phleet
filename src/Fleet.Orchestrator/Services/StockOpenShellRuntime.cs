@@ -652,6 +652,13 @@ public sealed class StockOpenShellRuntime(
         // #492 §7/§11: a verified outcome records the workload/supervisor identities it left behind.
         if (outcome.Result.Ok && final.Applied is { } observed && final.State is "applied" or "stopped" or "revoked")
             final = final with { Applied = observed with { Containers = await ObserveContainersAsync(observed) } };
+        // Review F6/R3: Docker is committed by this swap, so the managed record is retired first and a failure is
+        // persisted by the same swap that clears Operation: an unresolved handoff, never a clean applied_docker.
+        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved && !RetireAuthority(name))
+        {
+            final = final with { State = "needs_attention", Errors = [.. final.Errors, "authority_retire_failed"] };
+            outcome = (final, outcome.AppliedKind, outcome.AppliedPolicy, Result.Refused(502, "docker_handoff_unresolved", ["authority_retire_failed"]));
+        }
         var finalJson = final.Serialize();
         try
         {
@@ -662,20 +669,6 @@ public sealed class StockOpenShellRuntime(
         {
             // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
             return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
-        }
-        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved && !RetireAuthority(name))
-        {
-            // Review F6: Docker is committed but the managed record still holds ordinary traffic: an
-            // unresolved handoff, persisted and reported, never a clean applied_docker.
-            var held = final with { State = "needs_attention", Errors = [.. final.Errors, "authority_retire_failed"] };
-            outcome = (held, null, null, Result.Refused(502, "docker_handoff_unresolved", ["authority_retire_failed"]));
-            try
-            {
-                if (!await store.SwapAsync(agent.Id, finalJson, held.Serialize(), null, null, CancellationToken.None))
-                    outcome = (held, null, null, Result.Refused(409, "managed_state_changed_during_" + kind, ["authority_retire_failed"]));
-            }
-            catch (Exception ex) when (ex is DbException or InvalidOperationException)
-            { outcome = (held, null, null, Result.Refused(503, kind + "_state_unknown", ["authority_retire_failed"])); }
         }
         await PublishAsync(name);
         logger.LogInformation("Managed {Kind} for {Agent}: {Code}", kind, name, outcome.Result.Code);
@@ -1165,10 +1158,13 @@ public sealed class StockOpenShellRuntime(
         Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
         if (record.Applied is null && record.Candidate is null) return (record, null, null, Result.Refused(409, "managed_binding_missing"));
-        var errors = await RevokeFanoutAsync(agent.Name, record, ct);
-        return errors.Count == 0
-            ? (record with { State = "revoked", Candidate = null, Errors = [] }, null, null, Result.Done("revoked"))
-            : Hold(record, 502, "revoke_unresolved", [.. errors]);
+        // Review R2: a handed-off Docker agent keeps (or regains) a retired authority, never a held revoked one;
+        // this is also the supported retry of an earlier authority_retire_failed.
+        var docker = agent.AppliedRuntimeKind == "docker";
+        var errors = await RevokeFanoutAsync(agent.Name, record, ct, keepRetired: docker);
+        if (errors.Count > 0) return Hold(record, 502, "revoke_unresolved", [.. errors]);
+        if (docker && !RetireAuthority(agent.Name)) return Hold(record, 502, "docker_handoff_unresolved", "authority_retire_failed");
+        return (record with { State = "revoked", Candidate = null, Errors = [] }, null, null, Result.Done("revoked"));
     }
 
     /// <summary>Changed/unobservable generation: hold, then one bounded revoke/Stop fanout; never Start.</summary>
@@ -1287,7 +1283,8 @@ public sealed class StockOpenShellRuntime(
     /// verified binding, as independent legs with their own deadline so a hung leg never suppresses
     /// Stop. Returns every unresolved error; an empty list is the only clean result.
     /// </summary>
-    internal async Task<List<string>> RevokeFanoutAsync(string agentName, ManagedRecord record, CancellationToken ct, bool stop = true)
+    internal async Task<List<string>> RevokeFanoutAsync(string agentName, ManagedRecord record, CancellationToken ct, bool stop = true,
+        bool keepRetired = false)
     {
         var errors = new List<string>();
         var targets = new[] { record.Applied, record.Candidate }.OfType<ManagedBinding>().DistinctBy(b => b.Epoch).ToList();
@@ -1301,6 +1298,7 @@ public sealed class StockOpenShellRuntime(
                 var path = AuthorityPath(agentName);
                 if (!File.Exists(path)) return Task.FromResult<string?>(null);
                 var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
+                if (keepRetired && current["State"]?.GetValue<string>() == StockAuthoritySource.RetiredState) return Task.FromResult<string?>(null);
                 current["State"] = "revoked";
                 WriteRecord(path, current);
                 return Task.FromResult<string?>(null);

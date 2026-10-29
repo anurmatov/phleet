@@ -387,5 +387,60 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
         Assert.Equal("needs_attention", record.State);
         Assert.Contains("authority_retire_failed", record.Errors);
+        // Review R3: the swap that clears Operation already carries the hold; no clean record is ever released.
+        Assert.All(_t._store.History.Select(ManagedRecord.Parse).Where(r => r.Operation is null),
+            r => Assert.Contains("authority_retire_failed", r.Errors));
+    }
+
+    private ManagedBinding HandedOffDocker(string state, string authority, params string[] errors)
+    {
+        var binding = _t.Binding("fleet-agent1-r2r2r2r2", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "docker", record: new ManagedRecord { State = state, Applied = binding, Errors = [.. errors] }));
+        _t.WriteAuthority(authority);
+        return binding;
+    }
+
+    private string AuthorityState() =>
+        System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!["State"]!.GetValue<string>();
+
+    [Fact]
+    public async Task Revoke_on_a_handed_off_docker_agent_keeps_its_authority_retired()
+    {
+        HandedOffDocker("revoked", "retired");
+
+        var revoke = await _t.Runtime().RevokeAsync("agent1", default);
+
+        Assert.True(revoke.Ok, revoke.Code + ":" + string.Join(",", revoke.Errors));
+        Assert.Equal("retired", AuthorityState());
+        Assert.Equal("revoked", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
+    [Fact]
+    public async Task Revoke_retries_a_failed_authority_retirement_and_leaves_the_agent_docker_retired()
+    {
+        // Review R2: apply refuses after the handoff; revoke is the supported retire path.
+        HandedOffDocker("needs_attention", "revoked", "authority_retire_failed");
+
+        var revoke = await _t.Runtime().RevokeAsync("agent1", default);
+
+        Assert.True(revoke.Ok, revoke.Code + ":" + string.Join(",", revoke.Errors));
+        Assert.Equal("retired", AuthorityState());
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("revoked", 0), (record.State, record.Errors.Count));
+        Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
+    }
+
+    [Fact]
+    public async Task Revoke_whose_retirement_still_fails_keeps_the_docker_handoff_unresolved()
+    {
+        HandedOffDocker("needs_attention", "revoked", "authority_retire_failed");
+        File.Delete(_t.AuthorityPath());
+        Directory.CreateDirectory(_t.AuthorityPath());
+
+        var revoke = await _t.Runtime().RevokeAsync("agent1", default);
+
+        Assert.Equal("docker_handoff_unresolved", revoke.Code);
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
 }

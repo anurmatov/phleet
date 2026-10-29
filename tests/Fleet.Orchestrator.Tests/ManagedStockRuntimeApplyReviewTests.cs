@@ -249,6 +249,33 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
 
+    [Fact]
+    public async Task A_claim_left_by_a_returned_call_is_shown_interrupted_not_busy()
+    {
+        var binding = _t.Binding("fleet-agent1-f6f6f6f6", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        var agent = _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var registry = new AgentRegistry(new TaskHistoryStore(), Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRegistry>.Instance);
+        registry.PreloadFromDbConfig(agent);
+        // The final (claim-clearing) commit fails without committing: the call returns and its claim stays stored.
+        _t._store.OnSwap = (_, next) => ManagedRecord.Parse(next).Operation is null
+            ? throw new InvalidOperationException("synthetic_db_failure") : Task.CompletedTask;
+
+        var stop = await _t.Runtime(registry: registry).StopAsync("agent1", default);
+
+        Assert.Equal("stop_state_unknown", stop.Code);
+        var stored = _t._store.Get("agent1").AppliedRuntimeBinding;
+        Assert.StartsWith("stop:", ManagedRecord.Parse(stored).Operation);
+        var shown = registry.Get("agent1")!;
+        Assert.Equal("needs_attention", shown.ManagedState);
+        Assert.Contains("interrupted_stop", shown.ManagedErrors!);
+        Assert.False(shown.Managed!.Pending);
+        // A later reload of the same stored record (fresh registry) agrees.
+        var (state, errors, status) = AgentRegistry.ManagedView(stored, agentName: "agent1");
+        Assert.Equal(("needs_attention", false), (state, status!.Pending));
+        Assert.Contains("interrupted_stop", errors!);
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

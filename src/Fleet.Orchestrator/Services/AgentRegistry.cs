@@ -61,7 +61,7 @@ public sealed class AgentRegistry
             AppliedRuntimeKind = dbAgent.AppliedRuntimeKind,
             RuntimePending = AgentPatchHelpers.RuntimePending(dbAgent),
         };
-        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(dbAgent.AppliedRuntimeBinding);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(dbAgent.AppliedRuntimeBinding, agentName: dbAgent.Name);
         ApplyManagedLive(state);
         // Only add if not already present (heartbeat may have arrived first)
         if (_agents.TryAdd(dbAgent.Name, state))
@@ -75,7 +75,7 @@ public sealed class AgentRegistry
         state.RuntimeKind = agent.RuntimeKind;
         state.AppliedRuntimeKind = agent.AppliedRuntimeKind;
         state.RuntimePending = AgentPatchHelpers.RuntimePending(agent);
-        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(agent.AppliedRuntimeBinding);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(agent.AppliedRuntimeBinding, agentName: agent.Name);
         ApplyManagedLive(state);
         BroadcastIfChanged(state, force: true);
     }
@@ -367,12 +367,17 @@ public sealed class AgentRegistry
         int PriorityQueuedCount);
 
     /// <summary>Content-free view of the managed record: state and error codes only.</summary>
-    internal static (string? State, IReadOnlyList<string>? Errors, ManagedStatusView? Status) ManagedView(string? binding, string? backupDir = null)
+    internal static (string? State, IReadOnlyList<string>? Errors, ManagedStatusView? Status) ManagedView(string? binding, string? backupDir = null,
+        string? agentName = null)
     {
         if (string.IsNullOrEmpty(binding)) return (null, null, null);
         try
         {
             var record = ManagedRecord.Parse(binding);
+            // Review A8: for a known agent, a claim whose owning call has returned (or an earlier process's) is shown
+            // as the interrupted hold the next managed call records, never as a permanent "busy".
+            if (agentName is not null && record.Operation is { } op && !StockOpenShellRuntime.OperationLive(agentName, op))
+                record = record with { Operation = null, State = "needs_attention", Errors = [.. record.Errors, "interrupted_" + op.Split(':')[0]] };
             return (record.Operation is not null ? "busy" : record.State, record.Errors, ManagedStatus(record, backupDir));
         }
         catch (System.Text.Json.JsonException) { return ("unreadable", null, null); }

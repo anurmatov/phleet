@@ -659,11 +659,36 @@ public sealed class StockOpenShellRuntime(
         // process's claim on the record treats it as in progress for exactly the lifetime of this call.
         Running.AddOrUpdate(agent!.Name, 1, (_, n) => n + 1);
         try { return await RunClaimedAsync(name, kind, agent, record!, step, ct); }
-        finally { if (Running.AddOrUpdate(agent.Name, 0, (_, n) => n - 1) <= 0) Running.TryRemove(new(agent.Name, 0)); }
+        finally
+        {
+            if (Running.AddOrUpdate(agent.Name, 0, (_, n) => n - 1) <= 0)
+            {
+                Running.TryRemove(new(agent.Name, 0));
+                // Review A8: a claim this call left behind (unfinalized handoff, unknown commit) was published while
+                // still live; republish so the status shows it interrupted rather than a stale "busy".
+                await RepublishLeftClaimAsync(agent.Name);
+            }
+        }
     }
 
     /// <summary>Agents with a <see cref="RunAsync"/> call live in this process (claim CAS through final CAS).</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Running = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>True while <paramref name="operation"/> belongs to this process and a call for the agent is still running.</summary>
+    internal static bool OperationLive(string agentName, string operation) =>
+        operation.EndsWith(":" + Instance, StringComparison.Ordinal) && Running.ContainsKey(agentName);
+
+    private async Task RepublishLeftClaimAsync(string name)
+    {
+        try
+        {
+            if (await store.LoadAsync(name, CancellationToken.None) is not { } fresh || string.IsNullOrEmpty(fresh.AppliedRuntimeBinding)) return;
+            if (ManagedRecord.Parse(fresh.AppliedRuntimeBinding).Operation is { } op && !OperationLive(name, op)
+                && services.GetService<AgentRegistry>() is { } registry)
+                registry.UpdateRuntimeSelection(fresh);
+        }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException or JsonException) { }
+    }
 
     private async Task<Result> RunClaimedAsync(string name, string kind, Agent agent, ManagedRecord record, Step step, CancellationToken ct)
     {

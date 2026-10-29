@@ -1004,7 +1004,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     private string _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"}}";
     internal string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
-    internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null)
+    internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, AgentRegistry? registry = null)
     {
         Directory.CreateDirectory(_dir);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -1020,8 +1020,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         File.WriteAllText(Path.Combine(generated, "appsettings.json"), _generatedSettings);
         if (_generatedMcp is not null) File.WriteAllText(Path.Combine(generated, ".mcp.json"), _generatedMcp);
         File.WriteAllText(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), "model = \"synthetic\"\n");
+        var services = new ServiceCollection();
+        if (registry is not null) services.AddSingleton(registry);
         return new StockOpenShellRuntime(Config(), _cli, Provisioner(), _store, _host, _broker.Credentials,
-            new ServiceCollection().BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)
+            services.BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)
         {
             LegTimeout = TimeSpan.FromMilliseconds(400),
             FanoutTimeout = TimeSpan.FromSeconds(5),

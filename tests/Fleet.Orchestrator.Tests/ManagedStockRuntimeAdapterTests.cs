@@ -1131,6 +1131,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         internal const string PinnedProfiles = "{\"openai\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"telegram\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal-read\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal-cross-chat\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\"}";
         private readonly List<Agent> _agents = [];
         public bool RejectNextSwap;
+        /// <summary>Rejects (false) or fails (DB exception) any swap that commits this applied kind.</summary>
+        public string? RejectKind, ThrowKind;
         public readonly List<string> History = [];
 
         public Agent Add(Agent agent) { agent.Id = _agents.Count + 1; _agents.Add(agent); return agent; }
@@ -1145,6 +1147,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         {
             var agent = _agents.Single(a => a.Id == agentId);
             if (RejectNextSwap) { RejectNextSwap = false; return Task.FromResult(false); }
+            if (appliedKind is not null && appliedKind == RejectKind) return Task.FromResult(false);
+            if (appliedKind is not null && appliedKind == ThrowKind) throw new InvalidOperationException("synthetic_db_failure");
             if (agent.AppliedRuntimeBinding != expected) return Task.FromResult(false);
             agent.AppliedRuntimeBinding = next;
             History.Add(next);

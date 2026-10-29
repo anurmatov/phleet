@@ -670,20 +670,30 @@ public sealed class StockOpenShellRuntime(
             final = final with { Applied = observed with { Containers = await ObserveContainersAsync(observed) } };
         // Review F6/R3: Docker is committed by this swap, so the managed record is retired first and a failure is
         // persisted by the same swap that clears Operation: an unresolved handoff, never a clean applied_docker.
-        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved && !RetireAuthority(name))
+        var retired = false;
+        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved)
         {
-            final = final with { State = "needs_attention", Errors = [.. final.Errors, "authority_retire_failed"] };
-            outcome = (final, outcome.AppliedKind, outcome.AppliedPolicy, Result.Refused(502, "docker_handoff_unresolved", ["authority_retire_failed"]));
+            if (RetireAuthority(name)) retired = true;
+            else
+            {
+                final = final with { State = "needs_attention", Errors = [.. final.Errors, "authority_retire_failed"] };
+                outcome = (final, outcome.AppliedKind, outcome.AppliedPolicy, Result.Refused(502, "docker_handoff_unresolved", ["authority_retire_failed"]));
+            }
         }
         var finalJson = final.Serialize();
         try
         {
             if (!await store.SwapAsync(agent.Id, saved, finalJson, outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None))
+            {
+                // Review R2: the Docker binding is not committed, so the ordinary-admission hold is reinstated.
+                if (retired) ReinstateAuthorityHold(name);
                 return Result.Refused(409, "managed_state_changed_during_" + kind, outcome.Result.Errors);
+            }
         }
         catch (Exception ex) when (ex is DbException or InvalidOperationException)
         {
             // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
+            if (retired) ReinstateAuthorityHold(name);
             return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
         }
         await PublishAsync(name);
@@ -1783,6 +1793,30 @@ public sealed class StockOpenShellRuntime(
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
             or InvalidOperationException or StockIdentityDenied)
         { logger.LogWarning("Retiring the managed record for {Agent} failed; ordinary traffic stays held", agentName); }
+        return false;
+    }
+
+    /// <summary>
+    /// Review R2: undo a retirement whose Docker binding was never committed (failed final CAS or DB write), so the
+    /// record is revoked again and ordinary telemetry and control stay held. Only a plain retired file is rewritten;
+    /// anything else (absent, link, unreadable) is left as is and already holds or was never managed.
+    /// </summary>
+    internal bool ReinstateAuthorityHold(string agentName)
+    {
+        try
+        {
+            var path = AuthorityPath(agentName);
+            if (AuthorityEntry(path) != true) return false;
+            var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
+            if (current["State"]?.GetValue<string>() != StockAuthoritySource.RetiredState) return false;
+            current["State"] = "revoked";
+            WriteRecord(path, current);
+            if (AuthorityEntry(path) == true
+                && JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))?["State"]?.GetValue<string>() == "revoked") return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
+            or InvalidOperationException or StockIdentityDenied) { }
+        logger.LogError("Reinstating the managed hold for {Agent} after an uncommitted Docker handoff failed", agentName);
         return false;
     }
 

@@ -1,5 +1,6 @@
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
+using Microsoft.Extensions.Configuration;
 
 namespace Fleet.Orchestrator.Tests;
 
@@ -421,6 +422,50 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         // Review R3: the swap that clears Operation already carries the hold; no clean record is ever released.
         Assert.All(_t._store.History.Select(ManagedRecord.Parse).Where(r => r.Operation is null),
             r => Assert.Contains("authority_retire_failed", r.Errors));
+    }
+
+    [Theory]
+    [InlineData("reject")]
+    [InlineData("throw")]
+    public async Task Failed_final_binding_cas_keeps_ordinary_admission_held_for_a_docker_handoff(string failure)
+    {
+        var binding = _t.Binding("fleet-agent1-r2f1f1f1", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _t.WriteAuthority("active");
+        if (failure == "reject") _t._store.RejectKind = "docker"; else _t._store.ThrowKind = "docker";
+        var directory = Path.GetDirectoryName(_t.AuthorityPath())!;
+        var hold = new StockRuntimeMutationHold(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:AuthorityDirectory"] = directory }).Build());
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        // Review R2: the Docker binding never committed, so the retired record is revoked again and the hold stands.
+        Assert.False(result.Ok);
+        Assert.Equal(failure == "reject" ? "managed_state_changed_during_apply" : "apply_state_unknown", result.Code);
+        Assert.Equal("openshell", _t._store.Get("agent1").AppliedRuntimeKind);
+        Assert.Equal("revoked", AuthorityState());
+        Assert.False(Fleet.Shared.Security.StockAuthoritySource.IsRetired(directory, "agent1"));
+        Assert.True(hold.HoldsOrdinaryTraffic("agent1"));
+    }
+
+    [Fact]
+    public async Task Committed_docker_handoff_still_retires_the_authority_and_releases_admission()
+    {
+        var binding = _t.Binding("fleet-agent1-r2c0c0c0", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _t.WriteAuthority("active");
+        var directory = Path.GetDirectoryName(_t.AuthorityPath())!;
+        var hold = new StockRuntimeMutationHold(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:AuthorityDirectory"] = directory }).Build());
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
+        Assert.Equal("retired", AuthorityState());
+        Assert.False(hold.HoldsOrdinaryTraffic("agent1"));
     }
 
     private ManagedBinding HandedOffDocker(string state, string authority, params string[] errors)

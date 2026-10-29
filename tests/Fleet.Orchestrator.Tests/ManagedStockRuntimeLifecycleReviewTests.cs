@@ -486,6 +486,55 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Null(StockOpenShellRuntime.NoFollowOpenFlags(System.Runtime.InteropServices.Architecture.S390x));
     }
 
+    [Fact]
+    public async Task Apply_never_writes_the_observer_password_into_the_shared_authority_directory()
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        var authority = Path.GetDirectoryName(_t.AuthorityPath())!;
+        Directory.CreateDirectory(authority);
+        File.WriteAllText(Path.Combine(authority, "agent1.observer.password"), "legacy-observer"); // pre-split layout
+        var runtime = _t.Runtime(dockerStop: _ => { _t._host.DockerStates = ["exited"]; return Task.FromResult(true); });
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        // Review W4: the authority directory Telegram/Temporal/Bridge mount holds records and control only.
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        Assert.True(File.Exists(Path.Combine(authority, "agent1.control.password")));
+        Assert.Empty(Directory.EnumerateFiles(authority, "*observer*"));
+        var observerDir = Path.Combine(_t._dir, "managed", "observer");
+        var observer = Path.Combine(observerDir, "agent1.observer.password");
+        Assert.Equal(observer, Fleet.Shared.Security.StockAuthoritySource.RolePassword(authority, "agent1", "observer"));
+        Assert.Equal(64, File.ReadAllText(observer).Length);
+        Assert.NotEqual(File.ReadAllText(observer), File.ReadAllText(Path.Combine(authority, "agent1.control.password")));
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(observer));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(observerDir));
+        }
+    }
+
+    [Fact]
+    public void Observer_role_password_resolves_the_private_sibling_and_refuses_links()
+    {
+        var root = Directory.CreateTempSubdirectory("managed-w4-").FullName;
+        try
+        {
+            var authority = Path.Combine(root, "managed", "authority");
+            var observer = Path.Combine(root, "managed", "observer");
+            Directory.CreateDirectory(authority);
+            Assert.Equal(Path.Combine(authority, "agent1.control.password"),
+                Fleet.Shared.Security.StockAuthoritySource.RolePassword(authority, "agent1", "control"));
+            Assert.Equal(Path.Combine(observer, "agent1.observer.password"),
+                Fleet.Shared.Security.StockAuthoritySource.RolePassword(authority + Path.DirectorySeparatorChar, "agent1", "observer"));
+            Directory.CreateSymbolicLink(observer, authority); // a linked observer directory is never followed
+            Assert.Equal("broker_credential_unavailable", Assert.Throws<Fleet.Shared.Security.StockIdentityDenied>(
+                () => Fleet.Shared.Security.StockAuthoritySource.RolePassword(authority, "agent1", "observer")).Message);
+            Assert.Throws<Fleet.Shared.Security.StockIdentityDenied>(
+                () => Fleet.Shared.Security.StockAuthoritySource.RolePassword(Path.GetPathRoot(root)!, "agent1", "observer"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     private ManagedBinding HandedOffDocker(string state, string authority, params string[] errors)
     {
         var binding = _t.Binding("fleet-agent1-r2r2r2r2", Guid.NewGuid());

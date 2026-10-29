@@ -17,17 +17,25 @@ namespace Fleet.Orchestrator.Tests;
 /// <summary>#492 managed observer: one epoch-bound <c>-observer</c> receiver per active managed record.</summary>
 public sealed class ManagedStockRuntimeObserverLaneTests : IDisposable
 {
-    private readonly string _dir = Directory.CreateTempSubdirectory("managed-observer-").FullName;
+    // Review W4: records in managed/authority, observer credentials only in the private managed/observer sibling.
+    private readonly string _root = Directory.CreateTempSubdirectory("managed-observer-").FullName;
+    private readonly string _dir;
+    private readonly string _observerDir;
     private readonly Dictionary<string, Guid> _epochs = [];
     private readonly List<(ConnectionFactory Factory, IConnection Connection, IChannel Channel)> _lanes = [];
     private readonly AgentRegistry _registry = new(new TaskHistoryStore(), NullLogger<AgentRegistry>.Instance);
     private readonly IOptions<RabbitMqOptions> _options = Options.Create(new RabbitMqOptions { Host = "ordinary.example.test" });
     private readonly IConfiguration _config;
 
-    public ManagedStockRuntimeObserverLaneTests() => _config = new ConfigurationBuilder()
-        .AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:AuthorityDirectory"] = _dir }).Build();
+    public ManagedStockRuntimeObserverLaneTests()
+    {
+        _dir = Directory.CreateDirectory(Path.Combine(_root, "managed", "authority")).FullName;
+        _observerDir = Directory.CreateDirectory(Path.Combine(_root, "managed", "observer")).FullName;
+        _config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:AuthorityDirectory"] = _dir }).Build();
+    }
 
-    public void Dispose() => Directory.Delete(_dir, recursive: true);
+    public void Dispose() => Directory.Delete(_root, recursive: true);
 
     private void Save(string agent, string sandbox, string state = "active", string file = "")
     {
@@ -39,7 +47,7 @@ public sealed class ManagedStockRuntimeObserverLaneTests : IDisposable
             AssertionPrivateKeyPath = Path.Combine(_dir, "private"), AssertionPublicKeyPath = Path.Combine(_dir, "public"),
             MemoryHost = "memory.example.test", BrokerHost = "broker-" + agent + ".example.test"
         }));
-        File.WriteAllText(Path.Combine(_dir, agent + ".observer.password"), "observer-" + agent);
+        File.WriteAllText(Path.Combine(_observerDir, agent + ".observer.password"), "observer-" + agent);
     }
 
     private string Vhost(string agent) => "stock-" + _epochs[agent].ToString("N");
@@ -70,6 +78,19 @@ public sealed class ManagedStockRuntimeObserverLaneTests : IDisposable
         ((AsyncEventingBasicConsumer)channel.ReceivedCalls().Single(c => c.GetMethodInfo().Name == "BasicConsumeAsync").GetArguments()
             .Single(a => a is AsyncEventingBasicConsumer)!).HandleBasicDeliverAsync("consumer", 1, false, "fleet.orchestrator", route,
             new BasicProperties { UserId = user }, JsonSerializer.SerializeToUtf8Bytes(new AgentHeartbeat(agent, status, DateTimeOffset.UtcNow)), default);
+
+    [Fact]
+    public async Task ObserverLane_ReadsItsPasswordFromThePrivateSibling_NeverFromTheSharedAuthorityDirectory()
+    {
+        // Review W4: an observer password left in the shared (Telegram/Temporal/Bridge-mounted) directory is never used.
+        Save("agent1", "sandbox-1");
+        Save("agent2", "sandbox-2");
+        File.Move(Path.Combine(_observerDir, "agent2.observer.password"), Path.Combine(_dir, "agent2.observer.password"));
+        using var observer = Observer();
+        await observer.ReconcileAsync(_dir, default);
+        Assert.Equal("observer-agent1", Lane("agent1").Factory.Password);
+        Assert.DoesNotContain(_lanes, l => l.Factory.Password == "observer-agent2");
+    }
 
     [Fact]
     public async Task OneObserverLanePerActiveRecord_EachInItsOwnEpoch_RemovedAndChangedRecordsReconciled()
@@ -167,8 +188,8 @@ public sealed class ManagedStockRuntimeObserverLaneTests : IDisposable
             }
             if (fault == "password_link")
             {
-                File.Move(Path.Combine(_dir, "agent2.observer.password"), Path.Combine(outside, "password"));
-                File.CreateSymbolicLink(Path.Combine(_dir, "agent2.observer.password"), Path.Combine(outside, "password"));
+                File.Move(Path.Combine(_observerDir, "agent2.observer.password"), Path.Combine(outside, "password"));
+                File.CreateSymbolicLink(Path.Combine(_observerDir, "agent2.observer.password"), Path.Combine(outside, "password"));
             }
             var active = StockAuthoritySource.Active(_dir);
             Assert.NotNull(active["agent1"]);

@@ -108,14 +108,33 @@ public static class StockAuthoritySource
         { return false; } // unreadable is not retired
     }
 
-    /// <summary>The outside <c>control</c>/<c>observer</c> broker credential beside an agent's record. Refuses links.</summary>
+    /// <summary>
+    /// The outside broker credential for an agent. <c>control</c> lives beside the record in the shared authority
+    /// directory; <c>observer</c> lives only in the orchestrator-private sibling <see cref="ObserverDirectory"/>, so a
+    /// read-only authority mount (Telegram, Temporal, Bridge) never exposes it. Refuses links.
+    /// </summary>
     public static string RolePassword(string directory, string agent, string role)
     {
         if (!Path.IsPathFullyQualified(directory) || !ValidAgent(agent) || role is not ("control" or "observer"))
             throw new StockIdentityDenied("broker_configuration");
-        var path = Path.Combine(directory, $"{agent}.{role}.password");
+        var parent = role == "observer" ? ObserverDirectory(directory) : directory;
+        if (role == "observer" && new DirectoryInfo(parent).LinkTarget is not null)
+            throw new StockIdentityDenied("broker_credential_unavailable");
+        var path = Path.Combine(parent, $"{agent}.{role}.password");
         if (new FileInfo(path).LinkTarget is not null) throw new StockIdentityDenied("broker_credential_unavailable");
         return path;
+    }
+
+    /// <summary>
+    /// Review W4: the orchestrator-only observer credential directory, the <c>observer</c> sibling of the authority
+    /// directory (<c>&lt;ConfigDir&gt;/managed/observer</c> for the default <c>managed/authority</c>).
+    /// </summary>
+    public static string ObserverDirectory(string authorityDirectory)
+    {
+        if (!Path.IsPathFullyQualified(authorityDirectory)
+            || Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(authorityDirectory)) is not { Length: > 0 } parent)
+            throw new StockIdentityDenied("broker_configuration");
+        return Path.Combine(parent, "observer");
     }
 
     /// <summary>Same agent-name rule as <see cref="StockEnrollmentAuthority.Load"/>; also a safe file-name component.</summary>

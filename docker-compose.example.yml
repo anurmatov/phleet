@@ -257,6 +257,12 @@ services:
       dockerfile: src/Fleet.Telegram/Dockerfile
     image: fleet:telegram
     container_name: fleet-telegram
+    # Managed stock OpenShell (#492, default off): to enable this service's control lane, mount ONLY the
+    # authority directory, read-only (records + <agent>.control.password), and set
+    # StockOpenShell__AuthorityDirectory=/var/lib/fleet-openshell-client/managed/authority. Observer passwords
+    # live in the orchestrator-only managed/observer sibling and are never mounted here.
+    # volumes:
+    #   - ${FLEET_BASE_DIR}/openshell-client/managed/authority:/var/lib/fleet-openshell-client/managed/authority:ro
     environment:
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
@@ -290,6 +296,12 @@ services:
       dockerfile: src/Fleet.Bridge/Dockerfile
     image: fleet:bridge
     container_name: fleet-bridge
+    # Managed stock OpenShell (#492, default off): to enable this service's control lane, mount ONLY the
+    # authority directory, read-only (records + <agent>.control.password), and set
+    # StockOpenShell__AuthorityDirectory=/var/lib/fleet-openshell-client/managed/authority. Observer passwords
+    # live in the orchestrator-only managed/observer sibling and are never mounted here.
+    # volumes:
+    #   - ${FLEET_BASE_DIR}/openshell-client/managed/authority:/var/lib/fleet-openshell-client/managed/authority:ro
     ports:
       - "3300:3300"
     environment:
@@ -335,6 +347,11 @@ services:
       # If you're not using gemini, create an empty placeholder file:
       #   touch ${FLEET_BASE_DIR}/.gemini-credentials.json
       - ${FLEET_BASE_DIR}/.gemini-credentials.json:/root/.gemini/oauth_creds.json
+      # Managed stock OpenShell (#492, default off): for managed delegation mount ONLY the authority directory,
+      # read-only (records + <agent>.control.password), and set
+      # StockOpenShell__AuthorityDirectory=/var/lib/fleet-openshell-client/managed/authority. Observer passwords
+      # live in the orchestrator-only managed/observer sibling and are never mounted here.
+      # - ${FLEET_BASE_DIR}/openshell-client/managed/authority:/var/lib/fleet-openshell-client/managed/authority:ro
     environment:
       - RabbitMq__Host=rabbitmq
       - TemporalBridge__TemporalAddress=temporal-server:7233

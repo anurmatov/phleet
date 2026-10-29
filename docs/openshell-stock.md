@@ -461,10 +461,15 @@ unless `FLEET_STOCK_BROKER_MANAGEMENT_URL` is `https://`, `broker-ca.pem` is rea
 `openshell/gateways/<name>/mtls/tls.crt` and `tls.key` are readable here, and `python3 -c 'import sqlite3'`
 succeeds (`scripts/lib/stock-managed-preflight.sh`). Default-off installs skip these checks.
 
-The adapter writes per-agent records and control/observer broker passwords under
-`managed/authority/` (0600). Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
-`managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram), keeping
-`AuthorityFile` for gateway trust. The gateway-verified sandbox claim (hook) or the assertion's
+The adapter writes per-agent records and `<agent>.control.password` under `managed/authority/` (0600,
+directory 0700). Observer broker passwords go only to the orchestrator-private sibling
+`managed/observer/<agent>.observer.password` (0600, directory 0700) and are never written to, or read from,
+the authority directory. Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
+`managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram, Bridge), keeping
+`AuthorityFile` for gateway trust. Mount only `managed/authority` into those services, read-only (see the
+commented mounts in `docker-compose.example.yml`); never mount `managed/` or `managed/observer`. An enrollment
+written before this split keeps its observer lane closed until its next apply rewrites the credentials; the
+legacy observer copy in the authority directory is then removed. The gateway-verified sandbox claim (hook) or the assertion's
 sandbox (receiver, still signature-verified against the selected record) is only an index hint:
 exactly one active, non-symlink record must claim it, else the request refuses.
 
@@ -485,7 +490,8 @@ one per process:
   releases the lane and the ordinary-traffic hold. Never delete or edit authority records by hand; a
   failed retirement stays `needs_attention` until an operator reconciles and revokes.
 - **Observer.** The orchestrator's stock observer keeps one `-observer` receiver for each active
-  record. It uses that record's `BrokerHost` and `<agent>.observer.password` and reconciles every 30 s:
+  record. It uses that record's `BrokerHost` and `managed/observer/<agent>.observer.password` (the
+  `observer` sibling of `AuthorityDirectory`; links refused) and reconciles every 30 s:
   new or re-enrolled records get a receiver, and vanished, revoked or changed ones are closed. A failed
   or dropped receiver is not retried until its record changes. One lane never affects other lanes or
   the ordinary consumer, and warnings carry no exception text or credentials.

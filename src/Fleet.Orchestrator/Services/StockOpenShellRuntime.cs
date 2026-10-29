@@ -359,6 +359,8 @@ public sealed class StockOpenShellRuntime(
     internal string WorkloadAppRoot => WorkloadHome + "/app";
     internal string WorkloadEnrollmentFile => WorkloadHome + "/trust/enrollment.json";
     private string AuthorityDir => Path.Combine(ConfigDir, "managed", "authority");
+    /// <summary>Orchestrator-only observer credentials (review W4); never mounted into another service.</summary>
+    private string ObserverDir => StockAuthoritySource.ObserverDirectory(AuthorityDir);
     private string AuthorityPath(string agent) => Path.Combine(AuthorityDir, agent + ".json");
 
     /// <summary>Desired/applied kinds for routing; null when the agent is absent; throws on DB failure.</summary>
@@ -1642,10 +1644,17 @@ public sealed class StockOpenShellRuntime(
         return new JsonObject { ["mcpServers"] = servers }.ToJsonString();
     }
 
+    /// <summary>
+    /// Review W4: the control credential sits beside the record in the shared authority directory; the observer
+    /// credential goes only to the orchestrator-private 0700 <c>managed/observer</c> sibling, never the authority
+    /// directory that Telegram/Temporal/Bridge mount. A legacy observer copy in the authority directory is removed.
+    /// </summary>
     private void WriteBrokerPasswords(string agent, IReadOnlyDictionary<string, string> passwords)
     {
-        foreach (var role in new[] { "control", "observer" })
-            WriteText(Path.Combine(AuthorityDir, $"{agent}.{role}.password"), passwords[role]);
+        WriteText(Path.Combine(AuthorityDir, $"{agent}.control.password"), passwords["control"]);
+        WriteText(Path.Combine(ObserverDir, $"{agent}.observer.password"), passwords["observer"]);
+        var legacy = Path.Combine(AuthorityDir, $"{agent}.observer.password");
+        if (File.Exists(legacy) || new FileInfo(legacy).LinkTarget is not null) File.Delete(legacy);
     }
 
     /// <summary>The ordinary generated inputs, validated before any old-runtime Stop.</summary>

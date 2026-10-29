@@ -76,6 +76,10 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
         await _gate.WaitAsync(ct);
         try
         {
+            // Reread under the gate (#492 V1): the snapshot above may predate an enrollment whose lane another
+            // reconcile or ask opened meanwhile, and a stale snapshot must never close that lane.
+            try { active = StockAuthoritySource.Active(directory); }
+            catch (StockIdentityDenied) { logger.LogWarning("Stock control lanes not reconciled: authority unavailable"); return; }
             foreach (var agent in _lanes.Keys.Where(a => active.GetValueOrDefault(a) is null).ToList())
             {
                 // Removed, revoked or ambiguous: the old epoch connection never serves the agent again.

@@ -321,6 +321,36 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
     }
 
     [Fact]
+    public async Task StaleReconcileSnapshot_NeverClosesALaneOpenedForANewEnrollment()
+    {
+        Save("agent1", "sandbox-1");
+        BridgeRelayService? bridge = null;
+        Task<string>? ask = null;
+        await using var created = Bridge(factory =>
+        {
+            // While the startup reconcile (snapshot: agent1 only) opens agent1's lane, agent2 enrolls and an
+            // ask to agent2 queues on the gate ahead of that reconcile's close pass (#492 V1).
+            if (factory.VirtualHost == Vhost("agent1") && ask is null)
+            {
+                Save("agent2", "sandbox-2");
+                bridge!.TargetAgent = "agent2";
+                ask = bridge.AskAsync("new enrollment", "operator", null, 5, default);
+            }
+            return Substitute.For<IConnection>();
+        });
+        bridge = created;
+        bridge.Lanes!.ReconcileDelay = TimeSpan.FromHours(1); // no watcher reconcile can mask a wrong close
+        await bridge.InitializeAsync(default);
+
+        var lane = Snapshot().Single(l => l.Factory.VirtualHost == Vhost("agent2"));
+        Assert.False(Closed(lane.Connection));
+        Assert.Equal("agent2", Published(lane.Channel)[1]);
+        await Complete(lane.Channel, "agent2", Vhost("agent2") + "-workload");
+        Assert.Equal("synthetic completion", await ask!.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(2, Snapshot().Length);
+    }
+
+    [Fact]
     public void SingleFileMode_IsUnchanged_AndNeverCombinesWithTheDirectory()
     {
         Save("agent1", "sandbox-1");

@@ -187,6 +187,32 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.NotEqual(runtime.LegTimeout, upload.Timeout);
     }
 
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"not\":\"an array\"}")]
+    [InlineData("[{}]")]
+    public async Task Broker_revoke_records_a_connections_parse_error_and_still_runs_every_other_step(string listing)
+    {
+        var epoch = Guid.NewGuid();
+        var provisioner = _t.Provisioner();
+        _t._broker.ConnectionsBody = listing;
+
+        var revoke = await provisioner.RevokeEpochAsync(epoch, default);
+
+        Assert.False(revoke.Ok);
+        Assert.Equal("broker_revoke_unresolved", revoke.Code);
+        Assert.DoesNotContain("broker_management_unavailable", revoke.OwnedPartials);
+        Assert.Equal(StockBrokerProvisioner.Roles.Select(r => "connections:" + StockBrokerProvisioner.Principal(epoch, r)), revoke.OwnedPartials);
+        foreach (var role in StockBrokerProvisioner.Roles)
+        {
+            var user = StockBrokerProvisioner.Principal(epoch, role);
+            Assert.Contains(_t._broker.Deletes, d => d.StartsWith("/api/permissions/", StringComparison.Ordinal) && d.EndsWith("/" + user, StringComparison.Ordinal));
+            Assert.Contains(_t._broker.Deletes, d => d == "/api/users/" + user);
+        }
+        // The management user's own grant on the epoch vhost is still removed after the failed listings.
+        Assert.Equal(StockBrokerProvisioner.Roles.Length + 1, _t._broker.Deletes.Count(d => d.StartsWith("/api/permissions/", StringComparison.Ordinal)));
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

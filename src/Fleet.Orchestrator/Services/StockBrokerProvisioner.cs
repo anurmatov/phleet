@@ -191,7 +191,10 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
         async Task Step(Func<Task> action, string label)
         {
             try { await action(); }
-            catch (Exception ex) when (ex is BrokerFault or HttpRequestException or TaskCanceledException or IOException)
+            // Review A8: an unparseable/unexpected listing (e.g. connections) is that step's error; the remaining
+            // permission, user and grant deletions still run.
+            catch (Exception ex) when (ex is BrokerFault or HttpRequestException or TaskCanceledException or IOException
+                or JsonException or InvalidOperationException or KeyNotFoundException)
             { unresolved.Add(label); }
         }
     }

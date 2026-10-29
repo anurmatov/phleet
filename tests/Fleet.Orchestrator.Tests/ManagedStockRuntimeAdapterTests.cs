@@ -1038,7 +1038,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         };
     }
 
-    private StockBrokerProvisioner Provisioner() => new(Config(), _broker.Credentials) { HandlerFactory = () => _broker };
+    internal StockBrokerProvisioner Provisioner() => new(Config(), _broker.Credentials) { HandlerFactory = () => _broker };
 
     private IConfiguration Config(Dictionary<string, string?>? overrides = null)
     {
@@ -1279,6 +1279,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public readonly Dictionary<string, string> Bodies = [];
         public readonly HashSet<string> Existing = [];
         public bool FailDeletes;
+        /// <summary>When set, the body of every per-user connections listing (review A8: malformed listings).</summary>
+        public string? ConnectionsBody;
         public string? FailPutContaining;
         public HttpStatusCode WhoAmI = HttpStatusCode.OK;
         public readonly FakeCredentials Credentials = new();
@@ -1289,6 +1291,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             HttpStatusCode status;
             if (request.Method == HttpMethod.Get && path.EndsWith("/api/whoami", StringComparison.Ordinal))
                 status = WhoAmI;
+            else if (request.Method == HttpMethod.Get && ConnectionsBody is not null && path.Contains("/api/connections/username/", StringComparison.Ordinal))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(ConnectionsBody) });
             else if (request.Method == HttpMethod.Get)
                 status = Existing.Any(path.StartsWith) ? HttpStatusCode.OK : HttpStatusCode.NotFound;
             else if (request.Method == HttpMethod.Put || request.Method == HttpMethod.Post)

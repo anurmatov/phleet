@@ -37,6 +37,10 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
 
     private string Vhost(string agent) => "stock-" + _epochs[agent].ToString("N");
 
+    // Current lanes open at initialization (#492 workflow replies), so select a lane by its epoch vhost.
+    private (ConnectionFactory Factory, IConnection Connection, IChannel Channel) Lane(string agent) =>
+        _lanes.Last(l => l.Factory.VirtualHost == Vhost(agent));
+
     private BridgeRelayService Bridge(Func<ConnectionFactory, IConnection>? lane = null)
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -96,7 +100,7 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         {
             bridge.TargetAgent = agent;
             var response = bridge.AskAsync("synthetic question", "operator", null, 5, default);
-            var (factory, _, channel) = _lanes[^1];
+            var (factory, _, channel) = Lane(agent);
             Assert.Equal(Vhost(agent), factory.VirtualHost);
             Assert.Equal(Vhost(agent) + "-control", factory.UserName);
             Assert.Equal("control-" + agent, factory.Password);
@@ -200,18 +204,18 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         Assert.Equal(Denied, await bridge.AskAsync("fails", "operator", null, 1, default));
         failing = false;
         Assert.Equal(Denied, await bridge.AskAsync("held", "operator", null, 1, default));
-        Assert.Empty(_lanes); // no reconnect attempt for the same binding
+        Assert.DoesNotContain(_lanes, l => l.Factory.VirtualHost == Vhost("agent1")); // no reconnect attempt for the same binding
 
         bridge.TargetAgent = "agent2";
         var other = bridge.AskAsync("other", "operator", null, 5, default);
-        await Complete(_lanes[^1].Channel, "agent2", Vhost("agent2") + "-workload");
+        await Complete(Lane("agent2").Channel, "agent2", Vhost("agent2") + "-workload");
         Assert.Equal("synthetic completion", await other.WaitAsync(TimeSpan.FromSeconds(3)));
 
         Save("agent1", "sandbox-1");
         bridge.TargetAgent = "agent1";
         var reenrolled = bridge.AskAsync("reenrolled", "operator", null, 5, default);
         Assert.Equal(Vhost("agent1"), _lanes[^1].Factory.VirtualHost);
-        await Complete(_lanes[^1].Channel, "agent1", Vhost("agent1") + "-workload");
+        await Complete(Lane("agent1").Channel, "agent1", Vhost("agent1") + "-workload");
         Assert.Equal("synthetic completion", await reenrolled.WaitAsync(TimeSpan.FromSeconds(3)));
         Assert.Equal(0, Publishes(_ordinary));
     }

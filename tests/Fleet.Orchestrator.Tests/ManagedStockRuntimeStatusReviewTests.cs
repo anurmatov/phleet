@@ -1,4 +1,5 @@
 using Fleet.Orchestrator.Models;
+using Microsoft.Extensions.Configuration;
 using Fleet.Orchestrator.Services;
 
 namespace Fleet.Orchestrator.Tests;
@@ -120,6 +121,19 @@ public sealed class ManagedStockRuntimeStatusReviewTests : IDisposable
 
         File.WriteAllText(Path.Combine(_backup, "last-failure"), DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") + "\n");
         Assert.Equal("failed", AgentRegistry.ManagedStatus(record, _backup).BackupState);
+    }
+
+    [Fact]
+    public async Task Missing_cli_is_reported_missing_even_when_setsid_is_the_launched_process()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["StockOpenShell:CliPath"] = Path.Combine(_backup, "no-such-openshell"),
+        }).Build();
+        var result = await new ProcessStockCli(config).RunAsync(["--version"], null, TimeSpan.FromSeconds(10), default);
+        Assert.True(result.Missing);
+        Assert.False(ProcessStockCli.CliExists("no-such-openshell-" + Guid.NewGuid().ToString("N")));
+        Assert.True(ProcessStockCli.CliExists("sh"));
     }
 
     private static (string, DateTimeOffset?, long?) Backup(ManagedStatusView status) =>

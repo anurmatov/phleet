@@ -38,6 +38,8 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
         var cliPath = string.IsNullOrWhiteSpace(path) ? "openshell" : path;
         // Own session/process group, so a timeout reaps reparented descendants too.
         var leader = !OperatingSystem.IsWindows() && File.Exists(SetsidPath);
+        // setsid is the launched process, so its start never fails for an absent CLI: check the CLI itself.
+        if (leader && !CliExists(cliPath)) return new(-1, "", Missing: true);
         var psi = new ProcessStartInfo(leader ? SetsidPath : cliPath)
         {
             UseShellExecute = false,
@@ -80,12 +82,23 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
                 return new(-1, "", TimedOut: true);
             }
             var output = await stdout;
+            // setsid exits 127 when it cannot exec the CLI (removed after the check above).
+            if (leader && process.ExitCode == 127 && !CliExists(cliPath)) return new(-1, "", Missing: true);
             // Over-limit output is never parsed as a partial document.
             return output is null ? new(-1, "") : new(process.ExitCode, output);
         }
     }
 
     private const string SetsidPath = "/usr/bin/setsid";
+
+    /// <summary>An explicit path must be an existing file; a bare name must resolve on PATH.</summary>
+    internal static bool CliExists(string cliPath)
+    {
+        if (cliPath.Contains('/')) return File.Exists(cliPath);
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(':', StringSplitOptions.RemoveEmptyEntries))
+            if (File.Exists(Path.Combine(dir, cliPath))) return true;
+        return false;
+    }
 
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int KillGroup(int pid, int signal);

@@ -70,7 +70,8 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
         IReadOnlyDictionary<string, StockActiveRecord?> active;
         try { active = StockAuthoritySource.Active(directory); }
         catch (StockIdentityDenied) { logger.LogWarning("Stock control lanes not reconciled: authority unavailable"); return; }
-        foreach (var (agent, record) in active)
+        // Ordinal order: lane opens do not depend on the directory listing order.
+        foreach (var (agent, record) in active.OrderBy(p => p.Key, StringComparer.Ordinal))
             if (record is not null) await RouteAsync(agent, connect: true, ct);
         await _gate.WaitAsync(ct);
         try

@@ -130,9 +130,14 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         Assert.Equal("ordinary completion", await ordinary.WaitAsync(TimeSpan.FromSeconds(3)));
 
         // A lane is reused while its record binding is unchanged.
+        // Startup opens lanes in directory-listing order, so select agent1's lane by its epoch vhost (#492 C1).
         bridge.TargetAgent = "Agent1";
+        var agent1Lane = Lane("agent1");
         var again = bridge.AskAsync("again", "operator", null, 5, default);
-        await Complete(_lanes[0].Channel, "agent1", Vhost("agent1") + "-workload");
+        Assert.Equal(2, Publishes(agent1Lane.Channel)); // reused: the second ask publishes on the same lane channel
+        Assert.Equal("agent1", Published(agent1Lane.Channel)[1]);
+        Assert.Equal(Vhost("agent1") + "-control", Published(agent1Lane.Channel).OfType<BasicProperties>().Single().UserId);
+        await Complete(agent1Lane.Channel, "agent1", Vhost("agent1") + "-workload");
         Assert.Equal("synthetic completion", await again.WaitAsync(TimeSpan.FromSeconds(3)));
         Assert.Equal(2, _lanes.Count);
         Assert.Equal(1, Publishes(_ordinary));

@@ -578,9 +578,13 @@ capture rules, writes the spool before the ack and ignores a duplicate in the sa
 users, permissions, queues and consumers are unchanged.
 
 **Workflow delegation (existing-role routing).** Managed mode for Temporal is on only when
-`StockOpenShell:AuthorityDirectory` is configured on Fleet.Temporal. Without it (the default),
-`DelegateToAgent` never reads the orchestrator for the target's runtime, so an orchestrator restart,
-401, 404 or timeout cannot fail an ordinary delegation. With it, the orchestrator's
+`StockOpenShell:ManagedEnabled` is true on Fleet.Temporal (compose maps the orchestrator's
+`FLEET_STOCK_MANAGED_ENABLED`, default false). Off (the default), `DelegateToAgent` never reads the
+orchestrator for the target's runtime, so an orchestrator restart, 401, 404 or timeout cannot fail an
+ordinary delegation. On, a managed target also needs a usable `StockOpenShell:AuthorityDirectory`
+on Fleet.Temporal; a missing or invalid one refuses non-retryably with
+`managed_route_unconfigured:workflow_delegation` (error type `ManagedAuthorityUnconfigured`) and
+nothing is published. With managed mode on, the orchestrator's
 `appliedRuntimeKind` decides and the check fails closed: unreachable, non-success, invalid body or an
 unknown runtime fails the attempt retryably with `managed_route_unknown:workflow_delegation` (error
 type `ManagedAgentRuntimeUnknown`), and nothing is published on the ordinary broker. `docker` keeps

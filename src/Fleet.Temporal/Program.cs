@@ -16,7 +16,11 @@ var builder = WebApplication.CreateBuilder(args);
 // Configuration
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.Section));
 builder.Services.Configure<TemporalBridgeOptions>(builder.Configuration.GetSection(TemporalBridgeOptions.Section));
-builder.Services.PostConfigure<TemporalBridgeOptions>(o => o.StockAuthorityDirectory = builder.Configuration["StockOpenShell:AuthorityDirectory"] ?? "");
+builder.Services.PostConfigure<TemporalBridgeOptions>(o =>
+{
+    o.StockAuthorityDirectory = builder.Configuration["StockOpenShell:AuthorityDirectory"] ?? "";
+    o.StockManagedEnabled = bool.TryParse(builder.Configuration["StockOpenShell:ManagedEnabled"], out var managedEnabled) && managedEnabled;
+});
 builder.Services.Configure<FleetMemoryOptions>(builder.Configuration.GetSection(FleetMemoryOptions.Section));
 builder.Services.Configure<FleetWorkflowOptions>(builder.Configuration.GetSection(FleetWorkflowOptions.Section));
 builder.Services.PostConfigure<FleetWorkflowOptions>(o => o.OrchestratorUrl = builder.Configuration["TemporalBridge:OrchestratorUrl"] ?? "");

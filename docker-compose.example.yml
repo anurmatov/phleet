@@ -345,6 +345,9 @@ services:
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq
+      # Managed stock OpenShell (#492): the same switch the orchestrator reads, default off. When true,
+      # workflow delegation to a managed agent needs StockOpenShell__AuthorityDirectory and refuses by name without it.
+      - StockOpenShell__ManagedEnabled=${FLEET_STOCK_MANAGED_ENABLED:-false}
       # Dynamic keys fetched from orchestrator at startup and live-updated on config.changed events.
       # FLEET_CTO_AGENT       — CTO agent name for UWE {{config.CtoAgent}} and {{config.EscalationTarget}} template expressions
       # FLEET_GROUP_CHAT_ID   — Telegram group chat ID for activity directives (replaces static TemporalBridge__GroupChatId)

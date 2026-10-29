@@ -292,6 +292,9 @@ public sealed class DelegateToAgentActivity
     /// <summary>Named refusal when the managed-runtime check cannot tell what the target runs on.</summary>
     public const string ManagedTargetUnknown = "managed_route_unknown:workflow_delegation";
 
+    /// <summary>Named refusal when managed mode is enabled but Temporal has no usable authority directory (#492 W3).</summary>
+    public const string ManagedAuthorityUnconfigured = "managed_route_unconfigured:workflow_delegation";
+
     /// <summary>The selected epoch control identity and expected reply correlation for a managed delegation (#492).</summary>
     internal sealed record ManagedTarget(StockBrokerIdentity Identity, ManagedCorrelation Correlation);
 
@@ -301,8 +304,10 @@ public sealed class DelegateToAgentActivity
 
     /// <summary>
     /// Selects the route for a workflow directive (#492). Managed mode is off unless
-    /// <c>StockOpenShell:AuthorityDirectory</c> is configured: then nothing here runs, the orchestrator is never
-    /// consulted and an orchestrator outage cannot fail an ordinary delegation.
+    /// <c>StockOpenShell:ManagedEnabled</c> is true: then nothing here runs, the orchestrator is never
+    /// consulted and an orchestrator outage cannot fail an ordinary delegation. With managed mode on, a managed
+    /// target needs a usable <c>StockOpenShell:AuthorityDirectory</c>; without one the attempt is refused by name
+    /// (<see cref="ManagedAuthorityUnconfigured"/>), never published on the ordinary broker.
     ///
     /// With managed mode on the orchestrator's applied runtime decides, failing closed: an unreachable
     /// orchestrator, a non-success status, an invalid body or an unknown runtime refuses this attempt
@@ -316,8 +321,8 @@ public sealed class DelegateToAgentActivity
     /// </summary>
     private async Task<ManagedTarget?> GuardManagedTargetAsync(string agentName, string taskId, CancellationToken ct)
     {
+        if (!_bridgeConfig.StockManagedEnabled) return null;
         var directory = _bridgeConfig.StockAuthorityDirectory;
-        if (string.IsNullOrEmpty(directory)) return null;
         string? applied = null;
         string? fault = null;
         if (string.IsNullOrEmpty(_bridgeConfig.OrchestratorUrl)) fault = "no orchestrator";
@@ -345,7 +350,20 @@ public sealed class DelegateToAgentActivity
             }
 
         if (applied == "docker") return null;
-        if (applied == "openshell") return SelectManagedTarget(directory, agentName, taskId);
+        if (applied == "openshell")
+        {
+            if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathFullyQualified(directory) || !Directory.Exists(directory))
+            {
+                _logger.LogError("DelegateToAgent refused: managed mode is enabled but StockOpenShell:AuthorityDirectory is " +
+                    "missing or invalid ({Code}), agent={Agent}, taskId={TaskId}", ManagedAuthorityUnconfigured, agentName, taskId);
+                throw new ApplicationFailureException(
+                    $"{ManagedAuthorityUnconfigured}: agent {agentName} runs on the managed stock OpenShell runtime but this " +
+                    $"Temporal bridge has no usable StockOpenShell:AuthorityDirectory; the directive was not published. (taskId={taskId})",
+                    errorType: "ManagedAuthorityUnconfigured",
+                    nonRetryable: true);
+            }
+            return SelectManagedTarget(directory, agentName, taskId);
+        }
 
         fault ??= $"applied runtime '{Truncate(applied, 16)}'";
         _logger.LogError("DelegateToAgent refused: runtime of {Agent} could not be determined ({Fault}, {Code}), taskId={TaskId}",

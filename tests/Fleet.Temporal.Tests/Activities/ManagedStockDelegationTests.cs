@@ -76,7 +76,7 @@ public class ManagedStockDelegationTests : IDisposable
         return connection;
     }
 
-    private Harness Build(Func<HttpRequestMessage, HttpResponseMessage> respond, bool managedMode = true)
+    private Harness Build(Func<HttpRequestMessage, HttpResponseMessage> respond, bool managedMode = true, string? directory = null)
     {
         var ordinary = new List<Published>();
         var control = new List<Published>();
@@ -93,7 +93,8 @@ public class ManagedStockDelegationTests : IDisposable
             Options.Create(new TemporalBridgeOptions
             {
                 AgentTimeoutSeconds = 30, OrchestratorUrl = "http://orchestrator.invalid",
-                StockAuthorityDirectory = managedMode ? _dir : ""
+                StockManagedEnabled = managedMode,
+                StockAuthorityDirectory = directory ?? (managedMode ? _dir : "")
             }),
             registry, factory, http, NullLogger<DelegateToAgentActivity>.Instance)
         {
@@ -376,5 +377,58 @@ public class ManagedStockDelegationTests : IDisposable
             registry.SessionFor("wf/" + i, Agent, "sandbox-1", _epoch);
         Assert.Equal(TaskCompletionRegistry.MaxRetainedSessions, registry.RetainedSessionCount);
         Assert.NotEqual(rotated.Session, registry.SessionFor("wf/0", Agent, "sandbox-1", rotated.Epoch).Session); // evicted
+    }
+
+    // ---- #492 W3: managed mode is an explicit switch; enabled without a directory refuses by name ----
+
+    [Fact]
+    public async Task DefaultOff_WithAnAuthorityDirectoryConfigured_IsStillUnchanged_AndNeverConsultsTheOrchestrator()
+    {
+        SaveRecord();
+        var h = Build(Managed, managedMode: false, directory: _dir);
+
+        var run = new ActivityEnvironment().RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/off-dir"));
+        Assert.True(await CompleteWhenRegistered(h.Registry, "wf/off-dir", null));
+
+        Assert.True((await run).IsCompleted);
+        Assert.Equal(0, h.Orchestrator.Calls);
+        var published = Assert.Single(h.Ordinary);
+        Assert.Equal(RelayMessageType.Directive, JsonSerializer.Deserialize<RelayMessage>(published.Body)!.Type);
+        Assert.Empty(h.Control);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("relative/authority")]
+    [InlineData("/nonexistent/authority-directory")]
+    public async Task ManagedEnabled_WithoutAUsableAuthorityDirectory_RefusesAManagedTargetByName_WithoutAnyPublish(string directory)
+    {
+        SaveRecord();
+        var h = Build(Managed, directory: directory);
+
+        var failure = await Assert.ThrowsAsync<ApplicationFailureException>(() => new ActivityEnvironment()
+            .RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/unconfigured")));
+
+        Assert.True(failure.NonRetryable);
+        Assert.Equal("ManagedAuthorityUnconfigured", failure.ErrorType);
+        Assert.StartsWith(DelegateToAgentActivity.ManagedAuthorityUnconfigured, failure.Message);
+        Assert.Equal(1, h.Orchestrator.Calls);
+        Assert.Empty(h.Ordinary);
+        Assert.Empty(h.Control);
+        await h.Factory.DidNotReceive().CreateConnectionAsync(Arg.Any<CancellationToken>());
+        Assert.Equal(0, h.Registry.PendingCount);
+    }
+
+    [Fact]
+    public async Task ManagedEnabled_WithoutAuthorityDirectory_StillDelegatesAnOrdinaryTargetOnTheOrdinaryBroker()
+    {
+        var h = Build(Body($$"""{"agentName":"{{Agent}}","appliedRuntimeKind":"docker"}"""), directory: "");
+
+        var run = new ActivityEnvironment().RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/docker"));
+        Assert.True(await CompleteWhenRegistered(h.Registry, "wf/docker", null));
+
+        Assert.True((await run).IsCompleted);
+        Assert.Single(h.Ordinary);
+        Assert.Empty(h.Control);
     }
 }

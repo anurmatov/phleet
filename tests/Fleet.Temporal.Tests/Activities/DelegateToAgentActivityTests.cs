@@ -238,22 +238,23 @@ public class DelegateToAgentActivityTests
         Assert.DoesNotContain(h.PublishedInstructions, i => i.Contains("/cancel all"));
     }
 
-    // ── Managed stock OpenShell target (#492 review F5) ───────────────────────
+    // ── Managed stock OpenShell target (#492 review F5, R1/F13) ───────────────
 
     [Fact]
-    public async Task ManagedOpenShellTarget_IsRefusedNonRetryably_WithoutPublishing()
+    public async Task ManagedModeOff_NeverConsultsTheOrchestratorRuntime_AndDelegatesOrdinarily()
     {
+        // Managed routing (ManagedStockDelegationTests) needs StockOpenShell:AuthorityDirectory; without it
+        // the orchestrator's runtime is not read at all, so its availability cannot fail a delegation.
         var h = Build(orchestratorUrl: "http://orchestrator.invalid",
             agentJson: """{"agentName":"agent1","runtimeKind":"openshell","appliedRuntimeKind":"openshell"}""");
         var env = new ActivityEnvironment();
 
-        var failure = await Assert.ThrowsAsync<ApplicationFailureException>(() =>
-            env.RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-managed")));
+        var run = env.RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-managed"));
+        await CompleteWhenRegisteredAsync(h, "wf/task-managed", new AgentTaskResult("all done", "completed"));
 
-        Assert.True(failure.NonRetryable);
-        Assert.Equal("ManagedAgentWorkflowUnsupported", failure.ErrorType);
-        Assert.Contains(DelegateToAgentActivity.ManagedTargetUnsupported, failure.Message);
-        Assert.Empty(h.PublishedInstructions); // never published to a queue nobody reads
+        Assert.True((await run).IsCompleted);
+        Assert.Single(h.PublishedInstructions);
+        Assert.Empty(h.OrchestratorRequests);
     }
 
     [Fact]

@@ -648,7 +648,22 @@ public sealed class DelegateToAgentActivity
     {
         var identity = managed.Identity;
         var factory = new ConnectionFactory { HostName = identity.BrokerHost, ClientProvidedName = "fleet-temporal-control" };
-        identity.Configure(factory); // rechecks the current record; a changed or revoked epoch refuses here
+        BasicProperties props;
+        try
+        {
+            identity.Configure(factory); // rechecks the current record; a changed or revoked epoch refuses here
+            props = identity.Properties();
+        }
+        catch (StockIdentityDenied)
+        {
+            _logger.LogError("Managed workflow directive refused: control identity for {Agent} is not current ({Code}), taskId={TaskId}",
+                identity.Agent, ManagedTargetDenied, taskId);
+            throw new ApplicationFailureException(
+                $"{ManagedTargetDenied}: the control lane of agent {identity.Agent} is stale, revoked or has no usable control " +
+                $"credential; the directive was not published. (taskId={taskId})",
+                errorType: "ManagedAgentContextDenied",
+                nonRetryable: true);
+        }
         await using var connection = await ControlConnect(factory, ct);
         await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
 
@@ -667,7 +682,7 @@ public sealed class DelegateToAgentActivity
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         await channel.BasicPublishAsync(
             _rabbitConfig.Exchange, routingKey: identity.Agent, mandatory: false,
-            basicProperties: identity.Properties(), body: body, cancellationToken: ct);
+            basicProperties: props, body: body, cancellationToken: ct);
 
         _logger.LogInformation("Published managed workflow directive to {Agent} (taskId={TaskId})", identity.Agent, taskId);
     }

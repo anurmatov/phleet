@@ -582,6 +582,37 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
+    /// Review A2: the deprovision behind <c>DELETE /api/agents/{name}</c>. <c>KeepRow</c> non-null means the agent
+    /// row must stay: an applied openshell binding or an unresolved candidate/held record exists and no clean revoke
+    /// has succeeded, or the runtime hold denied the mutation. Docker deprovision stays best-effort; a cleanly
+    /// revoked managed binding was already stopped by its revoke, so no managed Stop result is ever ignored.
+    /// </summary>
+    public async Task<(ProvisionResult Deprovision, string? KeepRow)> DeprovisionForDeleteAsync(string agentName, CancellationToken ct = default)
+    {
+        Agent? agent;
+        using (var scope = scopeFactory.CreateScope())
+            agent = await scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents
+                .AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        if (agent is null) return (ProvisionResult.Fail(agentName, "agent not found in DB"), null);
+        if (DescribeManagedDeleteFault(agent) is { } managedFault) return (ProvisionResult.Fail(agentName, managedFault), managedFault);
+        if (agent.AppliedRuntimeKind != "docker") return (ProvisionResult.Ok(agentName, "managed binding revoked"), null);
+        var deprovision = await DeprovisionAsync(agentName, ct);
+        return (deprovision, !deprovision.Success && deprovision.Message == StockRuntimeMutationHold.Reason ? deprovision.Message : null);
+    }
+
+    /// <summary>Null only when no managed state would be dropped untracked with the agent row.</summary>
+    internal static string? DescribeManagedDeleteFault(Agent agent)
+    {
+        ManagedRecord record;
+        try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
+        catch (System.Text.Json.JsonException) { return "managed_binding_unreadable"; }
+        // A clean, finished revoke (a retired Docker handoff is recorded the same way) leaves nothing live.
+        if (record is { State: "revoked", Operation: null, Candidate: null, Errors.Count: 0 }) return null;
+        if (record.Unresolved) return "managed_state_unresolved";
+        return agent.AppliedRuntimeKind == "docker" ? null : "managed_binding_not_revoked";
+    }
+
+    /// <summary>
     /// Deprovisions then re-provisions the container. Used when config has changed.
     /// An optional imageOverride overrides the DB-configured image (used by CI for PR-specific images).
     /// </summary>

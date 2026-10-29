@@ -911,4 +911,39 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop") || c.Args.Contains("detach"));
         Assert.Equal(deletes, _t._broker.Deletes.Count);
     }
+
+    [Theory]
+    [InlineData("openshell", "applied", "managed_binding_not_revoked")]
+    [InlineData("openshell", "stopped", "managed_binding_not_revoked")]
+    [InlineData("openshell", "revoked_with_errors", "managed_binding_not_revoked")]
+    [InlineData("openshell", "needs_attention", "managed_state_unresolved")]
+    [InlineData("docker", "held_candidate", "managed_state_unresolved")]
+    [InlineData("openshell", "revoked", null)]
+    [InlineData("docker", "revoked", null)]
+    [InlineData("docker", "none", null)]
+    public async Task Agent_delete_keeps_the_row_until_managed_state_is_cleanly_revoked(string applied, string state, string? keepRow)
+    {
+        // Review A2: DELETE /api/agents/{name} never drops managed state untracked behind a failed or ignored Stop.
+        var binding = _t.Binding("fleet-agent1-a2a2a2a2", Guid.NewGuid());
+        var record = state switch
+        {
+            "none" => null,
+            "held_candidate" => new ManagedRecord { State = "needs_attention", Candidate = binding with { SandboxId = "" }, Errors = ["docker_observation_failed"] },
+            "revoked_with_errors" => new ManagedRecord { State = "revoked", Applied = binding, Errors = ["revoke_unresolved"] },
+            _ => new ManagedRecord { State = state, Applied = binding },
+        };
+        await using var harness = Fleet.Orchestrator.Tests.Services.ProvisioningHarness.Create();
+        await harness.SeedAsync(db => db.Agents.Add(new Agent { Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic",
+            ContainerName = "agent1", IsEnabled = true, RuntimeKind = "openshell", AppliedRuntimeKind = applied, AppliedRuntimeBinding = record?.Serialize() }));
+
+        var (deprovision, kept) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+
+        Assert.Equal(keepRow, kept);
+        if (keepRow is not null)
+        {
+            Assert.False(deprovision.Success);
+            Assert.Equal(0, harness.DockerRequestCount); // nothing stopped or removed behind the refusal
+        }
+        else if (applied == "openshell") Assert.True(deprovision.Success, deprovision.Message);
+    }
 }

@@ -593,8 +593,11 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
     if (agent is null)
         return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
 
-    // Best-effort deprovision — if container doesn't exist that's fine, proceed with DB delete
-    var deprovision = await provisioning.DeprovisionAsync(name);
+    // Best-effort Docker deprovision — if container doesn't exist that's fine, proceed with DB delete. Review A2:
+    // managed state (applied openshell binding, unresolved candidate/held record) keeps the row until revoked.
+    var (deprovision, keepRow) = await provisioning.DeprovisionForDeleteAsync(name);
+    if (keepRow is not null)
+        return Results.Conflict(new { error = keepRow, message = $"Agent '{name}' was not deleted: revoke its managed runtime first" });
 
     db.Agents.Remove(agent);
     await db.SaveChangesAsync();

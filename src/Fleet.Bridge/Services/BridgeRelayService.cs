@@ -91,6 +91,9 @@ public sealed class BridgeRelayService : IAsyncDisposable
     /// <summary>Managed lane: first backoff before a failed forward is requeued; doubles per consecutive failure.</summary>
     internal TimeSpan ForwardRetryDelay { get; init; } = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MaxForwardRetryDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>Ordinary relay: bound on a workflow reply forward's publish and broker confirm (#492 V5).</summary>
+    internal TimeSpan ForwardConfirmTimeout { get; set; } = TimeSpan.FromSeconds(10);
     private int _forwardFailures;
     private readonly CancellationTokenSource _stopping = new();
 
@@ -344,9 +347,10 @@ public sealed class BridgeRelayService : IAsyncDisposable
 
     /// <summary>
     /// Settles a managed-lane delivery on this same consumer: handled is acknowledged, refused is rejected
-    /// without requeue, and a reply whose forward failed is requeued after a bounded backoff so it is
-    /// redelivered (not re-executed) once forwarding recovers. A delivery left unacked by a closed channel
-    /// is returned to the queue by the broker.
+    /// without requeue, and a reply whose forward failed is requeued after a bounded backoff (at most
+    /// 30 s) so it is redelivered (not re-executed) once forwarding recovers. The backoff runs off the
+    /// consumer callback, so a stuck reply never delays this lane's bridge responses (#492 V5); the delivery
+    /// stays unacked meanwhile. A delivery left unacked by a closed channel is returned to the queue by the broker.
     /// </summary>
     private async Task SettleAsync(ulong tag, bool? settle)
     {
@@ -357,12 +361,26 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 var failures = Interlocked.Increment(ref _forwardFailures);
                 var delay = TimeSpan.FromTicks(Math.Min(ForwardRetryDelay.Ticks * (1L << Math.Min(failures - 1, 5)),
                     MaxForwardRetryDelay.Ticks));
-                if (delay > TimeSpan.Zero) await Task.Delay(delay, _stopping.Token);
-                await _consumeChannel!.BasicNackAsync(tag, multiple: false, requeue: true);
+                if (delay <= TimeSpan.Zero) await _consumeChannel!.BasicNackAsync(tag, multiple: false, requeue: true);
+                else _ = RequeueAfterAsync(tag, delay);
             }
             else if (settle.Value) await _consumeChannel!.BasicAckAsync(tag, multiple: false);
             else await _consumeChannel!.BasicRejectAsync(tag, requeue: false);
         }
+        catch (Exception)
+        {
+            _logger.LogWarning("Stock reply settlement deferred to the broker; manual reconciliation required");
+        }
+    }
+
+    private async Task RequeueAfterAsync(ulong tag, TimeSpan delay)
+    {
+        try
+        {
+            await Task.Delay(delay, _stopping.Token);
+            await _consumeChannel!.BasicNackAsync(tag, multiple: false, requeue: true);
+        }
+        catch (OperationCanceledException) { } // closing: the broker requeues the unacked delivery
         catch (Exception)
         {
             _logger.LogWarning("Stock reply settlement deferred to the broker; manual reconciliation required");
@@ -434,9 +452,13 @@ public sealed class BridgeRelayService : IAsyncDisposable
     {
         if (!_initialized || _publishChannel is null) throw new StockIdentityDenied("broker_forward_unavailable");
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(reply));
-        // Confirmed and mandatory: an unrouted, nacked or failed publish throws, so the lane keeps the reply.
+        // Confirmed and mandatory: an unrouted, nacked, failed or unconfirmed-in-time publish throws, so the
+        // lane keeps the reply for redelivery (#492 V5).
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        timeout.CancelAfter(ForwardConfirmTimeout);
         await _publishChannel.BasicPublishAsync(_rabbitConfig.Exchange, routingKey: "temporal-bridge", mandatory: true,
-            basicProperties: new BasicProperties { DeliveryMode = DeliveryModes.Persistent }, body: body);
+            basicProperties: new BasicProperties { DeliveryMode = DeliveryModes.Persistent }, body: body,
+            cancellationToken: timeout.Token);
     }
 
     public async ValueTask DisposeAsync()

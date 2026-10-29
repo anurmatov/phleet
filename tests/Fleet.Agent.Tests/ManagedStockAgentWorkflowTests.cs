@@ -163,7 +163,7 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
 
     private string Vhost => "stock-" + _epoch.ToString("N");
 
-    private async Task<BridgeRelayService> StartAsync()
+    private async Task<BridgeRelayService> StartAsync(TimeSpan? retryDelay = null, TimeSpan? confirmTimeout = null)
     {
         File.WriteAllText(Path.Combine(_dir, "agent1.json"), JsonSerializer.Serialize(new StockEnrollmentAuthority
         {
@@ -180,7 +180,8 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
         var bridge = new BridgeRelayService(Options.Create(new BridgeOptions { TargetAgent = "agent1", BridgeChatId = 7 }),
             Options.Create(new RabbitMqOptions { Host = "broker.example.test" }), NullLogger<BridgeRelayService>.Instance, configuration)
         { Connect = (_, _) => Task.FromResult(ordinary) };
-        bridge.Lanes!.ForwardRetryDelay = TimeSpan.Zero;
+        bridge.Lanes!.ForwardRetryDelay = retryDelay ?? TimeSpan.Zero;
+        if (confirmTimeout is { } bound) bridge.ForwardConfirmTimeout = bound;
         bridge.Lanes!.Connect = (factory, _) =>
         {
             Assert.Equal(Vhost + "-control", factory.UserName);
@@ -257,6 +258,28 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
         Assert.Equal(1, Calls(_lane, "BasicNackAsync"));
         Assert.Single(_lane.ReceivedCalls(), c => c.GetMethodInfo().Name == "BasicConsumeAsync");
         Assert.Contains(_lane.ReceivedCalls(), c => c.GetMethodInfo().Name == "BasicConsumeAsync" && Equals(c.GetArguments()[1], false));
+    }
+
+    [Fact]
+    public async Task UnconfirmedForward_TimesOut_AndItsBackoffRunsOffTheConsumerCallback_ThenRequeues()
+    {
+        _ordinary.BasicPublishAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<BasicProperties>(),
+            Arg.Any<ReadOnlyMemory<byte>>(), Arg.Any<CancellationToken>())
+            .Returns(call => new ValueTask(Task.Delay(Timeout.Infinite, call.ArgAt<CancellationToken>(5)))); // no confirm
+        await using var bridge = await StartAsync(retryDelay: TimeSpan.FromSeconds(2), confirmTimeout: TimeSpan.FromMilliseconds(100));
+
+        // The confirm wait is bounded (#492 V5), and the callback returns before the backoff elapses.
+        await Deliver(Vhost + "-workload", tag: 1).WaitAsync(TimeSpan.FromSeconds(1.5));
+        Assert.Equal(0, Calls(_lane, "BasicNackAsync"));
+        Assert.Equal(0, Calls(_lane, "BasicAckAsync"));
+        // The lane keeps consuming meanwhile: the next delivery is settled while the first awaits its backoff.
+        await Deliver(Vhost + "-control", tag: 2).WaitAsync(TimeSpan.FromSeconds(1.5));
+        await _lane.Received(1).BasicRejectAsync(2, false, Arg.Any<CancellationToken>());
+        Assert.Equal(0, Calls(_lane, "BasicNackAsync"));
+
+        for (var i = 0; i < 100 && Calls(_lane, "BasicNackAsync") == 0; i++) await Task.Delay(50);
+        await _lane.Received(1).BasicNackAsync(1, false, true, Arg.Any<CancellationToken>()); // bounded delay, then requeued
+        Assert.Equal(0, Calls(_lane, "BasicAckAsync"));
     }
 
     [Fact]

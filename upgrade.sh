@@ -159,6 +159,10 @@ stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
 # #492 §16: an enabled managed runtime also needs a fresh, successful gateway backup before any upgrade.
 stock_backup_freshness "$ENV_FILE" "$SCRIPT_DIR" \
   || { fail "managed runtime gateway backup is missing, failed or stale; run scripts/backup-stock-gateway.sh first"; exit 1; }
+# #492 A3: an enabled managed runtime builds the orchestrator with the pinned stock CLI (.env
+# OPENSHELL_CLI_URL/OPENSHELL_CLI_SHA256, validated above). Default-off passes no build args.
+ORCH_CLI_ARGS=$(stock_cli_build_args "$ENV_FILE") \
+  || { fail "managed runtime needs the pinned stock CLI build args; see docs/openshell-stock.md"; exit 1; }
 
 # #492: after the other preflights and before anything is stopped or replaced, refuse an orchestrator that cannot read managed
 # bindings while any exist. An unavailable preflight refuses; it is never read as "none".
@@ -216,7 +220,10 @@ build_image() {
 }
 
 build_image "fleet:agent"           "$SCRIPT_DIR/Dockerfile"                        "$SCRIPT_DIR"
-build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR"
+build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR" "$ORCH_CLI_ARGS"
+# #492 A3: never start a managed orchestrator without the pinned stock CLI. Default-off: no check.
+stock_cli_image_check "$ENV_FILE" fleet:orchestrator \
+  || { fail "the built fleet:orchestrator image lacks the pinned stock CLI; services were not started"; exit 1; }
 build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"

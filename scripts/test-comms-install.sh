@@ -21,6 +21,7 @@ case "$*" in
   'image inspect minio/'*) exit 1 ;;
   *'ps --quiet'*) echo running ;;
   'inspect -f'*) echo healthy ;;
+  'run --rm --entrypoint openshell '*) printf '%s\n' "${STUB_CLI_VERSION-openshell 0.1.5}" ;;
 esac
 MOCK
 chmod +x "$DIR/bin/docker"
@@ -185,6 +186,8 @@ FLEET_STOCK_BROKER_ADMIN_USER_REF=FIXTURE_BROKER_USER
 FLEET_STOCK_BROKER_ADMIN_PASSWORD_REF=FIXTURE_BROKER_PASSWORD
 FIXTURE_BROKER_USER=fixture-admin
 FIXTURE_BROKER_PASSWORD=fixture-password
+OPENSHELL_CLI_URL=https://cli.example.test/openshell-0.1.5
+OPENSHELL_CLI_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ENV
   echo "FLEET_STOCK_BACKUP_DIR=$BACKUPS" >> "$ENV"
   rm -rf "$BACKUPS"; mkdir -p "$BACKUPS"
@@ -208,6 +211,10 @@ managed_fixture; chmod 750 "$BACKUPS"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
 if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
 echo 'PASS managed upgrade with complete trust passes the preflight'
+# #492 A3: the orchestrator build gets the pinned stock CLI and the built image is checked for it.
+grep -q 'build -f .*/src/Fleet.Orchestrator/Dockerfile --build-arg OPENSHELL_CLI_URL=https://cli.example.test/openshell-0.1.5 --build-arg OPENSHELL_CLI_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -t fleet:orchestrator ' "$CALLS"
+grep -qx 'run --rm --entrypoint openshell fleet:orchestrator --version' "$CALLS"
+echo 'PASS managed upgrade builds the orchestrator with the pinned stock CLI and checks it'
 # #492 review W5: an existing configured backup dir keeps its mode; upgrade only creates an absent one.
 [[ "$(ls -ld "$BACKUPS" | cut -c1-10)" == drwxr-x--- ]]
 echo 'PASS upgrade leaves an existing backup bind source untouched'
@@ -221,6 +228,21 @@ managed_fixture; rm "$MTLS/tls.key"
 managed_refuses 'mTLS client cert/key'
 managed_fixture
 managed_refuses 'sqlite3' "$DIR/nosqlite:$PATH"
+managed_fixture; sed -i.bak '/^OPENSHELL_CLI_URL=/d' "$ENV"
+managed_refuses 'OPENSHELL_CLI_URL must be an https://'
+managed_fixture; sed -i.bak 's|^OPENSHELL_CLI_URL=https:|OPENSHELL_CLI_URL=http:|' "$ENV"
+managed_refuses 'OPENSHELL_CLI_URL must be an https://'
+managed_fixture; sed -i.bak 's|^OPENSHELL_CLI_SHA256=.*|OPENSHELL_CLI_SHA256=abc123|' "$ENV"
+managed_refuses 'OPENSHELL_CLI_SHA256 its 64-hex'
+# #492 A3: a built image without the pinned CLI version is never started.
+for cli in '' 'openshell 0.1.4'; do
+  managed_fixture; rc=0
+  STUB_CLI_VERSION="$cli" bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || { cat "$DIR/output" >&2; exit 1; }
+  grep -q 'managed runtime preflight: image fleet:orchestrator lacks the stock CLI openshell 0.1.5' "$DIR/output"
+  if grep -Eq ' up( |$)' "$CALLS"; then exit 1; fi
+  echo "PASS managed upgrade refuses to start an orchestrator image with CLI [${cli:-none}]"
+done
 # #492 §16: a missing, failed or stale gateway backup refuses an enabled managed upgrade.
 managed_fixture; sed -i.bak '/^FLEET_STOCK_BACKUP_DIR=/d' "$ENV"
 managed_refuses 'FLEET_STOCK_BACKUP_DIR must name'
@@ -235,7 +257,9 @@ managed_fixture; rm -rf "$CLIENT"
 sed -i.bak -e 's/^FLEET_STOCK_MANAGED_ENABLED=true$/FLEET_STOCK_MANAGED_ENABLED=false/' -e '/^FLEET_STOCK_BROKER/d' "$ENV"
 PATH="$DIR/nosqlite:$PATH" bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
 if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
-echo 'PASS default-off upgrade skips the managed preflight'
+if grep -Eq 'OPENSHELL_CLI|entrypoint openshell' "$CALLS"; then exit 1; fi
+grep -q 'build -f .*/src/Fleet.Orchestrator/Dockerfile -t fleet:orchestrator ' "$CALLS"
+echo 'PASS default-off upgrade skips the managed preflight, CLI build args and CLI check'
 # #492 A6: the flag is parsed like the services' .NET bool binder (case-insensitive, quotes and
 # whitespace stripped). True, "true" and TRUE are enabled and run the preflight; false and empty skip it.
 set_managed_flag() { grep -v '^FLEET_STOCK_MANAGED_ENABLED=' "$ENV" > "$ENV.tmp"; printf 'FLEET_STOCK_MANAGED_ENABLED=%s\n' "$1" >> "$ENV.tmp"; mv "$ENV.tmp" "$ENV"; }
@@ -273,17 +297,20 @@ cat > "$GUARDBIN/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CALLS"
 [[ "$*" == 'image inspect --format'*' fleet:orchestrator' ]] && printf '1'
+[[ "$*" == 'run --rm --entrypoint openshell '* ]] && printf '%s\n' "${STUB_CLI_VERSION-openshell 0.1.5}"
 exit 0
 MOCK
 chmod +x "$GUARDBIN/docker"
+managed_fixture; set_managed_flag false
 run_setup_guard() {
   : > "$CALLS"
   PATH="$GUARDBIN:$PATH" SKIP_BUILD="$1" DRY_RUN=false SCRIPT_DIR="$DIR" ENV_FILE="$ENV" BLOCK="$block" bash -c '
     set -euo pipefail
+    source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"
     read_env_var() { echo fixture-token; }
     stock_backup_freshness() { echo "freshness $*" >> "$CALLS"; }
     fail() { echo "FAIL: $*" >&2; }
-    eval "$BLOCK"' > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
+    eval "$BLOCK"' > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; return 1; }
 }
 run_setup_guard true
 grep -q '^freshness ' "$CALLS"
@@ -295,3 +322,18 @@ grep -q '^freshness ' "$CALLS"
 if grep -q '^image inspect' "$CALLS"; then exit 1; fi
 grep -q 'OK: target supports managed bindings' "$DIR/output"
 echo 'PASS setup.sh build run guards the orchestrator Dockerfile'
+if grep -q 'entrypoint openshell' "$CALLS"; then exit 1; fi
+echo 'PASS default-off setup guard never checks the stock CLI'
+# #492 A3: a managed --skip-build starts the existing image, so it must carry the pinned stock CLI.
+managed_fixture
+run_setup_guard true
+grep -qx 'run --rm --entrypoint openshell fleet:orchestrator --version' "$CALLS"
+echo 'PASS managed setup.sh --skip-build accepts a local image with the pinned stock CLI'
+if STUB_CLI_VERSION= run_setup_guard true 2>/dev/null; then exit 1; fi
+grep -q 'lacks the stock CLI openshell 0.1.5' "$DIR/output"
+if grep -q '^image inspect --format' "$CALLS"; then exit 1; fi
+echo 'PASS managed setup.sh --skip-build refuses a local image without the pinned stock CLI'
+# setup.sh passes the same build args to its orchestrator build and checks the result.
+grep -q 'build_image "fleet:orchestrator" .*"$ORCH_CLI_ARGS"$' "$ROOT/setup.sh"
+grep -q 'stock_cli_image_check "$ENV_FILE" fleet:orchestrator' "$ROOT/setup.sh"
+echo 'PASS setup.sh builds the orchestrator with the pinned stock CLI args and checks the image'

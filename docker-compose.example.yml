@@ -420,6 +420,10 @@ services:
     build:
       context: .
       dockerfile: src/Fleet.Orchestrator/Dockerfile
+      # #492: the pinned stock CLI for managed mode; both empty (default-off) installs no CLI.
+      args:
+        OPENSHELL_CLI_URL: ${OPENSHELL_CLI_URL:-}
+        OPENSHELL_CLI_SHA256: ${OPENSHELL_CLI_SHA256:-}
     image: fleet:orchestrator
     container_name: fleet-orchestrator
     ports:

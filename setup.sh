@@ -1015,6 +1015,10 @@ section "[5/7] Building Docker images..."
 # credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
 stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
   || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
+# #492 A3: an enabled managed runtime builds the orchestrator with the pinned stock CLI (.env
+# OPENSHELL_CLI_URL/OPENSHELL_CLI_SHA256, validated above). Default-off passes no build args.
+ORCH_CLI_ARGS=$(stock_cli_build_args "$ENV_FILE") \
+  || { fail "managed runtime needs the pinned stock CLI build args; see docs/openshell-stock.md"; exit 1; }
 # #492 §16: like upgrade, an enabled managed runtime needs a fresh, successful gateway backup first.
 stock_backup_freshness "$ENV_FILE" "$SCRIPT_DIR" \
   || { fail "managed runtime gateway backup is missing, failed or stale; run scripts/backup-stock-gateway.sh first"; exit 1; }
@@ -1029,6 +1033,11 @@ else
   STOCK_ROLLOUT_TARGET=(--dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile")
 fi
 if ! $DRY_RUN; then
+  # #492 A3: that existing image must already carry the pinned stock CLI when managed is enabled.
+  if $SKIP_BUILD; then
+    stock_cli_image_check "$ENV_FILE" fleet:orchestrator \
+      || { fail "the local fleet:orchestrator image lacks the pinned stock CLI; run setup.sh without --skip-build"; exit 1; }
+  fi
   ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
     bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" "${STOCK_ROLLOUT_TARGET[@]}" \
     || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
@@ -1079,7 +1088,10 @@ else
   }
 
   build_image "fleet:agent"           "$SCRIPT_DIR/Dockerfile"                        "$SCRIPT_DIR"
-  build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR"
+  build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR" "$ORCH_CLI_ARGS"
+  # #492 A3: never start a managed orchestrator without the pinned stock CLI. Default-off: no check.
+  $DRY_RUN || stock_cli_image_check "$ENV_FILE" fleet:orchestrator \
+    || { fail "the built fleet:orchestrator image lacks the pinned stock CLI"; exit 1; }
   build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"

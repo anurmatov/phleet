@@ -60,6 +60,9 @@ stock_managed_preflight() {
   $found || faults+=("stock CLI mTLS client cert/key (openshell/gateways/<name>/mtls/tls.crt and tls.key) not readable under $client_dir")
   python3 -c 'import sqlite3' >/dev/null 2>&1 \
     || faults+=("python3 with the sqlite3 module is required (gateway backup)")
+  # #492 A3: the orchestrator image must carry the exact stock CLI, so the pinned build args are required.
+  _stock_cli_pin_valid "$env_file" \
+    || faults+=("OPENSHELL_CLI_URL must be an https:// URL (no spaces, quotes, ? or &) and OPENSHELL_CLI_SHA256 its 64-hex SHA-256 (stock CLI $STOCK_CLI_VERSION for the orchestrator image)")
   ((${#faults[@]} == 0)) && return 0
   printf 'managed runtime preflight: %s\n' "${faults[@]}" >&2
   return 1
@@ -84,5 +87,38 @@ stock_backup_freshness() {
     return 0
   fi
   printf 'managed runtime preflight: gateway backup %s\n' "$out" >&2
+  return 1
+}
+
+# #492 A3: the orchestrator image installs the exact stock CLI only from the pinned OPENSHELL_CLI_URL
+# and OPENSHELL_CLI_SHA256 build args (src/Fleet.Orchestrator/Dockerfile). The URL is restricted to
+# characters safe for build_image's word-split $extra_args.
+STOCK_CLI_VERSION=0.1.5
+_stock_cli_pin_valid() {
+  [[ "$(_stock_env_get "$1" OPENSHELL_CLI_URL)" =~ ^https://[A-Za-z0-9._~:/@%+=-]+$ \
+    && "$(_stock_env_get "$1" OPENSHELL_CLI_SHA256)" =~ ^[0-9a-fA-F]{64}$ ]]
+}
+
+# Prints the orchestrator --build-arg words when managed is enabled; nothing when default-off.
+# Fails (with a message) when enabled and the pin is missing or malformed.
+# Usage: stock_cli_build_args <env-file>
+stock_cli_build_args() {
+  [[ "$(stock_managed_state "$1")" != false ]] || return 0
+  if ! _stock_cli_pin_valid "$1"; then
+    echo "managed runtime preflight: OPENSHELL_CLI_URL/OPENSHELL_CLI_SHA256 are missing or invalid" >&2
+    return 1
+  fi
+  printf -- '--build-arg OPENSHELL_CLI_URL=%s --build-arg OPENSHELL_CLI_SHA256=%s' \
+    "$(_stock_env_get "$1" OPENSHELL_CLI_URL)" "$(_stock_env_get "$1" OPENSHELL_CLI_SHA256)"
+}
+
+# When managed is enabled, refuse an orchestrator image without the stock CLI at the pinned version.
+# Default-off returns 0 without calling docker. Usage: stock_cli_image_check <env-file> <image>
+stock_cli_image_check() {
+  local out
+  [[ "$(stock_managed_state "$1")" != false ]] || return 0
+  out=$(docker run --rm --entrypoint openshell "$2" --version 2>/dev/null) || out=""
+  if [[ "$out" =~ ^openshell\ ${STOCK_CLI_VERSION//./\\.}([+\ ].*)?$ ]]; then return 0; fi
+  echo "managed runtime preflight: image $2 lacks the stock CLI openshell $STOCK_CLI_VERSION (got: ${out:-none})" >&2
   return 1
 }

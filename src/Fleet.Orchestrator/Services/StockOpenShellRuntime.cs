@@ -553,10 +553,8 @@ public sealed class StockOpenShellRuntime(
         // The agent's own bot token and derived journal ingest token stay outside in stock providers; the
         // workload gets only the public bot id and stock placeholders. Missing values refuse here.
         if (ContainerProvisioningService.HasTelegramBot(agent) && TelegramCredential(agent).Fault is { } telegramFault) return telegramFault;
-        // Tool-send receipts (#394) arrive on the ordinary broker, which the epoch identity cannot read; with
-        // capture on, Telegram MCP sends would go unjournaled, so the combination refuses instead.
-        if (JournalCapture(agent) && agent.McpEndpoints.Any(e => e.McpName == "fleet-telegram"))
-            return "managed_route_unsupported:journal_tool_send_receipts";
+        // Tool-send receipts (#394) for a managed agent travel over the epoch's existing control lane
+        // (fleet.group to the agent's own queue, published by Fleet.Telegram as the control principal).
         if ((JournalCapture(agent) || JournalRead(agent)) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
         // Only first-party HTTP MCP receivers that verify the outside assertion, and the comms-journal read
         // MCP (Comms verifies the derived read token resolved outside), are routed; others refuse.

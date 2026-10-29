@@ -564,13 +564,18 @@ Refusal codes, all raised before the old runtime stops:
 `fleet-journal-files` listener) are routed as above. Every MCP endpoint other than memory, the
 first-party receivers and `fleet-comms-journal` refuses apply with `managed_route_unsupported:mcp:<name>`,
 as does a supported endpoint without a configured receiving host (for `fleet-comms-journal`, no
-`JournalHost`). Tool-send receipts (#394) are not consumed in stock mode: Fleet.Telegram publishes
-them on the ordinary broker (`fleet.journal.tool-sends`, queue `fleet.journal.tool-sends.<agent>`),
-and the only principals in the `stock-<epoch>` vhost are the workload, control and observer roles of
-#489 §6. Delivery would need a new per-epoch publishing principal handed to Fleet.Telegram, a grant
-on the ordinary vhost, or an orchestrator relay consumer, each of which widens that table. So journal
-capture together with a `fleet-telegram` MCP grant refuses with
-`managed_route_unsupported:journal_tool_send_receipts`. Workflow directives and signals are not
+`JournalHost`). Tool-send receipts (#394) use the epoch's existing control lane (#492 existing-role
+routing): when Fleet.Telegram verifies a managed request it pins the receipt context (agent, sandbox,
+epoch, MCP session, destination chat) from the verified record, re-reads the record before publishing,
+and publishes the typed receipt as that epoch's `control` principal to `fleet.group` with the agent's
+routing key. It reads only `<agent>.control.password` and the current record from
+`StockOpenShell:AuthorityDirectory`, never admin or observer credentials, declares nothing and closes
+the lane when the binding changes. A stale, revoked or foreign context is dropped and counted, never
+retargeted or sent to the ordinary `fleet.journal.tool-sends` exchange. The workload admits the receipt
+from its own queue only with the control user-id, exchange `fleet.group`, its own routing key and a
+pinned agent/sandbox/epoch that is its current enrollment, then applies the usual own-bot, privacy and
+capture rules, writes the spool before the ack and ignores a duplicate in the same life. Broker
+users, permissions, queues and consumers are unchanged. Workflow directives and signals are not
 routed either: a managed agent's epoch identity reads only bridge control requests, and its relay
 publishes only bridge responses, so Temporal `DelegateToAgent` (and any workflow signal it would
 send back) has no lane. With `TemporalBridge:OrchestratorUrl` set, `DelegateToAgent` reads the

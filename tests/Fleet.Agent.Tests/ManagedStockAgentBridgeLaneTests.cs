@@ -351,7 +351,7 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
     }
 
     [Fact]
-    public async Task LostLaneConnection_IsHeldAndReplacedByTheNextAsk_WithinTheBoundedAttempts()
+    public async Task LostLaneConnection_IsHeldAndReplacedByTheNextAsk_AndRecoveredLossesNeverExhaustTheBound()
     {
         Save("agent1", "sandbox-1");
         await using var bridge = Bridge();
@@ -361,8 +361,10 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         bridge.TargetAgent = "agent1";
 
         // Broker restart: the lane connection shuts down and is never auto-recovered (#492 V2). The next ask
-        // replaces the dead lane instead of publishing on it; each replacement is one bounded open.
-        for (var opens = 2; opens <= BridgeControlLanes.MaxLaneAttempts; opens++)
+        // replaces the dead lane instead of publishing on it. Each successful reopen resets the bounded count
+        // of consecutive failed opens (#492 X1), so more recovered losses than MaxLaneAttempts stay openable.
+        var cycles = BridgeControlLanes.MaxLaneAttempts * 2 + 1;
+        for (var opens = 2; opens <= cycles + 1; opens++)
         {
             Lose(Snapshot()[^1].Connection);
             var ask = bridge.AskAsync("after restart", "operator", null, 5, default);
@@ -376,11 +378,9 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
             await Complete(lane.Channel, "agent1", Vhost("agent1") + "-workload");
             Assert.Equal("synthetic completion", await ask.WaitAsync(TimeSpan.FromSeconds(3)));
         }
-        Lose(Snapshot()[^1].Connection);
-        Assert.Equal(Denied, await bridge.AskAsync("held", "operator", null, 1, default));
-        Assert.Equal(BridgeControlLanes.MaxLaneAttempts, Snapshot().Length); // held: no further reopen
-        Assert.All(Snapshot(), l => Assert.True(Closed(l.Connection)));
-        Assert.Equal(1, Publishes(Snapshot()[^1].Channel));
+        Assert.Equal(cycles + 1, Snapshot().Length);
+        Assert.False(Closed(Snapshot()[^1].Connection));
+        Assert.All(Snapshot()[..^1], l => Assert.True(Closed(l.Connection)));
         Assert.Equal(0, Publishes(_ordinary));
     }
 

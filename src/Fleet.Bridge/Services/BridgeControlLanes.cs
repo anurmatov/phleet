@@ -22,10 +22,13 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
     /// <summary>Ordinary target: not managed. Managed: use <see cref="Lane"/>, or refuse when it is null.</summary>
     internal readonly record struct Route(bool Managed, BridgeRelayService? Lane);
 
-    /// <summary>A lane for one record binding; a failed open (null relay) is retried a bounded number of times.</summary>
+    /// <summary>
+    /// A lane for one record binding; a failed open (null relay) is retried a bounded number of times.
+    /// <see cref="Attempts"/> counts consecutive failed opens since the last successful one (0 while open).
+    /// </summary>
     private sealed record Entry(StockActiveRecord Source, BridgeRelayService? Relay, int Attempts = 1, DateTimeOffset RetryAt = default);
 
-    /// <summary>Opens of one record binding before its failed lane stays held until the binding changes.</summary>
+    /// <summary>Consecutive failed opens of one record binding before its lane stays held until the binding changes.</summary>
     internal const int MaxLaneAttempts = 5;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -173,21 +176,23 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
             if (entry is { Relay.Lost: true })
             {
                 // Connection shut down (e.g. broker restart; no auto-recovery, #492 V2): the dead lane is held, never
-                // used, and counts as one open of this binding, so the next allowed ask or reconcile replaces it
-                // within the same MaxLaneAttempts bound. Nothing reconnects on its own.
+                // used, and the next allowed ask or reconcile replaces it, its reopen counting against the
+                // MaxLaneAttempts bound of consecutive failed opens. Nothing reconnects on its own.
                 logger.LogWarning("Stock control lane for {Agent} lost its connection; held until reopened", agent);
                 await CloseAsync(entry.Relay);
                 entry = entry with { Relay = null, RetryAt = DateTimeOffset.UtcNow };
                 _lanes[agent] = entry;
             }
             // A failed lane of the same binding is retried with a doubling backoff, at most MaxLaneAttempts
-            // opens in all; after that it stays held (refusing) until re-enrollment changes the binding.
+            // consecutive failed opens; after that it stays held (refusing) until re-enrollment changes the
+            // binding. A successful open resets the count (#492 X1), so recovered connection losses (each
+            // broker restart costs one reopen) never use up the bound and refuse a working lane.
             if (entry is null || (entry.Relay is null && entry.Attempts < MaxLaneAttempts && DateTimeOffset.UtcNow >= entry.RetryAt))
             {
                 var attempts = entry is null ? 1 : entry.Attempts + 1;
                 var relay = await OpenAsync(agent, fresh, ct);
                 var delay = LaneRetryDelay * (1 << (attempts - 1));
-                entry = new(fresh, relay, attempts, DateTimeOffset.UtcNow + delay);
+                entry = new(fresh, relay, relay is null ? attempts : 0, DateTimeOffset.UtcNow + delay);
                 _lanes[agent] = entry;
                 // Bounded retry of this binding only; it reads the local directory again, not the broker.
                 if (relay is null && attempts < MaxLaneAttempts) ScheduleReconcile(delay + TimeSpan.FromMilliseconds(50));

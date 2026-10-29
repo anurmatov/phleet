@@ -20,7 +20,9 @@ public sealed record RelayMessage(
     string? TaskId = null,
     string? WorkflowId = null,
     string? SignalName = null,
-    string? Repo = null);
+    string? Repo = null,
+    Guid? Epoch = null,
+    string? Sandbox = null);
 
 public static class RelayMessageType
 {
@@ -28,4 +30,6 @@ public static class RelayMessageType
     public const string Response = "response";
     public const string PartialResponse = "partial-response";
     public const string WorkflowSignal = "workflow-signal";
+    /// <summary>Typed workflow directive to a managed stock agent over its epoch control lane (#492).</summary>
+    public const string WorkflowDirective = "workflow-directive";
 }

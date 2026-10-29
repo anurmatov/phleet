@@ -29,4 +29,11 @@ public sealed class TemporalBridgeOptions
     /// Set via TEMPORALBRIDGE__ORCHESTRATORAUTHTOKEN env var (same value as ORCHESTRATOR_AUTH_TOKEN).
     /// </summary>
     public string OrchestratorAuthToken { get; set; } = "";
+
+    /// <summary>
+    /// Managed stock OpenShell mode (#492): the trusted authority directory, bound from
+    /// <c>StockOpenShell:AuthorityDirectory</c>. Empty (the default) means managed mode is off: delegation
+    /// never consults the orchestrator for the target's runtime and publishes on the ordinary broker.
+    /// </summary>
+    public string StockAuthorityDirectory { get; set; } = "";
 }

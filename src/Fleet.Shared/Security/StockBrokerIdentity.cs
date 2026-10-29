@@ -42,6 +42,8 @@ public sealed class StockBrokerIdentity
         ? VirtualHost + "-" + role : throw new StockIdentityDenied("broker_role");
     public string Agent => _agent;
     public string BrokerHost => _host;
+    public Guid Epoch => _epoch;
+    public string Sandbox => _sandbox;
 
     public void Current()
     {

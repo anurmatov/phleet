@@ -12,6 +12,8 @@ namespace Fleet.Temporal.Services;
 public sealed class TaskCompletionRegistry
 {
     private readonly ConcurrentDictionary<string, TaskCompletionSource<AgentTaskResult>> _pending = new();
+    // Managed stock delegations (#492): the agent/sandbox/epoch/session a reply for the TaskId must carry.
+    private readonly ConcurrentDictionary<string, ManagedCorrelation> _expected = new();
     private readonly ILogger<TaskCompletionRegistry> _logger;
 
     public TaskCompletionRegistry(ILogger<TaskCompletionRegistry> logger)
@@ -27,8 +29,16 @@ public sealed class TaskCompletionRegistry
     /// are in flight at once, which is worth a log line rather than being inferred hours later
     /// from a confusing timeout.
     /// </remarks>
-    public TaskCompletionSource<AgentTaskResult> Register(string taskId)
+    public TaskCompletionSource<AgentTaskResult> Register(string taskId) => Register(taskId, null);
+
+    /// <summary>
+    /// Register a pending task; with <paramref name="expected"/> only a reply carrying exactly that managed
+    /// context (agent, sandbox, epoch, session) completes it, and a reply without one never does (#492).
+    /// </summary>
+    public TaskCompletionSource<AgentTaskResult> Register(string taskId, ManagedCorrelation? expected)
     {
+        if (expected is null) _expected.TryRemove(taskId, out _);
+        else _expected[taskId] = expected;
         var tcs = new TaskCompletionSource<AgentTaskResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         if (_pending.TryGetValue(taskId, out var prior) && !prior.Task.IsCompleted)
@@ -44,14 +54,29 @@ public sealed class TaskCompletionRegistry
     }
 
     /// <summary>Complete the pending task with the agent result. Returns true if matched.</summary>
-    public bool TryComplete(string taskId, AgentTaskResult result)
+    public bool TryComplete(string taskId, AgentTaskResult result) => TryComplete(taskId, result, null);
+
+    /// <summary>
+    /// Complete the pending task when the reply's managed context matches the registered expectation:
+    /// a managed registration needs the same agent, sandbox, epoch and session; an ordinary registration
+    /// refuses a reply that claims a managed context. Refusals log no content.
+    /// </summary>
+    public bool TryComplete(string taskId, AgentTaskResult result, ManagedCorrelation? context)
     {
+        _expected.TryGetValue(taskId, out var expected);
+        if (expected is null ? context is not null : context is null || !expected.Matches(context))
+        {
+            _logger.LogWarning("Reply for TaskId={TaskId} refused: managed correlation mismatch", taskId);
+            return false;
+        }
         if (!_pending.TryRemove(taskId, out var tcs))
         {
             _logger.LogWarning("No pending task for TaskId={TaskId} — ignoring response", taskId);
             return false;
         }
 
+        if (expected is not null)
+            _expected.TryRemove(new KeyValuePair<string, ManagedCorrelation>(taskId, expected));
         tcs.TrySetResult(result);
         _logger.LogInformation("Completed task {TaskId} with status={Status}", taskId, result.Status);
         return true;
@@ -81,12 +106,15 @@ public sealed class TaskCompletionRegistry
             if (!_pending.TryRemove(taskId, out var tcs))
                 return false;
 
+            _expected.TryRemove(taskId, out _);
             tcs.TrySetCanceled();
             return true;
         }
 
         var removed = _pending.TryRemove(
             new KeyValuePair<string, TaskCompletionSource<AgentTaskResult>>(taskId, owned));
+
+        if (removed) _expected.TryRemove(taskId, out _);
 
         // Our own source is cancelled either way — whoever awaits it must not hang — but whatever
         // else is under the key is left strictly alone.
@@ -111,7 +139,19 @@ public sealed class TaskCompletionRegistry
             tcs.TrySetCanceled();
         }
         _pending.Clear();
+        _expected.Clear();
     }
 
     public int PendingCount => _pending.Count;
+}
+
+/// <summary>
+/// The managed context a workflow reply must carry (#492): the target agent, its sandbox and epoch from the
+/// selected authority record, and the per-delegation session nonce sent only on that epoch's control lane.
+/// </summary>
+public sealed record ManagedCorrelation(string Agent, string Sandbox, Guid Epoch, string Session)
+{
+    public bool Matches(ManagedCorrelation other) =>
+        string.Equals(Agent, other.Agent, StringComparison.OrdinalIgnoreCase) && Sandbox == other.Sandbox
+        && Epoch == other.Epoch && Session == other.Session;
 }

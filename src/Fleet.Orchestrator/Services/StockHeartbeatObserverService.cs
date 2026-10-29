@@ -25,6 +25,9 @@ public sealed class StockHeartbeatObserverService(
     // Touched only by the single directory loop (or a test driving ReconcileAsync without starting the service).
     private readonly Dictionary<string, Lane> _lanes = new(StringComparer.OrdinalIgnoreCase);
 
+    // Set while the managed directory stays unavailable, so its warning is not repeated every reconcile.
+    private bool _directoryUnavailable;
+
     /// <summary>Agents with a lane, and whether that lane's receiver started.</summary>
     internal IReadOnlyDictionary<string, bool> Lanes => _lanes.ToDictionary(l => l.Key, l => l.Value.Receiver is not null);
 
@@ -248,10 +251,16 @@ public sealed class StockHeartbeatObserverService(
         try { active = StockAuthoritySource.Active(directory); }
         catch (StockIdentityDenied)
         {
-            // Existing receivers re-check their own record on every delivery; nothing new starts.
-            logger.LogWarning("Stock observer directory unavailable; manual reconciliation required");
+            // Existing receivers re-check their own record on every delivery; nothing new starts. A default-off
+            // install has no managed directory at all, so warn once per unavailable streak, then only at Debug.
+            if (_directoryUnavailable)
+                logger.LogDebug("Stock observer directory still unavailable");
+            else
+                logger.LogWarning("Stock observer directory unavailable; manual reconciliation required");
+            _directoryUnavailable = true;
             return;
         }
+        _directoryUnavailable = false;
         foreach (var (agent, lane) in _lanes.ToList())
         {
             if (active.GetValueOrDefault(agent) is { } fresh && lane.Source.SameBinding(fresh)) continue;

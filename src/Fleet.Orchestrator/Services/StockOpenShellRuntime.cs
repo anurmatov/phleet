@@ -1397,7 +1397,11 @@ public sealed class StockOpenShellRuntime(
                 var revoked = await broker.RevokeEpochAsync(target.Epoch, token);
                 return revoked.Ok ? null : string.Join(",", revoked.OwnedPartials.DefaultIfEmpty(revoked.Code ?? "broker_revoke_unresolved"));
             }));
-            if (string.IsNullOrEmpty(target.SandboxId)) { errors.Add("unverified_target:" + target.SandboxName); continue; }
+            // Review A1: a target recorded before its UUID (a failed pre-create apply) is clean only once the paged
+            // absence proof shows its exact owned name absent; nothing is detached, stopped or deleted for it.
+            if (string.IsNullOrEmpty(target.SandboxId))
+                legs.Add(Leg("unverified_target:" + target.SandboxName, async token =>
+                    await SandboxDeletedAsync(target.SandboxName, token) ? null : "sandbox_not_proven_absent"));
         }
         foreach (var target in targets.Where(t => !string.IsNullOrEmpty(t.SandboxId)).DistinctBy(t => t.SandboxId))
         {

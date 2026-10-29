@@ -783,4 +783,49 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Equal("docker_handoff_unresolved", revoke.Code);
         Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
+
+    [Theory]
+    [InlineData("absent", true)]
+    [InlineData("listed_on_page_two", false)]
+    [InlineData("present", false)]
+    [InlineData("unobservable", false)]
+    public async Task Failed_pre_uuid_docker_apply_is_cleared_by_revoke_only_once_its_owned_name_is_proven_absent(string gateway, bool clears)
+    {
+        // Review A1: the Docker->OpenShell apply fails before any sandbox UUID is recorded.
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = null;
+        var runtime = _t.Runtime(dockerStop: _ => Task.FromResult(true));
+        Assert.Equal("docker_observation_failed", (await runtime.ApplyAsync("agent1", default)).Code);
+        var held = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", held.State);
+        var name = held.Candidate!.SandboxName;
+        Assert.True(string.IsNullOrEmpty(held.Candidate.SandboxId));
+        switch (gateway)
+        {
+            case "absent": _t._cli.ListPages = [["fleet-other-00000000"], ["fleet-other-11111111"]]; break;
+            case "listed_on_page_two": _t._cli.ListPages = [["fleet-other-00000000"], [name]]; break;
+            case "present": _t._cli.Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready"); break;
+            default: _t._cli.ListFails = true; break;
+        }
+        _t._cli.Calls.Clear();
+
+        var revoke = await runtime.RevokeAsync("agent1", default);
+
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        if (clears)
+        {
+            Assert.True(revoke.Ok, revoke.Code + ":" + string.Join(",", revoke.Errors));
+            Assert.Equal(("revoked", 0), (record.State, record.Errors.Count));
+            Assert.Null(record.Candidate);
+            Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "list", "-o", "json", "--page-token", "p1"]));
+        }
+        else
+        {
+            Assert.False(revoke.Ok);
+            Assert.Equal("needs_attention", record.State);
+            Assert.Equal(name, record.Candidate!.SandboxName);
+        }
+        // No name guessing and no destructive action against whatever owns the name.
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop") || Verb(c, "start") || Verb(c, "delete") || c.Args.Contains("detach"));
+    }
 }

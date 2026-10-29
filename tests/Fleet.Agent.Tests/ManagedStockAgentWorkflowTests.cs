@@ -31,11 +31,12 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         .Where(c => c.GetMethodInfo().Name == "BasicPublishAsync").Select(c => c.GetArguments()).ToArray();
 
     private static byte[] Directive(Guid epoch, string sandbox = "synthetic-sandbox", string? taskId = "wf/task-1",
-        string? session = null, string sender = "temporal-bridge") =>
+        string? session = null, string sender = "temporal-bridge", DateTimeOffset? deadline = null) =>
         JsonSerializer.SerializeToUtf8Bytes(new
         {
             ChatId = 0, Sender = sender, Text = "synthetic task", Timestamp = DateTimeOffset.UtcNow, Type = "workflow-directive",
-            CorrelationId = session ?? Guid.NewGuid().ToString("N"), TaskId = taskId, Epoch = epoch, Sandbox = sandbox
+            CorrelationId = session ?? Guid.NewGuid().ToString("N"), TaskId = taskId, Epoch = epoch, Sandbox = sandbox,
+            Deadline = deadline
         });
 
     [Fact]
@@ -211,6 +212,51 @@ public sealed class ManagedStockAgentWorkflowDirectiveTests
         var publish = Assert.Single(Publishes(fixture.Channel));
         AssertWorkflowReply(((ReadOnlyMemory<byte>)publish[4]!).ToArray(), "response", session, fixture.Epoch);
         Assert.Equal(0, relay.WorkflowSessionCount);
+    }
+
+    [Fact]
+    public async Task PublishOutageLongerThanTheIdleBound_KeepsTheSessionUntilTheActivityDeadline()
+    {
+        using var fixture = new StockBrokerTransportTests.Fixture();
+        await using var relay = fixture.Relay();
+        var now = DateTimeOffset.UtcNow;
+        relay.WorkflowClock = () => now;
+        await relay.InitializeAsync(default);
+        var props = new BasicProperties { UserId = fixture.Binding.Principal("control") };
+        var idle = Fleet.Agent.Services.GroupRelayService.WorkflowSessionIdleTimeout;
+        var session = Guid.NewGuid().ToString("N");
+        // The activity's own deadline is four idle bounds away; wf/legacy carries none (an older sender).
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 1, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, session: session, deadline: now + idle * 4));
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 2, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/legacy"));
+
+        // Temporal cannot publish any resend for three idle bounds (#492 X4): the deadline keeps wf/task-1.
+        now += idle * 3;
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "late legacy result", RelayMessageType.Response, taskId: "wf/legacy");
+        Assert.Empty(Publishes(fixture.Channel));
+        Assert.Equal(1, relay.WorkflowSessionCount);
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "late result", RelayMessageType.Response, taskId: "wf/task-1");
+        var publish = Assert.Single(Publishes(fixture.Channel));
+        AssertWorkflowReply(((ReadOnlyMemory<byte>)publish[4]!).ToArray(), "response", session, fixture.Epoch);
+        Assert.Equal(0, relay.WorkflowSessionCount);
+
+        // Past its deadline the activity no longer accepts the reply, so the session is freed.
+        var expiring = Guid.NewGuid().ToString("N");
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 3, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/expiring", session: expiring, deadline: now + idle * 2));
+        // A resend without a later deadline never shortens the expiry already held.
+        now += idle / 2;
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 4, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/expiring", session: expiring));
+        now += idle + TimeSpan.FromSeconds(1); // past the resend's own idle bound, before the deadline
+        await Consumer(fixture.Channel).HandleBasicDeliverAsync("owned", 5, false, "fleet.group", "agent1", props,
+            Directive(fixture.Epoch, taskId: "wf/probe")); // admission runs the expiry pass
+        Assert.Equal(2, relay.WorkflowSessionCount);
+        now += idle / 2; // past wf/expiring's deadline; wf/probe is still within its idle bound
+        await relay.PublishToAgentAsync("temporal-bridge", 0, "too late", RelayMessageType.Response, taskId: "wf/expiring");
+        Assert.Single(Publishes(fixture.Channel));
+        Assert.Equal(1, relay.WorkflowSessionCount);
     }
 
     public static TheoryData<string> Foreign() => new()

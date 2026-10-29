@@ -703,6 +703,14 @@ public sealed class DelegateToAgentActivity
         await using var connection = await ControlConnect(factory, ct);
         await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
 
+        // The activity's own StartToClose deadline (#492 X4): the agent keeps the reply session until then even
+        // when no resend can be published (a broker or publish outage), since only this activity's end makes
+        // the reply unwanted. Every publish (initial, resend, continuation) carries the same deadline.
+        DateTimeOffset? deadline = ActivityExecutionContext.HasCurrent
+            && ActivityExecutionContext.Current.Info.StartToCloseTimeout is { } startToClose
+            ? new DateTimeOffset(DateTime.SpecifyKind(ActivityExecutionContext.Current.Info.StartedTime, DateTimeKind.Utc)) + startToClose
+            : null;
+
         var message = new RelayMessage(
             ChatId: chatId,
             Sender: BridgeSender,
@@ -713,7 +721,8 @@ public sealed class DelegateToAgentActivity
             TaskId: taskId,
             Repo: repo,
             Epoch: identity.Epoch,
-            Sandbox: identity.Sandbox);
+            Sandbox: identity.Sandbox,
+            Deadline: deadline);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         await channel.BasicPublishAsync(

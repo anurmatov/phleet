@@ -614,7 +614,13 @@ and is never retargeted to the ordinary broker. Resends and continuation retries
 session. Cancellation goes through the orchestrator's targeted cancel (the managed loopback cancel),
 and a managed agent gets no ordinary `/cancel all` fallback. The agent admits the directive only
 from the control principal on `fleet.group` routed to itself, with its own sandbox and epoch, a TaskId
-and a session. It then runs as an ordinary Temporal directive. The reply goes out as a typed
+and a session. The directive also carries the delegating activity's own StartToClose deadline. The
+agent keeps the TaskId's reply session until its final reply is published, the task is cancelled, or
+the session expires. Expiry is the later of 30 minutes after the last (re-)admitted directive and that
+deadline, capped at 7 days after admission, and at most 256 sessions are kept. A broker or publish
+outage that stops Temporal's five-minute resends therefore never drops the session of an activity that
+can still accept the reply. A directive without a deadline keeps the 30-minute idle bound. It then runs
+as an ordinary Temporal directive. The reply goes out as a typed
 `response`/`partial-response` on the existing bridge reply route (`bridge`, workload user-id), carrying
 agent, sandbox, epoch, session and TaskId. The Bridge's managed lane is the sole consumer of
 `fleet.agent.bridge` in that vhost. It admits the reply only with the workload principal and its own

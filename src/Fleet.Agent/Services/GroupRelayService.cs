@@ -38,16 +38,21 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     private readonly Dictionary<string, DateTimeOffset> _lastPublishTime = new();
     // Managed workflow directives (#492) admitted on the control lane: TaskId -> session nonce for the reply.
     // Bounded (#492 W6): only a successfully published final reply frees its entry (#492 R5) — a failed
-    // publication or a partial response keeps it, so a retried reply or a re-sent directive still carries the
-    // context; at the bound the oldest unreplied session is dropped, so unreplied (cancelled or timed-out) tasks
+    // publication or a partial response keeps it, so a later final reply (for example from the turn a re-sent
+    // directive runs) still carries the context; nothing republishes a failed reply by itself. At the bound the oldest unreplied session is dropped, so unreplied (cancelled or timed-out) tasks
     // can never fill the map and refuse every later directive.
-    // Cancel (Temporal's per-task cancel) and timeout also free it: a session no directive (re-)admitted within
-    // WorkflowSessionIdleTimeout is dropped — while Temporal waits it re-sends the directive every five minutes,
-    // so an idle session means the workflow cancelled or timed out and no longer accepts the reply.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Session, long Order, DateTimeOffset Admitted)> _workflowSessions = new(StringComparer.Ordinal);
+    // Cancel (Temporal's per-task cancel) and timeout also free it. A session expires at the later of
+    // WorkflowSessionIdleTimeout after its last (re-)admitted directive and the delegating activity's own
+    // StartToClose deadline carried in that directive (#492 X4). While Temporal waits it re-sends the directive
+    // every five minutes, but a broker or publish outage stops those resends while the activity still accepts
+    // the reply, so idleness alone must not drop a live workflow's session: only the activity's end makes the
+    // reply unwanted. Without a deadline (an older sender) the idle bound applies. The deadline is capped at
+    // MaxWorkflowSessionLifetime after admission, and the count bound above still holds.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Session, long Order, DateTimeOffset Expires)> _workflowSessions = new(StringComparer.Ordinal);
     private long _workflowSessionOrder;
     internal const int MaxWorkflowSessions = 256;
     internal static readonly TimeSpan WorkflowSessionIdleTimeout = TimeSpan.FromMinutes(30);
+    internal static readonly TimeSpan MaxWorkflowSessionLifetime = TimeSpan.FromDays(7);
     internal int WorkflowSessionCount => _workflowSessions.Count;
     /// <summary>Stands in for the wall clock in tests.</summary>
     internal Func<DateTimeOffset> WorkflowClock { get; set; } = () => DateTimeOffset.UtcNow;
@@ -474,7 +479,17 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             || message.WorkflowId is not null || message.SignalName is not null)
             throw new StockIdentityDenied("broker_route_denied");
         ExpireIdleWorkflowSessions();
-        _workflowSessions[message.TaskId] = (message.CorrelationId!, Interlocked.Increment(ref _workflowSessionOrder), WorkflowClock()); // a resend carries the same session and refreshes it
+        var now = WorkflowClock();
+        var expires = now + WorkflowSessionIdleTimeout;
+        if (message.Deadline is { } deadline)
+        {
+            var capped = deadline < now + MaxWorkflowSessionLifetime ? deadline : now + MaxWorkflowSessionLifetime;
+            if (capped > expires) expires = capped;
+        }
+        // A resend carries the same session and refreshes it; it never shortens a later expiry already held.
+        if (_workflowSessions.TryGetValue(message.TaskId, out var held) && held.Session == message.CorrelationId && held.Expires > expires)
+            expires = held.Expires;
+        _workflowSessions[message.TaskId] = (message.CorrelationId!, Interlocked.Increment(ref _workflowSessionOrder), expires);
         var excess = _workflowSessions.Count - MaxWorkflowSessions;
         if (excess > 0)
         {
@@ -482,7 +497,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
                 _workflowSessions.TryRemove(oldest);
             _logger.LogWarning("Dropped {Count} oldest unreplied managed workflow sessions (bound {Bound})", excess, MaxWorkflowSessions);
         }
-        return message with { Type = RelayMessageType.Directive, CorrelationId = null, Epoch = null, Sandbox = null };
+        return message with { Type = RelayMessageType.Directive, CorrelationId = null, Epoch = null, Sandbox = null, Deadline = null };
     }
 
     /// <summary>
@@ -492,7 +507,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     private void ForgetWorkflowSession(string taskId, string session)
     {
         while (_workflowSessions.TryGetValue(taskId, out var current) && current.Session == session)
-            if (_workflowSessions.TryRemove(new KeyValuePair<string, (string Session, long Order, DateTimeOffset Admitted)>(taskId, current))) return;
+            if (_workflowSessions.TryRemove(new KeyValuePair<string, (string Session, long Order, DateTimeOffset Expires)>(taskId, current))) return;
     }
 
     /// <summary>
@@ -507,18 +522,18 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     }
 
     /// <summary>
-    /// Timeout (#492): drops sessions no directive (re-)admitted within <see cref="WorkflowSessionIdleTimeout"/>;
-    /// returns how many were dropped.
+    /// Timeout (#492): drops sessions past their expiry — the later of <see cref="WorkflowSessionIdleTimeout"/>
+    /// after the last (re-)admitted directive and the activity deadline it carried (#492 X4); returns how many.
     /// </summary>
     private int ExpireIdleWorkflowSessions()
     {
         if (_workflowSessions.IsEmpty) return 0;
-        var cutoff = WorkflowClock() - WorkflowSessionIdleTimeout;
+        var now = WorkflowClock();
         var expired = 0;
         foreach (var entry in _workflowSessions)
-            if (entry.Value.Admitted <= cutoff && _workflowSessions.TryRemove(entry)) expired++;
+            if (entry.Value.Expires <= now && _workflowSessions.TryRemove(entry)) expired++;
         if (expired > 0)
-            _logger.LogWarning("Dropped {Count} managed workflow sessions idle past {Timeout} (cancelled or timed out)",
+            _logger.LogWarning("Dropped {Count} managed workflow sessions past their activity deadline or idle bound {Timeout} (cancelled or timed out)",
                 expired, WorkflowSessionIdleTimeout);
         return expired;
     }
@@ -538,5 +553,6 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
         string Type = RelayMessageType.Directive, string? CorrelationId = null, string? TaskId = null,
-        string? WorkflowId = null, string? SignalName = null, Guid? Epoch = null, string? Sandbox = null);
+        string? WorkflowId = null, string? SignalName = null, Guid? Epoch = null, string? Sandbox = null,
+        DateTimeOffset? Deadline = null);
 }

@@ -128,7 +128,13 @@ public class ManagedStockDelegationTests : IDisposable
         SaveRecord();
         var h = Build(Managed);
 
-        var run = new ActivityEnvironment().RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/managed"));
+        var started = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var environment = new ActivityEnvironment();
+        environment = new ActivityEnvironment
+        {
+            Info = environment.Info with { StartedTime = started, StartToCloseTimeout = TimeSpan.FromDays(30) }
+        };
+        var run = environment.RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/managed"));
         var deadline = Environment.TickCount64 + 5000;
         while (h.Control.Count == 0 && Environment.TickCount64 < deadline) await Task.Delay(10);
 
@@ -146,6 +152,8 @@ public class ManagedStockDelegationTests : IDisposable
         Assert.Equal("wf/managed", message.TaskId);
         Assert.Equal(_epoch, message.Epoch);
         Assert.Equal("sandbox-1", message.Sandbox);
+        // The activity's own StartToClose deadline (#492 X4), so the agent keeps the session through a publish outage.
+        Assert.Equal(new DateTimeOffset(started) + TimeSpan.FromDays(30), message.Deadline);
         Assert.True(Guid.TryParseExact(message.CorrelationId, "N", out _));
         Assert.Empty(h.Ordinary);
         await h.Factory.DidNotReceive().CreateConnectionAsync(Arg.Any<CancellationToken>());

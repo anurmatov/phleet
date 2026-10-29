@@ -236,6 +236,24 @@ sed -i.bak -e 's/^FLEET_STOCK_MANAGED_ENABLED=true$/FLEET_STOCK_MANAGED_ENABLED=
 PATH="$DIR/nosqlite:$PATH" bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
 if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
 echo 'PASS default-off upgrade skips the managed preflight'
+# #492 A6: the flag is parsed like the services' .NET bool binder (case-insensitive, quotes and
+# whitespace stripped). True, "true" and TRUE are enabled and run the preflight; false and empty skip it.
+set_managed_flag() { grep -v '^FLEET_STOCK_MANAGED_ENABLED=' "$ENV" > "$ENV.tmp"; printf 'FLEET_STOCK_MANAGED_ENABLED=%s\n' "$1" >> "$ENV.tmp"; mv "$ENV.tmp" "$ENV"; }
+for flag in True '"true"' TRUE ' true '; do
+  managed_fixture; set_managed_flag "$flag"; rm "$CLIENT/broker-ca.pem"
+  managed_refuses "broker CA"
+  echo "PASS managed flag [$flag] is read as enabled"
+done
+for flag in false False ''; do
+  managed_fixture; rm -rf "$CLIENT"; set_managed_flag "$flag"
+  PATH="$DIR/nosqlite:$PATH" bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
+  if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
+  echo "PASS managed flag [$flag] is read as off"
+done
+for flag in yes 1 enabled; do
+  managed_fixture; set_managed_flag "$flag"
+  managed_refuses 'FLEET_STOCK_MANAGED_ENABLED must be true or false'
+done
 # setup.sh shares the helper and runs it before the rollout guard and any orchestrator replacement.
 pre_line=$(grep -n '^stock_managed_preflight ' "$ROOT/setup.sh" | head -1 | cut -d: -f1)
 [[ -n "$pre_line" && "$pre_line" -lt "$guard_line" ]]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# #492: sourced by setup.sh and upgrade.sh. Only when FLEET_STOCK_MANAGED_ENABLED=true, refuse an
-# install whose managed-runtime trust is incomplete: HTTPS broker management with the operator CA,
+# #492: sourced by setup.sh and upgrade.sh. Only when FLEET_STOCK_MANAGED_ENABLED is enabled (see
+# stock_managed_state; an invalid value refuses), refuse an install whose managed-runtime trust is incomplete: HTTPS broker management with the operator CA,
 # resolvable broker credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3.
 # Default-off installs return 0 without any check. Usage: stock_managed_preflight <env-file> <client-dir>
 _stock_env_get() {
@@ -11,9 +11,35 @@ _stock_env_get() {
   done < "$1"
 }
 
+# #492 A6: FLEET_STOCK_MANAGED_ENABLED parsed like the services' .NET bool binder. Surrounding
+# whitespace and one pair of matching quotes are stripped, then a case-insensitive true/false
+# (True, TRUE, "true" are all enabled). Unset or empty is false (compose's :-false default). Any
+# other value prints invalid: the services would not read it as off, so callers must refuse it.
+# Usage: stock_managed_state <env-file>  ->  prints true, false or invalid
+_stock_trim() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  printf '%s' "${v%"${v##*[![:space:]]}"}"
+}
+stock_managed_state() {
+  local v
+  v=$(_stock_trim "$(_stock_env_get "$1" FLEET_STOCK_MANAGED_ENABLED)")
+  if [[ "$v" =~ ^\"(.*)\"$ || "$v" =~ ^\'(.*)\'$ ]]; then v=$(_stock_trim "${BASH_REMATCH[1]}"); fi
+  case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
+    true) echo true ;;
+    false|'') echo false ;;
+    *) echo invalid ;;
+  esac
+}
+
 stock_managed_preflight() {
   local env_file="$1" client_dir="$2" faults=() url ref key value mtls found=false
-  [[ "$(_stock_env_get "$env_file" FLEET_STOCK_MANAGED_ENABLED)" == true ]] || return 0
+  case "$(stock_managed_state "$env_file")" in
+    false) return 0 ;;
+    invalid)
+      echo "managed runtime preflight: FLEET_STOCK_MANAGED_ENABLED must be true or false (case-insensitive)" >&2
+      return 1 ;;
+  esac
   url=$(_stock_env_get "$env_file" FLEET_STOCK_BROKER_MANAGEMENT_URL)
   [[ "$url" =~ ^https://[^/[:space:]]+ ]] \
     || faults+=("FLEET_STOCK_BROKER_MANAGEMENT_URL must be an https:// broker management endpoint")
@@ -45,7 +71,8 @@ stock_managed_preflight() {
 # Usage: stock_backup_freshness <env-file> <repo-dir>
 stock_backup_freshness() {
   local env_file="$1" repo_dir="$2" dir out
-  [[ "$(_stock_env_get "$env_file" FLEET_STOCK_MANAGED_ENABLED)" == true ]] || return 0
+  # An invalid value is not "off": it falls through and must prove a fresh backup.
+  [[ "$(stock_managed_state "$env_file")" != false ]] || return 0
   dir=$(_stock_env_get "$env_file" FLEET_STOCK_BACKUP_DIR)
   if [[ -z "$dir" ]]; then
     echo "managed runtime preflight: FLEET_STOCK_BACKUP_DIR must name the scripts/backup-stock-gateway.sh backup dir" >&2

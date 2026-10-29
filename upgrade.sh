@@ -145,7 +145,8 @@ esac
 
 # #492: an enabled managed runtime needs a digest-pinned gateway image and a numeric docker group id
 # for the optional openshell profile; validated here instead of failing every default-off compose run.
-if [[ "$(read_env_var "$ENV_FILE" FLEET_STOCK_MANAGED_ENABLED)" == "true" ]]; then
+# Parsed like the services (case-insensitive, quotes stripped); an invalid value is not treated as off.
+if [[ "$(stock_managed_state "$ENV_FILE")" != false ]]; then
   [[ "$(read_env_var "$ENV_FILE" FLEET_STOCK_GATEWAY_IMAGE)" == *@sha256:* ]] \
     || { fail "FLEET_STOCK_GATEWAY_IMAGE must name the pinned stock gateway image by @sha256 digest"; exit 1; }
   [[ "$(read_env_var "$ENV_FILE" FLEET_DOCKER_GID)" =~ ^[0-9]+$ ]] \

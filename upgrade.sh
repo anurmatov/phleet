@@ -108,8 +108,11 @@ add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
 add_missing_env_var FLEET_STOCK_MANAGED_ENABLED false
-# Review A7: the authorized (host operator) owner of openshell-client; an existing value is kept.
-add_missing_env_var FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"
+# Review A7: the authorized (host operator) owner of openshell-client; an existing value is kept. Only
+# when managed is enabled, so a default-off upgrade leaves .env byte-for-byte unchanged (review C1).
+if [[ "$(stock_managed_state "$ENV_FILE")" == true ]]; then
+  add_missing_env_var FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"
+fi
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."

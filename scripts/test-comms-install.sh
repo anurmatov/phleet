@@ -99,7 +99,6 @@ FLEET_AUTONOMY_ENABLED=false
 FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false
 FLEET_STOCK_MANAGED_ENABLED=false
 ENV
-echo "FLEET_STOCK_CONFIG_DIR_UID=$(id -u)" >> "$ENV"
 cp "$ENV" "$DIR/before"
 : > "$CALLS"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
@@ -119,7 +118,8 @@ echo 'PASS default-off upgrade pre-creates the backup bind source 0700'
 # glues a key onto a last line that has no newline.
 printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
-[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false\nFLEET_STOCK_MANAGED_ENABLED=false\nFLEET_STOCK_CONFIG_DIR_UID=%s' "$(id -u)")" ]]
+[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false\nFLEET_STOCK_MANAGED_ENABLED=false')" ]]
+grep -q '^FLEET_STOCK_CONFIG_DIR_UID=' "$ENV" && exit 1 # review C1: default-off upgrade never adds the managed owner key
 echo 'PASS upgrade adds missing epic watcher/grant keys with defaults and keeps present values'
 sed -i.bak 's/^FLEET_AUTONOMY_ENABLED=false$/FLEET_AUTONOMY_ENABLED=true/' "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
@@ -212,6 +212,9 @@ managed_fixture; chmod 750 "$BACKUPS"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
 if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
 echo 'PASS managed upgrade with complete trust passes the preflight'
+# Review C1: only an enabled managed upgrade records the authorized owner of openshell-client.
+grep -qx "FLEET_STOCK_CONFIG_DIR_UID=$(id -u)" "$ENV"
+echo 'PASS managed upgrade records the openshell-client owner uid'
 # #492 A3: the orchestrator build gets the pinned stock CLI and the built image is checked for it.
 grep -q 'build -f .*/src/Fleet.Orchestrator/Dockerfile --build-arg OPENSHELL_CLI_URL=https://cli.example.test/openshell-0.1.5 --build-arg OPENSHELL_CLI_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -t fleet:orchestrator ' "$CALLS"
 grep -qx 'run --rm --entrypoint openshell fleet:orchestrator --version' "$CALLS"

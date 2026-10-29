@@ -97,6 +97,11 @@ public sealed class BridgeRelayService : IAsyncDisposable
     private const string ResponseType = "response";
     private const string PartialResponseType = "partial-response";
 
+    private volatile bool _lost;
+
+    /// <summary>Stock relay only: its broker connection shut down outside disposal and is never recovered here.</summary>
+    internal bool Lost { get => _lost; private set => _lost = value; }
+
     /// <summary>Per-agent managed control lanes; null unless <c>StockOpenShell:AuthorityDirectory</c> is set.</summary>
     internal BridgeControlLanes? Lanes { get; }
 
@@ -126,7 +131,12 @@ public sealed class BridgeRelayService : IAsyncDisposable
             {
                 if (_stockBroker is null)
                     _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
-                else _logger.LogWarning("Stock broker connection lost; manual reconciliation required");
+                else
+                {
+                    // No auto-recovery: a lost managed lane is marked so its owner holds and replaces it (#492 V2).
+                    if (!_stopping.IsCancellationRequested) Lost = true;
+                    _logger.LogWarning("Stock broker connection lost; manual reconciliation required");
+                }
                 return Task.CompletedTask;
             };
 

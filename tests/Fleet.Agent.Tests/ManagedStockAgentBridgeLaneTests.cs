@@ -351,6 +351,44 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
     }
 
     [Fact]
+    public async Task LostLaneConnection_IsHeldAndReplacedByTheNextAsk_WithinTheBoundedAttempts()
+    {
+        Save("agent1", "sandbox-1");
+        await using var bridge = Bridge();
+        bridge.Lanes!.ReconcileDelay = TimeSpan.FromHours(1);
+        await bridge.InitializeAsync(default);
+        Assert.Single(Snapshot());
+        bridge.TargetAgent = "agent1";
+
+        // Broker restart: the lane connection shuts down and is never auto-recovered (#492 V2). The next ask
+        // replaces the dead lane instead of publishing on it; each replacement is one bounded open.
+        for (var opens = 2; opens <= BridgeControlLanes.MaxLaneAttempts; opens++)
+        {
+            Lose(Snapshot()[^1].Connection);
+            var ask = bridge.AskAsync("after restart", "operator", null, 5, default);
+            Assert.Equal(opens, Snapshot().Length);
+            Assert.True(Closed(Snapshot()[^2].Connection));
+            Assert.Equal(opens == 2 ? 0 : 1, Publishes(Snapshot()[^2].Channel)); // never published on a dead lane
+            var lane = Snapshot()[^1];
+            Assert.Equal(Vhost("agent1"), lane.Factory.VirtualHost);
+            Assert.Equal(Vhost("agent1") + "-control", lane.Factory.UserName);
+            Assert.Equal(Vhost("agent1") + "-control", Published(lane.Channel).OfType<BasicProperties>().Single().UserId);
+            await Complete(lane.Channel, "agent1", Vhost("agent1") + "-workload");
+            Assert.Equal("synthetic completion", await ask.WaitAsync(TimeSpan.FromSeconds(3)));
+        }
+        Lose(Snapshot()[^1].Connection);
+        Assert.Equal(Denied, await bridge.AskAsync("held", "operator", null, 1, default));
+        Assert.Equal(BridgeControlLanes.MaxLaneAttempts, Snapshot().Length); // held: no further reopen
+        Assert.All(Snapshot(), l => Assert.True(Closed(l.Connection)));
+        Assert.Equal(1, Publishes(Snapshot()[^1].Channel));
+        Assert.Equal(0, Publishes(_ordinary));
+    }
+
+    private static void Lose(IConnection connection) =>
+        connection.ConnectionShutdownAsync += Raise.Event<AsyncEventHandler<ShutdownEventArgs>>(connection,
+            new ShutdownEventArgs(ShutdownInitiator.Peer, 320, "synthetic broker restart"));
+
+    [Fact]
     public void SingleFileMode_IsUnchanged_AndNeverCombinesWithTheDirectory()
     {
         Save("agent1", "sandbox-1");

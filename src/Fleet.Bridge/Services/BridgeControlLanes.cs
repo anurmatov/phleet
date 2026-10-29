@@ -170,6 +170,16 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
                 entry = null;
             }
             if (fresh is null) return new(true, null);
+            if (entry is { Relay.Lost: true })
+            {
+                // Connection shut down (e.g. broker restart; no auto-recovery, #492 V2): the dead lane is held, never
+                // used, and counts as one open of this binding, so the next allowed ask or reconcile replaces it
+                // within the same MaxLaneAttempts bound. Nothing reconnects on its own.
+                logger.LogWarning("Stock control lane for {Agent} lost its connection; held until reopened", agent);
+                await CloseAsync(entry.Relay);
+                entry = entry with { Relay = null, RetryAt = DateTimeOffset.UtcNow };
+                _lanes[agent] = entry;
+            }
             // A failed lane of the same binding is retried with a doubling backoff, at most MaxLaneAttempts
             // opens in all; after that it stays held (refusing) until re-enrollment changes the binding.
             if (entry is null || (entry.Relay is null && entry.Attempts < MaxLaneAttempts && DateTimeOffset.UtcNow >= entry.RetryAt))

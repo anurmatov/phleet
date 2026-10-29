@@ -261,6 +261,27 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
     }
 
     [Fact]
+    public async Task PreparedReplyQueue_IsRedeclaredIdentically_AndAReplyQueuedBeforeTheLaneOpensIsForwardedOnce()
+    {
+        // The orchestrator prepares fleet.agent.bridge (durable, non-exclusive, non-auto-delete, no arguments)
+        // and its fleet.group/bridge binding before activation (#492 R3/F8), so a reply published before this
+        // lane opens is queued; the lane's redeclare must match exactly (no PRECONDITION_FAILED).
+        await using var bridge = await StartAsync();
+        var declare = Assert.Single(_lane.ReceivedCalls(), c => c.GetMethodInfo().Name == "QueueDeclareAsync").GetArguments();
+        Assert.Equal(new object?[] { "fleet.agent.bridge", true, false, false, null }, declare.Take(5).ToArray());
+        var bind = Assert.Single(_lane.ReceivedCalls(), c => c.GetMethodInfo().Name == "QueueBindAsync").GetArguments();
+        Assert.Equal(new object?[] { "fleet.agent.bridge", "fleet.group", "bridge", null }, bind.Take(4).ToArray());
+        var exchange = Assert.Single(_lane.ReceivedCalls(), c => c.GetMethodInfo().Name == "ExchangeDeclareAsync").GetArguments();
+        Assert.Equal(new object?[] { "fleet.group", "direct", true, false, null }, exchange.Take(5).ToArray());
+
+        // The broker delivers the reply it retained to the sole consumer as soon as the lane opens.
+        await Deliver(Vhost + "-workload", tag: 1);
+        Assert.Single(Publishes(_ordinary));
+        await _lane.Received(1).BasicAckAsync(1, false, Arg.Any<CancellationToken>());
+        Assert.Equal(0, Calls(_lane, "BasicNackAsync"));
+    }
+
+    [Fact]
     public async Task UnconfirmedForward_TimesOut_AndItsBackoffRunsOffTheConsumerCallback_ThenRequeues()
     {
         _ordinary.BasicPublishAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<BasicProperties>(),

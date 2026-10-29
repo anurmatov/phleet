@@ -1033,6 +1033,10 @@ else
   STOCK_ROLLOUT_TARGET=(--dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile")
 fi
 if ! $DRY_RUN; then
+  # #492 A8: --skip-build starts the existing local image, so without one refuse before anything changes.
+  if $SKIP_BUILD && ! docker image inspect fleet:orchestrator >/dev/null 2>&1; then
+    fail "--skip-build needs an existing local fleet:orchestrator image; run setup.sh without --skip-build"; exit 1
+  fi
   # #492 A3: that existing image must already carry the pinned stock CLI when managed is enabled.
   if $SKIP_BUILD; then
     stock_cli_image_check "$ENV_FILE" fleet:orchestrator \

@@ -296,6 +296,7 @@ GUARDBIN="$DIR/guardbin"; mkdir -p "$GUARDBIN"
 cat > "$GUARDBIN/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CALLS"
+[[ "$*" == 'image inspect fleet:orchestrator' && -n "${NO_LOCAL_IMAGE:-}" ]] && exit 1
 [[ "$*" == 'image inspect --format'*' fleet:orchestrator' ]] && printf '1'
 [[ "$*" == 'run --rm --entrypoint openshell '* ]] && printf '%s\n' "${STUB_CLI_VERSION-openshell 0.1.5}"
 exit 0
@@ -324,6 +325,11 @@ grep -q 'OK: target supports managed bindings' "$DIR/output"
 echo 'PASS setup.sh build run guards the orchestrator Dockerfile'
 if grep -q 'entrypoint openshell' "$CALLS"; then exit 1; fi
 echo 'PASS default-off setup guard never checks the stock CLI'
+# #492 A8: --skip-build without a local fleet:orchestrator image refuses before the rollout guard.
+if NO_LOCAL_IMAGE=1 run_setup_guard true 2>/dev/null; then exit 1; fi
+grep -q -- '--skip-build needs an existing local fleet:orchestrator image' "$DIR/output"
+if grep -q '^image inspect --format' "$CALLS"; then exit 1; fi
+echo 'PASS setup.sh --skip-build without a local image refuses before replacing anything'
 # #492 A3: a managed --skip-build starts the existing image, so it must carry the pinned stock CLI.
 managed_fixture
 run_setup_guard true

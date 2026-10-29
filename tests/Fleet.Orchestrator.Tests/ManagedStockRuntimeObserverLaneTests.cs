@@ -93,6 +93,64 @@ public sealed class ManagedStockRuntimeObserverLaneTests : IDisposable
     }
 
     [Fact]
+    public async Task StockObserver_LegacySharedPassword_IsMovedOnceIntoThePrivateSibling_AndTheLaneStarts()
+    {
+        // Review V3: a pre-W4 enrollment left its observer password in the shared mount and had no private copy.
+        Save("agent1", "sandbox-1");
+        Save("agent2", "sandbox-2");
+        File.Move(Path.Combine(_observerDir, "agent1.observer.password"), Path.Combine(_dir, "agent1.observer.password"));
+        // agent2 already has its current private password; a stale shared copy is just removed.
+        File.WriteAllText(Path.Combine(_dir, "agent2.observer.password"), "stale-agent2");
+
+        Assert.Equal(2, StockHeartbeatObserverService.MigrateLegacyObserverPasswords(_dir, NullLogger.Instance));
+
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_dir, "*.observer.password"));
+        var moved = Path.Combine(_observerDir, "agent1.observer.password");
+        Assert.Equal("observer-agent1", File.ReadAllText(moved));
+        Assert.Equal("observer-agent2", File.ReadAllText(Path.Combine(_observerDir, "agent2.observer.password")));
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(moved));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(_observerDir));
+        }
+        // Once: a second pass finds nothing to do.
+        Assert.Equal(0, StockHeartbeatObserverService.MigrateLegacyObserverPasswords(_dir, NullLogger.Instance));
+        using var observer = Observer();
+        await observer.ReconcileAsync(_dir, default);
+        Assert.Equal("observer-agent1", Lane("agent1").Factory.Password);
+        Assert.Equal("observer-agent2", Lane("agent2").Factory.Password);
+    }
+
+    [Fact]
+    public void StockObserver_LegacyPasswordMigration_RefusesLinks()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        Save("agent1", "sandbox-1");
+        File.Delete(Path.Combine(_observerDir, "agent1.observer.password"));
+        var outside = Path.Combine(_root, "outside-secret");
+        File.WriteAllText(outside, "not-a-password");
+        var link = Path.Combine(_dir, "agent1.observer.password");
+        File.CreateSymbolicLink(link, outside);
+
+        Assert.Equal(0, StockHeartbeatObserverService.MigrateLegacyObserverPasswords(_dir, NullLogger.Instance));
+
+        // Never followed: the link stays, the target is untouched, nothing is published to the private sibling.
+        Assert.NotNull(new FileInfo(link).LinkTarget);
+        Assert.Equal("not-a-password", File.ReadAllText(outside));
+        Assert.False(File.Exists(Path.Combine(_observerDir, "agent1.observer.password")));
+
+        // A linked observer directory stops the migration entirely.
+        File.Delete(link);
+        File.WriteAllText(link, "observer-agent1");
+        Directory.Delete(_observerDir, recursive: true);
+        var elsewhere = Directory.CreateDirectory(Path.Combine(_root, "elsewhere")).FullName;
+        Directory.CreateSymbolicLink(_observerDir, elsewhere);
+        Assert.Equal(0, StockHeartbeatObserverService.MigrateLegacyObserverPasswords(_dir, NullLogger.Instance));
+        Assert.True(File.Exists(link));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(elsewhere));
+    }
+
+    [Fact]
     public async Task OneObserverLanePerActiveRecord_EachInItsOwnEpoch_RemovedAndChangedRecordsReconciled()
     {
         Save("agent1", "sandbox-1");

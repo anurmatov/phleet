@@ -17,6 +17,11 @@ health_bind_address = "127.0.0.1:8081"
 log_level           = "info"
 compute_driver      = "docker"
 disable_tls         = false
+# Required with TLS on and the Docker driver: the gateway-owned CA that issued gateway.pem (not
+# client_ca_path). The gateway injects it into the Docker driver so the supervisor can authenticate the
+# gateway's server certificate; the pinned stock gateway refuses guest TLS bootstrap without it. Keep it
+# here, never in [openshell.drivers.docker], and omit it only when TLS is disabled.
+guest_tls_ca        = "/var/lib/openshell/tls/ca.pem"
 
 [openshell.gateway.tls]
 cert_path      = "/var/lib/openshell/tls/gateway.pem"

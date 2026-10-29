@@ -447,7 +447,7 @@ Gateway reachability (the design's network row) with the example `--profile open
 | Caller | Network | Endpoint | Authentication |
 |---|---|---|---|
 | Orchestrator stock CLI | private `fleet-net` bridge | `https://openshell-gateway:8443` | mTLS client cert/key from `openshell-client`; server cert DNS SAN `openshell-gateway` |
-| Trusted native supervisor (`network_mode=host`) | host loopback | `https://127.0.0.1:8443`, the gateway's loopback-only host binding `127.0.0.1:8443:8443` | the stock supervisor TLS/JWT path; server cert IP SAN `127.0.0.1` |
+| Trusted native supervisor (`network_mode=host`) | host loopback | `https://127.0.0.1:8443`, the gateway's loopback-only host binding `127.0.0.1:8443:8443` | the stock supervisor TLS/JWT path, verifying the server cert (IP SAN `127.0.0.1`) against the gateway's `guest_tls_ca`, the CA that issued it, which the example sets in `[openshell.gateway]` |
 
 The binding is published on `127.0.0.1` only, never `0.0.0.0`, and only when the dormant
 `openshell` profile runs, so a default-off install publishes nothing. Host and container port stay

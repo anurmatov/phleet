@@ -6,6 +6,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -96,6 +97,19 @@ class DefaultOffComposeTests(unittest.TestCase):
         self.assertEqual(ports, ["127.0.0.1:8443:8443"])
         self.assertNotIn("0.0.0.0", service)
         self.assertNotIn("network_mode", service)
+
+    def test_gateway_example_sets_the_guest_tls_ca_at_gateway_scope(self):
+        """#492: the pinned stock gateway refuses Docker-driver guest TLS bootstrap without guest_tls_ca."""
+        config = tomllib.loads((ROOT / "deploy" / "openshell" / "gateway.toml.example").read_text())
+        gateway = config["openshell"]["gateway"]
+        self.assertEqual(gateway["compute_driver"], "docker")
+        self.assertIs(gateway["disable_tls"], False)
+        self.assertTrue(Path(gateway["guest_tls_ca"]).is_absolute())
+        # The CA that issued the server cert, not the client-certificate CA.
+        self.assertNotEqual(gateway["guest_tls_ca"], gateway["tls"]["client_ca_path"])
+        # Upstream rejects guest TLS fields inside driver tables.
+        for name, driver in config["openshell"].get("drivers", {}).items():
+            self.assertFalse({"guest_tls_ca", "guest_tls_cert", "guest_tls_key"} & driver.keys(), name)
 
     def test_default_off_compose_config_is_valid(self):
         probe = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True) if shutil.which("docker") else None

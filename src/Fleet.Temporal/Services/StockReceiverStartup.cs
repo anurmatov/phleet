@@ -22,6 +22,16 @@ public static class StockReceiverStartup
         services.AddHostedService<TemporalRelayListener>();
     }
 
+    /// <summary>
+    /// Hosts the workflow-failure notifier (#488) unless this instance is a dedicated stock receiver: it runs no
+    /// workflow machinery, so it must not poll namespaces or send a second notice for the ordinary bridge's failures.
+    /// </summary>
+    public static void AddFailureNotifierHost(IServiceCollection services, IConfiguration configuration)
+    {
+        if (IsReceiverOnly(configuration)) return;
+        services.AddHostedService(sp => sp.GetRequiredService<WorkflowFailureNotifier>());
+    }
+
     /// <summary>Namespaces to start workers for: none for a dedicated stock receiver.</summary>
     public static string[] WorkerNamespaces(IConfiguration configuration, IEnumerable<string> configured) =>
         IsReceiverOnly(configuration)

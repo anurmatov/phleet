@@ -42,4 +42,23 @@ public class StockReceiverStartupTests
     public void OrdinaryBridge_KeepsConfiguredNamespaceWorkers()
         => Assert.Equal(["fleet", "default"],
             StockReceiverStartup.WorkerNamespaces(Config(null), ["fleet", " ", "default", "FLEET"]));
+
+    private static int HostedServices(IConfiguration config)
+    {
+        var services = new ServiceCollection();
+        StockReceiverStartup.AddFailureNotifierHost(services, config);
+        return services.Count(d => d.ServiceType == typeof(IHostedService));
+    }
+
+    [Fact]
+    public void DedicatedReceiver_DoesNotHostTheWorkflowFailureNotifier()
+        => Assert.Equal(0, HostedServices(Config("/run/stock/authority.json")));
+
+    [Fact]
+    public void OrdinaryBridge_HostsTheWorkflowFailureNotifier()
+    {
+        Assert.Equal(1, HostedServices(Config(null)));
+        Assert.Equal(1, HostedServices(Config("")));
+    }
 }
+

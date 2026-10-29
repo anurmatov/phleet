@@ -120,8 +120,7 @@ builder.Services.AddSingleton<IWorkflowFailureSource, TemporalWorkflowFailureSou
 builder.Services.AddSingleton<IFailureNotificationSender, TemporalFailureNotificationSender>();
 builder.Services.AddSingleton<WorkflowFailureNotifier>();
 // #492: a dedicated stock receiver runs no workflow machinery, so it never polls or notifies failures either.
-if (!StockReceiverStartup.IsReceiverOnly(builder.Configuration))
-    builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowFailureNotifier>());
+StockReceiverStartup.AddFailureNotifierHost(builder.Services, builder.Configuration);
 
 var temporalOpts = builder.Configuration
     .GetSection(TemporalBridgeOptions.Section)

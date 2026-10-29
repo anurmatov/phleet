@@ -1845,9 +1845,11 @@ public sealed class StockOpenShellRuntime(
     private static bool IsRegularFile(string path)
     {
         if (!OperatingSystem.IsLinux()) return true;
+        // Review W6: O_NOFOLLOW differs by architecture; an unknown one is never trusted as regular.
+        if (NoFollowOpenFlags(System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture) is not { } flags) return false;
         try
         {
-            var fd = LibcOpen(path, 0x800 | 0x20000 | 0x80000);
+            var fd = LibcOpen(path, flags);
             if (fd < 0) return false;
             using var handle = new Microsoft.Win32.SafeHandles.SafeFileHandle(fd, ownsHandle: true);
             using var stream = new FileStream(handle, FileAccess.Read, 1);
@@ -1855,6 +1857,17 @@ public sealed class StockOpenShellRuntime(
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or DllNotFoundException) { return false; }
     }
+
+    /// <summary>
+    /// Linux <c>O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC</c> for the process architecture. O_NONBLOCK (0x800) and
+    /// O_CLOEXEC (0x80000) are shared; O_NOFOLLOW is 0x20000 on x86/x64 and 0x8000 on arm/arm64. Null when unknown.
+    /// </summary>
+    internal static int? NoFollowOpenFlags(System.Runtime.InteropServices.Architecture architecture) => architecture switch
+    {
+        System.Runtime.InteropServices.Architecture.X64 or System.Runtime.InteropServices.Architecture.X86 => 0x800 | 0x20000 | 0x80000,
+        System.Runtime.InteropServices.Architecture.Arm64 or System.Runtime.InteropServices.Architecture.Arm => 0x800 | 0x8000 | 0x80000,
+        _ => null,
+    };
 
     private static void WriteRecord(string path, JsonObject record) => WriteText(path, record.ToJsonString());
 

@@ -468,6 +468,24 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.False(hold.HoldsOrdinaryTraffic("agent1"));
     }
 
+    [Theory]
+    [InlineData(System.Runtime.InteropServices.Architecture.X64, 0x800 | 0x20000 | 0x80000)]
+    [InlineData(System.Runtime.InteropServices.Architecture.X86, 0x800 | 0x20000 | 0x80000)]
+    [InlineData(System.Runtime.InteropServices.Architecture.Arm64, 0x800 | 0x8000 | 0x80000)]
+    [InlineData(System.Runtime.InteropServices.Architecture.Arm, 0x800 | 0x8000 | 0x80000)]
+    public void Retirement_no_follow_open_flags_match_the_process_architecture(System.Runtime.InteropServices.Architecture architecture, int expected)
+    {
+        // Review W6: arm64 O_NOFOLLOW is 0x8000 (0x20000 is O_LARGEFILE there and never refuses a link); x64 is 0x20000.
+        Assert.Equal(expected, StockOpenShellRuntime.NoFollowOpenFlags(architecture));
+    }
+
+    [Fact]
+    public void Retirement_no_follow_open_flags_refuse_an_unknown_architecture()
+    {
+        Assert.Null(StockOpenShellRuntime.NoFollowOpenFlags(System.Runtime.InteropServices.Architecture.Wasm));
+        Assert.Null(StockOpenShellRuntime.NoFollowOpenFlags(System.Runtime.InteropServices.Architecture.S390x));
+    }
+
     private ManagedBinding HandedOffDocker(string state, string authority, params string[] errors)
     {
         var binding = _t.Binding("fleet-agent1-r2r2r2r2", Guid.NewGuid());

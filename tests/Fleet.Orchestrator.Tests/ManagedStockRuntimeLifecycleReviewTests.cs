@@ -419,9 +419,13 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
         Assert.Equal("needs_attention", record.State);
         Assert.Contains("authority_retire_failed", record.Errors);
-        // Review R3: the swap that clears Operation already carries the hold; no clean record is ever released.
-        Assert.All(_t._store.History.Select(ManagedRecord.Parse).Where(r => r.Operation is null),
-            r => Assert.Contains("authority_retire_failed", r.Errors));
+        // Review R3: the swap that clears Operation already carries a hold (pending retirement, then the failure);
+        // no clean record is ever released.
+        Assert.All(_t._store.History.Select(ManagedRecord.Parse).Where(r => r.Operation is null), r =>
+        {
+            Assert.Equal("needs_attention", r.State);
+            Assert.True(r.Errors.Contains(StockOpenShellRuntime.RetirePending) || r.Errors.Contains("authority_retire_failed"));
+        });
     }
 
     [Theory]
@@ -466,6 +470,87 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
         Assert.Equal("retired", AuthorityState());
         Assert.False(hold.HoldsOrdinaryTraffic("agent1"));
+    }
+
+    private StockRuntimeMutationHold Hold() => new(new ConfigurationBuilder()
+        .AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:AuthorityDirectory"] = Path.GetDirectoryName(_t.AuthorityPath())! }).Build());
+
+    private void DockerHandoff(string suffix)
+    {
+        var binding = _t.Binding("fleet-agent1-" + suffix, Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _t.WriteAuthority("active");
+    }
+
+    [Fact]
+    public async Task Ordinary_admission_stays_held_while_the_final_docker_binding_commit_is_awaited()
+    {
+        DockerHandoff("r6a0a0a0");
+        var hold = Hold();
+        var during = new List<bool>();
+        // Interceptor: the final Docker-binding swap is in flight (not yet committed) across real awaits.
+        _t._store.OnSwap = async (kind, _) =>
+        {
+            if (kind != "docker") return;
+            during.Add(hold.HoldsOrdinaryTraffic("agent1"));
+            await Task.Yield();
+            during.Add(hold.HoldsOrdinaryTraffic("agent1"));
+            await Task.Delay(20);
+            during.Add(hold.HoldsOrdinaryTraffic("agent1"));
+            Assert.Equal("openshell", _t._store.Get("agent1").AppliedRuntimeKind);
+        };
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        Assert.Equal(3, during.Count);
+        Assert.All(during, Assert.True);
+        // Released only after the durable commit, and the follow-up clears the pending marker.
+        Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
+        Assert.Equal("retired", AuthorityState());
+        Assert.False(hold.HoldsOrdinaryTraffic("agent1"));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.DoesNotContain(StockOpenShellRuntime.RetirePending, record.Errors);
+        Assert.NotEqual("needs_attention", record.State);
+    }
+
+    [Theory]
+    [InlineData("reject")]
+    [InlineData("throw")]
+    public async Task Failed_retirement_with_a_failed_follow_up_cas_keeps_traffic_held(string failure)
+    {
+        DockerHandoff("r6f0f0f0");
+        _t._cli.OnExec = _ => { File.WriteAllText(_t.AuthorityPath(), "{not json"); return 0; };
+        if (failure == "reject") _t._store.RejectFollowUp = true; else _t._store.ThrowFollowUp = true;
+        var hold = Hold();
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal("docker_handoff_unresolved", result.Code);
+        Assert.Equal(["authority_retire_failed", "handoff_record_unfinalized"], result.Errors);
+        // Fail-closed: the authority was never retired, and the committed record still shows the held pending marker.
+        Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
+        Assert.True(hold.HoldsOrdinaryTraffic("agent1"));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains(StockOpenShellRuntime.RetirePending, record.Errors);
+    }
+
+    [Fact]
+    public async Task Successful_retirement_with_a_failed_follow_up_cas_leaves_a_visible_held_record()
+    {
+        DockerHandoff("r6b0b0b0");
+        _t._store.RejectFollowUp = true;
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        // Docker is durably committed before the authority retired; the stale record stays held and revocable.
+        Assert.Equal("docker_handoff_unresolved", result.Code);
+        Assert.Equal([StockOpenShellRuntime.RetirePending, "handoff_record_unfinalized"], result.Errors);
+        Assert.Equal("retired", AuthorityState());
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
 
     [Theory]

@@ -1137,24 +1137,44 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         public Agent Add(Agent agent) { agent.Id = _agents.Count + 1; _agents.Add(agent); return agent; }
         public Agent Get(string name) => _agents.Single(a => a.Name == name);
-        public Task<Agent?> LoadAsync(string name, CancellationToken ct) => Task.FromResult(_agents.FirstOrDefault(a => a.Name == name));
+        public Task<Agent?> LoadAsync(string name, CancellationToken ct) => ThrowOnLoad
+            ? throw new InvalidOperationException("synthetic_db_failure")
+            : Task.FromResult(_agents.FirstOrDefault(a => a.Name == name));
         public Task<IReadOnlyList<Agent>> ListAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<Agent>>(_agents);
         public string ProfileHashes = PinnedProfiles;
         public Task<SandboxPolicyVersion?> LoadPolicyAsync(int id, CancellationToken ct) => Task.FromResult<SandboxPolicyVersion?>(
             id is 1 or 2 ? new SandboxPolicyVersion { Id = id, Version = id, Yaml = ManagedStockRuntimeTests.PolicyYaml, Sha256 = new string('b', 64), ProviderProfileHashes = ProfileHashes } : null);
 
-        public Task<bool> SwapAsync(int agentId, string? expected, string next, string? appliedKind, int? appliedPolicyVersionId, CancellationToken ct)
+        /// <summary>Interceptor awaited inside every swap before it commits (applied kind, next binding).</summary>
+        public Func<string?, string, Task>? OnSwap;
+        /// <summary>Commits a swap of this applied kind, then throws (post-commit ambiguity).</summary>
+        public string? ThrowAfterCommitKind;
+        /// <summary>Rejects (false) / throws on the n-th swap without an applied kind after a swap of this kind committed.</summary>
+        public bool RejectFollowUp, ThrowFollowUp;
+        public bool ThrowOnLoad;
+        private bool _kindCommitted;
+
+        public async Task<bool> SwapAsync(int agentId, string? expected, string next, string? appliedKind, int? appliedPolicyVersionId, CancellationToken ct)
         {
+            if (OnSwap is not null) await OnSwap(appliedKind, next);
             var agent = _agents.Single(a => a.Id == agentId);
-            if (RejectNextSwap) { RejectNextSwap = false; return Task.FromResult(false); }
-            if (appliedKind is not null && appliedKind == RejectKind) return Task.FromResult(false);
+            if (RejectNextSwap) { RejectNextSwap = false; return false; }
+            if (appliedKind is not null && appliedKind == RejectKind) return false;
             if (appliedKind is not null && appliedKind == ThrowKind) throw new InvalidOperationException("synthetic_db_failure");
-            if (agent.AppliedRuntimeBinding != expected) return Task.FromResult(false);
+            if (appliedKind is null && _kindCommitted && RejectFollowUp) return false;
+            if (appliedKind is null && _kindCommitted && ThrowFollowUp) throw new InvalidOperationException("synthetic_db_failure");
+            if (agent.AppliedRuntimeBinding != expected) return false;
             agent.AppliedRuntimeBinding = next;
             History.Add(next);
-            if (appliedKind is not null) { agent.AppliedRuntimeKind = appliedKind; agent.AppliedSandboxPolicyVersionId = appliedPolicyVersionId; }
-            return Task.FromResult(true);
+            if (appliedKind is not null) { agent.AppliedRuntimeKind = appliedKind; agent.AppliedSandboxPolicyVersionId = appliedPolicyVersionId; _kindCommitted = true; }
+            if (appliedKind is not null && appliedKind == ThrowAfterCommitKind)
+            {
+                ThrowOnLoad = ThrowOnLoadAfterCommit;
+                throw new InvalidOperationException("synthetic_post_commit_failure");
+            }
+            return true;
         }
+        public bool ThrowOnLoadAfterCommit;
     }
 
     internal sealed class FakeHost : IStockHostView

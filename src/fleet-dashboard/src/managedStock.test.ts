@@ -42,6 +42,11 @@ test('a failed authority retirement after a Docker handoff is surfaced and offer
   assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'revoked', managedErrors: [] }).startBlocked, false)
 })
 
+test('a committed Docker handoff with a pending authority retirement is held and revocable', () => {
+  assert.deepEqual(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'needs_attention', managedErrors: ['authority_retire_pending', 'handoff_record_unfinalized'] }),
+    { label: 'openshell · authority retirement pending', title: 'authority_retire_pending, handoff_record_unfinalized', startBlocked: true, canRevoke: true })
+})
+
 test('an ordinary pending Docker runtime selection stays startable (control for the retirement block)', () => {
   // Applied OpenShell, desired Docker, no held state: Start still targets the applied binding.
   assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'openshell', managedState: 'applied', managedErrors: [] }).startBlocked, false)

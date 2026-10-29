@@ -670,38 +670,56 @@ public sealed class StockOpenShellRuntime(
         // #492 §7/§11: a verified outcome records the workload/supervisor identities it left behind.
         if (outcome.Result.Ok && final.Applied is { } observed && final.State is "applied" or "stopped" or "revoked")
             final = final with { Applied = observed with { Containers = await ObserveContainersAsync(observed) } };
-        // Review F6/R3: Docker is committed by this swap, so the managed record is retired first and a failure is
-        // persisted by the same swap that clears Operation: an unresolved handoff, never a clean applied_docker.
-        var retired = false;
-        if (outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved)
-        {
-            if (RetireAuthority(name)) retired = true;
-            else
-            {
-                final = final with { State = "needs_attention", Errors = [.. final.Errors, "authority_retire_failed"] };
-                outcome = (final, outcome.AppliedKind, outcome.AppliedPolicy, Result.Refused(502, "docker_handoff_unresolved", ["authority_retire_failed"]));
-            }
-        }
+        // Review R2 (round 6): ordinary admission stays held until the Docker binding is durably committed. The
+        // handoff commits first with a pending-retirement marker (a held needs_attention record) while the authority
+        // record is still revoked; only after that commit is the authority retired, and a follow-up CAS clears the
+        // marker or records authority_retire_failed. A failed or ambiguous commit therefore never released traffic.
+        var handoff = outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved;
+        var clean = final;
+        if (handoff) final = final with { State = "needs_attention", Errors = [.. final.Errors, RetirePending] };
         var finalJson = final.Serialize();
-        try
-        {
-            if (!await store.SwapAsync(agent.Id, saved, finalJson, outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None))
-            {
-                // Review R2: the Docker binding is not committed, so the ordinary-admission hold is reinstated.
-                if (retired) ReinstateAuthorityHold(name);
-                return Result.Refused(409, "managed_state_changed_during_" + kind, outcome.Result.Errors);
-            }
-        }
+        bool committed;
+        try { committed = await store.SwapAsync(agent.Id, saved, finalJson, outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None); }
         catch (Exception ex) when (ex is DbException or InvalidOperationException)
         {
             // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
-            if (retired) ReinstateAuthorityHold(name);
+            // The authority was never retired, so ordinary traffic stays held.
             return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
+        }
+        if (!committed) return Result.Refused(409, "managed_state_changed_during_" + kind, outcome.Result.Errors);
+        if (handoff)
+        {
+            var retiredOk = RetireAuthority(name);
+            var next = retiredOk ? clean : clean with { State = "needs_attention", Errors = [.. clean.Errors, "authority_retire_failed"] };
+            var nextJson = next.Serialize();
+            bool finalized;
+            try { finalized = await store.SwapAsync(agent.Id, finalJson, nextJson, null, null, CancellationToken.None); }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException)
+            { finalized = false; }
+            if (!retiredOk)
+            {
+                await PublishAsync(name);
+                // The authority is unretired, so ordinary traffic stays held whether or not the follow-up committed.
+                logger.LogWarning("Managed {Kind} for {Agent}: authority retirement failed after the Docker commit", kind, name);
+                return Result.Refused(502, "docker_handoff_unresolved",
+                    finalized ? ["authority_retire_failed"] : ["authority_retire_failed", "handoff_record_unfinalized"]);
+            }
+            if (!finalized)
+            {
+                await PublishAsync(name);
+                // Docker is durably committed and the authority retired; the record still shows the pending marker (held,
+                // visible), and revoke on the Docker agent is the supported retry that clears it.
+                logger.LogWarning("Managed {Kind} for {Agent}: the retired handoff record was not finalized", kind, name);
+                return Result.Refused(502, "docker_handoff_unresolved", [RetirePending, "handoff_record_unfinalized"]);
+            }
         }
         await PublishAsync(name);
         logger.LogInformation("Managed {Kind} for {Agent}: {Code}", kind, name, outcome.Result.Code);
         return outcome.Result;
     }
+
+    /// <summary>Error marker on a committed Docker handoff whose authority is not yet retired (still held).</summary>
+    internal const string RetirePending = "authority_retire_pending";
 
     private async Task<(Agent? Agent, ManagedRecord? Record, Result? Fault)> ReadAsync(string name, CancellationToken ct)
     {
@@ -1802,30 +1820,6 @@ public sealed class StockOpenShellRuntime(
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
             or InvalidOperationException or StockIdentityDenied)
         { logger.LogWarning("Retiring the managed record for {Agent} failed; ordinary traffic stays held", agentName); }
-        return false;
-    }
-
-    /// <summary>
-    /// Review R2: undo a retirement whose Docker binding was never committed (failed final CAS or DB write), so the
-    /// record is revoked again and ordinary telemetry and control stay held. Only a plain retired file is rewritten;
-    /// anything else (absent, link, unreadable) is left as is and already holds or was never managed.
-    /// </summary>
-    internal bool ReinstateAuthorityHold(string agentName)
-    {
-        try
-        {
-            var path = AuthorityPath(agentName);
-            if (AuthorityEntry(path) != true) return false;
-            var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
-            if (current["State"]?.GetValue<string>() != StockAuthoritySource.RetiredState) return false;
-            current["State"] = "revoked";
-            WriteRecord(path, current);
-            if (AuthorityEntry(path) == true
-                && JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))?["State"]?.GetValue<string>() == "revoked") return true;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
-            or InvalidOperationException or StockIdentityDenied) { }
-        logger.LogError("Reinstating the managed hold for {Agent} after an uncommitted Docker handoff failed", agentName);
         return false;
     }
 

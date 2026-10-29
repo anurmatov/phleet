@@ -828,4 +828,33 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         // No name guessing and no destructive action against whatever owns the name.
         Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop") || Verb(c, "start") || Verb(c, "delete") || c.Args.Contains("detach"));
     }
+
+    [Theory]
+    [InlineData("sandbox_unobservable", false)]
+    [InlineData("quiescence_unobservable", false)]
+    [InlineData("running", true)]
+    public async Task Status_refresh_never_reads_an_unobservable_stopped_binding_as_an_unexpected_restart(string observed, bool holds)
+    {
+        // Review A5: the gateway restarted but is not ready yet, so the stopped sandbox cannot be observed.
+        var binding = _t.Binding("fleet-agent1-a5a5a5a5", Guid.NewGuid());
+        if (observed != "sandbox_unobservable") _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, observed == "running" ? "Ready" : "Stopped");
+        if (observed == "quiescence_unobservable") _t._host.RunningContainers = null;
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        var before = _t._store.Get("agent1").AppliedRuntimeBinding;
+        _t._host.Generation = "gateway-2@restarting";
+
+        await _t.Runtime().CheckGenerationAsync("agent1", default);
+
+        if (holds)
+        {
+            Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+            Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        }
+        else
+        {
+            Assert.Equal(before, _t._store.Get("agent1").AppliedRuntimeBinding);
+            Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop") || c.Args.Contains("detach"));
+            Assert.Empty(_t._broker.Deletes);
+        }
+    }
 }

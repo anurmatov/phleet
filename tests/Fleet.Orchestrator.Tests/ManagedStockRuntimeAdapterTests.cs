@@ -1258,7 +1258,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public string Generation = "gateway-1@start";
         public Task<string?> GatewayGenerationAsync(CancellationToken ct) => Task.FromResult<string?>(Generation);
         public Task<IReadOnlyList<string>?> RunningSandboxContainersAsync(string sandboxId, CancellationToken ct) =>
-            Task.FromResult<IReadOnlyList<string>?>([]);
+            Task.FromResult(RunningContainers);
+        /// <summary>Containers running under a sandbox UUID; null is an unobservable read.</summary>
+        public IReadOnlyList<string>? RunningContainers = [];
         public IReadOnlyList<string>? DockerStates = [];
         public Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct) => Task.FromResult(DockerStates);
         /// <summary>Labelled workload/supervisor containers; null (default) is an unobservable read.</summary>

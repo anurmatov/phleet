@@ -494,7 +494,8 @@ public sealed class StockOpenShellRuntime(
         if (record is not { Operation: null, Applied: { } binding } || record.State is "needs_attention" or "revoked") return;
         if (await host.GatewayGenerationAsync(ct) is { } current && current != binding.GatewayGeneration
             // A durably stopped, quiescent binding is a planned restart: Start/apply rebinds it after its checks.
-            && !(record.State == "stopped" && await StoppedQuiescentAsync(binding, ct) is null))
+            // Review A5: an unobservable sandbox or quiescence (gateway not ready yet) is no proof of an unexpected one.
+            && !(record.State == "stopped" && await StoppedQuiescentAsync(binding, ct) is null or "sandbox_unobservable" or "quiescence_unobservable"))
             await HandleUnexpectedRestartAsync(name, ct);
     }
 

@@ -25,15 +25,18 @@ export interface ManagedRuntimeView { label: string | null; title: string; start
 
 export function managedRuntimeView(agent: { runtimeKind?: string; appliedRuntimeKind?: string; managedState?: string | null; managedErrors?: string[] | null }): ManagedRuntimeView {
   const applied = agent.appliedRuntimeKind === 'openshell'
-  if (!applied && agent.runtimeKind !== 'openshell') return { label: null, title: '', startBlocked: false, canRevoke: false }
+  // #492 W6: a Docker handoff whose authority retirement failed leaves a held managed record on an applied
+  // Docker agent. Surface it and offer revoke, the supported retry, rather than hiding it as plain Docker.
+  const retireFailed = (agent.managedErrors ?? []).includes('authority_retire_failed')
+  if (!applied && agent.runtimeKind !== 'openshell' && !retireFailed) return { label: null, title: '', startBlocked: false, canRevoke: false }
   const state = agent.managedState ?? (applied ? 'unknown' : 'pending apply')
   const held = ['needs_attention', 'revoked', 'busy', 'applying', 'unreadable', 'unknown'].includes(state)
   return {
-    label: `openshell · ${state.replace(/_/g, ' ')}`,
+    label: `openshell · ${retireFailed && state === 'needs_attention' ? 'authority retirement failed' : state.replace(/_/g, ' ')}`,
     title: (agent.managedErrors ?? []).join(', '),
     // Start targets the applied binding; a pending desired change still starts the applied Docker runtime.
     startBlocked: applied && held,
-    canRevoke: applied && state !== 'busy' && state !== 'revoked',
+    canRevoke: (applied || retireFailed) && state !== 'busy' && state !== 'revoked',
   }
 }
 

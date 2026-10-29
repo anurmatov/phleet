@@ -27,6 +27,20 @@ test('managed card view blocks start on unresolved holds and offers revoke only 
   assert.equal(managedRuntimeView({ appliedRuntimeKind: 'openshell', managedState: 'revoked' }).startBlocked, true)
 })
 
+test('a failed authority retirement after a Docker handoff is surfaced and offers the revoke retry', () => {
+  // Handoff path: Docker is applied, the managed record is held with authority_retire_failed.
+  assert.deepEqual(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'needs_attention', managedErrors: ['authority_retire_failed'] }),
+    { label: 'openshell · authority retirement failed', title: 'authority_retire_failed', startBlocked: false, canRevoke: true })
+  // A failed revoke retry appends its code; the summary still names the retirement failure.
+  assert.deepEqual(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'needs_attention', managedErrors: ['authority_retire_failed', 'docker_handoff_unresolved', 'authority_retire_failed'] }),
+    { label: 'openshell · authority retirement failed', title: 'authority_retire_failed, docker_handoff_unresolved, authority_retire_failed', startBlocked: false, canRevoke: true })
+  // While the retry is in flight the record reads busy: no second revoke.
+  assert.deepEqual(managedRuntimeView({ appliedRuntimeKind: 'docker', managedState: 'busy', managedErrors: ['authority_retire_failed'] }),
+    { label: 'openshell · busy', title: 'authority_retire_failed', startBlocked: false, canRevoke: false })
+  // A resolved retirement clears the errors: an ordinary Docker agent again.
+  assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'revoked', managedErrors: [] }).label, null)
+})
+
 test('revoke outcome reports success, the named code and every unresolved leg', () => {
   assert.deepEqual(revokeOutcome(200, { message: 'revoked' }), { ok: true, text: 'Runtime revoked' })
   assert.deepEqual(revokeOutcome(502, { error: 'revoke_unresolved', errors: ['broker:x', 'stop:y'] }), { ok: false, text: 'revoke_unresolved: broker:x, stop:y' })

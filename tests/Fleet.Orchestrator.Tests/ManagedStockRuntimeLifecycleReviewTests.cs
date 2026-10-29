@@ -290,6 +290,37 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
     }
 
     [Fact]
+    public async Task Needs_attention_record_whose_sandbox_is_verifiably_deleted_is_cleared_by_revoke()
+    {
+        // Review F6r: the sandbox is gone from every stock list page; revoke is the supported clear.
+        var binding = _t.Binding("fleet-agent1-f6f6f6f6", Guid.NewGuid());
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = "needs_attention", Applied = binding, Errors = ["stop_unresolved"] }));
+        _t._cli.ListPages = [["fleet-other-00000000"], ["fleet-other-11111111"]];
+
+        var revoke = await _t.Runtime().RevokeAsync("agent1", default);
+
+        Assert.True(revoke.Ok, revoke.Code + ":" + string.Join(",", revoke.Errors));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("revoked", 0), (record.State, record.Errors.Count));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop") || Verb(c, "start"));
+    }
+
+    [Fact]
+    public async Task Needs_attention_record_whose_sandbox_is_still_listed_on_page_two_stays_held_after_revoke()
+    {
+        var binding = _t.Binding("fleet-agent1-f7f7f7f7", Guid.NewGuid());
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = "needs_attention", Applied = binding, Errors = ["stop_unresolved"] }));
+        _t._cli.ListPages = [["fleet-other-00000000"], [binding.SandboxName]];
+
+        var revoke = await _t.Runtime().RevokeAsync("agent1", default);
+
+        Assert.Equal("revoke_unresolved", revoke.Code);
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
+    [Fact]
     public async Task Unresolved_peer_with_a_deleted_sandbox_still_holds_a_planned_restart()
     {
         StoppedPeer("agent1", "fleet-agent1-eeeeeeee");

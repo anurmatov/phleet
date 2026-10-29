@@ -1319,7 +1319,7 @@ public sealed class StockOpenShellRuntime(
             var providers = targets.Where(t => t.SandboxId == target.SandboxId).SelectMany(t => t.AllProviders()).Distinct(StringComparer.Ordinal).ToList();
             legs.Add(Leg("detach:" + target.SandboxName, async token =>
             {
-                if (await VerifyIdentityAsync(target, token) is { } identity) return identity.Code;
+                if (await VerifyIdentityAsync(target, token) is { } identity) return await DeletedOrAsync(identity.Code, target, token);
                 // Every attached provider is detached; one failure does not skip the others.
                 var unresolved = false;
                 foreach (var provider in providers)
@@ -1330,11 +1330,16 @@ public sealed class StockOpenShellRuntime(
                 return unresolved ? "provider_detach_unknown" : null;
             }));
             if (stop) legs.Add(Leg("stop:" + target.SandboxName, async token =>
-                await LifecycleAsync("stop", target, token) ?? await QuiescentAsync(target, token)));
+                await LifecycleAsync("stop", target, token) is { } fault ? await DeletedOrAsync(fault, target, token) : await QuiescentAsync(target, token)));
         }
         foreach (var leg in await Task.WhenAll(legs))
             if (leg is not null) errors.Add(leg);
         return errors;
+
+        // Review F6r: a sandbox verifiably deleted (absent from every list page) has nothing left to detach or
+        // stop; it is clean only once no container runs under its UUID. Any other fault stays unresolved.
+        async Task<string?> DeletedOrAsync(string? fault, ManagedBinding target, CancellationToken token) =>
+            fault == "sandbox_unobservable" && await SandboxDeletedAsync(target.SandboxName, token) ? await QuiescentAsync(target, token) : fault;
 
         async Task<string?> Leg(string label, Func<CancellationToken, Task<string?>> action)
         {

@@ -895,6 +895,17 @@ public sealed class StockOpenShellRuntime(
 
         // Reprovision and stopped/revoked rollback keep the verified sandbox and its persistent workspace.
         var reuse = agent.AppliedRuntimeKind == "openshell" && record.Applied is not null;
+        // Review A7: the recovery path for managed_image_change_requires_revoke. After a clean revoke the old sandbox
+        // is cut and stopped; a changed image then gets a fresh sandbox from the pinned new image, carrying the old
+        // sandbox's workspace (the old sandbox itself stays stopped and revoked).
+        var retired = reuse && record.State == "revoked" && record.Applied!.Image != image ? record.Applied : null;
+        if (retired is not null)
+        {
+            if (record.Applied!.GatewayGeneration != generation && !await PlannedRestartAsync(agent.Name, record, record.Applied, ct))
+                return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
+            if (await VerifyIdentityAsync(retired, ct) is { } identity) return (record, null, null, identity);
+            reuse = false;
+        }
         if (reuse)
         {
             var old = record.Applied!;
@@ -963,6 +974,15 @@ public sealed class StockOpenShellRuntime(
                 if (await StopDockerAsync(agent) is { } dockerFault) return Hold(applying, 409, dockerFault);
                 try { StageWorkspace(agent, Path.Combine(bundle, "workspace")); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "workspace_stage_failed"); }
+            }
+            else if (retired is not null)
+            {
+                // Staged (no daemon) only for the transfer, then verified stopped again before the new sandbox exists.
+                var carried = await StageAsync(retired, ct) ?? await DownloadWorkspaceAsync(agent, retired, Path.Combine(bundle, "workspace"), ct);
+                using (var cleanup = new CancellationTokenSource(FanoutTimeout))
+                    if (await StopVerifiedAsync(retired, cleanup.Token) is { } stopped) carried = carried is null ? "stop:" + stopped : carried + ",stop:" + stopped;
+                // Nothing new exists yet: hold the revoked record itself (no UUID-less candidate), so revoke clears it.
+                if (carried is not null) return Hold(record, 502, "image_change_workspace_unresolved", carried);
             }
             if (await EnsureProvidersAsync() is { } providerFault) return Hold(applying, 502, providerFault);
             // Pinned contract: an explicit canonical launcher, staged; no --upload with a trailing command.

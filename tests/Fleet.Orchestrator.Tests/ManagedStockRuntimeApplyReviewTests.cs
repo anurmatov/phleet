@@ -301,6 +301,36 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Null(await DirFault(runtime));
     }
 
+    [Fact]
+    public async Task Image_change_is_refused_until_revoke_then_reapply_creates_a_fresh_pinned_sandbox_with_the_workspace()
+    {
+        var old = _t.Binding("fleet-agent1-a7a7a7a7", Guid.NewGuid()) with { Image = "registry.example.test/agent@sha256:old" };
+        _t._cli.Sandboxes[old.SandboxName] = (old.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = old }));
+        var runtime = _t.Runtime();
+        _t.WriteAuthority("active");
+
+        Assert.Equal("managed_image_change_requires_revoke", (await runtime.ApplyAsync("agent1", default)).Code);
+        Assert.DoesNotContain(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+        var apply = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Message);
+        Assert.Equal("applied_openshell", apply.Code);
+        var create = Assert.Single(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"])).Args;
+        var image = create[create.IndexOf("--from") + 1];
+        Assert.NotEqual(old.Image, image); // the configured (pinned) image, not the old one
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("applied", image), (record.State, record.Applied!.Image));
+        Assert.NotEqual(old.SandboxId, record.Applied.SandboxId);
+        Assert.NotEqual(old.SandboxName, record.Applied.SandboxName);
+        // The old sandbox's workspace was carried (synthetic download) and the old sandbox is left stopped.
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "download", old.SandboxName, "/workspace", c.Args[^1]]));
+        Assert.Contains("/workspace/marker-back.txt", _t._cli.Uploads.Select(u => u.Remote));
+        Assert.Equal("Stopped", _t._cli.Sandboxes[old.SandboxName].Phase);
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

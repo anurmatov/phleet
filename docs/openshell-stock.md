@@ -607,7 +607,10 @@ and a session. It then runs as an ordinary Temporal directive. The reply goes ou
 agent, sandbox, epoch, session and TaskId. The Bridge's managed lane is the sole consumer of
 `fleet.agent.bridge` in that vhost. It admits the reply only with the workload principal and its own
 agent, sandbox and epoch, then forwards it on the ordinary connection to the existing
-`temporal-bridge` receiver route. Anything else is refused with a content-free log. The Temporal
+`temporal-bridge` receiver route. The lane acknowledges a reply only after that mandatory forward is
+routed and publisher-confirmed. A failed forward is requeued on the same consumer after a bounded
+backoff (1 s, doubling to 30 s), so the reply is retained and the agent never reruns finished work.
+Anything else is refused with a content-free log and rejected without requeue. The Temporal
 registry completes the TaskId only when agent, sandbox, epoch and session equal the registered
 expectation. An ordinary reply cannot complete a managed TaskId, and a reply claiming a managed
 context cannot complete an ordinary one. The Bridge opens the lanes of all active records when it

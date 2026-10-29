@@ -180,6 +180,7 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
         var bridge = new BridgeRelayService(Options.Create(new BridgeOptions { TargetAgent = "agent1", BridgeChatId = 7 }),
             Options.Create(new RabbitMqOptions { Host = "broker.example.test" }), NullLogger<BridgeRelayService>.Instance, configuration)
         { Connect = (_, _) => Task.FromResult(ordinary) };
+        bridge.Lanes!.ForwardRetryDelay = TimeSpan.Zero;
         bridge.Lanes!.Connect = (factory, _) =>
         {
             Assert.Equal(Vhost + "-control", factory.UserName);
@@ -195,7 +196,7 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
         .Where(c => c.GetMethodInfo().Name == "BasicPublishAsync").Select(c => c.GetArguments()).ToArray();
 
     private Task Deliver(string? user, string sender = "agent1", Guid? epoch = null, string sandbox = "sandbox-1",
-        string? session = null, string? taskId = "wf/task-1", string routingKey = "bridge")
+        string? session = null, string? taskId = "wf/task-1", string routingKey = "bridge", ulong tag = 1, bool redelivered = false)
     {
         var consumer = _lane.ReceivedCalls().SelectMany(c => c.GetArguments()).OfType<AsyncEventingBasicConsumer>().Single();
         var body = JsonSerializer.SerializeToUtf8Bytes(new
@@ -203,8 +204,10 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
             ChatId = 7, Sender = sender, Text = "synthetic result", Timestamp = DateTimeOffset.UtcNow, Type = "response",
             CorrelationId = session ?? Guid.NewGuid().ToString("N"), TaskId = taskId, Epoch = epoch ?? _epoch, Sandbox = sandbox
         });
-        return consumer.HandleBasicDeliverAsync("owned", 1, false, "fleet.group", routingKey, new BasicProperties { UserId = user }, body);
+        return consumer.HandleBasicDeliverAsync("owned", tag, redelivered, "fleet.group", routingKey, new BasicProperties { UserId = user }, body);
     }
+
+    private static int Calls(IChannel channel, string method) => channel.ReceivedCalls().Count(c => c.GetMethodInfo().Name == method);
 
     [Fact]
     public async Task AdmittedReply_IsForwardedWithItsContext_ToTheTemporalReceiverOnTheOrdinaryConnection()
@@ -223,6 +226,37 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
         Assert.Equal(_epoch, reply.RootElement.GetProperty("Epoch").GetGuid());
         Assert.Equal("sandbox-1", reply.RootElement.GetProperty("Sandbox").GetString());
         Assert.Empty(Publishes(_lane)); // the lane never publishes a reply back into the epoch vhost
+        Assert.True((bool)forward[2]!); // mandatory and confirmed: an unrouted forward fails instead of vanishing
+        await _lane.Received(1).BasicAckAsync(1, false, Arg.Any<CancellationToken>()); // acked only after the forward
+    }
+
+    [Fact]
+    public async Task ForwardOutage_RetainsTheReplyOnTheSameConsumer_AndRecoveryDeliversItOnce()
+    {
+        var outage = true;
+        var forwarded = 0;
+        _ordinary.BasicPublishAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<BasicProperties>(),
+            Arg.Any<ReadOnlyMemory<byte>>(), Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            if (outage) return ValueTask.FromException(new IOException("synthetic forward outage"));
+            forwarded++;
+            return ValueTask.CompletedTask;
+        });
+        await using var bridge = await StartAsync();
+        var session = Guid.NewGuid().ToString("N");
+
+        await Deliver(Vhost + "-workload", session: session, tag: 1);
+        await _lane.Received(1).BasicNackAsync(1, false, true, Arg.Any<CancellationToken>()); // requeued, not lost
+        Assert.Equal(0, Calls(_lane, "BasicAckAsync"));
+        Assert.Equal(0, Calls(_lane, "BasicRejectAsync"));
+
+        outage = false; // the broker redelivers the retained reply to the same (sole) consumer
+        await Deliver(Vhost + "-workload", session: session, tag: 2, redelivered: true);
+        Assert.Equal(1, forwarded);
+        await _lane.Received(1).BasicAckAsync(2, false, Arg.Any<CancellationToken>());
+        Assert.Equal(1, Calls(_lane, "BasicNackAsync"));
+        Assert.Single(_lane.ReceivedCalls(), c => c.GetMethodInfo().Name == "BasicConsumeAsync");
+        Assert.Contains(_lane.ReceivedCalls(), c => c.GetMethodInfo().Name == "BasicConsumeAsync" && Equals(c.GetArguments()[1], false));
     }
 
     [Fact]
@@ -238,5 +272,9 @@ public sealed class ManagedStockAgentWorkflowReplyBridgeTests : IDisposable
         await Deliver(Vhost + "-workload", taskId: null);                      // no TaskId
         await Deliver(Vhost + "-workload", routingKey: "agent1");              // foreign route
         Assert.Empty(Publishes(_ordinary));
+        // Refused replies are rejected without requeue: never redelivered, never acked as forwarded.
+        await _lane.Received(8).BasicRejectAsync(1, false, Arg.Any<CancellationToken>());
+        Assert.Equal(0, Calls(_lane, "BasicNackAsync"));
+        Assert.Equal(0, Calls(_lane, "BasicAckAsync"));
     }
 }

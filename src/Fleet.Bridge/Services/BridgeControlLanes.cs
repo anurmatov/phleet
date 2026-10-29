@@ -35,6 +35,9 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
     /// <summary>The ordinary relay's forward of admitted typed workflow replies to the Temporal receiver (#492).</summary>
     internal Func<BridgeRelayService.RelayMessage, Task>? ForwardWorkflowReply { get; init; }
 
+    /// <summary>First backoff before a lane requeues a reply whose forward failed (#492 R4).</summary>
+    internal TimeSpan ForwardRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+
     /// <summary>Opens the lane of every currently active record (best effort); refused lanes stay held.</summary>
     internal async Task OpenActiveAsync(CancellationToken ct)
     {
@@ -97,7 +100,7 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
             relay = new BridgeRelayService(
                 Options.Create(new BridgeOptions { TargetAgent = identity.Agent, TimeoutSeconds = timeoutSeconds }),
                 Options.Create(new RabbitMqOptions { Host = identity.BrokerHost, Exchange = exchange }), logger, identity)
-            { Connect = Connect, ForwardWorkflowReply = ForwardWorkflowReply };
+            { Connect = Connect, ForwardWorkflowReply = ForwardWorkflowReply, ForwardRetryDelay = ForwardRetryDelay };
             await relay.InitializeAsync(ct);
             return relay;
         }

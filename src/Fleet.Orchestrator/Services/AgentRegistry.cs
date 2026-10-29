@@ -22,6 +22,15 @@ public sealed class AgentRegistry
     private readonly TaskHistoryStore _taskHistory;
     private readonly ILogger<AgentRegistry> _logger;
     private readonly string? _backupDir;
+    // #492 review F11/F12: live overlays applied on every status read, each source re-read at most once per window.
+    private readonly ConcurrentDictionary<string, (string SandboxId, ManagedContainers Seen)> _observedContainers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _backupGate = new();
+    private (DateTimeOffset? LastSuccess, string State) _backupStamp = (null, "unknown");
+    private DateTimeOffset _backupReadAt = DateTimeOffset.MinValue;
+
+    /// <summary>Longest a cached gateway backup stamp read is served before the status path re-reads it.</summary>
+    internal TimeSpan ManagedRefreshWindow { get; init; } = TimeSpan.FromSeconds(30);
+    internal Func<DateTimeOffset> Clock { get; init; } = () => DateTimeOffset.UtcNow;
 
     public AgentRegistry(TaskHistoryStore taskHistory, ILogger<AgentRegistry> logger, IConfiguration? config = null)
     {
@@ -52,7 +61,8 @@ public sealed class AgentRegistry
             AppliedRuntimeKind = dbAgent.AppliedRuntimeKind,
             RuntimePending = AgentPatchHelpers.RuntimePending(dbAgent),
         };
-        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(dbAgent.AppliedRuntimeBinding, _backupDir);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(dbAgent.AppliedRuntimeBinding);
+        ApplyManagedLive(state);
         // Only add if not already present (heartbeat may have arrived first)
         if (_agents.TryAdd(dbAgent.Name, state))
             BroadcastIfChanged(state, force: true);
@@ -65,8 +75,63 @@ public sealed class AgentRegistry
         state.RuntimeKind = agent.RuntimeKind;
         state.AppliedRuntimeKind = agent.AppliedRuntimeKind;
         state.RuntimePending = AgentPatchHelpers.RuntimePending(agent);
-        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(agent.AppliedRuntimeBinding, _backupDir);
+        (state.ManagedState, state.ManagedErrors, state.Managed) = ManagedView(agent.AppliedRuntimeBinding);
+        ApplyManagedLive(state);
         BroadcastIfChanged(state, force: true);
+    }
+
+    /// <summary>
+    /// Records a container observation made by the periodic status refresh (not a lifecycle operation).
+    /// It overlays the persisted identities only for the same stock sandbox and only while newer.
+    /// </summary>
+    public void ObserveManagedContainers(string agentName, string sandboxId, ManagedContainers observed)
+    {
+        _observedContainers[agentName] = (sandboxId, observed);
+        if (_agents.TryGetValue(agentName, out var state) && ApplyManagedLive(state))
+            BroadcastIfChanged(state, force: true);
+    }
+
+    /// <summary>Status read path: refreshes backup stamps (cached) and container overlays on every managed entry.</summary>
+    private void RefreshManagedLive()
+    {
+        foreach (var state in _agents.Values)
+            if (state.Managed is not null && ApplyManagedLive(state))
+                BroadcastIfChanged(state, force: true);
+    }
+
+    private (DateTimeOffset? LastSuccess, string State) BackupStamp()
+    {
+        lock (_backupGate)
+        {
+            var now = Clock();
+            if (now - _backupReadAt >= ManagedRefreshWindow || now < _backupReadAt)
+            {
+                _backupStamp = ManagedBackupStamp.Read(_backupDir);
+                _backupReadAt = now;
+            }
+            return _backupStamp;
+        }
+    }
+
+    /// <summary>Applies the live overlays to one entry; true when a visible field changed.</summary>
+    private bool ApplyManagedLive(AgentState state)
+    {
+        if (state.Managed is not { } view) return false;
+        var backup = BackupStamp();
+        var next = view with { BackupLastSuccessAt = backup.LastSuccess, BackupState = backup.State };
+        if (_observedContainers.TryGetValue(state.AgentName, out var live) && view.AppliedSandboxId is not null
+            && live.SandboxId == view.AppliedSandboxId && live.Seen is var seen
+            && (view.ContainersObservedAt is not { } persisted || seen.ObservedAt > persisted))
+            next = next with
+            {
+                WorkloadContainerId = seen.WorkloadId,
+                SupervisorContainerId = seen.SupervisorId,
+                ContainerStatus = seen.Status,
+                ContainersObservedAt = seen.ObservedAt,
+            };
+        if (next == view) return false;
+        state.Managed = next;
+        return true;
     }
 
     public void UpdateAgent(AgentHeartbeat heartbeat)
@@ -165,11 +230,18 @@ public sealed class AgentRegistry
             state.ContainerStartedAt = startedAt;
     }
 
-    public IReadOnlyCollection<AgentState> GetAll() =>
-        _agents.Values.OrderBy(a => a.AgentName).ToList();
+    public IReadOnlyCollection<AgentState> GetAll()
+    {
+        RefreshManagedLive();
+        return _agents.Values.OrderBy(a => a.AgentName).ToList();
+    }
 
-    public AgentState? Get(string agentName) =>
-        _agents.TryGetValue(agentName, out var state) ? state : null;
+    public AgentState? Get(string agentName)
+    {
+        if (!_agents.TryGetValue(agentName, out var state)) return null;
+        if (ApplyManagedLive(state)) BroadcastIfChanged(state, force: true);
+        return state;
+    }
 
     /// <summary>Removes an agent from the in-memory registry. Called after DB deletion to prevent ghost entries.</summary>
     public void Remove(string agentName) =>

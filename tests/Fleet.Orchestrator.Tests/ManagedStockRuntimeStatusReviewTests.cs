@@ -149,6 +149,84 @@ public sealed class ManagedStockRuntimeStatusReviewTests : IDisposable
         Assert.True(ProcessStockCli.CliExists("sh"));
     }
 
+    // ── #492 review F11/F12: the status read path refreshes, not only lifecycle operations ──
+
+    private static string Stamp(DateTimeOffset at) => at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") + "\n";
+
+    private AgentRegistry Registry(Func<DateTimeOffset> clock) =>
+        new(new TaskHistoryStore(), Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRegistry>.Instance,
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["StockOpenShell:BackupDir"] = _backup }).Build())
+        { Clock = clock };
+
+    [Fact]
+    public void Status_reads_pick_up_externally_changed_backup_stamps_without_a_runtime_update()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var registry = Registry(() => now);
+        var success = now.AddHours(-2);
+        File.WriteAllText(Path.Combine(_backup, "last-success"), Stamp(success));
+        var agent = _t.ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = "applied", Applied = _t.Binding("fleet-agent1-56565656", Guid.NewGuid()) });
+        registry.PreloadFromDbConfig(agent);
+        Assert.Equal("recorded", registry.Get(agent.Name)!.Managed!.BackupState);
+
+        // A later run fails: inside the window the cached read is served, after it the status read sees it.
+        File.WriteAllText(Path.Combine(_backup, "last-failure"), Stamp(now.AddMinutes(-1)));
+        Assert.Equal("recorded", registry.Get(agent.Name)!.Managed!.BackupState);
+        now = now.AddSeconds(31);
+        Assert.Equal("failed", registry.GetAll().Single().Managed!.BackupState);
+
+        // Then a later run succeeds: the new stamp replaces the failure on the next window, still no runtime update.
+        var later = now.AddSeconds(-5);
+        File.WriteAllText(Path.Combine(_backup, "last-success"), Stamp(later));
+        now = now.AddSeconds(31);
+        var view = registry.Get(agent.Name)!.Managed!;
+        Assert.Equal(("recorded", Stamp(later)), (view.BackupState, Stamp(view.BackupLastSuccessAt!.Value)));
+
+        // The stamps disappearing (dir emptied) reads unknown again.
+        File.Delete(Path.Combine(_backup, "last-success"));
+        now = now.AddSeconds(31);
+        Assert.Equal(("unknown", (DateTimeOffset?)null), (registry.GetAll().Single().Managed!.BackupState, registry.GetAll().Single().Managed!.BackupLastSuccessAt));
+    }
+
+    [Fact]
+    public async Task Status_refresh_reobserves_containers_that_changed_after_apply()
+    {
+        var registry = Registry(() => DateTimeOffset.UtcNow);
+        var binding = _t.Binding("fleet-agent1-57575757", Guid.NewGuid()) with
+        {
+            Containers = new ManagedContainers(WorkloadId, SupervisorId, "running", DateTimeOffset.UtcNow.AddMinutes(-5)),
+        };
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var agent = _t._store.Get("agent1");
+        registry.PreloadFromDbConfig(agent);
+        Assert.Equal("running", registry.Get(agent.Name)!.Managed!.ContainerStatus);
+
+        // The workload exits after apply: the periodic status refresh re-reads labels without a lifecycle op.
+        _t._host.SandboxContainers = Pair("exited");
+        var runtime = _t.Runtime();
+        await runtime.RefreshContainersAsync("agent1", registry, default);
+        var view = registry.Get(agent.Name)!.Managed!;
+        Assert.Equal((WorkloadId, SupervisorId, "stopped"), (view.WorkloadContainerId, view.SupervisorContainerId, view.ContainerStatus));
+        // A DB-driven re-read of the (unchanged) record keeps the newer observation.
+        registry.UpdateRuntimeSelection(_t._store.Get("agent1"));
+        Assert.Equal("stopped", registry.Get(agent.Name)!.Managed!.ContainerStatus);
+
+        // Bounded: a second refresh inside the window does not query Docker again.
+        _t._host.SandboxContainers = [];
+        await runtime.RefreshContainersAsync("agent1", registry, default);
+        Assert.Equal("stopped", registry.Get(agent.Name)!.Managed!.ContainerStatus);
+        // After the window (fresh runtime cache) the removal is seen and the last known IDs are kept.
+        await _t.Runtime().RefreshContainersAsync("agent1", registry, default);
+        view = registry.Get(agent.Name)!.Managed!;
+        Assert.Equal((WorkloadId, SupervisorId, "removed"), (view.WorkloadContainerId, view.SupervisorContainerId, view.ContainerStatus));
+
+        // Display-only: the persisted record is untouched; an observation for another sandbox never applies.
+        Assert.Equal("running", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!.Containers!.Status);
+        registry.ObserveManagedContainers(agent.Name, "other-sandbox", new ManagedContainers("x", "y", "running", DateTimeOffset.UtcNow.AddMinutes(1)));
+        Assert.Equal("removed", registry.Get(agent.Name)!.Managed!.ContainerStatus);
+    }
+
     private static (string, DateTimeOffset?, long?) Backup(ManagedStatusView status) =>
         (status.BackupState, status.BackupLastSuccessAt, status.BackupAgeSeconds);
 }

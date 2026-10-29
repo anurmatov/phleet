@@ -1420,6 +1420,34 @@ public sealed class StockOpenShellRuntime(
         return ManagedContainers.From(containers, binding.Containers, DateTimeOffset.UtcNow);
     }
 
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _containersReadAt = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Longest a container observation is served before the status refresh re-reads Docker labels.</summary>
+    internal TimeSpan ContainerRefreshWindow { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// #492 review F11: the periodic status refresh re-observes the applied binding's containers (bounded,
+    /// at most once per window per agent) so a workload that exits or is removed after a lifecycle
+    /// operation is not still shown as its last recorded status. Display-only: the record is unchanged.
+    /// </summary>
+    public async Task RefreshContainersAsync(string name, AgentRegistry registry, CancellationToken ct)
+    {
+        if (!Enabled) return;
+        var now = DateTimeOffset.UtcNow;
+        if (_containersReadAt.TryGetValue(name, out var last) && now - last < ContainerRefreshWindow && now >= last) return;
+        _containersReadAt[name] = now;
+        Agent? agent;
+        try { agent = await store.LoadAsync(name, ct); }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return; }
+        if (agent is not { AppliedRuntimeKind: "openshell" }) return;
+        ManagedRecord record;
+        try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
+        catch (JsonException) { return; }
+        // An in-flight operation records its own observation when it finishes.
+        if (record is not { Operation: null, Applied: { } binding }) return;
+        registry.ObserveManagedContainers(name, binding.SandboxId, await ObserveContainersAsync(binding));
+    }
+
     /// <summary>No workload or native-supervisor container left running for the UUID, by exact label query.</summary>
     private async Task<string?> QuiescentAsync(ManagedBinding binding, CancellationToken ct)
     {

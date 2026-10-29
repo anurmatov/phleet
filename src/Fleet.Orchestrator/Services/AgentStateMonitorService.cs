@@ -54,6 +54,10 @@ public sealed class AgentStateMonitorService : BackgroundService
                     try { await _managed.CheckGenerationAsync(agent.AgentName, stoppingToken); }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     { _logger.LogWarning("Managed generation check for {Agent} failed ({Type})", agent.AgentName, ex.GetType().Name); }
+                    // #492 review F11: and re-observes its containers (bounded, cached per agent).
+                    try { await _managed.RefreshContainersAsync(agent.AgentName, _registry, stoppingToken); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    { _logger.LogWarning("Managed container refresh for {Agent} failed ({Type})", agent.AgentName, ex.GetType().Name); }
                 }
 
             // Refresh container start times periodically

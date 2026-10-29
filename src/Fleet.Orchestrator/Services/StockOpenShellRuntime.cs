@@ -502,6 +502,11 @@ public sealed class StockOpenShellRuntime(
     private Task<Result> HandleUnexpectedRestartAsync(string name, CancellationToken ct) =>
         RunAsync(name, "restart_hold", async (agent, record, _, token) => record.Applied is null
             ? (record, null, null, Result.Refused(409, "managed_binding_missing"))
+            // Review A4: an already held or revoked record is never fanned out again, and the logs/cancel guard gets
+            // the status refresh's exemption for a durably stopped, quiescent (or not yet observable) binding.
+            : record.State is "needs_attention" or "revoked" || record.State == "stopped"
+                && await StoppedQuiescentAsync(record.Applied, token) is null or "sandbox_unobservable" or "quiescence_unobservable"
+                ? (record, null, null, Result.Refused(409, "gateway_generation_changed"))
             : await HoldForGenerationAsync(agent, record, "gateway_generation_changed", token), ct);
 
     /// <summary>Pushes the persisted runtime state to the registry/WebSocket so dashboards update live.</summary>

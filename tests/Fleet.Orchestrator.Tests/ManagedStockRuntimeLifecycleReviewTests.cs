@@ -857,4 +857,58 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
             Assert.Empty(_t._broker.Deletes);
         }
     }
+
+    [Theory]
+    [InlineData("logs")]
+    [InlineData("cancel")]
+    public async Task Logs_or_cancel_after_a_planned_gateway_restart_never_hold_a_stopped_quiescent_binding(string action)
+    {
+        // Review A4: the guard gets the same planned-restart exemption as the status refresh.
+        var binding = _t.Binding("fleet-agent1-a4a4a4a4", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        var runtime = _t.Runtime();
+        _t._host.Generation = "gateway-2@planned";
+
+        var result = action == "logs" ? (await runtime.LogsAsync("agent1", 10, default)).Result : await runtime.CancelAsync("agent1", null, default);
+
+        Assert.Equal((409, "gateway_generation_changed"), (result.Status, result.Code));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("stopped", 0, binding.GatewayGeneration), (record.State, record.Errors.Count, record.Applied!.GatewayGeneration));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop") || c.Args.Contains("detach"));
+        Assert.Empty(_t._broker.Deletes);
+        var start = await runtime.StartAsync("agent1", default);
+        Assert.True(start.Ok, start.Code + ":" + string.Join(",", start.Errors));
+    }
+
+    [Theory]
+    [InlineData("needs_attention")]
+    [InlineData("revoked")]
+    public async Task Repeated_logs_after_an_unexpected_restart_never_rerun_the_revoke_fanout(string state)
+    {
+        var binding = _t.Binding("fleet-agent1-a4b4c4d4", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = state == "revoked" ? "revoked" : "applied", Applied = binding }));
+        var runtime = _t.Runtime();
+        _t._host.Generation = "gateway-2@unexpected";
+        if (state == "needs_attention")
+        {
+            // The first read holds the running binding and fans out once.
+            Assert.Equal("gateway_generation_changed", (await runtime.LogsAsync("agent1", 10, default)).Result.Code);
+            Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+            Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        }
+        var held = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        var deletes = _t._broker.Deletes.Count;
+        _t._cli.Calls.Clear();
+
+        for (var i = 0; i < 3; i++)
+            Assert.Equal("gateway_generation_changed", (await runtime.LogsAsync("agent1", 10, default)).Result.Code);
+
+        var after = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal((held.State, held.Errors.Count), (after.State, after.Errors.Count));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop") || c.Args.Contains("detach"));
+        Assert.Equal(deletes, _t._broker.Deletes.Count);
+    }
 }

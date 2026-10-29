@@ -61,7 +61,8 @@ public sealed class BridgeRelayService : IAsyncDisposable
         // Managed lanes keep this ordinary connection for ordinary targets; a process-wide single-file
         // stock identity has no ordinary connection, so the two modes never combine.
         if (_stockBroker is not null || !Path.IsPathFullyQualified(directory)) throw new StockIdentityDenied("broker_configuration");
-        Lanes = new BridgeControlLanes(directory, bridgeConfig.Value.TimeoutSeconds, _rabbitConfig.Exchange, logger);
+        Lanes = new BridgeControlLanes(directory, bridgeConfig.Value.TimeoutSeconds, _rabbitConfig.Exchange, logger)
+        { ForwardWorkflowReply = ForwardWorkflowReplyAsync };
     }
 
     /// <summary>One relay bound to an explicit epoch identity: the single-file process or a managed lane.</summary>
@@ -80,6 +81,15 @@ public sealed class BridgeRelayService : IAsyncDisposable
     }
 
     internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> Connect { get; init; }
+
+    /// <summary>
+    /// Managed lane only (#492): forwards an admitted typed workflow reply to the existing Temporal receiver
+    /// route on the ordinary connection. Null on the ordinary and single-file relays.
+    /// </summary>
+    internal Func<RelayMessage, Task>? ForwardWorkflowReply { get; init; }
+
+    private const string ResponseType = "response";
+    private const string PartialResponseType = "partial-response";
 
     /// <summary>Per-agent managed control lanes; null unless <c>StockOpenShell:AuthorityDirectory</c> is set.</summary>
     internal BridgeControlLanes? Lanes { get; }
@@ -136,6 +146,9 @@ public sealed class BridgeRelayService : IAsyncDisposable
 
             _initialized = true;
             _logger.LogInformation("BridgeRelayService initialized on exchange {Exchange}", _rabbitConfig.Exchange);
+            // Managed lanes are the sole consumers of their epoch reply queues; open the current ones so a
+            // workflow reply is read without waiting for a bridge ask to that agent.
+            if (Lanes is not null) await Lanes.OpenActiveAsync(ct);
         }
         catch (Exception) when (_stockBroker is not null)
         {
@@ -290,7 +303,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
         }
     }
 
-    private Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
+    private async Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
     {
         try
         {
@@ -303,7 +316,19 @@ public sealed class BridgeRelayService : IAsyncDisposable
             var json = Encoding.UTF8.GetString(ea.Body.Span);
             var message = JsonSerializer.Deserialize<RelayMessage>(json);
             if (message is null)
-                return Task.CompletedTask;
+                return;
+            if (_stockBroker is not null && message.Type is ResponseType or PartialResponseType)
+            {
+                // Typed workflow reply (#492): validated workload user-id, fleet.group/bridge route, this lane's
+                // agent, sandbox and epoch, a session nonce and a TaskId; Temporal checks the live correlation.
+                if (ForwardWorkflowReply is null || message.Sender != _stockBroker.Agent || message.Epoch != _stockBroker.Epoch
+                    || message.Sandbox != _stockBroker.Sandbox || !Guid.TryParseExact(message.CorrelationId, "N", out _)
+                    || message.TaskId is not { Length: > 0 and <= 512 })
+                    throw new StockIdentityDenied("broker_route_denied");
+                await ForwardWorkflowReply(message);
+                _logger.LogInformation("Verified stock workflow reply forwarded");
+                return;
+            }
             if (_stockBroker is not null && (message.Sender != _stockBroker.Agent || message.Type != "bridge-response"
                 || !Guid.TryParseExact(message.CorrelationId, "N", out _)))
                 throw new StockIdentityDenied("broker_route_denied");
@@ -339,8 +364,15 @@ public sealed class BridgeRelayService : IAsyncDisposable
         {
             _logger.LogError(ex, "Error processing bridge response");
         }
+    }
 
-        return Task.CompletedTask;
+    /// <summary>Publishes an admitted managed workflow reply to <c>temporal-bridge</c> on the ordinary connection.</summary>
+    private async Task ForwardWorkflowReplyAsync(RelayMessage reply)
+    {
+        if (!_initialized || _publishChannel is null) throw new StockIdentityDenied("broker_forward_unavailable");
+        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(reply));
+        await _publishChannel.BasicPublishAsync(_rabbitConfig.Exchange, routingKey: "temporal-bridge", mandatory: false,
+            basicProperties: new BasicProperties { DeliveryMode = DeliveryModes.Persistent }, body: body);
     }
 
     public async ValueTask DisposeAsync()
@@ -360,6 +392,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
             await _connection.CloseAsync();
     }
 
-    private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
-        string Type = "directive", string? CorrelationId = null, string? TaskId = null);
+    internal sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
+        string Type = "directive", string? CorrelationId = null, string? TaskId = null,
+        Guid? Epoch = null, string? Sandbox = null);
 }

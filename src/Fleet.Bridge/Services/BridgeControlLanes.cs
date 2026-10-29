@@ -32,6 +32,19 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
     internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> Connect { get; set; } =
         (factory, ct) => factory.CreateConnectionAsync(ct);
 
+    /// <summary>The ordinary relay's forward of admitted typed workflow replies to the Temporal receiver (#492).</summary>
+    internal Func<BridgeRelayService.RelayMessage, Task>? ForwardWorkflowReply { get; init; }
+
+    /// <summary>Opens the lane of every currently active record (best effort); refused lanes stay held.</summary>
+    internal async Task OpenActiveAsync(CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, StockActiveRecord?> active;
+        try { active = StockAuthoritySource.Active(directory); }
+        catch (StockIdentityDenied) { logger.LogWarning("Stock control lanes not opened: authority unavailable"); return; }
+        foreach (var (agent, record) in active)
+            if (record is not null) await RouteAsync(agent, connect: true, ct);
+    }
+
     /// <summary>Selects the route for a target; with <paramref name="connect"/> opens or replaces its lane.</summary>
     internal async Task<Route> RouteAsync(string targetAgent, bool connect, CancellationToken ct)
     {
@@ -84,7 +97,7 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
             relay = new BridgeRelayService(
                 Options.Create(new BridgeOptions { TargetAgent = identity.Agent, TimeoutSeconds = timeoutSeconds }),
                 Options.Create(new RabbitMqOptions { Host = identity.BrokerHost, Exchange = exchange }), logger, identity)
-            { Connect = Connect };
+            { Connect = Connect, ForwardWorkflowReply = ForwardWorkflowReply };
             await relay.InitializeAsync(ct);
             return relay;
         }

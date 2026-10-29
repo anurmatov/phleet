@@ -170,6 +170,23 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal("/home/agent/trust/enrollment.json", _t._cli.Uploads.Last().Remote); // activated enrollment, same path
     }
 
+    [Fact]
+    public async Task Workspace_upload_gets_the_same_bound_as_the_workspace_download()
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        var runtime = _t.Runtime();
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        _t._store.Get("agent1").RuntimeKind = "docker";
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+
+        var upload = Assert.Single(_t._cli.Timeouts, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "workspace");
+        var download = Assert.Single(_t._cli.Timeouts, c => c.Args.Take(2).SequenceEqual(["sandbox", "download"]));
+        Assert.Equal(TimeSpan.FromMinutes(5), runtime.TransferTimeout);
+        Assert.Equal(runtime.TransferTimeout, upload.Timeout);
+        Assert.Equal(download.Timeout, upload.Timeout);
+        Assert.NotEqual(runtime.LegTimeout, upload.Timeout);
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

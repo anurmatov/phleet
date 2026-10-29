@@ -330,6 +330,8 @@ public sealed class StockOpenShellRuntime(
     internal TimeSpan FanoutTimeout { get; init; } = TimeSpan.FromSeconds(120);
     internal TimeSpan StopSettle { get; init; } = TimeSpan.FromSeconds(60);
     internal TimeSpan Poll { get; init; } = TimeSpan.FromSeconds(2);
+    /// <summary>Review A7: workspace bundle upload and download share one realistic bound (not the 30 s CLI leg).</summary>
+    internal TimeSpan TransferTimeout { get; init; } = TimeSpan.FromMinutes(5);
     /// <summary>Test seams; production uses the ordinary generator, Docker service and provisioning path.</summary>
     internal Func<string, CancellationToken, Task<string>>? GenerateInputs { get; init; }
     internal Func<string, Task<bool>>? DockerStop { get; init; }
@@ -1190,7 +1192,7 @@ public sealed class StockOpenShellRuntime(
     private async Task<string?> UploadAsync(ManagedBinding binding, string local, string remote, CancellationToken ct)
     {
         if (await VerifyIdentityAsync(binding, ct) is { } identity) return identity.Code;
-        var run = await cli.RunAsync(["sandbox", "upload", binding.SandboxName, local, remote], null, LegTimeout, ct);
+        var run = await cli.RunAsync(["sandbox", "upload", binding.SandboxName, local, remote], null, TransferTimeout, ct);
         return run.ExitCode == 0 && !run.TimedOut ? null : "input_upload_unknown";
     }
 
@@ -1573,7 +1575,7 @@ public sealed class StockOpenShellRuntime(
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_stage_failed"; }
         if (await VerifyIdentityAsync(binding, ct) is { } before) return before.Code;
-        var download = await cli.RunAsync(["sandbox", "download", binding.SandboxName, "/workspace", staging], null, TimeSpan.FromMinutes(5), ct);
+        var download = await cli.RunAsync(["sandbox", "download", binding.SandboxName, "/workspace", staging], null, TransferTimeout, ct);
         if (download.ExitCode != 0 || download.TimedOut) return "workspace_download_unknown";
         if (await VerifyIdentityAsync(binding, ct) is { } after) return after.Code;
         // Mirror the working tree (deletions included); excluded account/control state is never touched.

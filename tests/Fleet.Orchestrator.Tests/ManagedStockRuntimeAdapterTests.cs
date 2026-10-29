@@ -1089,6 +1089,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     internal sealed class FakeCli : IStockCli
     {
         public readonly List<Call> Calls = [];
+        /// <summary>The bound each call was given (review A7: transfer vs ordinary leg).</summary>
+        public readonly List<(string[] Args, TimeSpan Timeout)> Timeouts = [];
         public readonly Dictionary<string, (string Id, string Phase)> Sandboxes = new();
         public readonly HashSet<string> Hang = [];
         public string Version = "openshell 0.1.5";
@@ -1097,7 +1099,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         public async Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv, TimeSpan timeout, CancellationToken ct)
         {
-            lock (Calls) Calls.Add(new([.. args], secretEnv));
+            lock (Calls) { Calls.Add(new([.. args], secretEnv)); Timeouts.Add(([.. args], timeout)); }
             if (args.Count > 2 && Hang.Contains(args[2])) { await Task.Delay(Timeout.Infinite, ct); }
             string Name(int index) => args[index];
             return (args[0], args.Count > 1 ? args[1] : "") switch

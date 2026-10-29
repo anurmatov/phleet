@@ -166,6 +166,36 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
         Assert.Throws<InvalidOperationException>(() => provisioning.GetAgentBaseUrl(new Agent { Name = "agent1", DisplayName = "Agent", Role = "test", Model = "sol", ContainerName = "agent1", AppliedRuntimeKind = "openshell" }));
     }
 
+    [Fact]
+    public async Task Delete_ownership_keeps_a_concurrent_claim_out_until_the_row_is_gone()
+    {
+        // Review A2/D1: an apply/Start/revoke claim CAS issued while the delete guard owns the inspected binding never
+        // wins. On MySQL it waits on the row lock and then matches no row; the one shared SQLite test connection
+        // refuses it outright. Either way the deprovision ran under the inspected binding alone.
+        await WithDb(async db => { db.Agents.Add(ManagedStockRuntimeTests.Agent()); return await db.SaveChangesAsync(); });
+        var inspected = await WithDb(db => db.Agents.AsNoTracking().SingleAsync());
+        var store = App.Services.GetRequiredService<Fleet.Orchestrator.Services.IManagedBindingStore>();
+        var claimJson = new Fleet.Orchestrator.Services.ManagedRecord { State = "applying", Operation = "apply:other-process:synthetic" }.Serialize();
+        Task<bool>? claim = null;
+        var guard = new Fleet.Orchestrator.Services.ManagedDeleteGuard(inspected.Id, inspected.AppliedRuntimeBinding, inspected.AppliedRuntimeKind, async _ =>
+        {
+            claim = Task.Run(() => store.SwapAsync(inspected.Id, inspected.AppliedRuntimeBinding, claimJson, null, null, CancellationToken.None));
+            await Task.WhenAny(claim, Task.Delay(TimeSpan.FromSeconds(1)));
+            Assert.False(claim.IsCompletedSuccessfully && claim.Result, "a concurrent claim won while the delete owned the row");
+            return Fleet.Orchestrator.Services.ProvisionResult.Ok("agent1", "synthetic deprovision");
+        });
+
+        var (fault, deprovision) = await WithDb(async db => await guard.DeleteAsync(db, await db.Agents.SingleAsync()));
+
+        Assert.Null(fault);
+        Assert.True(deprovision!.Success);
+        var won = false;
+        try { won = await claim!; }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Data.Common.DbException) { }
+        Assert.False(won);
+        Assert.Equal(0, await WithDb(db => db.Agents.CountAsync()));
+    }
+
     private sealed class NoopAcl : Fleet.Orchestrator.Services.IAclChangeNotifier
     {
         public Task PublishAclChangedAsync(CancellationToken ct = default) => Task.CompletedTask;

@@ -561,6 +561,13 @@ public sealed class ContainerProvisioningService(
             var managedStop = await runtime.StopAsync(agentName, ct);
             return new ProvisionResult(agentName, managedStop.Ok, managedStop.Message);
         }
+        return await DeprovisionContainerAsync(agent, ct);
+    }
+
+    /// <summary>Stops and removes <paramref name="agent"/>'s Docker container; no DB read.</summary>
+    private async Task<ProvisionResult> DeprovisionContainerAsync(Agent agent, CancellationToken ct)
+    {
+        var agentName = agent.Name;
         var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
         if (existing is null)
             return ProvisionResult.Fail(agentName,
@@ -582,31 +589,33 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
-    /// Review A2: the deprovision behind <c>DELETE /api/agents/{name}</c>. <c>KeepRow</c> non-null means the agent
+    /// Review A2: the inspection behind <c>DELETE /api/agents/{name}</c>. <c>KeepRow</c> non-null means the agent
     /// row must stay: an applied openshell binding or an unresolved candidate/held record exists and no clean revoke
-    /// has succeeded, or the runtime hold denied the mutation. Docker deprovision stays best-effort; a cleanly
-    /// revoked managed binding was already stopped by its revoke, so no managed Stop result is ever ignored.
+    /// has succeeded, or the runtime hold denies the Docker mutation. Otherwise the guard owns the rest: it locks the
+    /// exact inspected binding and only then deprovisions the inspected runtime (best-effort Docker; a cleanly revoked
+    /// managed binding was already stopped by its revoke, so nothing is stopped and no managed Stop result is ignored).
     /// </summary>
-    public async Task<(ProvisionResult Deprovision, string? KeepRow, ManagedDeleteGuard? Guard)> DeprovisionForDeleteAsync(string agentName, CancellationToken ct = default)
+    public async Task<(string? KeepRow, ManagedDeleteGuard? Guard)> PrepareDeleteAsync(string agentName, CancellationToken ct = default)
     {
         Agent? agent;
         using (var scope = scopeFactory.CreateScope())
             agent = await scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents
                 .AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        if (agent is null) return (ProvisionResult.Fail(agentName, "agent not found in DB"), null, null);
-        if (DescribeManagedDeleteFault(agent) is { } managedFault) return (ProvisionResult.Fail(agentName, managedFault), managedFault, null);
-        // Review A2/D1: nothing is persisted here. The caller deletes the row only if the binding and runtime kind
-        // are still exactly what this inspection saw (ManagedDeleteGuard.DeleteAsync), so an exception anywhere
-        // in between leaves no claim behind and a default-off Docker agent can never be locked by a crash.
-        var guard = new ManagedDeleteGuard(agent.Id, agent.AppliedRuntimeBinding, agent.AppliedRuntimeKind);
-        if (BeforeDeprovision is not null) await BeforeDeprovision();
-        if (agent.AppliedRuntimeKind != "docker") return (ProvisionResult.Ok(agentName, "managed binding revoked"), null, guard);
-        var deprovision = await DeprovisionAsync(agentName, ct);
-        if (!deprovision.Success && deprovision.Message == StockRuntimeMutationHold.Reason) return (deprovision, deprovision.Message, null);
-        return (deprovision, null, guard);
+        if (agent is null) return (null, null);
+        if (DescribeManagedDeleteFault(agent) is { } managedFault) return (managedFault, null);
+        var isDocker = agent.AppliedRuntimeKind == "docker";
+        if (isDocker && RuntimeHold.Denies(agentName)) return (StockRuntimeMutationHold.Reason, null);
+        // Review A2/D1: nothing is persisted here, and nothing is deprovisioned until the guard holds the exact
+        // inspected binding. The runtime acted on is the inspected one, never a fresh lookup that could find a
+        // concurrently applied replacement.
+        return (null, new ManagedDeleteGuard(agent.Id, agent.AppliedRuntimeBinding, agent.AppliedRuntimeKind, async token =>
+        {
+            if (BeforeDeprovision is not null) await BeforeDeprovision();
+            return isDocker ? await DeprovisionContainerAsync(agent, token) : ProvisionResult.Ok(agentName, "managed binding revoked");
+        }));
     }
 
-    /// <summary>Test seam: runs after the managed-state inspection and before any deprovision (review A2/D1).</summary>
+    /// <summary>Test seam: runs once the delete guard holds the inspected binding, before any deprovision (review A2/D1).</summary>
     internal Func<Task>? BeforeDeprovision { get; set; }
 
     /// <summary>Null only when no managed state would be dropped untracked with the agent row.</summary>
@@ -1989,20 +1998,24 @@ internal sealed record ProjectContextPlan(IReadOnlyList<ProjectContextAssignment
 }
 
 /// <summary>
-/// Review A2/D1/D2: the inspected binding and runtime kind of an agent row about to be deleted. The row is
-/// deleted in one transaction that first compare-and-sets that exact binding (taking the row lock, so a
-/// concurrent apply/Start/revoke claim CAS either already changed it — conflict — or waits and then finds no
-/// row). Nothing is written outside the transaction: any failure rolls back and leaves the binding as it was.
+/// Review A2/D1/D2: the inspected binding and runtime kind of an agent row about to be deleted, and the deprovision
+/// of that inspected runtime. One transaction first compare-and-sets that exact binding (taking the row lock), then
+/// deprovisions, then deletes the row. A concurrent apply/Start/revoke claim CAS either already changed the binding
+/// (conflict, before any stop/remove) or waits on the lock and then finds no row. Nothing is written outside the
+/// transaction: a failure or crash rolls back and leaves the binding as it was, so the delete stays retryable.
 /// </summary>
-public sealed record ManagedDeleteGuard(int AgentId, string? Binding, string? Kind)
+public sealed record ManagedDeleteGuard(int AgentId, string? Binding, string? Kind, Func<CancellationToken, Task<ProvisionResult>> Deprovision)
 {
     public const string Changed = "managed_state_changed_during_delete";
     public const string Unavailable = "managed_delete_unavailable";
 
-    /// <summary>Null when the row was deleted; <see cref="Changed"/> (409) or <see cref="Unavailable"/> (503) otherwise.</summary>
-    public async Task<string?> DeleteAsync(OrchestratorDbContext db, Agent tracked, CancellationToken ct = default)
+    /// <summary>
+    /// Fault null when the row was deleted, with the deprovision result; otherwise <see cref="Changed"/> (409) or
+    /// <see cref="Unavailable"/> (503) and nothing was deprovisioned under a changed binding.
+    /// </summary>
+    public async Task<(string? Fault, ProvisionResult? Deprovision)> DeleteAsync(OrchestratorDbContext db, Agent tracked, CancellationToken ct = default)
     {
-        if (tracked.Id != AgentId) return Changed;
+        if (tracked.Id != AgentId) return (Changed, null);
         try
         {
             return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
@@ -2016,12 +2029,15 @@ public sealed record ManagedDeleteGuard(int AgentId, string? Binding, string? Ki
                 if (locked != 1)
                 {
                     await tx.RollbackAsync(ct);
-                    return Changed;
+                    return ((string?)Changed, (ProvisionResult?)null);
                 }
+                // The row stays locked until commit or rollback, so the runtime is deprovisioned only under the
+                // inspected binding; an exception from it rolls the transaction back too.
+                var deprovision = await Deprovision(ct);
                 db.Agents.Remove(tracked);
                 await db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
-                return (string?)null;
+                return (null, deprovision);
             });
         }
         catch (Exception ex) when (ex is System.Data.Common.DbException or DbUpdateException or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException
@@ -2029,7 +2045,7 @@ public sealed record ManagedDeleteGuard(int AgentId, string? Binding, string? Ki
         {
             // The transaction rolled back: the binding is unchanged and the row is kept. A DB outage is not a conflict.
             db.ChangeTracker.Clear();
-            return Unavailable;
+            return (Unavailable, null);
         }
     }
 }

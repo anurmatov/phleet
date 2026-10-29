@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.Extensions.Configuration;
@@ -938,16 +939,18 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         await harness.SeedAsync(db => db.Agents.Add(new Agent { Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic",
             ContainerName = "agent1", IsEnabled = true, RuntimeKind = "openshell", AppliedRuntimeKind = applied, AppliedRuntimeBinding = record?.Serialize() }));
 
-        var (deprovision, kept, guard) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+        var (kept, guard) = await harness.Service.PrepareDeleteAsync("agent1");
 
         Assert.Equal(keepRow, kept);
         Assert.Equal(keepRow is null, guard is not null);
-        if (keepRow is not null)
+        Assert.Equal(0, harness.DockerRequestCount); // inspection alone never stops or removes anything
+        if (keepRow is null && applied == "openshell")
         {
-            Assert.False(deprovision.Success);
-            Assert.Equal(0, harness.DockerRequestCount); // nothing stopped or removed behind the refusal
+            var (fault, deprovision) = await DeleteWithGuardAsync(harness, guard!);
+            Assert.Null(fault);
+            Assert.True(deprovision!.Success, deprovision.Message);
+            Assert.Equal(0, harness.DockerRequestCount); // a cleanly revoked binding was stopped by its revoke
         }
-        else if (applied == "openshell") Assert.True(deprovision.Success, deprovision.Message);
     }
 
     private static async Task<string?> BindingAsync(Fleet.Orchestrator.Tests.Services.ProvisioningHarness harness)
@@ -966,11 +969,11 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         return harness;
     }
 
-    private static async Task<string?> DeleteWithGuardAsync(Fleet.Orchestrator.Tests.Services.ProvisioningHarness harness, ManagedDeleteGuard guard)
+    private static async Task<(string? Fault, ProvisionResult? Deprovision)> DeleteWithGuardAsync(Fleet.Orchestrator.Tests.Services.ProvisioningHarness harness, ManagedDeleteGuard guard)
     {
-        string? fault = "not-run";
-        await harness.MutateAsync(async db => fault = await guard.DeleteAsync(db, await db.Agents.SingleAsync(a => a.Name == "agent1")));
-        return fault;
+        (string?, ProvisionResult?) result = ("not-run", null);
+        await harness.MutateAsync(async db => result = await guard.DeleteAsync(db, await db.Agents.SingleAsync(a => a.Name == "agent1")));
+        return result;
     }
 
     private static async Task<bool> RowExistsAsync(Fleet.Orchestrator.Tests.Services.ProvisioningHarness harness)
@@ -980,22 +983,78 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         return exists;
     }
 
+    private static bool StopsOrRemoves(string request) => request.EndsWith("/stop", StringComparison.Ordinal) || request.StartsWith("DELETE ", StringComparison.Ordinal);
+
     [Fact]
     public async Task Agent_delete_conflicts_when_a_concurrent_apply_claims_the_binding_after_inspection()
     {
         // Review A2: inspection passed on a clean revoke, then an apply claimed the row before the delete commit.
         await using var harness = await RevokedAgentAsync();
-        var (_, kept, guard) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+        var (kept, guard) = await harness.Service.PrepareDeleteAsync("agent1");
         Assert.Null(kept);
         var applying = (ManagedRecord.Parse(await BindingAsync(harness)) with { Operation = "apply:other-process" }).Serialize();
         await harness.MutateAsync(async db =>
             await db.Agents.Where(a => a.Name == "agent1").ExecuteUpdateAsync(u => u.SetProperty(a => a.AppliedRuntimeBinding, applying)));
 
-        Assert.Equal(ManagedDeleteGuard.Changed, await DeleteWithGuardAsync(harness, guard!));
+        Assert.Equal(ManagedDeleteGuard.Changed, (await DeleteWithGuardAsync(harness, guard!)).Fault);
 
         Assert.True(await RowExistsAsync(harness));
         Assert.Equal(applying, await BindingAsync(harness)); // the apply's claim is untouched
         Assert.Equal(0, harness.DockerRequestCount);
+    }
+
+    [Fact]
+    public async Task Docker_agent_delete_conflicts_before_any_stop_or_remove_when_a_concurrent_apply_claims_it()
+    {
+        // Review A2 (d752ca65): a Docker-applied agent with a live container; an apply's claim CAS commits between
+        // inspection and delete. The delete refuses before touching Docker, so the apply keeps its runtime.
+        await using var harness = await EmptyDockerAgentAsync();
+        harness.ExistingContainers.Add("agent1");
+        var (kept, guard) = await harness.Service.PrepareDeleteAsync("agent1");
+        Assert.Null(kept);
+        var applying = new ManagedRecord { State = "applying", Operation = "apply:other-process:synthetic" }.Serialize();
+        await harness.MutateAsync(async db =>
+            await db.Agents.Where(a => a.Name == "agent1").ExecuteUpdateAsync(u => u.SetProperty(a => a.AppliedRuntimeBinding, applying)));
+
+        var (fault, deprovision) = await DeleteWithGuardAsync(harness, guard!);
+
+        Assert.Equal(ManagedDeleteGuard.Changed, fault);
+        Assert.Null(deprovision);
+        Assert.Equal(0, harness.DockerRequestCount); // no inspect, stop or remove
+        Assert.Contains("agent1", harness.ExistingContainers);
+        Assert.True(await RowExistsAsync(harness));
+        Assert.Equal(applying, await BindingAsync(harness));
+    }
+
+    [Fact]
+    public async Task Docker_agent_delete_never_stops_a_concurrently_applied_OpenShell_replacement()
+    {
+        // Review D1 (d752ca65): inspect a Docker agent, then an OpenShell apply commits its replacement binding. The
+        // delete refuses without stopping that sandbox, through the actual adapter, or touching Docker.
+        var replacement = _t.Binding("fleet-agent1-e5e5e5e5", Guid.NewGuid());
+        _t._cli.Sandboxes[replacement.SandboxName] = (replacement.SandboxId, "Ready");
+        var applied = new ManagedRecord { State = "applied", Applied = replacement };
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: applied));
+        var runtime = _t.Runtime();
+        await using var harness = Fleet.Orchestrator.Tests.Services.ProvisioningHarness.Create(extraServices: s => s.AddSingleton(runtime));
+        harness.ExistingContainers.Add("agent1");
+        await harness.SeedAsync(db => db.Agents.Add(new Agent { Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic",
+            ContainerName = "agent1", IsEnabled = true, RuntimeKind = "openshell", AppliedRuntimeKind = "docker", AppliedRuntimeBinding = null }));
+        var (kept, guard) = await harness.Service.PrepareDeleteAsync("agent1");
+        Assert.Null(kept);
+        var appliedJson = applied.Serialize();
+        await harness.MutateAsync(async db => await db.Agents.Where(a => a.Name == "agent1").ExecuteUpdateAsync(u => u
+            .SetProperty(a => a.AppliedRuntimeBinding, appliedJson).SetProperty(a => a.AppliedRuntimeKind, "openshell")));
+
+        var (fault, deprovision) = await DeleteWithGuardAsync(harness, guard!);
+
+        Assert.Equal(ManagedDeleteGuard.Changed, fault);
+        Assert.Null(deprovision);
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop"));
+        Assert.Equal("Ready", _t._cli.Sandboxes[replacement.SandboxName].Phase);
+        Assert.Equal(0, harness.DockerRequestCount);
+        Assert.True(await RowExistsAsync(harness));
+        Assert.Equal(appliedJson, await BindingAsync(harness));
     }
 
     [Theory]
@@ -1004,43 +1063,62 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
     public async Task Agent_delete_removes_exactly_the_inspected_row_and_persists_no_claim_before_it(string kind)
     {
         await using var harness = kind == "docker" ? await EmptyDockerAgentAsync() : await RevokedAgentAsync();
+        if (kind == "docker") harness.ExistingContainers.Add("agent1");
         var inspected = await BindingAsync(harness);
 
-        var (_, kept, guard) = await harness.Service.DeprovisionForDeleteAsync("agent1");
+        var (kept, guard) = await harness.Service.PrepareDeleteAsync("agent1");
 
         Assert.Null(kept);
         Assert.Equal(inspected, await BindingAsync(harness)); // no claim survives between inspection and delete
-        Assert.Null(await DeleteWithGuardAsync(harness, guard!));
+        var (fault, deprovision) = await DeleteWithGuardAsync(harness, guard!);
+        Assert.Null(fault);
+        Assert.True(deprovision!.Success, deprovision.Message);
         Assert.False(await RowExistsAsync(harness));
+        if (kind == "docker")
+        {
+            Assert.Equal(2, harness.DockerRequests.Count(StopsOrRemoves)); // stop, then remove, under the lock
+            Assert.Empty(harness.ExistingContainers);
+        }
+        else Assert.Equal(0, harness.DockerRequestCount);
     }
 
     [Fact]
-    public async Task Deprovision_failure_after_inspection_leaves_the_binding_unchanged_and_nothing_live()
+    public async Task Deprovision_failure_under_delete_ownership_restores_the_binding_and_stays_retryable()
     {
-        // Review D1: an exception between inspection and delete can leave no claim behind.
+        // Review D1: an exception after the guard took ownership and before the delete commits rolls back: the row
+        // and its (empty) binding are as inspected, Docker was not touched, and the agent stays deletable.
         await using var harness = await EmptyDockerAgentAsync();
-        harness.Service.BeforeDeprovision = () => throw new InvalidOperationException("synthetic deprovision failure");
+        harness.ExistingContainers.Add("agent1");
+        harness.Service.BeforeDeprovision = () => throw new HttpRequestException("synthetic deprovision failure");
+        var (_, guard) = await harness.Service.PrepareDeleteAsync("agent1");
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Service.DeprovisionForDeleteAsync("agent1"));
+        await Assert.ThrowsAsync<HttpRequestException>(() => DeleteWithGuardAsync(harness, guard!));
 
         Assert.Null(await BindingAsync(harness));
         Assert.True(await RowExistsAsync(harness));
+        Assert.Equal(0, harness.DockerRequestCount);
         harness.Service.BeforeDeprovision = null;
-        var (_, kept, guard) = await harness.Service.DeprovisionForDeleteAsync("agent1"); // and the agent stays deletable
+        var (kept, retry) = await harness.Service.PrepareDeleteAsync("agent1"); // nothing left behind holds it
         Assert.Null(kept);
-        Assert.Null(await DeleteWithGuardAsync(harness, guard!));
+        Assert.Null((await DeleteWithGuardAsync(harness, retry!)).Fault);
+        Assert.False(await RowExistsAsync(harness));
+        Assert.Empty(harness.ExistingContainers);
     }
 
     [Fact]
     public async Task Agent_delete_reports_a_database_outage_as_unavailable_not_a_conflict()
     {
-        // Review D2: an unreachable/broken store is 503, never managed_state_changed_during_delete.
+        // Review D2: an unreachable/broken store is 503, never managed_state_changed_during_delete, and nothing is deprovisioned.
         await using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync(); // an empty database: every statement against agents fails
         await using var db = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>().UseSqlite(connection).Options);
-        var guard = new ManagedDeleteGuard(1, null, "docker");
+        var deprovisions = 0;
+        var guard = new ManagedDeleteGuard(1, null, "docker", _ => { deprovisions++; return Task.FromResult(ProvisionResult.Ok("agent1", "synthetic")); });
 
-        Assert.Equal(ManagedDeleteGuard.Unavailable, await guard.DeleteAsync(db, new Agent { Id = 1, Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic", ContainerName = "agent1" }));
+        var (fault, _) = await guard.DeleteAsync(db, new Agent { Id = 1, Name = "agent1", DisplayName = "Synthetic", Role = "synthetic", Model = "synthetic", ContainerName = "agent1" });
+
+        Assert.Equal(ManagedDeleteGuard.Unavailable, fault);
+        Assert.Equal(0, deprovisions);
     }
 
     private static async Task<Fleet.Orchestrator.Tests.Services.ProvisioningHarness> EmptyDockerAgentAsync()
@@ -1051,4 +1129,3 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         return harness;
     }
 }
-

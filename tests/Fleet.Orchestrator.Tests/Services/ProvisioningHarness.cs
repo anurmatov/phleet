@@ -12,8 +12,8 @@ namespace Fleet.Orchestrator.Tests.Services;
 
 /// <summary>
 /// Runs the real <see cref="ContainerProvisioningService.ProvisionAsync"/> end to end: SQLite for the
-/// DB, a temp directory for <c>Provisioning:BaseDir</c>, and a fake Docker API that reports no
-/// existing container and accepts create/start. What it produces on disk is exactly what a live
+/// DB, a temp directory for <c>Provisioning:BaseDir</c>, and a fake Docker API that reports only
+/// <see cref="ExistingContainers"/> and accepts create/start. What it produces on disk is exactly what a live
 /// provision writes under <c>workspaces/&lt;container&gt;/.generated/</c>.
 /// </summary>
 internal sealed class ProvisioningHarness : IAsyncDisposable
@@ -35,7 +35,10 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     /// <summary>The JSON body of every <c>/containers/create</c> call; its <c>HostConfig.Binds</c> are the binds.</summary>
     public IReadOnlyList<string> CreateBodies => _dockerApi.CreateBodies;
 
-    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig)
+    /// <summary>Containers the fake Docker API reports as existing; stop succeeds and remove deletes them.</summary>
+    public ISet<string> ExistingContainers => _dockerApi.Existing;
+
+    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig, Action<IServiceCollection>? extraServices)
     {
         BaseDir = Path.Combine(Path.GetTempPath(), $"prov-harness-{Guid.NewGuid():N}");
         Directory.CreateDirectory(BaseDir);
@@ -47,6 +50,7 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
 
         var services = new ServiceCollection();
         services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
+        extraServices?.Invoke(services);
         Services = services.BuildServiceProvider();
 
         using (var scope = Services.CreateScope())
@@ -71,7 +75,8 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             new JournalTokenService(config), Logs.For<ContainerProvisioningService>());
     }
 
-    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null) => new(extraConfig);
+    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null,
+        Action<IServiceCollection>? extraServices = null) => new(extraConfig, extraServices);
 
     public async Task SeedAsync(Action<OrchestratorDbContext> seed)
     {
@@ -99,12 +104,13 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
         try { Directory.Delete(BaseDir, recursive: true); } catch { /* best effort */ }
     }
 
-    /// <summary>No container exists; create and start succeed.</summary>
+    /// <summary>Only <see cref="Existing"/> containers exist; create and start succeed.</summary>
     private sealed class FakeDockerApi : HttpMessageHandler
     {
         public int RequestCount { get; private set; }
         public List<string> Requests { get; } = [];
         public List<string> CreateBodies { get; } = [];
+        public HashSet<string> Existing { get; } = new(StringComparer.Ordinal);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -121,6 +127,19 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             }
             if (request.Method == HttpMethod.Post && path.EndsWith("/start", StringComparison.Ordinal))
                 return new HttpResponseMessage(HttpStatusCode.NoContent);
+            foreach (var name in Existing)
+            {
+                var container = $"/containers/{name}";
+                if (request.Method == HttpMethod.Get && path.EndsWith(container + "/json", StringComparison.Ordinal))
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json") };
+                if (request.Method == HttpMethod.Post && path.EndsWith(container + "/stop", StringComparison.Ordinal))
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                if (request.Method == HttpMethod.Delete && path.EndsWith(container, StringComparison.Ordinal))
+                {
+                    Existing.Remove(name);
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                }
+            }
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
     }

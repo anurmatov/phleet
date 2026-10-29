@@ -26,6 +26,7 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     internal const string HeartbeatExchange = "fleet.orchestrator";
     internal const string HeartbeatQueue = "fleet.orchestrator.heartbeats";
     internal const string BridgeReplyQueue = "fleet.agent.bridge";
+    internal const string BridgeReplyRoute = "bridge";
 
     public sealed record Outcome(bool Ok, string? Code, IReadOnlyList<string> OwnedPartials,
         IReadOnlyDictionary<string, string>? Passwords = null);
@@ -90,7 +91,7 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     }
 
     /// <summary>
-    /// PUT the epoch vhost, three non-administrator users with independent random passwords and
+    /// PUT the epoch vhost, its prepared bridge reply queue/binding, three non-administrator users with independent random passwords and
     /// their exact permissions. An existing vhost or user is not ours and refuses; no default-vhost
     /// or global grant is written.
     /// </summary>
@@ -111,6 +112,7 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
 
             await PutAsync(http, $"api/vhosts/{Uri.EscapeDataString(vhost)}", new { description = "fleet managed stock epoch" }, ct);
             owned.Add("vhost:" + vhost);
+            await PrepareBridgeReplyQueueAsync(http, vhost, owned, ct);
             var passwords = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var role in Roles)
             {
@@ -133,8 +135,30 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     }
 
     /// <summary>
+    /// Readies the epoch's existing bridge reply queue before any principal exists, so a workload reply
+    /// published before the Bridge lane opens is retained for that lane rather than dropped unrouted
+    /// (#492 R3/F8). The <c>fleet.group</c> exchange, the durable <c>fleet.agent.bridge</c> queue and its
+    /// <c>bridge</c> binding carry exactly the properties the Bridge lane redeclares (direct/durable, durable,
+    /// non-exclusive, non-auto-delete, no arguments), so that redeclare never fails a precondition. Each is
+    /// an owned partial kept for custody with the vhost on revoke; a failure holds the epoch.
+    /// </summary>
+    private static async Task PrepareBridgeReplyQueueAsync(HttpClient http, string vhost, List<string> owned, CancellationToken ct)
+    {
+        var v = Uri.EscapeDataString(vhost);
+        await PutAsync(http, $"api/exchanges/{v}/{Uri.EscapeDataString(GroupExchange)}",
+            new { type = "direct", durable = true, auto_delete = false, @internal = false, arguments = new { } }, ct);
+        owned.Add("exchange:" + vhost + "/" + GroupExchange);
+        await PutAsync(http, $"api/queues/{v}/{Uri.EscapeDataString(BridgeReplyQueue)}",
+            new { durable = true, auto_delete = false, arguments = new { } }, ct);
+        owned.Add("queue:" + vhost + "/" + BridgeReplyQueue);
+        await PostAsync(http, $"api/bindings/{v}/e/{Uri.EscapeDataString(GroupExchange)}/q/{Uri.EscapeDataString(BridgeReplyQueue)}",
+            new { routing_key = BridgeReplyRoute, arguments = new { } }, ct);
+        owned.Add("binding:" + vhost + "/" + GroupExchange + "/" + BridgeReplyRoute + "/" + BridgeReplyQueue);
+    }
+
+    /// <summary>
     /// Removes the three users' permissions, closes their connections and deletes the users. The
-    /// retired vhost and its queues are kept for custody. Every step runs; failures aggregate.
+    /// retired vhost and its queues (including the prepared bridge reply queue) are kept for custody. Every step runs; failures aggregate.
     /// </summary>
     public async Task<Outcome> RevokeEpochAsync(Guid epoch, CancellationToken ct)
     {
@@ -231,6 +255,13 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     {
         using var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         using var response = await http.PutAsync(path, content, ct);
+        if (!response.IsSuccessStatusCode) throw new BrokerFault(Classify(response.StatusCode));
+    }
+
+    private static async Task PostAsync(HttpClient http, string path, object body, CancellationToken ct)
+    {
+        using var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        using var response = await http.PostAsync(path, content, ct);
         if (!response.IsSuccessStatusCode) throw new BrokerFault(Classify(response.StatusCode));
     }
 

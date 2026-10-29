@@ -74,8 +74,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         var authority = JsonNode.Parse(File.ReadAllText(Path.Combine(_dir, "managed", "authority", "agent1.json")))!;
         Assert.Equal("active", authority["State"]!.GetValue<string>());
         Assert.Equal(record.Applied.SandboxId, authority["SandboxId"]!.GetValue<string>());
-        // Exactly the epoch vhost, three users and three permissions; never the default vhost.
-        Assert.Equal(7, _broker.Puts.Count);
+        // Exactly the epoch vhost, its prepared bridge reply exchange/queue/binding, three users and three
+        // permissions; never the default vhost.
+        Assert.Equal(9, _broker.Puts.Count);
+        Assert.Single(_broker.Posts);
         Assert.DoesNotContain(_broker.Puts, p => p.Contains("/api/vhosts/%2F") || p.Contains("/api/permissions/%2F/"));
     }
 
@@ -314,7 +316,49 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         _broker.FailPutContaining = "/api/permissions/";
         var partial = await Provisioner().CreateEpochAsync(Guid.NewGuid(), "agent1", default);
         Assert.Equal("broker_management_permission_denied", partial.Code);
-        Assert.Equal(2, partial.OwnedPartials.Count); // vhost and the first user, never activated
+        Assert.Equal(5, partial.OwnedPartials.Count); // vhost, reply exchange/queue/binding and the first user, never activated
+    }
+
+    [Fact]
+    public async Task Bridge_reply_queue_and_binding_are_prepared_before_any_principal_with_the_lane_declare_properties()
+    {
+        var epoch = Guid.NewGuid();
+        var created = await Provisioner().CreateEpochAsync(epoch, "agent1", default);
+
+        Assert.True(created.Ok);
+        var vhost = StockBrokerProvisioner.VirtualHost(epoch);
+        var queue = $"/api/queues/{vhost}/fleet.agent.bridge";
+        var binding = $"/api/bindings/{vhost}/e/fleet.group/q/fleet.agent.bridge";
+        var exchange = $"/api/exchanges/{vhost}/fleet.group";
+        var firstUser = _broker.Writes.FindIndex(p => p.Contains("/api/users/"));
+        Assert.True(_broker.Writes.IndexOf(exchange) is var e && e > 0 && e < firstUser);
+        Assert.True(_broker.Writes.IndexOf(queue) is var q && q > e && q < firstUser);
+        Assert.True(_broker.Writes.IndexOf(binding) is var b && b > q && b < firstUser);
+        // Exactly what the Bridge lane redeclares (durable, non-exclusive, non-auto-delete, no arguments).
+        Assert.Equal("{\"durable\":true,\"auto_delete\":false,\"arguments\":{}}", _broker.Bodies[queue]);
+        Assert.Equal("{\"type\":\"direct\",\"durable\":true,\"auto_delete\":false,\"internal\":false,\"arguments\":{}}", _broker.Bodies[exchange]);
+        Assert.Equal("{\"routing_key\":\"bridge\",\"arguments\":{}}", _broker.Bodies[binding]);
+        Assert.Contains("queue:" + vhost + "/fleet.agent.bridge", created.OwnedPartials);
+        Assert.Contains("binding:" + vhost + "/fleet.group/bridge/fleet.agent.bridge", created.OwnedPartials);
+
+        // Revoke keeps the vhost and its prepared queue for custody.
+        await Provisioner().RevokeEpochAsync(epoch, default);
+        Assert.DoesNotContain(_broker.Deletes, p => p.Contains("/api/queues/") || p.Contains("/api/bindings/") || p.Contains("/api/vhosts/"));
+    }
+
+    [Fact]
+    public async Task Failed_bridge_reply_queue_creation_holds_the_epoch_without_principals_or_activation()
+    {
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker"));
+        _broker.FailPutContaining = "/api/queues/";
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.NotEqual("openshell", _store.Get("agent1").AppliedRuntimeKind);
+        Assert.DoesNotContain(_broker.Writes, p => p.Contains("/api/users/") || p.Contains("/api/bindings/"));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "exec"]) && c.Args[^1].Contains(".fleet-activate"));
+        Assert.NotEqual("applied", ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).State);
     }
 
     [Fact]
@@ -1194,6 +1238,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     {
         public readonly List<string> Puts = [];
         public readonly List<string> Deletes = [];
+        public readonly List<string> Posts = [];
+        public readonly List<string> Writes = []; // PUT and POST paths in order
+        public readonly Dictionary<string, string> Bodies = [];
         public readonly HashSet<string> Existing = [];
         public bool FailDeletes;
         public string? FailPutContaining;
@@ -1208,10 +1255,19 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 status = WhoAmI;
             else if (request.Method == HttpMethod.Get)
                 status = Existing.Any(path.StartsWith) ? HttpStatusCode.OK : HttpStatusCode.NotFound;
-            else if (request.Method == HttpMethod.Put)
+            else if (request.Method == HttpMethod.Put || request.Method == HttpMethod.Post)
             {
                 if (FailPutContaining is not null && path.Contains(FailPutContaining)) status = HttpStatusCode.Forbidden;
-                else { lock (Puts) Puts.Add(path); status = HttpStatusCode.Created; }
+                else
+                {
+                    lock (Puts)
+                    {
+                        (request.Method == HttpMethod.Put ? Puts : Posts).Add(path);
+                        Writes.Add(path);
+                        Bodies[path] = request.Content!.ReadAsStringAsync(ct).GetAwaiter().GetResult();
+                    }
+                    status = HttpStatusCode.Created;
+                }
             }
             else { lock (Deletes) Deletes.Add(path); status = FailDeletes ? HttpStatusCode.InternalServerError : HttpStatusCode.NoContent; }
             return Task.FromResult(new HttpResponseMessage(status));

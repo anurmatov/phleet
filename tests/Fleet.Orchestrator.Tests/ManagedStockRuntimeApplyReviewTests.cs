@@ -331,6 +331,9 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "download", old.SandboxName, "/workspace", c.Args[^1]]));
         Assert.Contains("/workspace/marker-back.txt", _t._cli.Uploads.Select(u => u.Remote));
         Assert.Equal("Stopped", _t._cli.Sandboxes[old.SandboxName].Phase);
+        // Ownership tracking survives the replacement: the old sandbox stays recorded with its UUID.
+        var superseded = Assert.Single(record.Superseded);
+        Assert.Equal((old.SandboxName, old.SandboxId), (superseded.SandboxName, superseded.SandboxId));
     }
 
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]

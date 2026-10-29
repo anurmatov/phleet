@@ -228,6 +228,11 @@ public sealed record ManagedRecord
     public string? Operation { get; init; }
     public ManagedBinding? Applied { get; init; }
     public ManagedBinding? Candidate { get; init; }
+    /// <summary>
+    /// Revoked, verified-stopped earlier bindings of this agent replaced by an image-change re-apply (review A7b).
+    /// They stay tracked for custody, with their sandbox UUIDs; nothing deletes their sandboxes.
+    /// </summary>
+    public IReadOnlyList<ManagedBinding> Superseded { get; init; } = [];
     public IReadOnlyList<string> Errors { get; init; } = [];
     public DateTimeOffset UpdatedAt { get; init; }
 
@@ -1053,7 +1058,9 @@ public sealed class StockOpenShellRuntime(
         if (await UploadAsync(candidate, Path.Combine(bundle, "trust", "enrollment.json"), WorkloadEnrollmentFile, ct) is { } enrollment)
             return await HoldStoppedAsync(applying, candidate, enrollment, [], ct);
         if (await ActivateAsync(candidate, ct) is { } activate) return await HoldStoppedAsync(applying, candidate, activate, [], ct);
-        return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [] }, "openshell", policy.Id, Result.Done("applied_openshell"));
+        // An image-change re-apply keeps the replaced, revoked and stopped sandbox tracked instead of dropping it.
+        var superseded = retired is not null && retired.SandboxId != candidate.SandboxId ? [.. record.Superseded, retired] : record.Superseded;
+        return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [], Superseded = superseded }, "openshell", policy.Id, Result.Done("applied_openshell"));
     }
 
     /// <summary>Bare <c>--credential KEY</c> arguments: the CLI reads each value from its own environment.</summary>

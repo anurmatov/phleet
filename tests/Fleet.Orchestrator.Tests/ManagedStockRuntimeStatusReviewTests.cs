@@ -22,7 +22,7 @@ public sealed class ManagedStockRuntimeStatusReviewTests : IDisposable
     }
 
     private static StockSandboxContainer[] Pair(string state) =>
-        [new(SupervisorId, state, "supervisor"), new(WorkloadId, state, "workload")];
+        [new(SupervisorId, state, "supervisor"), new(WorkloadId, state, "sandbox")];
 
     [Fact]
     public async Task Verified_stop_persists_workload_and_supervisor_ids_with_stopped_status()
@@ -66,7 +66,7 @@ public sealed class ManagedStockRuntimeStatusReviewTests : IDisposable
     public void Container_reads_fold_running_stopped_removed_and_unobservable_without_losing_ids()
     {
         var now = DateTimeOffset.UtcNow;
-        var running = ManagedContainers.From([new(WorkloadId, "running", "workload"), new(SupervisorId, "running", "supervisor")], null, now);
+        var running = ManagedContainers.From([new(WorkloadId, "running", "sandbox"), new(SupervisorId, "running", "supervisor")], null, now);
         Assert.Equal((WorkloadId, SupervisorId, "running"), (running.WorkloadId, running.SupervisorId, running.Status));
         Assert.Equal("stopped", ManagedContainers.From(Pair("exited"), null, now).Status);
         var removed = ManagedContainers.From([], running, now);
@@ -121,6 +121,19 @@ public sealed class ManagedStockRuntimeStatusReviewTests : IDisposable
 
         File.WriteAllText(Path.Combine(_backup, "last-failure"), DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") + "\n");
         Assert.Equal("failed", AgentRegistry.ManagedStatus(record, _backup).BackupState);
+    }
+
+    [Fact]
+    public void Container_roles_are_the_pinned_driver_values_and_unknown_roles_are_never_the_workload()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const string StagingId = "cccccccccccc0000000000000000000000000000000000000000000000000003";
+        // Sorted first, but "staging"/"identity"/unlabelled helpers are not the workload.
+        var mixed = ManagedContainers.From([new("0" + StagingId[1..], "exited", "staging"), new("00" + StagingId[2..], "exited", "identity"),
+            new("000" + StagingId[3..], "exited", null), new(SupervisorId, "running", "supervisor"), new(WorkloadId, "running", "sandbox")], null, now);
+        Assert.Equal((WorkloadId, SupervisorId, "running"), (mixed.WorkloadId, mixed.SupervisorId, mixed.Status));
+        var helpersOnly = ManagedContainers.From([new(StagingId, "exited", "staging"), new(SupervisorId, "exited", "native-supervisor")], null, now);
+        Assert.Equal(((string?)null, (string?)null), (helpersOnly.WorkloadId, helpersOnly.SupervisorId));
     }
 
     [Fact]

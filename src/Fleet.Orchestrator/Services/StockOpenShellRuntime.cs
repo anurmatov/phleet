@@ -199,16 +199,21 @@ public sealed record ManagedBinding(string SandboxName, string SandboxId, Guid E
 /// </summary>
 public sealed record ManagedContainers(string? WorkloadId, string? SupervisorId, string Status, DateTimeOffset ObservedAt)
 {
+    /// <summary><c>openshell.ai/isolation-role</c> values at the pinned stock commit (openshell-driver-docker).</summary>
+    public const string WorkloadRole = "sandbox";
+    public const string SupervisorRole = "supervisor";
+
     /// <summary>Folds one label read into the record; a failed or empty read keeps the last known IDs.</summary>
     public static ManagedContainers From(IReadOnlyList<StockSandboxContainer>? containers, ManagedContainers? previous, DateTimeOffset now)
     {
         if (containers is null) return new(previous?.WorkloadId, previous?.SupervisorId, "unobservable", now);
         if (containers.Count == 0) return new(previous?.WorkloadId, previous?.SupervisorId, "removed", now);
-        static bool Supervisor(StockSandboxContainer c) => c.Role?.Contains("supervisor", StringComparison.OrdinalIgnoreCase) == true;
+        // Exact role values of the pinned stock Docker driver: "sandbox" is the workload, "supervisor" the
+        // native supervisor; "staging", "identity" or any other role is neither, never a workload ID.
         var ordered = containers.OrderBy(c => c.Id, StringComparer.Ordinal).ToList();
         var running = containers.Any(c => c.State is "running" or "restarting" or "paused");
-        return new(ordered.FirstOrDefault(c => !Supervisor(c))?.Id ?? previous?.WorkloadId,
-            ordered.FirstOrDefault(Supervisor)?.Id ?? previous?.SupervisorId, running ? "running" : "stopped", now);
+        return new(ordered.FirstOrDefault(c => c.Role == WorkloadRole)?.Id ?? previous?.WorkloadId,
+            ordered.FirstOrDefault(c => c.Role == SupervisorRole)?.Id ?? previous?.SupervisorId, running ? "running" : "stopped", now);
     }
 }
 

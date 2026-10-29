@@ -30,15 +30,24 @@ test('managed card view blocks start on unresolved holds and offers revoke only 
 test('a failed authority retirement after a Docker handoff is surfaced and offers the revoke retry', () => {
   // Handoff path: Docker is applied, the managed record is held with authority_retire_failed.
   assert.deepEqual(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'needs_attention', managedErrors: ['authority_retire_failed'] }),
-    { label: 'openshell · authority retirement failed', title: 'authority_retire_failed', startBlocked: false, canRevoke: true })
+    { label: 'openshell · authority retirement failed', title: 'authority_retire_failed', startBlocked: true, canRevoke: true })
   // A failed revoke retry appends its code; the summary still names the retirement failure.
   assert.deepEqual(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'needs_attention', managedErrors: ['authority_retire_failed', 'docker_handoff_unresolved', 'authority_retire_failed'] }),
-    { label: 'openshell · authority retirement failed', title: 'authority_retire_failed, docker_handoff_unresolved, authority_retire_failed', startBlocked: false, canRevoke: true })
+    { label: 'openshell · authority retirement failed', title: 'authority_retire_failed, docker_handoff_unresolved, authority_retire_failed', startBlocked: true, canRevoke: true })
   // While the retry is in flight the record reads busy: no second revoke.
   assert.deepEqual(managedRuntimeView({ appliedRuntimeKind: 'docker', managedState: 'busy', managedErrors: ['authority_retire_failed'] }),
-    { label: 'openshell · busy', title: 'authority_retire_failed', startBlocked: false, canRevoke: false })
+    { label: 'openshell · busy', title: 'authority_retire_failed', startBlocked: true, canRevoke: false })
   // A resolved retirement clears the errors: an ordinary Docker agent again.
   assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'revoked', managedErrors: [] }).label, null)
+  assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'revoked', managedErrors: [] }).startBlocked, false)
+})
+
+test('an ordinary pending Docker runtime selection stays startable (control for the retirement block)', () => {
+  // Applied OpenShell, desired Docker, no held state: Start still targets the applied binding.
+  assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'openshell', managedState: 'applied', managedErrors: [] }).startBlocked, false)
+  // Applied Docker, desired OpenShell pending apply: Start runs the applied Docker runtime.
+  assert.equal(managedRuntimeView({ runtimeKind: 'openshell', appliedRuntimeKind: 'docker' }).startBlocked, false)
+  assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: null, managedErrors: null }).startBlocked, false)
 })
 
 test('revoke outcome reports success, the named code and every unresolved leg', () => {

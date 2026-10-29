@@ -35,7 +35,9 @@ export function managedRuntimeView(agent: { runtimeKind?: string; appliedRuntime
     label: `openshell · ${retireFailed && state === 'needs_attention' ? 'authority retirement failed' : state.replace(/_/g, ' ')}`,
     title: (agent.managedErrors ?? []).join(', '),
     // Start targets the applied binding; a pending desired change still starts the applied Docker runtime.
-    startBlocked: applied && held,
+    // An unresolved Docker authority retirement keeps the backend's ordinary-admission hold, so Start is
+    // refused there too until revoke resolves it (#492 U1).
+    startBlocked: (applied || retireFailed) && held,
     canRevoke: (applied || retireFailed) && state !== 'busy' && state !== 'revoked',
   }
 }

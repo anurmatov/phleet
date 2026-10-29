@@ -218,8 +218,14 @@ public sealed class DelegateToAgentActivity
             await TryReportTimeoutToActoAsync(agentName, taskId, ex.Message);
             throw;
         }
+        catch (ApplicationFailureException ex) when (managed is not null && IsManagedRefusal(ex))
+        {
+            // A refused resend (epoch changed or revoked) is final: the activity fails non-retryably.
+            ReleaseSession();
+            throw;
+        }
 
-        // Completion, cancellation and timeout end the managed session; compare-and-release leaves a session a
+        // Completion, cancellation, timeout and a refused resend end the managed session; compare-and-release leaves a session a
         // later attempt re-selected for a different epoch alone.
         void ReleaseSession()
         {
@@ -301,6 +307,16 @@ public sealed class DelegateToAgentActivity
     /// <summary>Opens the producer-only epoch control connection; replaceable by tests.</summary>
     internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> ControlConnect { get; set; } =
         (factory, ct) => factory.CreateConnectionAsync(ct);
+
+    /// <summary>Heartbeat cadence while waiting for a reply; replaceable by tests.</summary>
+    internal TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long after the last publish the directive is re-sent; replaceable by tests.</summary>
+    internal TimeSpan ResendInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>True for the named non-retryable refusal of a managed control lane whose epoch changed or was revoked.</summary>
+    private static bool IsManagedRefusal(ApplicationFailureException ex) =>
+        ex.NonRetryable && ex.ErrorType == "ManagedAgentContextDenied";
 
     /// <summary>
     /// Selects the route for a workflow directive (#492). Managed mode is off unless
@@ -454,11 +470,11 @@ public sealed class DelegateToAgentActivity
         try
         {
             var lastPublished = DateTimeOffset.UtcNow;
-            var resendInterval = TimeSpan.FromMinutes(5);
+            var resendInterval = ResendInterval;
 
             while (true)
             {
-                var heartbeatDelay = Task.Delay(TimeSpan.FromSeconds(30), timeoutCts.Token);
+                var heartbeatDelay = Task.Delay(HeartbeatInterval, timeoutCts.Token);
                 var completed = await Task.WhenAny(tcs.Task, heartbeatDelay);
 
                 if (completed == tcs.Task)
@@ -496,6 +512,13 @@ public sealed class DelegateToAgentActivity
                     }
                     catch (OperationCanceledException)
                     {
+                        throw;
+                    }
+                    catch (ApplicationFailureException ex) when (managed is not null && IsManagedRefusal(ex))
+                    {
+                        // The record's epoch changed or was revoked: no reply can arrive on this lane, so the
+                        // named refusal fails the activity now instead of waiting silently for the timeout.
+                        _registry.TryCancel(taskId, tcs);
                         throw;
                     }
                     catch (Exception ex)

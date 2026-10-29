@@ -371,6 +371,44 @@ public class ManagedStockDelegationTests : IDisposable
         Assert.Equal(0, h.Registry.RetainedSessionCount);
     }
 
+    [Theory]
+    [InlineData("revoked")]
+    [InlineData("epoch-changed")]
+    public async Task RefusedResend_AfterTheEpochChangedOrWasRevoked_FailsAtOnce_WithTheNamedNonRetryableRefusal(string change)
+    {
+        SaveRecord();
+        var h = Build(Managed);
+        h.Activity.HeartbeatInterval = TimeSpan.FromMilliseconds(20);
+        h.Activity.ResendInterval = TimeSpan.FromMilliseconds(50);
+        var budget = TimeSpan.FromMinutes(10);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var run = new ActivityEnvironment
+            {
+                Info = ActivityEnvironment.DefaultInfo with { StartToCloseTimeout = TimeSpan.FromHours(1) }
+            }
+            .RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/resend-refused",
+                agentBudgetSeconds: (int)budget.TotalSeconds));
+        await NextDirective(h.Control, 1);
+
+        // The record the resend rechecks no longer names the selected epoch.
+        if (change == "revoked")
+            SaveRecord("revoked");
+        else
+            File.WriteAllText(Path.Combine(_dir, Agent + ".json"), File.ReadAllText(Path.Combine(_dir, Agent + ".json"))
+                .Replace(_epoch.ToString(), Guid.NewGuid().ToString()));
+
+        var failure = await Assert.ThrowsAsync<ApplicationFailureException>(() => run.WaitAsync(TimeSpan.FromSeconds(30)));
+
+        Assert.True(clock.Elapsed < budget, $"refusal surfaced only after {clock.Elapsed}");
+        Assert.True(failure.NonRetryable);
+        Assert.Equal("ManagedAgentContextDenied", failure.ErrorType);
+        Assert.StartsWith(DelegateToAgentActivity.ManagedTargetDenied, failure.Message);
+        Assert.Empty(h.Ordinary);
+        Assert.Equal(0, h.Registry.PendingCount);
+        Assert.Equal(0, h.Registry.RetainedSessionCount);
+    }
+
     [Fact]
     public void RetainedSessions_AreBounded_OldestFirst_AndReusedOnlyOnTheSameEpoch()
     {

@@ -688,6 +688,13 @@ qualified:
 
 #493 owns the exact-build trial, with no installation or activation implied.
 
+**Agent deletion.** `DELETE /api/agents/{name}` keeps the row (409) until the managed record is cleanly
+revoked. The row is then deleted in one database transaction that first compare-and-sets the exact
+binding and runtime kind it inspected, so a concurrent apply, Start or revoke either changed it first
+(`managed_state_changed_during_delete`, 409) or waits on the row lock and then finds no row. Nothing is
+written outside that transaction, so a crash or error mid-delete leaves the binding as it was; a
+database outage returns `managed_delete_unavailable` (503).
+
 **Rollout guard and rollback.** `scripts/check-stock-runtime-rollout.sh` runs in `upgrade.sh`
 before anything is stopped, and it is the operator rollback entrypoint (`--image IMAGE`). A target
 without the label needs the operator-authenticated `GET /api/managed-runtime/rollback-preflight` to

@@ -688,16 +688,6 @@ public sealed class StockOpenShellRuntime(
     /// <summary>True while <paramref name="operation"/> is the claim of a call still running in this process.</summary>
     internal static bool OperationLive(string agentName, string operation) => LiveClaims.ContainsKey(operation);
 
-    /// <summary>A live claim token for an exclusive non-adapter operation (review A2: agent-row deletion).</summary>
-    internal static string RegisterLiveClaim(string kind)
-    {
-        var operation = kind + ":" + Instance + ":" + Guid.NewGuid().ToString("N");
-        LiveClaims[operation] = 0;
-        return operation;
-    }
-
-    internal static void ReleaseLiveClaim(string operation) => LiveClaims.TryRemove(operation, out _);
-
     private async Task RepublishLeftClaimAsync(string name)
     {
         try

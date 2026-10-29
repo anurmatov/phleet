@@ -47,6 +47,22 @@ test('a committed Docker handoff with a pending authority retirement is held and
     { label: 'openshell · authority retirement pending', title: 'authority_retire_pending, handoff_record_unfinalized', startBlocked: true, canRevoke: true })
 })
 
+test('an unresolved Docker→OpenShell candidate blocks Start and offers revoke, whatever the desired selection', () => {
+  // #492 F2: the apply failed and left a held candidate on the applied Docker agent; the backend refuses Start.
+  const failed = { appliedRuntimeKind: 'docker', managedState: 'needs_attention', managedErrors: ['sandbox_create_failed'] }
+  assert.deepEqual(managedRuntimeView({ ...failed, runtimeKind: 'openshell' }),
+    { label: 'openshell · needs attention', title: 'sandbox_create_failed', startBlocked: true, canRevoke: true })
+  // The operator switched the desired selection back to Docker: still held until revoke resolves it.
+  assert.deepEqual(managedRuntimeView({ ...failed, runtimeKind: 'docker' }),
+    { label: 'openshell · needs attention', title: 'sandbox_create_failed', startBlocked: true, canRevoke: true })
+  // An interrupted apply (stale applying) and an unreadable record are held the same way.
+  assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'applying' }).startBlocked, true)
+  assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'docker', managedState: 'unreadable' }).canRevoke, true)
+  // An apply still in flight is held but not revocable twice.
+  assert.deepEqual(managedRuntimeView({ runtimeKind: 'openshell', appliedRuntimeKind: 'docker', managedState: 'busy', managedErrors: [] }),
+    { label: 'openshell · busy', title: '', startBlocked: true, canRevoke: false })
+})
+
 test('an ordinary pending Docker runtime selection stays startable (control for the retirement block)', () => {
   // Applied OpenShell, desired Docker, no held state: Start still targets the applied binding.
   assert.equal(managedRuntimeView({ runtimeKind: 'docker', appliedRuntimeKind: 'openshell', managedState: 'applied', managedErrors: [] }).startBlocked, false)

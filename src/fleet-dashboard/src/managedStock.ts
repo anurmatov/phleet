@@ -30,7 +30,10 @@ export function managedRuntimeView(agent: { runtimeKind?: string; appliedRuntime
   // A committed handoff whose authority is not yet retired carries authority_retire_pending: equally held.
   const retireErrors = agent.managedErrors ?? []
   const retireFailed = retireErrors.includes('authority_retire_failed') || retireErrors.includes('authority_retire_pending')
-  if (!applied && agent.runtimeKind !== 'openshell' && !retireFailed) return { label: null, title: '', startBlocked: false, canRevoke: false }
+  // #492 F2: any unresolved record on an applied Docker agent (e.g. a failed Docker→OpenShell candidate) keeps the
+  // backend's Start hold whatever the desired selection says, so it is held and revocable here too.
+  const dockerHeld = !applied && (retireFailed || ['needs_attention', 'applying', 'busy', 'unreadable'].includes(agent.managedState ?? ''))
+  if (!applied && agent.runtimeKind !== 'openshell' && !dockerHeld) return { label: null, title: '', startBlocked: false, canRevoke: false }
   const state = agent.managedState ?? (applied ? 'unknown' : 'pending apply')
   const held = ['needs_attention', 'revoked', 'busy', 'applying', 'unreadable', 'unknown'].includes(state)
   return {
@@ -39,10 +42,10 @@ export function managedRuntimeView(agent: { runtimeKind?: string; appliedRuntime
       : state.replace(/_/g, ' ')}`,
     title: (agent.managedErrors ?? []).join(', '),
     // Start targets the applied binding; a pending desired change still starts the applied Docker runtime.
-    // An unresolved Docker authority retirement keeps the backend's ordinary-admission hold, so Start is
-    // refused there too until revoke resolves it (#492 U1).
-    startBlocked: (applied || retireFailed) && held,
-    canRevoke: (applied || retireFailed) && state !== 'busy' && state !== 'revoked',
+    // An unresolved Docker record (authority retirement or candidate) keeps the backend's ordinary-admission
+    // hold, so Start is refused there too until revoke resolves it (#492 U1, F2).
+    startBlocked: (applied || dockerHeld) && held,
+    canRevoke: (applied || dockerHeld) && state !== 'busy' && state !== 'revoked',
   }
 }
 

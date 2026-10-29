@@ -428,7 +428,7 @@ arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back t
 - **One writer per agent.** A compare-and-set on `agents.AppliedRuntimeBinding` admits one operation; a concurrent request gets 409.
 - **Interrupted or unknown outcomes.** An operation left by an earlier orchestrator process becomes `needs_attention` and is never replayed. Unknown outcomes, a changed sandbox UUID, an unobservable quiescence check and a changed gateway generation (container ID plus StartedAt) all hold, with no Start or replacement, until an operator reconciles and revokes. A planned gateway restart is the one exception: when every owned managed record is durably stopped (or revoked) with the same sandbox UUID, Stopped and quiescent, Start or re-apply rebinds the recorded generation after the trust preflight; a changed generation under a running binding still holds and runs the revoke/Stop fanout.
 - **Cancel.** The adapter runs `sandbox exec` to POST the workload's loopback `/cancel` or `/cancel/{taskId}`. The agent admits only that route, and only when the actual connection address is loopback and `Agent:NativeAuthMode=api_key`; forwarded headers are ignored.
-- **Broker.** Per epoch: vhost `stock-<epoch>` plus `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost for custody.
+- **Broker.** Per epoch: vhost `stock-<epoch>`, then its existing bridge reply queue `fleet.agent.bridge` bound from `fleet.group` with route `bridge` (declared with exactly the properties the Bridge lane redeclares: durable direct exchange; durable, non-exclusive, non-auto-delete queue; no arguments), then `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. All of this precedes workload activation, and a failure holds the epoch. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost and its queues for custody.
 
 Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
 into the orchestrator at `/var/lib/fleet-openshell-client`:
@@ -484,7 +484,9 @@ one per process:
   and correlation checks. A managed target never falls back to the ordinary connection. These all
   refuse: an inactive, expired, ambiguous or linked record; a record removed after use; an unreadable
   directory. A lane is replaced when the agent's record binding changes, for example a new epoch. A
-  lane that fails to connect stays refused until then, because there is no stock reconnect loop.
+  lane that fails to connect, or whose connection shuts down, is reopened only a bounded number of
+  times (see the workflow reply lanes below) and then stays refused until then; there is no stock
+  reconnect loop.
   `check_acto_status` keeps its stock refusal for a managed target. To return an agent to the ordinary
   connection, apply Docker: the verified OpenShell-to-Docker handoff marks the record `retired`, which
   releases the lane and the ordinary-traffic hold. Never delete or edit authority records by hand; a
@@ -614,8 +616,10 @@ agent, sandbox, epoch, session and TaskId. The Bridge's managed lane is the sole
 `fleet.agent.bridge` in that vhost. It admits the reply only with the workload principal and its own
 agent, sandbox and epoch, then forwards it on the ordinary connection to the existing
 `temporal-bridge` receiver route. The lane acknowledges a reply only after that mandatory forward is
-routed and publisher-confirmed. A failed forward is requeued on the same consumer after a bounded
-backoff (1 s, doubling to 30 s), so the reply is retained and the agent never reruns finished work.
+routed and publisher-confirmed; a forward not confirmed within 10 s fails. A failed forward stays
+unacknowledged and is requeued after a bounded backoff (1 s, doubling to 30 s) that runs off the lane's
+consumer callback, so the lane keeps settling its other deliveries meanwhile, the reply is retained and
+the agent never reruns finished work.
 Anything else is refused with a content-free log and rejected without requeue. The Temporal
 registry completes the TaskId only when agent, sandbox, epoch and session equal the registered
 expectation. An ordinary reply cannot complete a managed TaskId, and a reply claiming a managed
@@ -623,11 +627,17 @@ context cannot complete an ordinary one. The Bridge opens the lanes of all activ
 starts and keeps them reconciled with the trusted authority directory through a local file watcher
 (not a broker poller). Opening a lane declares its epoch `fleet.agent.bridge` queue and attaches the
 sole consumer. Enrollment opens the agent's lane, a new epoch replaces it, and a removed, revoked or
-ambiguous record closes it, all without a bridge ask or a restart. A lane that fails to open is
-retried at most five times with a doubling backoff (5 s first), then stays refused until
-re-enrollment. A workflow reply sent before its lane opens finds no epoch reply queue: it is
-unroutable, not queued, so the delegation stays unconfirmed and resends. No user, permission, queue,
-consumer, poller or broker is added, and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals
+ambiguous record closes it, all without a bridge ask or a restart; a reconcile rereads the directory
+before closing anything, so a stale read never closes a lane just opened for a new enrollment. A record
+binding gets at most five lane opens in all: a lane that fails to open is retried up to four times with
+a doubling backoff (5 s, 10 s, 20 s, 40 s). A lane whose broker connection shuts down (for example a
+broker restart) is held and never used again; the next bridge ask or directory change replaces it, and
+each replacement counts toward the same five opens. Nothing reconnects on its own, and after the fifth
+open the binding stays refused until re-enrollment. The orchestrator creates the epoch's
+`fleet.agent.bridge` queue and its `bridge` binding before activation, so a workflow reply sent before
+its lane opens, or while its lane is closed or held, is queued durably in that queue and consumed once
+the lane opens. No user, permission, consumer, poller or broker is added (the queue is the existing
+reply queue, prepared earlier), and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals
 from a managed agent remain unrouted.
 
 A dedicated Fleet.Temporal receiver

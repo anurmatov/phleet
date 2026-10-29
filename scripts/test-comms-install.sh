@@ -182,6 +182,7 @@ ENV
   echo "FLEET_STOCK_BACKUP_DIR=$BACKUPS" >> "$ENV"
   rm -rf "$BACKUPS"; mkdir -p "$BACKUPS"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$BACKUPS/last-success"
+  mkdir -p "$BACKUPS/gateway-20260101T000000Z"; : > "$BACKUPS/gateway-20260101T000000Z/COMPLETE"; : > "$BACKUPS/gateway-20260101T000000Z/SHA256SUMS"
   rm -rf "$CLIENT"; mkdir -p "$MTLS"
   echo fixture-ca > "$CLIENT/broker-ca.pem"
   echo fixture-cert > "$MTLS/tls.crt"

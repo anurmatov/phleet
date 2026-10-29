@@ -114,6 +114,11 @@ class DefaultOffComposeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+def time_stamp():
+    import time
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n"
+
+
 class GatewayBackupTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -203,7 +208,7 @@ class GatewayBackupTests(unittest.TestCase):
             while not marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertTrue(marker.exists(), "backup never reached the copy step")
-            self.assertEqual(len(list(self.backups.glob("gateway-*"))), 1)
+            self.assertEqual(len(list(self.backups.glob(".partial-gateway-*"))), 1)
             os.killpg(proc.pid, signal.SIGTERM)  # what a job runner or `timeout` sends to the group
             _, stderr = proc.communicate(timeout=10)
         finally:
@@ -213,9 +218,66 @@ class GatewayBackupTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 143, stderr)
         self.assertIn("backup_interrupted", stderr)
         self.assertEqual(list(self.backups.glob("gateway-*")), [])  # the key-bearing partial is gone
+        self.assertEqual(list(self.backups.glob(".partial-gateway-*")), [])
         self.assertFalse((self.backups / "last-success").exists())
         self.assertFalse((self.backups / "last-success.tmp").exists())
         self.assertTrue((self.backups / "last-failure").exists())
+
+    def test_sigkill_mid_run_never_leaves_a_snapshot_that_counts_as_valid(self):
+        """#492 review L4: SIGKILL runs no trap, so the key-bearing partial must never carry the gateway-* name."""
+        import signal
+        import time
+        freshness = ROOT / "scripts" / "check-stock-gateway-backup.sh"
+        stub_bin = Path(self.tmp.name, "slow-bin")
+        stub_bin.mkdir()
+        marker = Path(self.tmp.name, "copying")
+        stub = stub_bin / "python3"
+        stub.write_text("#!/usr/bin/env bash\ncat > /dev/null\n"
+                        f'echo synthetic-key > "$4/gateway-key.pem"\n: > "$4/COMPLETE"\n: > "$4/SHA256SUMS"\n: > "{marker}"\nexec sleep 30\n')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub_bin}:{os.environ['PATH']}"}
+        proc = subprocess.Popen(["bash", str(BACKUP), str(self.backups), str(self.config), str(self.state)],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(marker.exists(), "backup never reached the copy step")
+            os.killpg(proc.pid, signal.SIGKILL)  # no trap runs
+            proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+        self.assertEqual(list(self.backups.glob("gateway-*")), [])
+        (leftover,) = list(self.backups.glob(".partial-gateway-*"))
+        # Even with a fresh success stamp (from an earlier run), the leftover never satisfies the freshness check.
+        (self.backups / "last-success").write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+        check = subprocess.run(["bash", str(freshness), str(self.backups)], capture_output=True, text=True)
+        self.assertEqual(check.returncode, 1, check.stdout)
+        self.assertIn("no complete gateway snapshot", check.stderr)
+        # The next run publishes a complete snapshot and prunes the stale key-bearing leftover.
+        old = time.time() - 2 * 3600
+        os.utime(leftover, (old, old))
+        result = self.run_backup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(leftover.exists())
+        (snapshot,) = list(self.backups.glob("gateway-*"))
+        self.assertTrue((snapshot / "COMPLETE").exists())
+        self.assertEqual(list(self.backups.glob(".partial-*")), [])
+        check = subprocess.run(["bash", str(freshness), str(self.backups)], capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_incomplete_gateway_snapshot_from_an_older_version_is_pruned_and_ignored(self):
+        legacy = self.backups / "gateway-20260101T000000Z"
+        legacy.mkdir(parents=True)
+        (legacy / "gateway-key.pem").write_text("synthetic-key\n")
+        (self.backups / "last-success").write_text(time_stamp())
+        freshness = ROOT / "scripts" / "check-stock-gateway-backup.sh"
+        check = subprocess.run(["bash", str(freshness), str(self.backups)], capture_output=True, text=True)
+        self.assertIn("no complete gateway snapshot", check.stderr)
+        self.assertEqual(self.run_backup().returncode, 0)
+        self.assertFalse(legacy.exists())
 
     def test_missing_database_fails_without_a_success_marker(self):
         result = self.run_backup(Path(self.tmp.name, "absent"))

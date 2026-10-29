@@ -5,7 +5,9 @@
 #   check-stock-gateway-backup.sh BACKUP_DIR [MAX_AGE_HOURS]   # MAX_AGE_HOURS defaults to 26
 #
 # Reads BACKUP_DIR/last-success written by backup-stock-gateway.sh. Exits nonzero when it is missing,
-# malformed, in the future, older than MAX_AGE_HOURS, or not newer than BACKUP_DIR/last-failure.
+# malformed, in the future, older than MAX_AGE_HOURS, or not newer than BACKUP_DIR/last-failure, or when
+# no complete gateway-* snapshot (COMPLETE and SHA256SUMS, not INVALID) exists: .partial-* dirs and
+# incomplete snapshots left by a killed run never count.
 set -euo pipefail
 
 [[ $# -ge 1 && $# -le 2 ]] || { echo "usage: $0 BACKUP_DIR [MAX_AGE_HOURS]" >&2; exit 2; }
@@ -39,5 +41,12 @@ if age > datetime.timedelta(hours=max_hours):
     sys.exit(f"STALE: last gateway backup is {int(age.total_seconds() // 3600)}h old (limit {max_hours}h)")
 if failure is not None and failure >= success:
     sys.exit("STALE: the latest gateway backup run failed (last-failure is not older than last-success)")
+def complete(name):
+    path = os.path.join(backup_dir, name)
+    return (name.startswith("gateway-") and os.path.isdir(path) and not os.path.islink(path)
+            and os.path.isfile(os.path.join(path, "COMPLETE")) and os.path.isfile(os.path.join(path, "SHA256SUMS"))
+            and not os.path.lexists(os.path.join(path, "INVALID")))
+if not any(complete(name) for name in os.listdir(backup_dir)):
+    sys.exit(f"STALE: no complete gateway snapshot in {backup_dir}")
 print(f"OK: last gateway backup {int(age.total_seconds() // 60)}m ago")
 PY

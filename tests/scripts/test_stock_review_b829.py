@@ -23,6 +23,10 @@ class BackupFreshnessTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
+        complete = self.dir / "gateway-20260101T000000Z"  # the check also needs one complete snapshot
+        complete.mkdir()
+        (complete / "COMPLETE").write_text("")
+        (complete / "SHA256SUMS").write_text("")
 
     def tearDown(self):
         self.tmp.cleanup()

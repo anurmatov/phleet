@@ -428,7 +428,7 @@ arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back t
 - **One writer per agent.** A compare-and-set on `agents.AppliedRuntimeBinding` admits one operation; a concurrent request gets 409.
 - **Interrupted or unknown outcomes.** An operation left by an earlier orchestrator process becomes `needs_attention` and is never replayed. Unknown outcomes, a changed sandbox UUID, an unobservable quiescence check and a changed gateway generation (container ID plus StartedAt) all hold, with no Start or replacement, until an operator reconciles and revokes. A planned gateway restart is the one exception: when every owned managed record is durably stopped (or revoked) with the same sandbox UUID, Stopped and quiescent, Start or re-apply rebinds the recorded generation after the trust preflight; a changed generation under a running binding still holds and runs the revoke/Stop fanout.
 - **Cancel.** The adapter runs `sandbox exec` to POST the workload's loopback `/cancel` or `/cancel/{taskId}`. The agent admits only that route, and only when the actual connection address is loopback and `Agent:NativeAuthMode=api_key`; forwarded headers are ignored.
-- **Broker.** Per epoch: vhost `stock-<epoch>`, then its existing bridge reply queue `fleet.agent.bridge` bound from `fleet.group` with route `bridge` (declared with exactly the properties the Bridge lane redeclares: durable direct exchange; durable, non-exclusive, non-auto-delete queue; no arguments), then `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. All of this precedes workload activation, and a failure holds the epoch. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost and its queues for custody.
+- **Broker.** Per epoch: vhost `stock-<epoch>`, then the `fleet.group` exchange (`PUT exchanges/<vhost>/fleet.group`), its existing bridge reply queue `fleet.agent.bridge` (`PUT queues/<vhost>/fleet.agent.bridge`) and the binding from `fleet.group` to it with route `bridge` (`POST bindings/<vhost>/e/fleet.group/q/fleet.agent.bridge`), all declared with exactly the properties the Bridge lane redeclares (durable direct exchange; durable, non-exclusive, non-auto-delete queue; no arguments), then `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. All of this precedes workload activation, and a failure holds the epoch. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost and its queues for custody.
   The orchestrator writes no grant for its management user: the queue/exchange/binding writes inside the new vhost rely on RabbitMQ granting the creating management user `.*` configure/write/read on a vhost it creates (the internal auth backend's implicit creator grant on `PUT /api/vhosts`). Under a backend without that grant, those writes are refused and every apply holds the epoch. Revoke removes that grant last, with one exact DELETE of `permissions/<epoch vhost>/<management user>` (already absent counts as removed; a failure is reported as `permission:management`, never naming the user). The grant is owned because create refuses a pre-existing vhost, and removing it keeps custody: the vhost and its queues stay, and an administrator can re-grant itself to inspect them.
 
 Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
@@ -469,8 +469,11 @@ the authority directory. Outside consumers select records by sandbox: set `Stock
 `managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram, Bridge), keeping
 `AuthorityFile` for gateway trust. Mount only `managed/authority` into those services, read-only (see the
 commented mounts in `docker-compose.example.yml`); never mount `managed/` or `managed/observer`. An enrollment
-written before this split keeps its observer lane closed until its next apply rewrites the credentials; the
-legacy observer copy in the authority directory is then removed. The gateway-verified sandbox claim (hook) or the assertion's
+written before this split has its legacy `<agent>.observer.password` moved once, at orchestrator startup, into
+the private sibling as a 0600 file (links refused and left in place; a stale copy is removed when the sibling already
+holds a newer password); its next apply also rewrites the credentials and removes any legacy copy. Each entry is handled
+on its own and the directory is re-enumerated up to four times, so a concurrent apply, a vanished copy or a file created
+mid-move never skips the remaining entries, and a cross-device temp copy is always removed. The gateway-verified sandbox claim (hook) or the assertion's
 sandbox (receiver, still signature-verified against the selected record) is only an index hint:
 exactly one active, non-symlink record must claim it, else the request refuses.
 
@@ -635,7 +638,7 @@ a doubling backoff (5 s, 10 s, 20 s, 40 s). A lane whose broker connection shuts
 broker restart) is held and never used again; the next bridge ask or directory change replaces it, and
 each replacement counts toward the same five opens. Nothing reconnects on its own, and after the fifth
 open the binding stays refused until re-enrollment. The orchestrator creates the epoch's
-`fleet.agent.bridge` queue and its `bridge` binding before activation, so a workflow reply sent before
+`fleet.group` exchange, its `fleet.agent.bridge` queue and their `bridge` binding before activation, so a workflow reply sent before
 its lane opens, or while its lane is closed or held, is queued durably in that queue and consumed once
 the lane opens. No user, permission, consumer, poller or broker is added (the queue is the existing
 reply queue, prepared earlier), and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals

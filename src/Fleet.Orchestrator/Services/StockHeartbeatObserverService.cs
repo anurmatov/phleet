@@ -99,8 +99,12 @@ public sealed class StockHeartbeatObserverService(
     /// sibling as a 0600 file (atomic rename; copy+fsync+delete across devices). Links are refused and never followed:
     /// a linked authority/observer directory stops the migration, a linked entry is left in place. When the sibling
     /// already holds a newer password the stale shared copy is deleted. Returns how many entries were moved or removed.
+    /// Review X5: each entry is handled on its own, so a race (a concurrent apply writing the sibling, the shared copy
+    /// vanishing) or a failure on one entry never skips the rest; the directory is re-enumerated, up to
+    /// <see cref="LegacyMigrationPasses"/> times, until no unhandled legacy entry remains (catching files created
+    /// mid-move); and a cross-device temp is always removed.
     /// </summary>
-    internal static int MigrateLegacyObserverPasswords(string authorityDirectory, ILogger logger)
+    internal static int MigrateLegacyObserverPasswords(string authorityDirectory, ILogger logger, LegacyMigrationSeams? seams = null)
     {
         var migrated = 0;
         try
@@ -108,61 +112,127 @@ public sealed class StockHeartbeatObserverService(
             var authority = new DirectoryInfo(authorityDirectory);
             if (!authority.Exists) return 0;
             if (authority.LinkTarget is not null) { logger.LogWarning("Legacy observer password migration refused a linked authority directory"); return 0; }
-            var legacy = authority.EnumerateFileSystemInfos("*" + ObserverSuffix).ToList();
-            if (legacy.Count == 0) return 0;
-            var observer = StockAuthoritySource.ObserverDirectory(authorityDirectory);
-            var observerInfo = new DirectoryInfo(observer);
-            if (observerInfo.LinkTarget is not null) { logger.LogWarning("Legacy observer password migration refused a linked observer directory"); return 0; }
-            if (OperatingSystem.IsWindows()) Directory.CreateDirectory(observer);
-            else
+            string? observer = null;
+            // Entries deliberately left in place, or that failed, are not retried within this run.
+            var settled = new HashSet<string>(StringComparer.Ordinal);
+            for (var pass = 0; pass < LegacyMigrationPasses; pass++)
             {
-                Directory.CreateDirectory(observer, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-                File.SetUnixFileMode(observer, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            }
-            foreach (var entry in legacy)
-            {
-                var agent = entry.Name[..^ObserverSuffix.Length];
-                if (!StockAuthoritySource.ValidAgent(agent)) continue;
-                // lstat semantics: only a plain regular file is moved; a link (even dangling) or other entry is refused.
-                if (entry.LinkTarget is not null || entry is not FileInfo
-                    || (entry.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory | FileAttributes.Device)) != 0)
+                var legacy = authority.EnumerateFileSystemInfos("*" + ObserverSuffix).Where(e => !settled.Contains(e.Name)).ToList();
+                if (legacy.Count == 0) return migrated;
+                if (observer is null)
                 {
-                    logger.LogWarning("Legacy observer password for {Agent} is not a regular file; left in place", agent);
-                    continue;
-                }
-                var target = Path.Combine(observer, entry.Name);
-                var targetInfo = new FileInfo(target);
-                if (targetInfo.LinkTarget is not null) { logger.LogWarning("Observer password for {Agent} is a link; legacy copy left in place", agent); continue; }
-                if (targetInfo.Exists)
-                {
-                    // The private sibling already holds the current password (a later apply wrote it): drop the stale copy.
-                    File.Delete(entry.FullName);
-                    migrated++;
-                    continue;
-                }
-                try { File.Move(entry.FullName, target, overwrite: false); }
-                catch (IOException) when (File.Exists(entry.FullName) && !File.Exists(target))
-                {
-                    // Cross-device: copy into a private temp, fsync, publish by rename, then delete the shared copy.
-                    var temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                    var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
-                    if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-                    using (var stream = new FileStream(temp, options))
+                    observer = StockAuthoritySource.ObserverDirectory(authorityDirectory);
+                    if (new DirectoryInfo(observer).LinkTarget is not null) { logger.LogWarning("Legacy observer password migration refused a linked observer directory"); return 0; }
+                    if (OperatingSystem.IsWindows()) Directory.CreateDirectory(observer);
+                    else
                     {
-                        stream.Write(File.ReadAllBytes(entry.FullName));
-                        stream.Flush(flushToDisk: true);
+                        Directory.CreateDirectory(observer, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                        File.SetUnixFileMode(observer, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
                     }
-                    File.Move(temp, target, overwrite: false);
-                    File.Delete(entry.FullName);
                 }
-                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-                migrated++;
-                logger.LogInformation("Moved the legacy observer password for {Agent} into the orchestrator-only directory", agent);
+                foreach (var entry in legacy)
+                {
+                    try
+                    {
+                        switch (MigrateLegacyEntry(entry, observer, logger, seams))
+                        {
+                            case true: migrated++; break;
+                            case false: settled.Add(entry.Name); break;
+                        }
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        settled.Add(entry.Name);
+                        logger.LogWarning("Legacy observer password for {Agent} was not moved ({Type}); manual reconciliation required",
+                            entry.Name[..^ObserverSuffix.Length], ex.GetType().Name);
+                    }
+                }
             }
+            if (authority.EnumerateFileSystemInfos("*" + ObserverSuffix).Any(e => !settled.Contains(e.Name)))
+                logger.LogWarning("Legacy observer passwords kept appearing after {Passes} passes; manual reconciliation required", LegacyMigrationPasses);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or StockIdentityDenied)
         { logger.LogWarning("Legacy observer password migration incomplete ({Type}); manual reconciliation required", ex.GetType().Name); }
         return migrated;
+    }
+
+    /// <summary>Bound on legacy-directory enumerations per migration run (review X5).</summary>
+    internal const int LegacyMigrationPasses = 4;
+
+    /// <summary>Test seams for the legacy migration's race windows; production passes none.</summary>
+    internal sealed class LegacyMigrationSeams
+    {
+        public Action<string>? BeforeMove { get; init; }
+        public Action<string>? BeforePublish { get; init; }
+        public bool ForceCrossDevice { get; init; }
+    }
+
+    /// <summary>True: moved or stale copy removed; false: left in place; null: already gone (handled elsewhere).</summary>
+    private static bool? MigrateLegacyEntry(FileSystemInfo entry, string observer, ILogger logger, LegacyMigrationSeams? seams)
+    {
+        var agent = entry.Name[..^ObserverSuffix.Length];
+        if (!StockAuthoritySource.ValidAgent(agent)) return false;
+        entry.Refresh();
+        if (!entry.Exists && entry.LinkTarget is null) return null;
+        // lstat semantics: only a plain regular file is moved; a link (even dangling) or other entry is refused.
+        if (entry.LinkTarget is not null || entry is not FileInfo
+            || (entry.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory | FileAttributes.Device)) != 0)
+        {
+            logger.LogWarning("Legacy observer password for {Agent} is not a regular file; left in place", agent);
+            return false;
+        }
+        var target = Path.Combine(observer, entry.Name);
+        if (new FileInfo(target).LinkTarget is not null) { logger.LogWarning("Observer password for {Agent} is a link; legacy copy left in place", agent); return false; }
+        if (File.Exists(target))
+        {
+            // The private sibling already holds the current password (a later apply wrote it): drop the stale copy.
+            File.Delete(entry.FullName);
+            return true;
+        }
+        seams?.BeforeMove?.Invoke(agent);
+        try
+        {
+            if (seams?.ForceCrossDevice == true) throw new IOException("synthetic_cross_device");
+            File.Move(entry.FullName, target, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(entry.FullName) && !File.Exists(target))
+        {
+            // Cross-device: copy into a private temp, fsync, publish by rename, then delete the shared copy.
+            var temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+                if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                using (var stream = new FileStream(temp, options))
+                {
+                    stream.Write(File.ReadAllBytes(entry.FullName));
+                    stream.Flush(flushToDisk: true);
+                }
+                seams?.BeforePublish?.Invoke(agent);
+                // Raced by a concurrent apply that wrote the sibling: that one is current, so only the stale copy goes.
+                try { File.Move(temp, target, overwrite: false); }
+                catch (IOException) when (File.Exists(target) && new FileInfo(target).LinkTarget is null) { }
+                File.Delete(entry.FullName);
+            }
+            finally
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                { logger.LogWarning("Observer password temp for {Agent} was not removed; manual reconciliation required", agent); }
+            }
+        }
+        catch (IOException)
+        {
+            // Raced: the shared copy vanished (handled elsewhere), or a concurrent apply wrote the sibling first.
+            if (!File.Exists(entry.FullName)) return null;
+            if (new FileInfo(target).LinkTarget is not null) { logger.LogWarning("Observer password for {Agent} is a link; legacy copy left in place", agent); return false; }
+            if (!File.Exists(target)) throw;
+            File.Delete(entry.FullName);
+            return true;
+        }
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        logger.LogInformation("Moved the legacy observer password for {Agent} into the orchestrator-only directory", agent);
+        return true;
     }
 
     /// <summary>

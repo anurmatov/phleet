@@ -122,6 +122,69 @@ public sealed class ManagedStockRuntimeObserverLaneTests : IDisposable
     }
 
     [Fact]
+    public void StockObserver_LegacyPasswordMigration_RacesNeverSkipEntries_AndFilesCreatedMidMoveAreMoved()
+    {
+        // Review X5: a concurrent apply writes one agent's private sibling, another shared copy vanishes and a new legacy
+        // file appears, all while the first move is in flight. None of that may skip the remaining entries.
+        foreach (var a in new[] { "agent1", "agent2", "agent3" }) File.WriteAllText(Path.Combine(_dir, a + ".observer.password"), "legacy-" + a);
+        var order = new List<string>();
+        var seams = new StockHeartbeatObserverService.LegacyMigrationSeams
+        {
+            BeforeMove = agent =>
+            {
+                order.Add(agent);
+                if (order.Count != 1) return;
+                File.WriteAllText(Path.Combine(_observerDir, agent + ".observer.password"), "current-" + agent);
+                var other = new[] { "agent1", "agent2", "agent3" }.First(a => a != agent && File.Exists(Path.Combine(_dir, a + ".observer.password")));
+                File.Delete(Path.Combine(_dir, other + ".observer.password"));
+                order.Add("vanished:" + other);
+                File.WriteAllText(Path.Combine(_dir, "agent4.observer.password"), "legacy-agent4");
+            },
+        };
+
+        var migrated = StockHeartbeatObserverService.MigrateLegacyObserverPasswords(_dir, NullLogger.Instance, seams);
+
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_dir, "*.observer.password"));
+        var raced = order[0];
+        var vanished = order[1]["vanished:".Length..];
+        var plain = new[] { "agent1", "agent2", "agent3" }.Single(a => a != raced && a != vanished);
+        // The concurrent apply's current password is never overwritten by the stale shared copy.
+        Assert.Equal("current-" + raced, File.ReadAllText(Path.Combine(_observerDir, raced + ".observer.password")));
+        Assert.False(File.Exists(Path.Combine(_observerDir, vanished + ".observer.password")));
+        Assert.Equal("legacy-" + plain, File.ReadAllText(Path.Combine(_observerDir, plain + ".observer.password")));
+        Assert.Equal("legacy-agent4", File.ReadAllText(Path.Combine(_observerDir, "agent4.observer.password")));
+        Assert.Equal(3, migrated);
+    }
+
+    [Fact]
+    public void StockObserver_LegacyPasswordMigration_CrossDeviceRaceLeavesNoTempAndKeepsTheCurrentPassword()
+    {
+        foreach (var a in new[] { "agent1", "agent2" }) File.WriteAllText(Path.Combine(_dir, a + ".observer.password"), "legacy-" + a);
+        string? raced = null;
+        var seams = new StockHeartbeatObserverService.LegacyMigrationSeams
+        {
+            ForceCrossDevice = true,
+            // Review X5: a concurrent apply publishes the sibling between the temp copy and its rename.
+            BeforePublish = agent =>
+            {
+                if (raced is not null) return;
+                raced = agent;
+                File.WriteAllText(Path.Combine(_observerDir, agent + ".observer.password"), "current-" + agent);
+            },
+        };
+
+        Assert.Equal(2, StockHeartbeatObserverService.MigrateLegacyObserverPasswords(_dir, NullLogger.Instance, seams));
+
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_dir, "*.observer.password"));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_observerDir, "*.tmp"));
+        var other = raced == "agent1" ? "agent2" : "agent1";
+        Assert.Equal("current-" + raced, File.ReadAllText(Path.Combine(_observerDir, raced + ".observer.password")));
+        var copied = Path.Combine(_observerDir, other + ".observer.password");
+        Assert.Equal("legacy-" + other, File.ReadAllText(copied));
+        if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(copied));
+    }
+
+    [Fact]
     public void StockObserver_LegacyPasswordMigration_RefusesLinks()
     {
         if (OperatingSystem.IsWindows()) return;

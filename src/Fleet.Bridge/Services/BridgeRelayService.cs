@@ -110,6 +110,24 @@ public sealed class BridgeRelayService : IAsyncDisposable
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
 
+    /// <summary>
+    /// Body of the existing <c>/health</c> endpoint. With managed lanes it lists, content-free, every lane that
+    /// is lost, held or refused (#492 X2) and reports <c>degraded</c> while any is, still with HTTP 200 so no
+    /// probe restarts the Bridge on its own: recovery stays the manual step in docs/openshell-stock.md.
+    /// </summary>
+    internal async Task<object> HealthAsync(CancellationToken ct)
+    {
+        if (Lanes is null) return new { status = "healthy", service = "fleet-bridge" };
+        var lanes = await Lanes.StatusAsync(ct);
+        return new
+        {
+            status = lanes is { Count: 0 } ? "healthy" : "degraded",
+            service = "fleet-bridge",
+            stockLanes = lanes?.Select(l => new { agent = l.Agent, epoch = l.Epoch, state = l.State, attempts = l.Attempts })
+                .ToArray<object>() ?? (object)"unknown"
+        };
+    }
+
     public async Task InitializeAsync(CancellationToken ct)
     {
         if (_stockBroker is not null && !IsEnabled) throw new StockIdentityDenied("broker_target");

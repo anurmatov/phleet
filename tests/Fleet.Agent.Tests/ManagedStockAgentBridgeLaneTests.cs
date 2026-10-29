@@ -390,6 +390,69 @@ public sealed class ManagedStockAgentBridgeLaneTests : IDisposable
         Assert.Equal(0, Publishes(_ordinary));
     }
 
+    [Fact]
+    public async Task Health_ListsLostHeldAndRefusedLanes_ContentFree_UntilTheyAreReplaced()
+    {
+        Save("agent1", "sandbox-1");
+        Save("agent2", "sandbox-2");
+        var failAgent2 = true;
+        BridgeRelayService Start(TimeSpan retry)
+        {
+            var started = Bridge(factory => failAgent2 && factory.VirtualHost == Vhost("agent2")
+                ? throw new IOException("synthetic connect failure") : Substitute.For<IConnection>());
+            started.Lanes!.LaneRetryDelay = retry;
+            started.Lanes.ReconcileDelay = TimeSpan.FromHours(1);
+            return started;
+        }
+        string Short(string agent) => _epochs[agent].ToString("N")[..8];
+        string Lanes(params string[] lanes) =>
+            $$"""{"status":"{{(lanes.Length == 0 ? "healthy" : "degraded")}}","service":"fleet-bridge","stockLanes":[{{string.Join(",", lanes)}}]}""";
+        string Item(string agent, string state, int attempts) =>
+            $$"""{"agent":"{{agent}}","epoch":"{{Short(agent)}}","state":"{{state}}","attempts":{{attempts}}}""";
+
+        // A failed open is held while its bounded retry is pending.
+        await using (var pending = Start(TimeSpan.FromHours(1)))
+        {
+            await pending.InitializeAsync(default);
+            Assert.Equal(Lanes(Item("agent2", "held", 1)), await Health(pending));
+        }
+
+        // After MaxLaneAttempts consecutive failed opens it is refused.
+        await using var bridge = Start(TimeSpan.FromMilliseconds(20));
+        await bridge.InitializeAsync(default);
+        var refused = Lanes(Item("agent2", "refused", BridgeControlLanes.MaxLaneAttempts));
+        for (var i = 0; i < 100 && await Health(bridge) != refused; i++) await Task.Delay(50);
+        Assert.Equal(refused, await Health(bridge));
+
+        // Broker restart: agent1's lane is lost and listed until the next ask replaces it (#492 X2).
+        Lose(Lane("agent1").Connection);
+        Assert.Equal(Lanes(Item("agent1", "lost", 0), Item("agent2", "refused", BridgeControlLanes.MaxLaneAttempts)),
+            await Health(bridge));
+        bridge.TargetAgent = "agent1";
+        var ask = bridge.AskAsync("after restart", "operator", null, 5, default);
+        await Complete(Lane("agent1").Channel, "agent1", Vhost("agent1") + "-workload");
+        Assert.Equal("synthetic completion", await ask.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(refused, await Health(bridge));
+
+        // Re-enrollment changes the binding and clears the refused lane.
+        failAgent2 = false;
+        Save("agent2", "sandbox-2");
+        await bridge.Lanes.ReconcileAsync(default);
+        var healthy = await Health(bridge);
+        Assert.Equal(Lanes(), healthy);
+        Assert.DoesNotContain("sandbox", healthy);
+        Assert.DoesNotContain("password", healthy);
+        Assert.DoesNotContain("example.test", healthy);
+
+        // Without managed lanes the body is the ordinary one, unchanged.
+        var ordinary = new BridgeRelayService(Options.Create(new BridgeOptions()), Options.Create(new RabbitMqOptions()),
+            NullLogger<BridgeRelayService>.Instance);
+        Assert.Equal("""{"status":"healthy","service":"fleet-bridge"}""", await Health(ordinary));
+    }
+
+    private static async Task<string> Health(BridgeRelayService bridge) =>
+        JsonSerializer.Serialize(await bridge.HealthAsync(default));
+
     private static void Lose(IConnection connection) =>
         connection.ConnectionShutdownAsync += Raise.Event<AsyncEventHandler<ShutdownEventArgs>>(connection,
             new ShutdownEventArgs(ShutdownInitiator.Peer, 320, "synthetic broker restart"));

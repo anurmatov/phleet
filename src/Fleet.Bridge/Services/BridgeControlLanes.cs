@@ -202,6 +202,39 @@ internal sealed class BridgeControlLanes(string directory, int timeoutSeconds, s
         finally { _gate.Release(); }
     }
 
+    /// <summary>Content-free state of a managed lane that is not serving: agent name, short epoch id, state, failed opens.</summary>
+    internal readonly record struct LaneStatus(string Agent, string Epoch, string State, int Attempts);
+
+    /// <summary>Bound on waiting for the gate when reporting lane state, so a slow open never blocks health.</summary>
+    internal TimeSpan StatusGateTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The lanes that are not serving (#492 X2), for the Bridge's existing <c>/health</c> endpoint: <c>lost</c>
+    /// (connection shut down, e.g. a broker restart, not yet replaced), <c>held</c> (a failed open awaiting its
+    /// bounded retry) or <c>refused</c> (MaxLaneAttempts consecutive failed opens; held until the binding
+    /// changes). Nothing reconnects on its own and Temporal resends never replace a lane, so this is where an
+    /// operator sees a lane that needs the manual recovery in docs/openshell-stock.md. Null when the gate is
+    /// busy past <see cref="StatusGateTimeout"/> (state unknown, never reported as clean).
+    /// </summary>
+    internal async Task<IReadOnlyList<LaneStatus>?> StatusAsync(CancellationToken ct)
+    {
+        if (!await _gate.WaitAsync(StatusGateTimeout, ct)) return null;
+        try
+        {
+            var result = new List<LaneStatus>();
+            foreach (var (agent, entry) in _lanes.OrderBy(p => p.Key, StringComparer.Ordinal))
+            {
+                var state = entry.Relay is { Lost: false } ? null
+                    : entry.Relay is not null ? "lost"
+                    : entry.Attempts < MaxLaneAttempts ? "held" : "refused";
+                if (state is not null)
+                    result.Add(new(agent, entry.Source.Record.Epoch.ToString("N")[..8], state, entry.Attempts));
+            }
+            return result;
+        }
+        finally { _gate.Release(); }
+    }
+
     private async Task<BridgeRelayService?> OpenAsync(string agent, StockActiveRecord record, CancellationToken ct)
     {
         BridgeRelayService? relay = null;

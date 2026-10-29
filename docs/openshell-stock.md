@@ -633,11 +633,33 @@ starts and keeps them reconciled with the trusted authority directory through a 
 sole consumer. Enrollment opens the agent's lane, a new epoch replaces it, and a removed, revoked or
 ambiguous record closes it, all without a bridge ask or a restart; a reconcile rereads the directory
 before closing anything, so a stale read never closes a lane just opened for a new enrollment. A record
-binding gets at most five lane opens in all: a lane that fails to open is retried up to four times with
-a doubling backoff (5 s, 10 s, 20 s, 40 s). A lane whose broker connection shuts down (for example a
-broker restart) is held and never used again; the next bridge ask or directory change replaces it, and
-each replacement counts toward the same five opens. Nothing reconnects on its own, and after the fifth
-open the binding stays refused until re-enrollment. The orchestrator creates the epoch's
+binding gets at most five consecutive failed lane opens: a lane that fails to open is retried up to four
+times with a doubling backoff (5 s, 10 s, 20 s, 40 s), and a successful open resets the count. A lane
+whose broker connection shuts down (for example a broker restart) is held and never used again; the next
+bridge ask or directory change replaces it, and that replacement counts as one open toward the same
+bound, so recovered restarts never use it up. Nothing reconnects on its own, and after the fifth
+consecutive failed open the binding stays refused until re-enrollment.
+
+**Lost lanes after a broker restart.** Temporal resends use their own connection and never replace a
+lane. If no bridge ask or directory change arrives after a broker restart, the agent's workflow replies
+stay queued and unconsumed in its epoch `fleet.agent.bridge` queue. The waiting activity can then time
+out, and a reply forwarded after that is dropped as "No pending task". The Bridge's existing `GET /health`
+reports this without content: with managed lanes it returns `status: degraded` (still HTTP 200, so no
+probe restarts the Bridge) and lists each lane that is not serving under `stockLanes`, with its agent
+name, the first 8 hex digits of its epoch, its `state` and its consecutive failed `attempts`. The states
+are `lost` (connection shut down, not yet replaced), `held` (a failed open waiting for its bounded retry)
+and `refused` (five consecutive failed opens; held until the binding changes). `stockLanes: "unknown"`
+means a lane open was still in progress, so check again. Manual recovery after a broker restart, once
+the broker is back:
+1. For a `lost` lane, send any bridge ask to that agent. This replaces the lane inside the bound, and
+   the queued replies are consumed when the lane opens. A `held` lane is retried by its bounded backoff.
+   Alternatively, restart the Bridge, which reopens the lanes of all active records at startup.
+2. For a `refused` lane, fix the broker or credential cause first. Then re-apply or re-enroll the agent
+   so that its record binding changes, or restart the Bridge, which starts a fresh bound.
+3. Confirm that `GET /health` is back to `status: healthy` with an empty `stockLanes`.
+A reply that is forwarded after its activity timed out is still dropped as described above.
+
+The orchestrator creates the epoch's
 `fleet.group` exchange, its `fleet.agent.bridge` queue and their `bridge` binding before activation, so a workflow reply sent before
 its lane opens, or while its lane is closed or held, is queued durably in that queue and consumed once
 the lane opens. No user, permission, consumer, poller or broker is added (the queue is the existing

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Fleet.Shared.Journal;
 using Fleet.Shared.Security;
 using Microsoft.AspNetCore.Http;
@@ -53,27 +54,56 @@ public interface IManagedReceiptLane : IAsyncDisposable
 /// re-epoched, rebound — is closed. Only the selected epoch's <c>control</c> credential is read;
 /// nothing is declared, bound or consumed. Called from the publisher's one loop only.
 /// </summary>
+/// <remarks>
+/// A receiver that cannot resolve the authority directory, the control credential or the broker
+/// identity never drops a receipt silently (#492 W6): each refusal is counted per fixed reason in
+/// <see cref="Misconfigured"/> and warned about — content-free, the reason code and its count only —
+/// on the first occurrence of each reason and then at most once per
+/// <see cref="ToolSendReceiptPublisher.WarningInterval"/>. The receipt is still not sent.
+/// </remarks>
 public sealed class StockControlReceiptTransport(
     string authorityDirectory,
     ILogger<StockControlReceiptTransport> logger,
-    Func<ConnectionFactory, CancellationToken, Task<IManagedReceiptLane>>? openLane = null)
+    Func<ConnectionFactory, CancellationToken, Task<IManagedReceiptLane>>? openLane = null,
+    TimeProvider? time = null)
     : IManagedToolSendReceiptTransport
 {
+    /// <summary>No usable (set, fully qualified) <c>StockOpenShell:AuthorityDirectory</c>.</summary>
+    public const string AuthorityDirectoryUnset = "authority_directory_unset";
+
+    /// <summary>The epoch's <c>&lt;agent&gt;.control.password</c> is missing, unreadable or a link.</summary>
+    public const string ControlCredentialUnavailable = "control_credential_unavailable";
+
+    /// <summary>The epoch's control credential was read but is not a usable password.</summary>
+    public const string ControlCredentialInvalid = "control_credential_invalid";
+
     private readonly Func<ConnectionFactory, CancellationToken, Task<IManagedReceiptLane>> _openLane
         = openLane ?? RabbitMqManagedReceiptLane.OpenAsync;
+
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
 
     private readonly Dictionary<string, (StockActiveRecord Record, StockBrokerIdentity Identity, IManagedReceiptLane Lane)> _lanes
         = new(StringComparer.Ordinal);
 
+    private readonly Dictionary<string, long> _lastWarningTicks = new(StringComparer.Ordinal);
+
+    /// <summary>Managed receipts refused because this receiver is misconfigured, per fixed reason.</summary>
+    public ManagedReceiptDropCounters Misconfigured { get; } = new();
+
     public async Task PublishAsync(ToolSendReceipt receipt, CancellationToken ct)
     {
+        if (string.IsNullOrEmpty(authorityDirectory) || !Path.IsPathFullyQualified(authorityDirectory))
+            throw Misconfiguration(AuthorityDirectoryUnset);
+
         var context = receipt.Managed ?? throw new StockIdentityDenied("receipt_context_missing");
         var agent = ToolSendReceipts.RoutingKey(receipt.Agent);
         if (!StockAuthoritySource.ValidAgent(agent) || context.Destination != receipt.Chat.Id
             || context.Session is not { Length: > 0 and <= 256 })
             throw new StockIdentityDenied("receipt_context_invalid");
 
-        var active = StockAuthoritySource.Active(authorityDirectory);
+        IReadOnlyDictionary<string, StockActiveRecord?> active;
+        try { active = StockAuthoritySource.Active(authorityDirectory); }
+        catch (StockIdentityDenied e) { throw Misconfiguration(e.Message); } // unreadable or oversized directory
         if (!active.TryGetValue(agent, out var current) || current is null
             || current.Record.Agent != agent || current.Record.Epoch != context.Epoch || current.Record.SandboxId != context.Sandbox)
         {
@@ -81,7 +111,18 @@ public sealed class StockControlReceiptTransport(
             throw new StockIdentityDenied("receipt_context_stale");
         }
 
-        var lane = await LaneAsync(agent, current, ct);
+        (StockActiveRecord Record, StockBrokerIdentity Identity, IManagedReceiptLane Lane) lane;
+        try { lane = await LaneAsync(agent, current, ct); }
+        catch (StockIdentityDenied e)
+        {
+            // Credential or broker identity resolution failed: the lane can never open as configured.
+            throw Misconfiguration(e.Message switch
+            {
+                "broker_credential_unavailable" => ControlCredentialUnavailable,
+                "broker_credential_invalid" => ControlCredentialInvalid,
+                var code => code,
+            });
+        }
         var properties = lane.Identity.Properties(); // re-checks the binding; UserId = the epoch's control principal
         properties.ContentType = "application/json";
         properties.Type = ToolSendReceipts.ManagedMessageType;
@@ -119,6 +160,33 @@ public sealed class StockControlReceiptTransport(
         return _lanes[agent] = (current, identity, lane);
     }
 
+    /// <summary>
+    /// Counts one refusal under its fixed reason and warns (first time per reason, then at most once per
+    /// interval). Never logs the receipt, its chat, session, agent or any credential: the reason is a
+    /// fixed code, and anything else is reduced to <c>identity_denied</c>. Returns the refusal to throw.
+    /// </summary>
+    private StockIdentityDenied Misconfiguration(string? code)
+    {
+        var reason = FixedReason(code);
+        var count = Misconfigured.Count(reason);
+
+        var now = _time.GetUtcNow().UtcTicks;
+        if (!_lastWarningTicks.TryGetValue(reason, out var last) || now - last >= ToolSendReceiptPublisher.WarningInterval.Ticks)
+        {
+            _lastWarningTicks[reason] = now;
+            logger.LogWarning(
+                "journal: managed tool-send receipt dropped, receiver misconfigured (reason={Reason}); "
+                + "managed_receipts_misconfigured={Count} for this reason since start. "
+                + "Repeats at most once a minute per reason",
+                reason, count);
+        }
+        return new StockIdentityDenied(reason);
+    }
+
+    private static string FixedReason(string? code) =>
+        code is { Length: > 0 and <= 64 } && code.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
+            ? code : "identity_denied";
+
     private async Task CloseAsync(string agent)
     {
         if (!_lanes.Remove(agent, out var lane)) return;
@@ -129,6 +197,31 @@ public sealed class StockControlReceiptTransport(
     public async ValueTask DisposeAsync()
     {
         foreach (var agent in _lanes.Keys.ToArray()) await CloseAsync(agent);
+    }
+}
+
+/// <summary>
+/// Per-reason drop counters for managed receipts, in-process like <see cref="ToolSendReceiptCounters"/>.
+/// Keys are fixed reason codes only.
+/// </summary>
+public sealed class ManagedReceiptDropCounters
+{
+    private readonly ConcurrentDictionary<string, long> _byReason = new(StringComparer.Ordinal);
+    private long _total;
+
+    /// <summary>Every counted refusal, all reasons together.</summary>
+    public long Total => Interlocked.Read(ref _total);
+
+    /// <summary>Refusals counted under <paramref name="reason"/>; 0 when never seen.</summary>
+    public long this[string reason] => _byReason.TryGetValue(reason, out var count) ? count : 0;
+
+    /// <summary>A snapshot of every reason seen so far and its count.</summary>
+    public IReadOnlyDictionary<string, long> ByReason => new Dictionary<string, long>(_byReason, StringComparer.Ordinal);
+
+    internal long Count(string reason)
+    {
+        Interlocked.Increment(ref _total);
+        return _byReason.AddOrUpdate(reason, 1, (_, count) => count + 1);
     }
 }
 

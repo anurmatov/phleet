@@ -6,6 +6,7 @@ using Fleet.Telegram.Services;
 using Fleet.Telegram.Tests.Tools;
 using Fleet.Telegram.Tools;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using RabbitMQ.Client;
@@ -132,6 +133,85 @@ public sealed class ManagedToolSendReceiptTests : IDisposable
         Assert.False(rig.Ordinary.HasMore);
     }
 
+    [Fact]
+    public async Task Receiver_without_an_authority_directory_logs_and_counts_a_named_drop()
+    {
+        var logger = new CapturingLogger<StockControlReceiptTransport>();
+        await using var rig = new Rig("", logger);
+
+        Assert.Contains("\"ok\":true", await rig.Send(pin: new ManagedToolSendPin(Agent, "sandbox-a", _epoch, Session)));
+
+        await Eventually(() => rig.Publisher.Counters.Dropped == 1);
+        Assert.Equal(1, rig.Transport.Misconfigured[StockControlReceiptTransport.AuthorityDirectoryUnset]);
+        Assert.Equal(1, rig.Transport.Misconfigured.Total);
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("reason=authority_directory_unset", warning);
+        AssertContentFree(warning);
+        Assert.Equal(0, rig.Publisher.Counters.Published);
+        Assert.Equal(0, rig.Lanes.Opened);
+        Assert.False(rig.Ordinary.HasMore);
+    }
+
+    [Fact]
+    public async Task Missing_control_credential_logs_and_counts_a_named_drop_without_opening_a_lane()
+    {
+        File.Delete(Path.Combine(_dir, Agent + ".control.password"));
+        var logger = new CapturingLogger<StockControlReceiptTransport>();
+        await using var rig = new Rig(_dir, logger);
+        var pin = new ManagedToolSendPin(Agent, "sandbox-a", _epoch, Session);
+
+        await rig.Send(pin);
+        await rig.Send(pin);
+
+        await Eventually(() => rig.Publisher.Counters.Dropped == 2);
+        Assert.Equal(2, rig.Transport.Misconfigured[StockControlReceiptTransport.ControlCredentialUnavailable]);
+        // Warned once per reason per interval, but every drop is counted.
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("reason=control_credential_unavailable", warning);
+        AssertContentFree(warning);
+        Assert.Equal(0, rig.Publisher.Counters.Published);
+        Assert.Equal(0, rig.Lanes.Opened);
+        Assert.False(rig.Ordinary.HasMore);
+    }
+
+    [Fact]
+    public async Task Unreadable_authority_directory_logs_the_identity_reason_code()
+    {
+        var logger = new CapturingLogger<StockControlReceiptTransport>();
+        await using var rig = new Rig(Path.Combine(_dir, "missing"), logger);
+
+        await rig.Send(pin: new ManagedToolSendPin(Agent, "sandbox-a", _epoch, Session));
+
+        await Eventually(() => rig.Publisher.Counters.Dropped == 1);
+        Assert.Equal(1, rig.Transport.Misconfigured["authority_unavailable"]);
+        AssertContentFree(Assert.Single(logger.Warnings));
+        Assert.Contains("reason=authority_unavailable", logger.Warnings[0]);
+    }
+
+    [Fact]
+    public async Task Stale_context_is_not_counted_as_a_misconfiguration()
+    {
+        var logger = new CapturingLogger<StockControlReceiptTransport>();
+        await using var rig = new Rig(_dir, logger);
+        SaveRecord("active", Guid.NewGuid());
+
+        await rig.Send(pin: new ManagedToolSendPin(Agent, "sandbox-a", _epoch, Session));
+
+        await Eventually(() => rig.Publisher.Counters.Dropped == 1);
+        Assert.Equal(0, rig.Transport.Misconfigured.Total);
+        Assert.Empty(logger.Warnings);
+    }
+
+    private void AssertContentFree(string warning)
+    {
+        foreach (var secret in new[]
+                 {
+                     "synthetic text", ChatId.ToString(), Session, Agent, "sandbox-a", _epoch.ToString(), _epoch.ToString("N"),
+                     "synthetic-control", "tok:agent", _dir,
+                 })
+            Assert.DoesNotContain(secret, warning, StringComparison.OrdinalIgnoreCase);
+    }
+
     private void SaveRecord(string state, Guid epoch) => File.WriteAllText(Path.Combine(_dir, Agent + ".json"),
         JsonSerializer.Serialize(new StockEnrollmentAuthority
         {
@@ -155,12 +235,14 @@ public sealed class ManagedToolSendReceiptTests : IDisposable
     {
         private readonly BotClientFactory _factory;
 
-        public Rig(string dir)
+        public Rig(string dir, ILogger<StockControlReceiptTransport>? logger = null)
         {
             Ordinary = new OrdinaryTransport();
             Lanes = new LaneRecorder();
+            Transport = new StockControlReceiptTransport(dir, logger ?? NullLogger<StockControlReceiptTransport>.Instance,
+                Lanes.OpenAsync);
             Publisher = new ToolSendReceiptPublisher(Ordinary, NullLogger<ToolSendReceiptPublisher>.Instance,
-                managed: new StockControlReceiptTransport(dir, NullLogger<StockControlReceiptTransport>.Instance, Lanes.OpenAsync));
+                managed: Transport);
             _factory = new BotClientFactory(NullLogger<BotClientFactory>.Instance, _ => new FakeBotClient(req => new Message
             {
                 Id = 41,
@@ -173,6 +255,7 @@ public sealed class ManagedToolSendReceiptTests : IDisposable
 
         public OrdinaryTransport Ordinary { get; }
         public LaneRecorder Lanes { get; }
+        public StockControlReceiptTransport Transport { get; }
         public ToolSendReceiptPublisher Publisher { get; }
 
         public Task<string> Send(ManagedToolSendPin? pin)
@@ -212,6 +295,23 @@ public sealed class ManagedToolSendReceiptTests : IDisposable
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly List<string> _warnings = [];
+
+        public List<string> Warnings { get { lock (_warnings) return [.. _warnings]; } }
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning) lock (_warnings) _warnings.Add(formatter(state, exception));
+        }
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
     }
 
     internal sealed record Published(string Exchange, string RoutingKey, BasicProperties Properties, byte[] Body);

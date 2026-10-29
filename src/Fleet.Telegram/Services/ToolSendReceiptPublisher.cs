@@ -46,7 +46,7 @@ public sealed class ToolSendReceiptPublisher : BackgroundService
 
     /// <param name="transport">Null when receipts are off.</param>
     /// <param name="managed">
-    /// The managed stock control lane (#492), only with receipts on and an authority directory. A
+    /// The managed stock control lane (#492), only with receipts on and a managed receiver. A
     /// managed receipt goes there or nowhere: never to the ordinary <paramref name="transport"/>.
     /// </param>
     public ToolSendReceiptPublisher(
@@ -175,14 +175,15 @@ public static class ToolSendReceiptRegistration
 
         services.AddSingleton<IToolSendReceiptTransport>(sp => new RabbitMqToolSendReceiptTransport(
             brokerUrl, sp.GetRequiredService<ILogger<RabbitMqToolSendReceiptTransport>>()));
-        // #492: managed mode (stock identity with an authority directory) adds the control-lane producer.
+        // #492: a managed receiver (stock identity, AuthorityFile set) adds the control-lane producer. One
+        // without a usable authority directory still gets it, so each managed receipt it cannot send is
+        // refused with a named, counted reason (authority_directory_unset) instead of an anonymous drop.
         var directory = configuration[Fleet.Shared.Security.StockServiceIdentityMiddleware.AuthorityDirectoryKey];
-        var managed = !string.IsNullOrEmpty(configuration[Fleet.Shared.Security.StockServiceIdentityMiddleware.AuthorityFileKey])
-            && !string.IsNullOrEmpty(directory) && Path.IsPathFullyQualified(directory);
+        var managed = !string.IsNullOrEmpty(configuration[Fleet.Shared.Security.StockServiceIdentityMiddleware.AuthorityFileKey]);
         services.AddSingleton(sp => new ToolSendReceiptPublisher(
             sp.GetRequiredService<IToolSendReceiptTransport>(),
             sp.GetRequiredService<ILogger<ToolSendReceiptPublisher>>(),
-            managed: managed ? new StockControlReceiptTransport(directory!,
+            managed: managed ? new StockControlReceiptTransport(directory ?? "",
                 sp.GetRequiredService<ILogger<StockControlReceiptTransport>>()) : null));
         services.AddHostedService(sp => sp.GetRequiredService<ToolSendReceiptPublisher>());
 

@@ -18,6 +18,7 @@ namespace Fleet.Agent.Services;
 public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 {
     private readonly StockBrokerIdentity? _stockBroker;
+    private readonly IServiceProvider? _services;
     private readonly AgentOptions _agentConfig;
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly ILogger<GroupRelayService> _logger;
@@ -46,9 +47,10 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     public GroupRelayService(
         IOptions<AgentOptions> agentConfig,
         IOptions<RabbitMqOptions> rabbitConfig,
-        ILogger<GroupRelayService> logger, StockBrokerIdentity? stockBroker = null)
+        ILogger<GroupRelayService> logger, StockBrokerIdentity? stockBroker = null, IServiceProvider? services = null)
     {
         _stockBroker = stockBroker;
+        _services = services;
         _agentConfig = agentConfig.Value;
         _rabbitConfig = rabbitConfig.Value;
         _logger = logger;
@@ -169,8 +171,10 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
             // Start consuming
             var consumer = new AsyncEventingBasicConsumer(_consumeChannel);
-            consumer.ReceivedAsync += OnRelayMessageReceived;
-            await _consumeChannel.BasicConsumeAsync(queueName, autoAck: true, consumer: consumer,
+            // Stock (#492): manual ack, so an admitted receipt is acked only after its spool write.
+            if (_stockBroker is null) consumer.ReceivedAsync += OnRelayMessageReceived;
+            else consumer.ReceivedAsync += OnStockDeliveryAsync;
+            await _consumeChannel.BasicConsumeAsync(queueName, autoAck: _stockBroker is null, consumer: consumer,
                 cancellationToken: ct);
 
             _initialized = true;
@@ -257,6 +261,65 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         {
             _logger.LogError(ex, "Failed to publish relay message to {Target}", targetAgent);
         }
+    }
+
+    /// <summary>
+    /// Managed receipt capture (#492): set by <see cref="ToolSendReceiptConsumer"/> when the journal is
+    /// on. Takes the body, the pin check and the ack to run after the spool write.
+    /// </summary>
+    internal Func<ReadOnlyMemory<byte>, Func<Fleet.Shared.Journal.ToolSendReceipt, bool>, Func<Task>, Task>? ManagedReceiptSink { get; set; }
+
+    /// <summary>Stands in for the broker ack in tests.</summary>
+    internal Func<ulong, Task>? StockAckHook { get; set; }
+
+    private async Task OnStockDeliveryAsync(object sender, BasicDeliverEventArgs ea)
+    {
+        if (ea.BasicProperties.Type == Fleet.Shared.Journal.ToolSendReceipts.ManagedMessageType)
+        {
+            await AdmitManagedReceiptAsync(ea);
+            return;
+        }
+        await OnRelayMessageReceived(sender, ea);
+        await StockAckAsync(ea.DeliveryTag); // handled or refused; a refused delivery is never requeued
+    }
+
+    /// <summary>
+    /// A typed tool-send receipt on this workload's own queue: admitted only from the epoch control
+    /// principal on <c>fleet.group</c> routed to this agent, with a pinned agent/sandbox/epoch that is
+    /// this still-current enrollment. Anything else is refused (acked, not requeued, never retargeted).
+    /// </summary>
+    private async Task AdmitManagedReceiptAsync(BasicDeliverEventArgs ea)
+    {
+        var acked = false;
+        Task Ack() { acked = true; return StockAckAsync(ea.DeliveryTag); }
+        try
+        {
+            if (ea.Body.Length > Fleet.Shared.Journal.ToolSendReceipts.MaxBytes) throw new StockIdentityDenied("broker_size");
+            if (ea.Exchange != "fleet.group") throw new StockIdentityDenied("broker_identity_denied");
+            _stockBroker!.RequireDelivery(ea.BasicProperties.UserId, "control", ea.Exchange, _rabbitConfig.Exchange,
+                ea.RoutingKey, _agentConfig.ShortName);
+            // Resolved at first delivery, so a receipt arriving before hosted services finish starting is
+            // still captured; with the journal off there is no consumer and the receipt is refused.
+            if (ManagedReceiptSink is null && _services?.GetService(typeof(ToolSendReceiptConsumer)) is ToolSendReceiptConsumer receipts)
+                ManagedReceiptSink = receipts.HandleManagedAsync;
+            if (ManagedReceiptSink is not { } sink) throw new StockIdentityDenied("receipt_capture_off");
+            var stock = _stockBroker;
+            await sink(ea.Body, r => r.Managed is { } c && stock.Pins(r.Agent, c.Sandbox, c.Epoch), Ack);
+            _logger.LogInformation("Verified stock control receipt handled");
+        }
+        catch (Exception)
+        {
+            _logger.LogWarning("Stock broker receipt denied");
+        }
+        if (!acked) await StockAckAsync(ea.DeliveryTag);
+    }
+
+    private async Task StockAckAsync(ulong deliveryTag)
+    {
+        if (StockAckHook is { } hook) { await hook(deliveryTag); return; }
+        if (_consumeChannel is not { IsOpen: true } channel) return;
+        try { await channel.BasicAckAsync(deliveryTag, multiple: false); }
+        catch (Exception) { _logger.LogWarning("Stock broker ack failed"); }
     }
 
     private Task OnRelayMessageReceived(object sender, BasicDeliverEventArgs ea)

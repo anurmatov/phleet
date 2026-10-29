@@ -462,9 +462,26 @@ public static class AgentHostRegistration
         // the drainer. The bot id is read from the transport lazily; the transport derives it from
         // Telegram:BotToken when it is constructed, before any hosted service starts, so receipts
         // queued across a restart never meet an unknown own bot.
-        // Stock profiles hold only an epoch-scoped broker identity without the receipt exchange/queue,
-        // so no consumer is started there (#492); the gap is documented, not retried forever.
-        if (!configuration.GetValue<bool>("StockOpenShell:Enabled"))
+        // Stock profiles hold only an epoch-scoped broker identity without the receipt exchange/queue
+        // (#492): there the consumer attaches no queue of its own; managed receipts arrive typed on the
+        // existing control lane into the agent's own queue and the stock relay hands them over.
+        if (configuration.GetValue<bool>("StockOpenShell:Enabled"))
+        {
+            services.AddSingleton(sp =>
+            {
+                long? botId = null;
+                var consumer = new ToolSendReceiptConsumer(
+                    sp.GetRequiredService<IOptions<AgentOptions>>(),
+                    sp.GetRequiredService<GroupRelayService>(),
+                    sp.GetRequiredService<JournalCapture>(),
+                    sp.GetRequiredService<JournalCounters>(),
+                    () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,
+                    sp.GetRequiredService<ILogger<ToolSendReceiptConsumer>>());
+                consumer.AttachManaged(sp.GetRequiredService<GroupRelayService>());
+                return consumer;
+            });
+        }
+        else
         {
             services.AddSingleton(sp =>
             {

@@ -184,15 +184,60 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
         return AckAsync(channel, deliveryTag);
     }
 
-    private Outcome Decide(ReadOnlySpan<byte> body)
+    /// <summary>
+    /// A managed receipt (#492) the agent's stock relay admitted from the epoch control principal.
+    /// <paramref name="pins"/> must accept its pinned agent/sandbox/epoch, its session must be present
+    /// and its destination must be the chat it reports; then the same rules and capture apply. The
+    /// ack never precedes the spool write; a receipt already captured in this life is not captured again.
+    /// </summary>
+    internal Task HandleManagedAsync(ReadOnlyMemory<byte> body, Func<ToolSendReceipt, bool> pins, Func<Task> ack)
+    {
+        var outcome = Decide(body.Span, pins);
+        _logger.LogInformation(
+            "managed tool-send receipt handled (result={Result}, reason={Reason}, parts={Parts}, kept={Kept}, spooled={Spooled})",
+            outcome.Result, outcome.Reason, outcome.Parts, outcome.Kept, outcome.Spooled);
+        return ack();
+    }
+
+    /// <summary>Attaches managed capture to the stock relay instead of the receipt exchange it cannot use.</summary>
+    internal void AttachManaged(GroupRelayService relay) => relay.ManagedReceiptSink = HandleManagedAsync;
+
+    private const int RecentCapacity = 1024;
+    private readonly HashSet<string> _recent = new(StringComparer.Ordinal);
+    private readonly Queue<string> _recentOrder = new();
+
+    private bool FirstSeen(ToolSendReceipt receipt)
+    {
+        var key = string.Join('/', receipt.Managed!.Epoch.ToString("N"), receipt.Managed.Session, receipt.Chat.Id,
+            string.Join(',', receipt.Messages.Select(m => m.MessageId)));
+        lock (_recent)
+        {
+            if (!_recent.Add(key)) return false;
+            _recentOrder.Enqueue(key);
+            if (_recentOrder.Count > RecentCapacity) _recent.Remove(_recentOrder.Dequeue());
+            return true;
+        }
+    }
+
+    private Outcome Decide(ReadOnlySpan<byte> body, Func<ToolSendReceipt, bool>? pins = null)
     {
         if (!ToolSendReceipts.TryParse(body, out var receipt, out var reason))
             return Invalid(reason ?? "malformed", parts: 0);
 
         var parts = receipt!.Messages.Count;
 
+        if (pins is not null)
+        {
+            // Managed: the pinned context decides attribution; stale, foreign or retargeted is refused.
+            if (receipt.Managed is not { } context || context.Session is not { Length: > 0 and <= 256 }
+                || context.Destination != receipt.Chat.Id || receipt.Agent != ToolSendReceipts.RoutingKey(receipt.Agent)
+                || !Pins(pins, receipt))
+                return Invalid("context", parts);
+        }
+        else if (receipt.Managed is not null)
+            return Invalid("context", parts); // a managed receipt never arrives on the ordinary exchange
         // fleet-telegram stamps the trusted endpoint attribution, lower-cased.
-        if (!string.Equals(receipt.Agent, ToolSendReceipts.RoutingKey(_agentName), StringComparison.Ordinal))
+        else if (!string.Equals(receipt.Agent, ToolSendReceipts.RoutingKey(_agentName), StringComparison.Ordinal))
             return Invalid("agent", parts);
 
         if (receipt.Messages.Any(m => m.MessageId <= 0))
@@ -206,9 +251,18 @@ public sealed class ToolSendReceiptConsumer : BackgroundService
             return new Outcome("foreign_bot", "-", parts, 0, 0);
         }
 
+        if (pins is not null && !FirstSeen(receipt))
+            return new Outcome("duplicate", "-", parts, 0, 0);
+
         var (kept, spooled) = Capture(receipt);
         _counters.ToolSendCaptured();
         return new Outcome("captured", "-", parts, kept, spooled);
+    }
+
+    private static bool Pins(Func<ToolSendReceipt, bool> pins, ToolSendReceipt receipt)
+    {
+        try { return pins(receipt); }
+        catch (Exception) { return false; } // a changed or unreadable enrollment is not this one
     }
 
     private Outcome Invalid(string reason, int parts)
@@ -356,3 +410,4 @@ internal sealed class ToolSendReceiptQueueCleanup(
         }
     }
 }
+

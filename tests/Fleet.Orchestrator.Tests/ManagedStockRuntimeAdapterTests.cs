@@ -110,7 +110,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal(Fleet.Shared.Security.StockAuthoritySource.RetiredState, JsonNode.Parse(File.ReadAllText(AuthorityPath()))!["State"]!.GetValue<string>());
         Assert.Contains(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"]));
         Assert.Contains(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
-        Assert.Equal(6, _broker.Deletes.Count); // permission and user for each principal; no live connections
+        // Permission and user for each principal, then the management user's own vhost grant; no live connections.
+        Assert.Equal(7, _broker.Deletes.Count);
     }
 
     [Fact]
@@ -344,6 +345,37 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         // Revoke keeps the vhost and its prepared queue for custody.
         await Provisioner().RevokeEpochAsync(epoch, default);
         Assert.DoesNotContain(_broker.Deletes, p => p.Contains("/api/queues/") || p.Contains("/api/bindings/") || p.Contains("/api/vhosts/"));
+    }
+
+    [Fact]
+    public async Task Revoke_removes_only_the_management_users_own_grant_on_the_epoch_vhost_and_keeps_the_vhost()
+    {
+        var epoch = Guid.NewGuid();
+        var vhost = StockBrokerProvisioner.VirtualHost(epoch);
+        Assert.True((await Provisioner().CreateEpochAsync(epoch, "agent1", default)).Ok);
+        // Review X3: create writes no grant for the management user (its PUTs rely on the creator's implicit grant).
+        Assert.DoesNotContain(_broker.Writes, p => p.EndsWith("/synthetic-admin", StringComparison.Ordinal));
+
+        var revoked = await Provisioner().RevokeEpochAsync(epoch, default);
+
+        Assert.True(revoked.Ok, revoked.Code);
+        var admin = $"/api/permissions/{vhost}/synthetic-admin";
+        // Exactly one bounded DELETE of that grant, after every principal is gone; nothing else of the admin's is touched.
+        Assert.Single(_broker.Deletes, p => p.Contains("synthetic-admin"));
+        Assert.Equal(admin, _broker.Deletes[^1]);
+        Assert.DoesNotContain(_broker.Deletes, p => p.Contains("/api/vhosts/") || p.Contains("/api/users/synthetic-admin"));
+    }
+
+    [Fact]
+    public async Task Failed_management_grant_removal_is_reported_without_naming_the_management_user()
+    {
+        _broker.FailDeletes = true;
+
+        var revoked = await Provisioner().RevokeEpochAsync(Guid.NewGuid(), default);
+
+        Assert.False(revoked.Ok);
+        Assert.Contains("permission:management", revoked.OwnedPartials);
+        Assert.DoesNotContain(revoked.OwnedPartials, l => l.Contains("synthetic-admin"));
     }
 
     [Fact]

@@ -429,6 +429,7 @@ arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back t
 - **Interrupted or unknown outcomes.** An operation left by an earlier orchestrator process becomes `needs_attention` and is never replayed. Unknown outcomes, a changed sandbox UUID, an unobservable quiescence check and a changed gateway generation (container ID plus StartedAt) all hold, with no Start or replacement, until an operator reconciles and revokes. A planned gateway restart is the one exception: when every owned managed record is durably stopped (or revoked) with the same sandbox UUID, Stopped and quiescent, Start or re-apply rebinds the recorded generation after the trust preflight; a changed generation under a running binding still holds and runs the revoke/Stop fanout.
 - **Cancel.** The adapter runs `sandbox exec` to POST the workload's loopback `/cancel` or `/cancel/{taskId}`. The agent admits only that route, and only when the actual connection address is loopback and `Agent:NativeAuthMode=api_key`; forwarded headers are ignored.
 - **Broker.** Per epoch: vhost `stock-<epoch>`, then its existing bridge reply queue `fleet.agent.bridge` bound from `fleet.group` with route `bridge` (declared with exactly the properties the Bridge lane redeclares: durable direct exchange; durable, non-exclusive, non-auto-delete queue; no arguments), then `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. All of this precedes workload activation, and a failure holds the epoch. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost and its queues for custody.
+  The orchestrator writes no grant for its management user: the queue/exchange/binding writes inside the new vhost rely on RabbitMQ granting the creating management user `.*` configure/write/read on a vhost it creates (the internal auth backend's implicit creator grant on `PUT /api/vhosts`). Under a backend without that grant, those writes are refused and every apply holds the epoch. Revoke removes that grant last, with one exact DELETE of `permissions/<epoch vhost>/<management user>` (already absent counts as removed; a failure is reported as `permission:management`, never naming the user). The grant is owned because create refuses a pre-existing vhost, and removing it keeps custody: the vhost and its queues stay, and an administrator can re-grant itself to inspect them.
 
 Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
 into the orchestrator at `/var/lib/fleet-openshell-client`:
@@ -649,7 +650,10 @@ qualified:
 - the stock gateway Compose unit;
 - the gateway's real bot/journal substitution and TLS path;
 - dashboard revoke/state controls;
-- the upload-into-stopped-sandbox step.
+- the upload-into-stopped-sandbox step;
+- the real broker's implicit creator grant for the management user on a vhost it creates (which the
+  epoch's exchange, queue and binding writes rely on), and revoke's exact removal of that grant while the
+  vhost and its queues are kept.
 
 #493 owns the exact-build trial, with no installation or activation implied.
 

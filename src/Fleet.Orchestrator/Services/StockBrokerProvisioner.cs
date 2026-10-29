@@ -157,8 +157,12 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
     }
 
     /// <summary>
-    /// Removes the three users' permissions, closes their connections and deletes the users. The
-    /// retired vhost and its queues (including the prepared bridge reply queue) are kept for custody. Every step runs; failures aggregate.
+    /// Removes the three users' permissions, closes their connections and deletes the users, then removes the
+    /// management user's own grant on the epoch vhost (review X3): RabbitMQ's internal backend grants the creator
+    /// <c>.*</c> on a vhost it creates, which the queue/exchange/binding PUTs rely on. That grant is owned (create
+    /// refuses a pre-existing vhost) and its removal is one exact DELETE of <c>permissions/&lt;vhost&gt;/&lt;management
+    /// user&gt;</c>; already absent (no implicit grant) is success. The retired vhost and its queues (including the
+    /// prepared bridge reply queue) are kept for custody. Every step runs; failures aggregate.
     /// </summary>
     public async Task<Outcome> RevokeEpochAsync(Guid epoch, CancellationToken ct)
     {
@@ -175,6 +179,10 @@ public sealed class StockBrokerProvisioner(IConfiguration config, ICredentialsRe
                 await Step(() => CloseConnectionsAsync(http, user, ct), "connections:" + user);
                 await Step(() => DeleteAsync(http, $"api/users/{Uri.EscapeDataString(user)}", ct), "user:" + user);
             }
+            // The management user's name never enters a label (labels reach records and logs).
+            if (AdminCredential() is { } admin && !Roles.Any(r => string.Equals(Principal(epoch, r), admin.User, StringComparison.Ordinal)))
+                await Step(() => DeleteAsync(http, $"api/permissions/{Uri.EscapeDataString(vhost)}/{Uri.EscapeDataString(admin.User)}", ct),
+                    "permission:management");
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
         { unresolved.Add("broker_management_unavailable"); }

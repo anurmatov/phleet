@@ -682,9 +682,17 @@ public sealed class StockOpenShellRuntime(
         try { committed = await store.SwapAsync(agent.Id, saved, finalJson, outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None); }
         catch (Exception ex) when (ex is DbException or InvalidOperationException)
         {
-            // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
-            // The authority was never retired, so ordinary traffic stays held.
-            return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
+            // Review V4: the write may have committed before it threw. Resolve by re-reading; never assume either way.
+            switch (await ResolveCommitAsync(name, finalJson, saved))
+            {
+                case true: committed = true; break;
+                case false:
+                    // Post-action DB failure: the claimed operation stays recorded and is reported as interrupted next time.
+                    return Result.Refused(503, kind + "_state_unknown", outcome.Result.Errors);
+                default:
+                    logger.LogError("Managed {Kind} for {Agent}: final commit is ambiguous; the hold is kept", kind, name);
+                    return Result.Refused(503, "needs_attention", [.. outcome.Result.Errors, kind + "_state_unknown", "commit_ambiguous"]);
+            }
         }
         if (!committed) return Result.Refused(409, "managed_state_changed_during_" + kind, outcome.Result.Errors);
         if (handoff)
@@ -695,7 +703,7 @@ public sealed class StockOpenShellRuntime(
             bool finalized;
             try { finalized = await store.SwapAsync(agent.Id, finalJson, nextJson, null, null, CancellationToken.None); }
             catch (Exception ex) when (ex is DbException or InvalidOperationException)
-            { finalized = false; }
+            { finalized = await ResolveCommitAsync(name, nextJson, finalJson) == true; }
             if (!retiredOk)
             {
                 await PublishAsync(name);
@@ -720,6 +728,22 @@ public sealed class StockOpenShellRuntime(
 
     /// <summary>Error marker on a committed Docker handoff whose authority is not yet retired (still held).</summary>
     internal const string RetirePending = "authority_retire_pending";
+
+    /// <summary>
+    /// Review V4: after a swap threw, re-read the stored binding. True: <paramref name="written"/> is stored (the write
+    /// committed); false: <paramref name="previous"/> is still stored (it did not); null: unreadable or another value.
+    /// </summary>
+    private async Task<bool?> ResolveCommitAsync(string name, string written, string? previous)
+    {
+        try
+        {
+            var stored = (await store.LoadAsync(name, CancellationToken.None))?.AppliedRuntimeBinding;
+            if (stored == written) return true;
+            if (stored == previous) return false;
+        }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { }
+        return null;
+    }
 
     private async Task<(Agent? Agent, ManagedRecord? Record, Result? Fault)> ReadAsync(string name, CancellationToken ct)
     {

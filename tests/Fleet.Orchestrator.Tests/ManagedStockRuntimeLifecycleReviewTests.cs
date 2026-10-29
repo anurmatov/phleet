@@ -515,6 +515,42 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.NotEqual("needs_attention", record.State);
     }
 
+    [Fact]
+    public async Task Post_commit_swap_exception_is_resolved_by_rereading_and_completes_the_handoff()
+    {
+        DockerHandoff("v4c0c0c0");
+        _t._store.ThrowAfterCommitKind = "docker";
+        var hold = Hold();
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        // Review V4: the re-read shows the Docker binding committed, so retirement proceeds; no hold on Docker.
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
+        Assert.Equal("retired", AuthorityState());
+        Assert.False(hold.HoldsOrdinaryTraffic("agent1"));
+        Assert.DoesNotContain(StockOpenShellRuntime.RetirePending, ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Errors);
+    }
+
+    [Fact]
+    public async Task Ambiguous_post_commit_swap_exception_keeps_the_hold_and_reports_needs_attention()
+    {
+        DockerHandoff("v4a0a0a0");
+        _t._store.ThrowAfterCommitKind = "docker";
+        _t._store.ThrowOnLoadAfterCommit = true;
+        var hold = Hold();
+
+        var result = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal("needs_attention", result.Code);
+        Assert.Contains("commit_ambiguous", result.Errors);
+        // Never assumed either way: the authority is not retired and the stored record carries the pending hold.
+        Assert.Equal("revoked", AuthorityState());
+        Assert.True(hold.HoldsOrdinaryTraffic("agent1"));
+        Assert.Contains(StockOpenShellRuntime.RetirePending, ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Errors);
+    }
+
     [Theory]
     [InlineData("reject")]
     [InlineData("throw")]

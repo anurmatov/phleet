@@ -274,4 +274,107 @@ public class ManagedStockDelegationTests : IDisposable
         Assert.Empty(h.Control);
         await h.Factory.DidNotReceive().CreateConnectionAsync(Arg.Any<CancellationToken>());
     }
+
+    // ---- #492 R5: the workflow session survives a failed publication so the retry reuses it ----
+
+    private static async Task<RelayMessage> NextDirective(List<Published> control, int count)
+    {
+        var deadline = Environment.TickCount64 + 5000;
+        while (Environment.TickCount64 < deadline)
+        {
+            lock (control) if (control.Count >= count) return JsonSerializer.Deserialize<RelayMessage>(control[count - 1].Body)!;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException("no directive published");
+    }
+
+    [Fact]
+    public async Task FailedFirstSend_RetainsTheSession_AndTheRetryReusesIt_SoTheFirstSendsReplyCompletesTheRetry()
+    {
+        SaveRecord();
+        var h = Build(Managed);
+        var attempt = 0;
+        h.Activity.ControlConnect = (_, _) =>
+        {
+            // The first send reaches the broker, then the publication reports failure.
+            var connection = Recording(h.Control);
+            if (Interlocked.Increment(ref attempt) == 1)
+                connection.When(c => c.DisposeAsync()).Do(_ => throw new IOException("connection reset after publish"));
+            return Task.FromResult(connection);
+        };
+
+        await Assert.ThrowsAnyAsync<Exception>(() => new ActivityEnvironment()
+            .RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/retry")));
+        var first = await NextDirective(h.Control, 1);
+        Assert.Equal(0, h.Registry.PendingCount);
+        Assert.Equal(1, h.Registry.RetainedSessionCount);
+
+        var retry = new ActivityEnvironment().RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/retry"));
+        var second = await NextDirective(h.Control, 2);
+        Assert.Equal(first.CorrelationId, second.CorrelationId);
+
+        // The agent answers the directive it already received, with the first send's session.
+        Assert.True(await CompleteWhenRegistered(h.Registry, "wf/retry",
+            new ManagedCorrelation(Agent, "sandbox-1", _epoch, first.CorrelationId!)));
+        Assert.Equal("done", (await retry).Text);
+        Assert.Equal(0, h.Registry.RetainedSessionCount);
+    }
+
+    [Fact]
+    public async Task HealthyOneShot_ReleasesItsSession_AndANewDelegationGetsAFreshOne()
+    {
+        SaveRecord();
+        var h = Build(Managed);
+
+        var run = new ActivityEnvironment().RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/once"));
+        var first = await NextDirective(h.Control, 1);
+        Assert.True(await CompleteWhenRegistered(h.Registry, "wf/once",
+            new ManagedCorrelation(Agent, "sandbox-1", _epoch, first.CorrelationId!)));
+        Assert.Equal("done", (await run).Text);
+        Assert.Single(h.Control);
+        Assert.Equal(0, h.Registry.PendingCount);
+        Assert.Equal(0, h.Registry.RetainedSessionCount);
+
+        var again = new ActivityEnvironment().RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/once"));
+        var second = await NextDirective(h.Control, 2);
+        Assert.NotEqual(first.CorrelationId, second.CorrelationId);
+        Assert.True(await CompleteWhenRegistered(h.Registry, "wf/once",
+            new ManagedCorrelation(Agent, "sandbox-1", _epoch, second.CorrelationId!)));
+        await again;
+    }
+
+    // ---- #492 W6: the per-task session map is bounded and released on timeout ----
+
+    [Fact]
+    public async Task Timeout_ReleasesTheManagedSession()
+    {
+        SaveRecord();
+        var h = Build(Managed);
+
+        await Assert.ThrowsAsync<TimeoutException>(() => new ActivityEnvironment
+            {
+                Info = ActivityEnvironment.DefaultInfo with { StartToCloseTimeout = TimeSpan.FromHours(1) }
+            }
+            .RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/timeout", agentBudgetSeconds: 1)));
+
+        Assert.Single(h.Control);
+        Assert.Equal(0, h.Registry.PendingCount);
+        Assert.Equal(0, h.Registry.RetainedSessionCount);
+    }
+
+    [Fact]
+    public void RetainedSessions_AreBounded_OldestFirst_AndReusedOnlyOnTheSameEpoch()
+    {
+        var registry = new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance);
+        var first = registry.SessionFor("wf/0", Agent, "sandbox-1", _epoch);
+        Assert.Equal(first, registry.SessionFor("wf/0", Agent, "sandbox-1", _epoch));
+        var rotated = registry.SessionFor("wf/0", Agent, "sandbox-1", Guid.NewGuid());
+        Assert.NotEqual(first.Session, rotated.Session);
+        Assert.False(registry.ReleaseSession("wf/0", first)); // a stale owner cannot release the replacement
+
+        for (var i = 1; i <= TaskCompletionRegistry.MaxRetainedSessions + 10; i++)
+            registry.SessionFor("wf/" + i, Agent, "sandbox-1", _epoch);
+        Assert.Equal(TaskCompletionRegistry.MaxRetainedSessions, registry.RetainedSessionCount);
+        Assert.NotEqual(rotated.Session, registry.SessionFor("wf/0", Agent, "sandbox-1", rotated.Epoch).Session); // evicted
+    }
 }

@@ -159,6 +159,58 @@ public sealed class TaskCompletionRegistry
     }
 
     public int PendingCount => _pending.Count;
+
+    // ---- Managed workflow sessions (#492 R5, W6) ----
+
+    /// <summary>Upper bound on retained managed sessions; the oldest are dropped beyond it.</summary>
+    public const int MaxRetainedSessions = 1024;
+
+    private sealed class RetainedSession(ManagedCorrelation correlation, long order)
+    {
+        public ManagedCorrelation Correlation { get; } = correlation;
+        public long Order { get; } = order;
+    }
+
+    private readonly ConcurrentDictionary<string, RetainedSession> _sessions = new();
+    private long _sessionOrder;
+
+    /// <summary>
+    /// The session for a managed delegation of <paramref name="taskId"/> to this agent/sandbox/epoch. A session
+    /// retained by an earlier attempt of the same TaskId on the same epoch is reused, so a directive that left
+    /// before its publication reported failure is still answered into the retry's registration (#492 R5); a
+    /// different agent, sandbox or epoch gets a fresh session. Retention is bounded by
+    /// <see cref="MaxRetainedSessions"/> and released on completion, cancellation and timeout.
+    /// </summary>
+    public ManagedCorrelation SessionFor(string taskId, string agent, string sandbox, Guid epoch)
+    {
+        var fresh = new RetainedSession(
+            new ManagedCorrelation(agent, sandbox, epoch, Guid.NewGuid().ToString("N")),
+            Interlocked.Increment(ref _sessionOrder));
+        var chosen = _sessions.AddOrUpdate(taskId, fresh, (_, existing) =>
+            string.Equals(existing.Correlation.Agent, agent, StringComparison.OrdinalIgnoreCase)
+            && existing.Correlation.Sandbox == sandbox && existing.Correlation.Epoch == epoch
+                ? existing
+                : fresh);
+        if (_sessions.Count > MaxRetainedSessions) TrimSessions();
+        return chosen.Correlation;
+    }
+
+    /// <summary>Releases the retained session of <paramref name="taskId"/> only if it is still <paramref name="session"/>.</summary>
+    public bool ReleaseSession(string taskId, ManagedCorrelation session) =>
+        _sessions.TryGetValue(taskId, out var retained)
+        && retained.Correlation == session
+        && _sessions.TryRemove(new KeyValuePair<string, RetainedSession>(taskId, retained));
+
+    public int RetainedSessionCount => _sessions.Count;
+
+    private void TrimSessions()
+    {
+        var excess = _sessions.Count - MaxRetainedSessions;
+        if (excess <= 0) return;
+        foreach (var (id, retained) in _sessions.OrderBy(entry => entry.Value.Order).Take(excess).ToList())
+            _sessions.TryRemove(new KeyValuePair<string, RetainedSession>(id, retained));
+        _logger.LogWarning("Dropped {Count} oldest retained managed workflow sessions (bound {Bound})", excess, MaxRetainedSessions);
+    }
 }
 
 /// <summary>

@@ -147,6 +147,8 @@ public sealed class DelegateToAgentActivity
         }
         catch (Exception ex)
         {
+            // A managed session is deliberately retained: the directive may have left before the failure was
+            // reported, and the retry must register for the same session to accept its reply (#492 R5).
             _registry.TryCancel(taskId, tcs);
             _logger.LogError(ex, "Failed to publish directive to agent {Agent}", agentName);
             throw;
@@ -159,7 +161,7 @@ public sealed class DelegateToAgentActivity
             var result = await WaitForResponseAsync(agentName, tcs, taskId, ctx, timeout, instruction, repo, managed);
 
             if (!retryOnIncomplete || !result.IsIncomplete)
-                return result;
+                return Released(result);
 
             var accumulatedText = result.Text;
 
@@ -192,27 +194,42 @@ public sealed class DelegateToAgentActivity
                 accumulatedText += "\n" + result.Text;
 
                 if (!result.IsIncomplete)
-                    return result with { Text = accumulatedText };
+                    return Released(result with { Text = accumulatedText });
             }
 
             _logger.LogWarning(
                 "Agent {Agent} still incomplete after {Max} retries, returning accumulated text. taskId={TaskId}",
                 agentName, maxIncompleteRetries, taskId);
-            return result with { Text = accumulatedText };
+            return Released(result with { Text = accumulatedText });
         }
         catch (OperationCanceledException) when (ctx.CancellationToken.IsCancellationRequested)
         {
+            ReleaseSession();
             _logger.LogWarning("Activity cancelled for taskId={TaskId}, sending /cancel to agent {Agent}", taskId, agentName);
             await TrySendCancelAsync(agentName, taskId, managed);
             throw;
         }
         catch (TimeoutException ex)
         {
+            ReleaseSession();
             // The message is built where the elapsed time is actually measured, so the number
             // reported is a measurement rather than a restatement of the configured budget.
             _logger.LogWarning("{Message}", ex.Message);
             await TryReportTimeoutToActoAsync(agentName, taskId, ex.Message);
             throw;
+        }
+
+        // Completion, cancellation and timeout end the managed session; compare-and-release leaves a session a
+        // later attempt re-selected for a different epoch alone.
+        void ReleaseSession()
+        {
+            if (managed is not null) _registry.ReleaseSession(taskId, managed.Correlation);
+        }
+
+        AgentTaskResult Released(AgentTaskResult final)
+        {
+            ReleaseSession();
+            return final;
         }
     }
 
@@ -350,7 +367,8 @@ public sealed class DelegateToAgentActivity
                 ?? throw new StockIdentityDenied("authority_mapping_missing");
             var identity = new StockBrokerIdentity(record.Path, StockAuthoritySource.RolePassword(directory, agent, "control"), "control");
             if (identity.Agent != agent) throw new StockIdentityDenied("authority_mapping_invalid");
-            return new(identity, new ManagedCorrelation(identity.Agent, identity.Sandbox, identity.Epoch, Guid.NewGuid().ToString("N")));
+            // A retry of this TaskId on the same epoch reuses the retained session (#492 R5).
+            return new(identity, _registry.SessionFor(taskId, identity.Agent, identity.Sandbox, identity.Epoch));
         }
         catch (StockIdentityDenied)
         {

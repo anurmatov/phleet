@@ -630,7 +630,10 @@ linked `STATE_DIR` or anything under it still refuses. Staleness is surfaced by
 complete `gateway-*` snapshot exists (partial and incomplete dirs never count). With
 `FLEET_STOCK_MANAGED_ENABLED=true`, `setup.sh` and `upgrade.sh` run it against `FLEET_STOCK_BACKUP_DIR` (limit
 `FLEET_STOCK_BACKUP_MAX_AGE_HOURS`) before the rollout guard and refuses on a missing, failed or stale
-backup; wire the same check into host monitoring. Snapshots contain keys: keep
+backup; wire the same check into host monitoring. The example compose mounts `FLEET_STOCK_BACKUP_DIR`
+read-only into the orchestrator for the status view, which re-reads the stamps at most every 30 s on
+status reads (a configured dir that is not mounted reports `unmounted`); the periodic status refresh
+likewise re-observes applied sandbox containers at most every 30 s per agent, display-only. Snapshots contain keys: keep
 them host-local unless an operator-approved encrypted transfer exists. To restore, stop the gateway
 and every owned workload first, verify integrity and bindings before any admission, and keep the
 unexpected-resume hold.

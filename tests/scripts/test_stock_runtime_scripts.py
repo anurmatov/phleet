@@ -114,6 +114,92 @@ class DefaultOffComposeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class BackupBindSourceTests(unittest.TestCase):
+    """#492 review W5: setup/upgrade pre-create the unconditional backup bind source 0700, only when absent."""
+
+    MOUNT = "- ${FLEET_STOCK_BACKUP_DIR:-${FLEET_BASE_DIR}/openshell-backup}:/var/lib/fleet-stock-backup:ro"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name, "fleet")
+        self.base.mkdir()
+        self.env_file = self.base / ".env"
+        self.env_file.write_text("FLEET_STOCK_MANAGED_ENABLED=false\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_block(self, script, dry_run=False, shell_dir=None):
+        """Runs the script's own read_env_var and STOCK_BACKUP_SRC lines, nothing else of the script."""
+        text = (ROOT / script).read_text()
+        reader = re.search(r"^read_env_var\(\) \{\n.*?^\}\n", text, re.S | re.M).group(0)
+        lines = [line for line in text.splitlines() if "STOCK_BACKUP_SRC" in line]
+        self.assertEqual(len(lines), 2, lines)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("FLEET_")}
+        env.update(FLEET_BASE_DIR=str(self.base), ENV_FILE=str(self.env_file), DRY_RUN="true" if dry_run else "false")
+        if shell_dir is not None:
+            env["FLEET_STOCK_BACKUP_DIR"] = shell_dir
+        body = "set -euo pipefail\n" + reader + "\n".join(lines) + '\nprintf "%s" "$STOCK_BACKUP_SRC"\n'
+        result = subprocess.run(["bash", "-c", body], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_scripts_use_the_compose_default(self):
+        self.assertIn(self.MOUNT, (ROOT / "docker-compose.example.yml").read_text())
+        for script in ("setup.sh", "upgrade.sh"):
+            with self.subTest(script=script):
+                self.assertIn("${STOCK_BACKUP_SRC:-$FLEET_BASE_DIR/openshell-backup}", (ROOT / script).read_text())
+
+    def test_absent_default_dir_is_created_0700(self):
+        for script in ("setup.sh", "upgrade.sh"):
+            with self.subTest(script=script):
+                target = self.base / "openshell-backup"
+                shutil.rmtree(target, ignore_errors=True)
+                self.assertEqual(self.run_block(script), str(target))
+                self.assertTrue(target.is_dir())
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+                self.assertEqual(target.stat().st_uid, os.getuid())
+
+    def test_absent_configured_dir_is_created_0700(self):
+        for script in ("setup.sh", "upgrade.sh"):
+            with self.subTest(script=script, source=".env"):
+                target = Path(self.tmp.name, script, "env", "backups")
+                self.env_file.write_text(f"FLEET_STOCK_BACKUP_DIR={target}\n")
+                self.assertEqual(self.run_block(script), str(target))
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+                self.assertFalse((self.base / "openshell-backup").exists())
+            with self.subTest(script=script, source="shell"):
+                # Compose lets a shell export win over --env-file, so the export is the bind source.
+                target = Path(self.tmp.name, script, "shell", "backups")
+                self.assertEqual(self.run_block(script, shell_dir=str(target)), str(target))
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+
+    def test_existing_dir_is_left_untouched(self):
+        for script in ("setup.sh", "upgrade.sh"):
+            with self.subTest(script=script):
+                target = self.base / "openshell-backup"
+                shutil.rmtree(target, ignore_errors=True)
+                target.mkdir()
+                target.chmod(0o750)
+                (target / "last-success").write_text("stamp\n")
+                before = target.stat()
+                self.run_block(script)
+                after = target.stat()
+                self.assertEqual(stat.S_IMODE(after.st_mode), 0o750)
+                self.assertEqual((after.st_uid, after.st_gid, after.st_mtime_ns), (before.st_uid, before.st_gid, before.st_mtime_ns))
+                self.assertEqual((target / "last-success").read_text(), "stamp\n")
+
+    def test_setup_dry_run_creates_nothing(self):
+        target = Path(self.tmp.name, "configured", "backups")
+        self.env_file.write_text(f"FLEET_STOCK_BACKUP_DIR={target}\n")
+        self.run_block("setup.sh", dry_run=True)
+        self.assertFalse(target.parent.exists())
+        self.env_file.write_text("")
+        self.run_block("setup.sh", dry_run=True)
+        self.assertFalse((self.base / "openshell-backup").exists())
+        self.assertRegex((ROOT / "setup.sh").read_text(), r'(?m)^\$DRY_RUN \|\| .*mkdir -p -m 700 "\$STOCK_BACKUP_SRC"$')
+
+
 def time_stamp():
     import time
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n"

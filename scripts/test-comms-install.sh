@@ -107,6 +107,11 @@ for service in fleet-comms fleet-comms-ops comms-mysql comms-minio comms-minio-i
 done
 ! grep -Eq ' down .* -v| rm .* -v|image inspect| pull |fleet:comms' "$CALLS"
 echo 'PASS disabled Comms removes containers but preserves keys and volumes'
+# #492 review W5: the unconditional orchestrator backup bind source exists before compose runs, as
+# the operator and 0700, so Docker never creates it root-owned on a default-off install.
+[[ -d "$DIR/fleet/openshell-backup" && "$(ls -ld "$DIR/fleet/openshell-backup" | cut -c1-10)" == drwx------ ]]
+[[ -O "$DIR/fleet/openshell-backup" ]]
+echo 'PASS default-off upgrade pre-creates the backup bind source 0700'
 # Epic watcher/grant upgrades append missing defaults, keep a present value, and never
 # glues a key onto a last line that has no newline.
 printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
@@ -143,6 +148,7 @@ cp "$FRESH/.env.example" "$DIR/example-before"
 if ! printf '3\nn\n' | HOME="$DIR/home" TMPDIR="$DIR/previews" bash "$FRESH/setup.sh" --dry-run > "$DIR/output" 2>&1; then
   cat "$DIR/output" >&2; exit 1
 fi
+# No runtime dir at all, so neither the client nor the backup bind source (#492 W5) is pre-created.
 [[ ! -e "$FRESH/fleet" && ! -e "$FRESH/.env" ]]
 cmp "$FRESH/.env.example" "$DIR/example-before"
 [[ -z "$(ls -A "$DIR/previews")" ]]
@@ -197,10 +203,13 @@ managed_refuses() {
   if grep -Eq ' down$| rm | up ' "$CALLS"; then exit 1; fi
   echo "PASS managed upgrade refuses: $why"
 }
-managed_fixture
+managed_fixture; chmod 750 "$BACKUPS"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || { cat "$DIR/output" >&2; exit 1; }
 if grep -q 'managed runtime preflight' "$DIR/output"; then exit 1; fi
 echo 'PASS managed upgrade with complete trust passes the preflight'
+# #492 review W5: an existing configured backup dir keeps its mode; upgrade only creates an absent one.
+[[ "$(ls -ld "$BACKUPS" | cut -c1-10)" == drwxr-x--- ]]
+echo 'PASS upgrade leaves an existing backup bind source untouched'
 managed_fixture; sed -i.bak 's|^FLEET_STOCK_BROKER_MANAGEMENT_URL=https:|FLEET_STOCK_BROKER_MANAGEMENT_URL=http:|' "$ENV"
 managed_refuses 'must be an https://'
 managed_fixture; rm "$CLIENT/broker-ca.pem"

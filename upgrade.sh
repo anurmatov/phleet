@@ -96,6 +96,10 @@ add_missing_env_var() {
 }
 add_missing_env_var FLEET_EPIC_WATCHER_ENABLED false
 mkdir -p "$FLEET_BASE_DIR/openshell-client" && chmod 700 "$FLEET_BASE_DIR/openshell-client"
+# #492 W5: the read-only gateway backup bind source too, resolved like compose (a shell export, then
+# .env, then the default). Created only when absent; an existing path's owner and mode are never changed.
+STOCK_BACKUP_SRC=${FLEET_STOCK_BACKUP_DIR:-$(read_env_var "$ENV_FILE" FLEET_STOCK_BACKUP_DIR)}; STOCK_BACKUP_SRC=${STOCK_BACKUP_SRC:-$FLEET_BASE_DIR/openshell-backup}
+[[ -e "$STOCK_BACKUP_SRC" || -L "$STOCK_BACKUP_SRC" ]] || mkdir -p -m 700 "$STOCK_BACKUP_SRC"
 add_missing_env_var FLEET_EPIC_WATCHER_INTERVAL_SECONDS 300
 add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
 add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14

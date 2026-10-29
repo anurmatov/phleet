@@ -674,9 +674,14 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Agents with a <see cref="RunAsync"/> call live in this process (claim CAS through final CAS).</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Running = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>True while <paramref name="operation"/> belongs to this process and a call for the agent is still running.</summary>
-    internal static bool OperationLive(string agentName, string operation) =>
-        operation.EndsWith(":" + Instance, StringComparison.Ordinal) && Running.ContainsKey(agentName);
+    /// <summary>
+    /// Exact claim tokens of <see cref="RunClaimedAsync"/> calls still running in this process. A claim is live only
+    /// while its own call runs; another call for the same agent name never makes a left-behind claim look busy.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> LiveClaims = new(StringComparer.Ordinal);
+
+    /// <summary>True while <paramref name="operation"/> is the claim of a call still running in this process.</summary>
+    internal static bool OperationLive(string agentName, string operation) => LiveClaims.ContainsKey(operation);
 
     private async Task RepublishLeftClaimAsync(string name)
     {
@@ -692,7 +697,15 @@ public sealed class StockOpenShellRuntime(
 
     private async Task<Result> RunClaimedAsync(string name, string kind, Agent agent, ManagedRecord record, Step step, CancellationToken ct)
     {
-        var operation = kind + ":" + Instance;
+        // kind:process:call — the kind stays first for interrupted_<kind>; the call id scopes liveness to this call.
+        var operation = kind + ":" + Instance + ":" + Guid.NewGuid().ToString("N");
+        LiveClaims[operation] = 0;
+        try { return await RunClaimedCoreAsync(name, kind, agent, record, step, operation, ct); }
+        finally { LiveClaims.TryRemove(operation, out _); }
+    }
+
+    private async Task<Result> RunClaimedCoreAsync(string name, string kind, Agent agent, ManagedRecord record, Step step, string operation, CancellationToken ct)
+    {
         var current = record with { Operation = operation };
         var saved = current.Serialize();
         try
@@ -817,7 +830,7 @@ public sealed class StockOpenShellRuntime(
         {
             // An operation owned by an earlier orchestrator process, or by a call in this process that has already
             // returned (e.g. an unfinalized handoff that kept its claim), was interrupted: hold it, never replay.
-            if (!op.EndsWith(":" + Instance, StringComparison.Ordinal) || !Running.ContainsKey(agent.Name))
+            if (!OperationLive(agent.Name, op))
             {
                 var held = record with { Operation = null, State = "needs_attention", Errors = [.. record.Errors, "interrupted_" + op.Split(':')[0]] };
                 try { await store.SwapAsync(agent.Id, agent.AppliedRuntimeBinding, held.Serialize(), null, null, ct); }

@@ -18,14 +18,15 @@ public static class ManagedToolSendReceipts
 
     /// <summary>
     /// Admission for the Telegram receiver: pins the receipt context from the verified record (and the
-    /// request's MCP session), then proceeds unchanged. Requests without a session pin nothing.
+    /// request's MCP session), then proceeds unchanged. Every verified request is pinned, so a managed
+    /// receipt can never take the ordinary route; one without a session is refused at publish.
     /// </summary>
     public static Task Pin(HttpContext context, StockEnrollmentAuthority record, string? tool,
         CancellationToken admission, Func<Task> proceed)
     {
-        if (context.Request.Headers["Mcp-Session-Id"].FirstOrDefault() is { Length: > 0 and <= 256 } session)
-            context.Items[ManagedToolSendPin.ItemKey] = new ManagedToolSendPin(
-                ToolSendReceipts.RoutingKey(record.Agent), record.SandboxId, record.Epoch, session);
+        context.Items[ManagedToolSendPin.ItemKey] = new ManagedToolSendPin(
+            ToolSendReceipts.RoutingKey(record.Agent), record.SandboxId, record.Epoch,
+            context.Request.Headers["Mcp-Session-Id"].FirstOrDefault() ?? "");
         return proceed();
     }
 }
@@ -68,7 +69,8 @@ public sealed class StockControlReceiptTransport(
     {
         var context = receipt.Managed ?? throw new StockIdentityDenied("receipt_context_missing");
         var agent = ToolSendReceipts.RoutingKey(receipt.Agent);
-        if (!StockAuthoritySource.ValidAgent(agent) || context.Destination != receipt.Chat.Id)
+        if (!StockAuthoritySource.ValidAgent(agent) || context.Destination != receipt.Chat.Id
+            || context.Session is not { Length: > 0 and <= 256 })
             throw new StockIdentityDenied("receipt_context_invalid");
 
         var active = StockAuthoritySource.Active(authorityDirectory);

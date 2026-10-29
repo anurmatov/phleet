@@ -109,6 +109,18 @@ public sealed class ManagedToolSendReceiptTests : IDisposable
     }
 
     [Fact]
+    public async Task Managed_send_without_a_session_is_dropped_not_sent_ordinary()
+    {
+        await using var rig = new Rig(_dir);
+
+        await rig.Send(pin: new ManagedToolSendPin(Agent, "sandbox-a", _epoch, ""));
+
+        await Eventually(() => rig.Publisher.Counters.Dropped == 1);
+        Assert.Equal(0, rig.Lanes.Opened);
+        Assert.False(rig.Ordinary.HasMore);
+    }
+
+    [Fact]
     public async Task Foreign_pinned_agent_is_dropped()
     {
         await using var rig = new Rig(_dir);

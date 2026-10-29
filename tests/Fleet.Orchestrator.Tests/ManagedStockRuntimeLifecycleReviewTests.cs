@@ -245,6 +245,34 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
     }
 
     [Fact]
+    public async Task Deleted_peer_is_proven_absent_only_after_every_stock_list_page()
+    {
+        StoppedPeer("agent1", "fleet-agent1-d1d1d1d1");
+        DeletedPeer("openshell", "revoked");
+        _t._cli.ListPages = [["fleet-agent1-d1d1d1d1"], ["fleet-other-00000000"]];
+        _t._host.Generation = "gateway-2@planned";
+
+        var start = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.True(start.Ok, start.Code + ":" + string.Join(",", start.Errors));
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "list", "-o", "json", "--page-token", "p1"]));
+    }
+
+    [Fact]
+    public async Task Peer_listed_on_the_second_stock_page_is_never_treated_as_deleted()
+    {
+        StoppedPeer("agent1", "fleet-agent1-d2d2d2d2");
+        DeletedPeer("openshell", "revoked");
+        // Review F9/F6r: the get fails, but the gateway still lists the name, on page 2.
+        _t._cli.ListPages = [["fleet-agent1-d2d2d2d2"], ["fleet-agent2-cccccccc"]];
+        _t._host.Generation = "gateway-2@planned";
+
+        var start = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.Equal((409, "gateway_generation_changed"), (start.Status, start.Code));
+    }
+
+    [Fact]
     public async Task Unresolved_peer_with_a_deleted_sandbox_still_holds_a_planned_restart()
     {
         StoppedPeer("agent1", "fleet-agent1-eeeeeeee");

@@ -1225,19 +1225,40 @@ public sealed class StockOpenShellRuntime(
         return await QuiescentAsync(binding, ct) is null;
     }
 
-    /// <summary>Deleted only when the gateway lists successfully without the name; a failed get alone is unobservable.</summary>
+    /// <summary>Upper bound on <c>sandbox list</c> pages read before absence is refused as unproven.</summary>
+    internal const int MaxListPages = 64;
+
+    /// <summary>
+    /// Deleted only when the gateway lists successfully without the name across every page; a failed get alone is
+    /// unobservable. Pinned 0.1.5 <c>sandbox list -o json</c> prints <c>{"sandboxes":[…],"next_page_token":"…"}</c>
+    /// (review F9); an unparsable page, a repeated token or an unexhausted page bound is never absence.
+    /// </summary>
     private async Task<bool> SandboxDeletedAsync(string name, CancellationToken ct)
     {
         if (await GetAsync(name, ct) is not null) return false;
-        var list = await cli.RunAsync(["sandbox", "list", "-o", "json"], null, LegTimeout, ct);
-        if (list.Missing || list.TimedOut || list.ExitCode != 0) return false;
-        try
+        var token = "";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var page = 0; page < MaxListPages; page++)
         {
-            using var document = JsonDocument.Parse(list.Stdout);
-            return document.RootElement.ValueKind == JsonValueKind.Array && document.RootElement.EnumerateArray().All(e =>
-                e.ValueKind == JsonValueKind.Object && e.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String && n.GetString() != name);
+            var list = await cli.RunAsync(token.Length == 0 ? ["sandbox", "list", "-o", "json"]
+                : ["sandbox", "list", "-o", "json", "--page-token", token], null, LegTimeout, ct);
+            if (list.Missing || list.TimedOut || list.ExitCode != 0) return false;
+            try
+            {
+                using var document = JsonDocument.Parse(list.Stdout);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object
+                    || !root.TryGetProperty("sandboxes", out var sandboxes) || sandboxes.ValueKind != JsonValueKind.Array
+                    || !root.TryGetProperty("next_page_token", out var next) || next.ValueKind != JsonValueKind.String) return false;
+                if (!sandboxes.EnumerateArray().All(e => e.ValueKind == JsonValueKind.Object && e.TryGetProperty("name", out var n)
+                    && n.ValueKind == JsonValueKind.String && n.GetString() != name)) return false;
+                token = next.GetString()!;
+            }
+            catch (JsonException) { return false; }
+            if (token.Length == 0) return true;
+            if (!seen.Add(token)) return false;
         }
-        catch (JsonException) { return false; }
+        return false;
     }
 
     private async Task<string?> StoppedQuiescentAsync(ManagedBinding binding, CancellationToken ct)

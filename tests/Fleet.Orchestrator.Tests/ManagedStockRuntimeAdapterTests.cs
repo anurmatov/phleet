@@ -1045,7 +1045,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
                 ("sandbox", "upload") => Transfer(Name(2), () => Upload(args[3], args[4])),
                 ("sandbox", "exec") => Transfer(args[3], () => new(OnExec?.Invoke(args[^1]) ?? 0, "")),
-                ("sandbox", "list") => ListFails ? new(1, "") : new(0, "[]"),
+                ("sandbox", "list") => ListFails ? new(1, "") : List(args),
                 ("profile", "export") => new(0, ProfileYaml),
                 _ => new(0, ""),
             };
@@ -1062,6 +1062,21 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         }
 
         public bool ListFails;
+
+        /// <summary>Listed names per page (page i is served for <c>--page-token p{i}</c>); default one page of Sandboxes.</summary>
+        public List<string[]>? ListPages;
+
+        // Pinned 0.1.5 (openshell-cli output.rs paginated_collection_value): -o json prints the
+        // {"sandboxes":[…],"next_page_token":"…"} envelope, never a bare array (review F9).
+        private StockCliResult List(IReadOnlyList<string> args)
+        {
+            var at = args.ToList().IndexOf("--page-token");
+            var page = at < 0 ? 0 : int.Parse(args[at + 1][1..]);
+            var names = ListPages is { } pages ? pages[page] : [.. Sandboxes.Keys];
+            var next = ListPages is { } all && page + 1 < all.Count ? "p" + (page + 1) : "";
+            return new(0, JsonSerializer.Serialize(new { sandboxes = names.Select(n => new { id = Sandboxes.TryGetValue(n, out var s) ? s.Id : "", name = n }), next_page_token = next }));
+        }
+
         public readonly List<(string Remote, string? Content)> Uploads = [];
         public bool SwapOnLogs;
         public Action? OnCreate;

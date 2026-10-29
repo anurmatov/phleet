@@ -591,8 +591,11 @@ type `ManagedAgentRuntimeUnknown`), and nothing is published on the ordinary bro
 the ordinary directive. For `openshell`, Temporal reads only the agent's current active record and its
 `<agent>.control.password` beside it (never admin or observer credentials) and publishes a typed
 `workflow-directive` producer-only, as the epoch `control` principal (validated user-id), to
-`fleet.group` routed to the agent. It carries the TaskId, the record's sandbox and epoch and a fresh
-session nonce. The expected agent, sandbox, epoch and session are registered with the TaskId. A
+`fleet.group` routed to the agent. It carries the TaskId, the record's sandbox and epoch and a session
+nonce: fresh for a new TaskId, and reused by a retry of the same TaskId on the same epoch after a failed
+publication (bounded, released on completion, cancellation and timeout). The expected agent, sandbox,
+epoch and session are registered with the TaskId's waiter as one registration, and completion and
+cleanup compare-and-remove only that registration. A
 missing, revoked, ambiguous or unreadable record, or an unusable control credential, fails
 non-retryably with `managed_route_denied:workflow_delegation` (error type `ManagedAgentContextDenied`)
 and is never retargeted to the ordinary broker. Resends and continuation retries use the same lane and

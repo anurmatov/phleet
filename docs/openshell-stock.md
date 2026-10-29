@@ -713,7 +713,7 @@ deploy integration that replace the orchestrator must run
 exit.** Administrator Docker commands that bypass this procedure are not protected.
 
 **Backup.** Run `scripts/backup-stock-gateway.sh BACKUP_DIR GATEWAY_TOML [/var/lib/openshell]` from the
-operator's daily host job and before gateway changes. It refuses incomplete coverage (database, gateway TOML, TLS cert/key/client CA, JWT keys and kid), then takes a stdlib SQLite online backup with
+operator's daily host job and before gateway changes. It refuses incomplete coverage (database, gateway TOML, TLS cert/key, gateway CA `tls/ca.pem`, client CA, JWT keys and kid), then takes a stdlib SQLite online backup with
 an integrity check, copies config and trust files, and checks their inode/mtime before and after.
 Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure, a
 changed trust file or an interruption (SIGTERM/SIGINT/SIGHUP) marks the partial snapshot `INVALID` and

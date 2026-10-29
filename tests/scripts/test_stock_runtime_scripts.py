@@ -228,7 +228,7 @@ class GatewayBackupTests(unittest.TestCase):
             db.execute("create table sandboxes(id text)")
             db.execute("insert into sandboxes values ('synthetic')")
         (self.state / "tls" / "jwt").mkdir()
-        for name in ("gateway.pem", "gateway-key.pem", "client-ca.pem", "jwt/signing.pem", "jwt/public.pem", "jwt/kid"):
+        for name in ("gateway.pem", "gateway-key.pem", "ca.pem", "client-ca.pem", "jwt/signing.pem", "jwt/public.pem", "jwt/kid"):
             (self.state / "tls" / name).write_text("synthetic\n")
         self.config = Path(self.tmp.name, "gateway.toml")
         self.config.write_text("[openshell]\nversion = 2\n")
@@ -253,17 +253,21 @@ class GatewayBackupTests(unittest.TestCase):
         with sqlite3.connect(snapshot / "gateway.db") as db:
             self.assertEqual(db.execute("select id from sandboxes").fetchone()[0], "synthetic")
         sums = (snapshot / "SHA256SUMS").read_text()
+        self.assertIn("state/tls/ca.pem", sums)
         self.assertIn("state/tls/client-ca.pem", sums)
         self.assertIn("config/gateway.toml", sums)
 
     def test_incomplete_trust_or_config_coverage_is_invalid(self):
-        for missing in (self.state / "tls" / "jwt" / "kid", self.config):
+        # ca.pem is the gateway-owned CA guest_tls_ca names; restoring without it breaks guest TLS bootstrap.
+        for missing, reported in ((self.state / "tls" / "jwt" / "kid", "tls/jwt/kid"),
+                                  (self.state / "tls" / "ca.pem", "tls/ca.pem"), (self.config, "CONFIG_FILE")):
             with self.subTest(missing=missing.name):
                 content = missing.read_text()
                 missing.unlink()
                 result = self.run_backup()
                 missing.write_text(content)
                 self.assertEqual(result.returncode, 1)
+                self.assertIn(f"coverage_incomplete: {reported}", result.stderr)
                 self.assertFalse((self.backups / "last-success").exists())
                 self.assertEqual(list(self.backups.glob("gateway-*")), [])  # partial key material deleted
                 self.assertTrue((self.backups / "last-failure").exists())

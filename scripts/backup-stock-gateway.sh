@@ -5,7 +5,8 @@
 #   backup-stock-gateway.sh BACKUP_DIR CONFIG_FILE [STATE_DIR]   # STATE_DIR defaults to /var/lib/openshell
 #
 # Coverage is complete or the run fails: gateway.db, the gateway TOML and every trust file it uses
-# (TLS server cert/key, client CA, JWT signing/public key and kid under STATE_DIR/tls) must exist.
+# (TLS server cert/key, the gateway CA guest_tls_ca names, client CA, JWT signing/public key and kid
+# under STATE_DIR/tls) must exist.
 # SQLite is copied with the stdlib online backup API (never a raw copy of an open DB/WAL) and
 # integrity-checked. Config and trust files are copied as-is, and their inode/mtime is compared
 # before and after; any change, missing file, failure or SIGTERM/SIGINT/SIGHUP deletes the partial
@@ -64,7 +65,7 @@ def anchored(path):
     return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
 
 state, config, out = anchored(sys.argv[1]), anchored(sys.argv[2]), sys.argv[3]
-REQUIRED = ["tls/gateway.pem", "tls/gateway-key.pem", "tls/client-ca.pem",
+REQUIRED = ["tls/gateway.pem", "tls/gateway-key.pem", "tls/ca.pem", "tls/client-ca.pem",
             "tls/jwt/signing.pem", "tls/jwt/public.pem", "tls/jwt/kid"]
 
 def regular(path):

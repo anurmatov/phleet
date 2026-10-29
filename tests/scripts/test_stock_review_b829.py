@@ -114,7 +114,7 @@ class BackupTests(unittest.TestCase):
         (state / "tls" / "jwt").mkdir(parents=True)
         with sqlite3.connect(state / "gateway.db") as db:
             db.execute("create table sandboxes(id text)")
-        for name in ("gateway.pem", "gateway-key.pem", "client-ca.pem", "jwt/signing.pem", "jwt/public.pem", "jwt/kid"):
+        for name in ("gateway.pem", "gateway-key.pem", "ca.pem", "client-ca.pem", "jwt/signing.pem", "jwt/public.pem", "jwt/kid"):
             (state / "tls" / name).write_text("synthetic\n")
         return state
 

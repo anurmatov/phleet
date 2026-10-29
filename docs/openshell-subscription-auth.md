@@ -5,6 +5,8 @@ Refs [#498](https://github.com/anurmatov/phleet/issues/498), approved body
 `e960764c036d6767a6c0538272f4af79ddf562c284851da8ec11aeef8904f4d4`.
 All A0–A9 runtime outcomes remain **UNRUN** in this source patch.
 A source review, profile check or merge cannot qualify native credential isolation.
+**TRANSPORT BLOCKED:** effective HTTP/SSE selection at the pinned native client
+has not been established; no native trial startup is authorized by this runbook.
 
 This is one native-cache candidate on unmodified OpenShell 0.1.5 and Codex 0.164.0.
 The alternative external-token RPC is not this handoff: it parses an access-token JWT.
@@ -118,10 +120,21 @@ Write a separate native `config.toml` before startup:
 ```toml
 forced_login_method = "chatgpt"
 forced_chatgpt_workspace_id = "<selected-account-id>"
-
-[model_providers.openai]
-supports_websockets = false
 ```
+
+This config sets authentication intent only, not effective HTTP transport.
+At Codex 0.164.0, the built-in OpenAI provider sets `supports_websockets: true`
+([provider definition](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L528-L567)).
+Its configured-provider merge uses `model_providers.entry(key).or_insert(provider)`
+([merge rules](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/model-provider-info/src/lib.rs#L696-L740)),
+so an `openai` table cannot replace that built-in transport capability.
+Do not add an ineffective `supports_websockets = false` override or claim that
+the desired HTTP Responses/SSE baseline is selected by the auth configuration.
+The coordinator must obtain pinned-supported effective-config/source proof of
+HTTP selection before an authorized native trial can start; absent that proof,
+record `blocked:transport_unqualified`, with native checks UNRUN.
+No endpoint widening, additional provider implementation, proxy or helper
+framework is authorized to resolve this prerequisite here.
 
 Only the private stdio app-server is selected, with no remote listener or
 `account/login/start` token injection.
@@ -156,7 +169,7 @@ Chosen candidate only: the stock example's **native cache route**, with all usab
 | Account authority | Outside-owned grant and policy binding to that one account, with mandatory cross-account refusal test; native `forced_chatgpt_workspace_id` alone not a security boundary because workload configuration is writable; absence of a stock/issuer-enforced boundary = stop |
 | Native client | Existing Codex app-server over private stdio, no exposed WebSocket listener or remote client; no `account/login/start` injection of opaque access handles and no auth-refresh callback returning real tokens |
 | Endpoint boundary | Stock-inspected HTTPS only to `chatgpt.com:443`: `GET /backend-api/wham/accounts/check`, `GET /backend-api/codex/models`, `POST /backend-api/codex/responses`; no wildcard provider endpoint, API-key endpoint, direct egress or TLS-skip route |
-| Transport/routing | HTTP Responses/SSE baseline with pinned `model_providers.openai.supports_websockets=false`, required auth/model/bootstrap paths, WebSocket-only behavior, redirects or a discovered backend outside the listed origin = blocked evidence, no automatic allowlist widening, optional non-credential telemetry/flag/update denials handled only by the explicit rule below |
+| Transport/routing | **TRANSPORT BLOCKED** until pinned-supported effective HTTP Responses/SSE selection has offline effective-config/source proof; the built-in OpenAI provider ignores the proposed table override, so no native startup or HTTP baseline claim from that setting; required extra paths, WebSocket-only behavior, redirects or another origin = blocked evidence, no automatic allowlist widening or new helper; optional egress only under the explicit rule below |
 | Long-lived use | Stable handle resolves to the currently committed gateway token after refresh without restarting the workload; a changed account, refresh owner, provider configuration epoch or endpoint set requires detach and a new authorization, not silent rebinding |
 
 Source evidence supports this candidate's cache parsing and refresh primitives, not complete native discovery, account isolation, refresh, cancellation or restore compatibility at the combined pins
@@ -204,8 +217,8 @@ No production rollout or shared gateway allowed, P/F each use an explicitly appr
 | Pin the storage paths | Owned gateway environment `OPENSHELL_DB_URL=sqlite:<STATE>/gateway.db?mode=rwc`, owned TOML `[openshell.gateway.credential_storage].key_encryption_key_path=<STATE>/key-encryption-key.bin`, server cert/key/client CA/guest CA at `<STATE>/tls/gateway.pem`, `gateway-key.pem`, `client-ca.pem`, `ca.pem`, JWT material at `<STATE>/tls/jwt/signing.pem`, `public.pem`, `kid`, owned CLI client trust kept under `<trial-root>/client` |
 | Before mutations | Snapshot empty initialized fixture state/config/trust only, preserve originals, never a production/shared gateway snapshot |
 | A7 checkpoint | After P cancellation/detach and before restore, stop native workloads, supervisors and gateway, verify no remaining writer/client/refresh owner, record the latest committed credential generation and all owned IDs, no issuer call while stopped |
-| Snapshot | SQLite CLI `sqlite3 "$STATE/gateway.db" ".backup '$SNAP/state/gateway.db'"`, copy complete stopped STATE tree excluding DB/WAL/SHM duplicates, plus CONFIG as `config/gateway.toml` and client trust tree, using mode/owner-preserving `cp -a` as detailed below, require DB, KEK and every named/referenced trust file present/regular/non-symlink, missing coverage = failure |
-| Integrity / hashes | `sqlite3 "$SNAP/state/gateway.db" 'PRAGMA integrity_check;'` returns exactly `ok`, relative-path SHA-256 manifest of every snapshot payload with `sha256sum`, `sha256sum -c SHA256SUMS` passes, protected manifest excludes itself |
+| Snapshot | As recorded fixture UID/GID with `umask 077`, SQLite CLI `sqlite3 "$STATE/gateway.db" ".backup '$SNAP/state/gateway.db'"`, require output UID/GID and mode 0600 before hashing; copy complete stopped STATE tree excluding DB/WAL/SHM duplicates, plus CONFIG as `config/gateway.toml` and client trust tree, using mode/owner-preserving `cp -a` below; require DB, KEK and every named/referenced trust file, missing coverage = failure |
+| Integrity / hashes | Require backup and newly created `SHA256SUMS` owned by the recorded fixture UID/GID and mode 0600 before hashing, `sqlite3 "$SNAP/state/gateway.db" 'PRAGMA integrity_check;'` exactly `ok`, relative-path manifest covering every payload except itself, `sha256sum -c SHA256SUMS` passes, verify manifest ownership/mode again afterward |
 | Restore | Keep all writers stopped, preserve current owned files as originals, verify manifest first, restore DB/config/KEK/trust with original ownership/modes, remove only owned stale WAL/SHM, compare restored payload hashes and run the same integrity command on restored DB |
 | Readiness | Restart only the same owned gateway, require authenticated `openshell gateway info` and `openshell sandbox list` success against its private client context, no model/provider use until identity/readiness/current refresh ownership reconciled, old/detached handles remain refused |
 | Stale issuer state | Any other owner/issuer rotation or uncertain generation since the checkpoint = no provider replay, remain stopped/detached and require separately approved fresh authorization, filesystem hashes alone not a restored-service pass |
@@ -222,9 +235,34 @@ file, private roots are 0700, payloads 0600 and ownership matches the fixture UI
 keep the gateway, supervisors, native processes and refresh writers stopped.
 Do not follow external symlinks or broaden ownership/modes to make a copy work.
 
-The authorized operator creates the protected snapshot directories, runs the
-SQLite `.backup` command from the table, then uses `cp -a` for each remaining
-stopped-state payload/tree, CONFIG and client trust.
+The authorized operator runs the snapshot shell as the recorded numeric
+`FIXTURE_UID` and `FIXTURE_GID`, with no default to the operator's own identity.
+All destination parents must already have that ownership and exact mode 0700,
+without setgid bits, symlinks or pre-existing backup/manifest outputs.
+If that identity cannot read the stopped sources or preserve their recorded
+ownership, stop; do not broaden permissions or copy shared credentials.
+Set the restrictive umask before creating either generated output:
+
+```sh
+set -euo pipefail
+test "$(id -u)" = "$FIXTURE_UID"
+test "$(id -g)" = "$FIXTURE_GID"
+umask 077
+DB_COPY="$SNAP/state/gateway.db"
+test ! -e "$DB_COPY"
+test ! -L "$DB_COPY"
+sqlite3 "$STATE/gateway.db" \
+  ".backup '$DB_COPY'"
+chmod 0600 "$DB_COPY"
+test "$(stat -c '%u:%g:%a' \
+  "$DB_COPY")" = \
+  "$FIXTURE_UID:$FIXTURE_GID:600"
+```
+
+Run these blocks sequentially in that same private fail-fast Bash shell (`set -euo pipefail`),
+with the approved variables already set; a nonzero result stops the procedure.
+The backup output has the recorded fixture ownership and mode 0600 before hashing.
+Then use `cp -a` for each remaining stopped-state payload/tree, CONFIG and client trust.
 Exclude `gateway.db`, `gateway.db-wal` and `gateway.db-shm` from that state-tree
 copy, so the `.backup` result is not overwritten by a raw database copy.
 For example, once the approved paths and destination parents are verified:
@@ -242,12 +280,39 @@ cp -a "$TRIAL_ROOT/client" \
 These named files are the minimum, not permission to omit other referenced
 configuration/trust or state payloads: enumerate and copy each remaining owned
 payload with `cp -a`, preserving relative paths and excluding the DB/WAL/SHM set.
-Use a relative-path manifest covering every snapshot payload except itself,
-verify with `sha256sum -c SHA256SUMS` from SNAP, and require integrity result `ok`.
+Create the manifest as the same fixture identity with the same `umask 077`,
+and verify its UID/GID and 0600 mode before hashing any payload into it:
+
+```sh
+cd "$SNAP"
+test ! -e SHA256SUMS
+test ! -L SHA256SUMS
+: > SHA256SUMS
+chmod 0600 SHA256SUMS
+test "$(stat -c '%u:%g:%a' \
+  SHA256SUMS)" = \
+  "$FIXTURE_UID:$FIXTURE_GID:600"
+find . -type f \
+  ! -path ./SHA256SUMS -print0 \
+  | sort -z \
+  | xargs -0 sha256sum > SHA256SUMS
+sha256sum -c SHA256SUMS
+test "$(stat -c '%u:%g:%a' \
+  SHA256SUMS)" = \
+  "$FIXTURE_UID:$FIXTURE_GID:600"
+```
+
+This relative-path manifest covers every snapshot payload except itself.
+Require integrity result `ok` independently; successful hashing is not that check.
+An unsupported `stat`, `sort -z` or other required command stops operator preflight,
+not permission to install or substitute a new helper.
 On restore, preserve current owned files first and copy each verified snapshot
 payload back with `cp -a` to its original absolute path while all writers remain
 stopped; remove only the owned stale WAL/SHM before restart.
 Compare restored hashes, numeric UID/GID and modes against the recorded ledger;
+the restored DB must specifically be `FIXTURE_UID:FIXTURE_GID` and mode 0600,
+as must the snapshot DB and manifest before and after verification.
+Check every restored config/KEK/trust payload against its recorded UID/GID/mode too;
 copy or ownership-preservation failure stops restore, never a successful result.
 Restart only the same owned gateway for authenticated readiness checks.
 Detached handles must remain refused, with no provider/model use before ownership
@@ -266,6 +331,8 @@ endpoint counts, account-match booleans, refresh commit, cancellation/quiescence
 snapshot integrity and authenticated readiness, not secret-bearing payloads.
 
 The coordinator owns the missing live-trial evidence and exact operator scope.
+Before merge, all 11 final-head CI checks must be successful; an in-progress
+Build and Test is pending, not failed, and prior-head green checks are not final-head proof.
 An unexpected outcome ends qualification with `blocked:<first reason>` and
 remaining checks UNRUN; only matching predeclared negative assertions are passes.
 No retries, opportunistic repairs, unrelated source rewrites or normal-agent

@@ -636,12 +636,24 @@ public sealed class StockOpenShellRuntime(
         if (!Enabled) return Result.Refused(409, Unavailable);
         var (agent, record, fault) = await ReadAsync(name, ct);
         if (fault is not null) return fault;
+        // Review H1: marked live before the claim CAS and unmarked only after the final CAS, so a reader that sees this
+        // process's claim on the record treats it as in progress for exactly the lifetime of this call.
+        Running.AddOrUpdate(agent!.Name, 1, (_, n) => n + 1);
+        try { return await RunClaimedAsync(name, kind, agent, record!, step, ct); }
+        finally { if (Running.AddOrUpdate(agent.Name, 0, (_, n) => n - 1) <= 0) Running.TryRemove(new(agent.Name, 0)); }
+    }
+
+    /// <summary>Agents with a <see cref="RunAsync"/> call live in this process (claim CAS through final CAS).</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Running = new(StringComparer.OrdinalIgnoreCase);
+
+    private async Task<Result> RunClaimedAsync(string name, string kind, Agent agent, ManagedRecord record, Step step, CancellationToken ct)
+    {
         var operation = kind + ":" + Instance;
-        var current = record! with { Operation = operation };
+        var current = record with { Operation = operation };
         var saved = current.Serialize();
         try
         {
-            if (!await store.SwapAsync(agent!.Id, agent.AppliedRuntimeBinding, saved, null, null, ct))
+            if (!await store.SwapAsync(agent.Id, agent.AppliedRuntimeBinding, saved, null, null, ct))
                 return Result.Refused(409, "managed_operation_conflict");
         }
         catch (Exception ex) when (ex is DbException or InvalidOperationException) { return Result.Refused(503, "runtime_state_unavailable"); }
@@ -674,9 +686,11 @@ public sealed class StockOpenShellRuntime(
         // handoff commits first with a pending-retirement marker (a held needs_attention record) while the authority
         // record is still revoked; only after that commit is the authority retired, and a follow-up CAS clears the
         // marker or records authority_retire_failed. A failed or ambiguous commit therefore never released traffic.
+        // Review H1: the held commit also RETAINS this operation's claim, so a concurrent revoke/apply/start gets 409
+        // through authority retirement; only the final CAS below clears Operation.
         var handoff = outcome.Result.Ok && outcome.AppliedKind == "docker" && !final.Unresolved;
         var clean = final;
-        if (handoff) final = final with { State = "needs_attention", Errors = [.. final.Errors, RetirePending] };
+        if (handoff) final = final with { State = "needs_attention", Errors = [.. final.Errors, RetirePending], Operation = operation };
         var finalJson = final.Serialize();
         bool committed;
         try { committed = await store.SwapAsync(agent.Id, saved, finalJson, outcome.AppliedKind, outcome.AppliedPolicy, CancellationToken.None); }
@@ -716,7 +730,8 @@ public sealed class StockOpenShellRuntime(
             {
                 await PublishAsync(name);
                 // Docker is durably committed and the authority retired; the record still shows the pending marker (held,
-                // visible), and revoke on the Docker agent is the supported retry that clears it.
+                // visible) and the retained claim, which ReadAsync reports as interrupted once this call has returned;
+                // revoke on the Docker agent is the supported retry that clears it.
                 logger.LogWarning("Managed {Kind} for {Agent}: the retired handoff record was not finalized", kind, name);
                 return Result.Refused(502, "docker_handoff_unresolved", [RetirePending, "handoff_record_unfinalized"]);
             }
@@ -756,8 +771,9 @@ public sealed class StockOpenShellRuntime(
         catch (JsonException) { return (agent, null, Result.Refused(409, "managed_binding_unreadable")); }
         if (record.Operation is { } op)
         {
-            // An operation owned by an earlier orchestrator process was interrupted: hold it, never replay.
-            if (!op.EndsWith(":" + Instance, StringComparison.Ordinal))
+            // An operation owned by an earlier orchestrator process, or by a call in this process that has already
+            // returned (e.g. an unfinalized handoff that kept its claim), was interrupted: hold it, never replay.
+            if (!op.EndsWith(":" + Instance, StringComparison.Ordinal) || !Running.ContainsKey(agent.Name))
             {
                 var held = record with { Operation = null, State = "needs_attention", Errors = [.. record.Errors, "interrupted_" + op.Split(':')[0]] };
                 try { await store.SwapAsync(agent.Id, agent.AppliedRuntimeBinding, held.Serialize(), null, null, ct); }

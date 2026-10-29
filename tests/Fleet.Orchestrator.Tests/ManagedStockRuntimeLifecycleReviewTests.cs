@@ -516,6 +516,60 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
     }
 
     [Fact]
+    public async Task Concurrent_writers_get_conflict_until_the_docker_handoff_final_cas_clears_the_claim()
+    {
+        DockerHandoff("h1a0a0a0");
+        var runtime = _t.Runtime();
+        var probes = new List<(string Moment, string Verb, int Status, bool Unchanged)>();
+        var inFlight = false;
+        async Task Probe(string moment)
+        {
+            inFlight = true;
+            try
+            {
+                var before = _t._store.Get("agent1").AppliedRuntimeBinding;
+                var kind = _t._store.Get("agent1").AppliedRuntimeKind;
+                foreach (var (verb, call) in new (string, Func<Task<StockOpenShellRuntime.Result>>)[]
+                {
+                    ("revoke", () => runtime.RevokeAsync("agent1", default)),
+                    ("apply", () => runtime.ApplyAsync("agent1", default)),
+                    ("start", () => runtime.StartAsync("agent1", default)),
+                })
+                {
+                    var r = await call();
+                    probes.Add((moment, verb, r.Status, _t._store.Get("agent1").AppliedRuntimeBinding == before
+                        && _t._store.Get("agent1").AppliedRuntimeKind == kind));
+                }
+            }
+            finally { inFlight = false; }
+        }
+        // Review H1: interceptor over the actual RunAsync — while the held Docker commit is in flight, and again after it
+        // committed and the authority was retired but before the final CAS lands, other writers try to take the agent.
+        _t._store.OnSwap = async (kind, next) =>
+        {
+            if (inFlight) return;
+            if (kind == "docker") await Probe("held_commit");
+            else if (kind is null && _t._store.Get("agent1").AppliedRuntimeKind == "docker" && !next.Contains(StockOpenShellRuntime.RetirePending))
+            {
+                Assert.Equal("retired", AuthorityState());
+                Assert.NotNull(ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Operation);
+                await Probe("retired_before_final_cas");
+            }
+        };
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        Assert.Equal(6, probes.Count);
+        Assert.All(probes, p => Assert.True(p.Status == 409 && p.Unchanged, p.Moment + "/" + p.Verb + ":" + p.Status));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Null(record.Operation);
+        Assert.DoesNotContain(StockOpenShellRuntime.RetirePending, record.Errors);
+        Assert.Equal("docker", _t._store.Get("agent1").AppliedRuntimeKind);
+        Assert.Equal("retired", AuthorityState());
+    }
+
+    [Fact]
     public async Task Post_commit_swap_exception_is_resolved_by_rereading_and_completes_the_handoff()
     {
         DockerHandoff("v4c0c0c0");
@@ -587,6 +641,28 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         Assert.Equal([StockOpenShellRuntime.RetirePending, "handoff_record_unfinalized"], result.Errors);
         Assert.Equal("retired", AuthorityState());
         Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
+    [Fact]
+    public async Task Unfinalized_handoff_claim_is_held_as_interrupted_after_the_call_returns_never_stuck_in_progress()
+    {
+        DockerHandoff("h1b0b0b0");
+        _t._store.RejectFollowUp = true;
+        var runtime = _t.Runtime();
+        Assert.Equal("docker_handoff_unresolved", (await runtime.ApplyAsync("agent1", default)).Code);
+        // Review H1: the retained claim belongs to a call that has returned, so it reads as interrupted, not busy.
+        Assert.NotNull(ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Operation);
+        _t._store.RejectFollowUp = false;
+
+        var revoke = await runtime.RevokeAsync("agent1", default);
+
+        Assert.Equal("needs_attention", revoke.Code);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Null(record.Operation);
+        Assert.Contains("interrupted_apply", record.Errors);
+        Assert.Contains(StockOpenShellRuntime.RetirePending, record.Errors);
+        var retry = await runtime.RevokeAsync("agent1", default);
+        Assert.NotEqual("managed_operation_in_progress", retry.Code);
     }
 
     [Theory]

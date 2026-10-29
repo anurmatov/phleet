@@ -36,6 +36,11 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     private const string OrchestratorExchange = "fleet.orchestrator";
 
     private readonly Dictionary<string, DateTimeOffset> _lastPublishTime = new();
+    // Managed workflow directives (#492) admitted on the control lane: TaskId -> session nonce for the reply.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _workflowSessions = new(StringComparer.Ordinal);
+    private const int MaxWorkflowSessions = 256;
+    private const string WorkflowDirectiveType = "workflow-directive";
+    private const string TemporalBridgeRoute = "temporal-bridge";
     public IReadOnlyDictionary<string, DateTimeOffset> LastPublishTime => _lastPublishTime;
 
     /// <summary>
@@ -237,11 +242,20 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
         try
         {
-            if (_stockBroker is not null && (targetAgent != "bridge" || type != RelayMessageType.BridgeResponse
-                || !Guid.TryParseExact(correlationId, "N", out _)))
-                throw new StockIdentityDenied("broker_route_denied");
             var routingKey = targetAgent.ToLowerInvariant();
             var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName);
+            if (_stockBroker is not null && targetAgent == TemporalBridgeRoute
+                && type is RelayMessageType.Response or RelayMessageType.PartialResponse
+                && taskId is not null && workflowId is null && signalName is null && _workflowSessions.TryRemove(taskId, out var session))
+            {
+                // Typed workflow reply (#492): the existing bridge reply route as the workload principal,
+                // carrying agent (sender), sandbox, epoch, session and TaskId for the Bridge and Temporal to check.
+                routingKey = "bridge";
+                message = message with { CorrelationId = session, Epoch = _stockBroker.Epoch, Sandbox = _stockBroker.Sandbox };
+            }
+            else if (_stockBroker is not null && (targetAgent != "bridge" || type != RelayMessageType.BridgeResponse
+                || !Guid.TryParseExact(correlationId, "N", out _)))
+                throw new StockIdentityDenied("broker_route_denied");
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
 
             var props = _stockBroker?.Properties() ?? new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
@@ -337,9 +351,11 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             {
                 _stockBroker.RequireDelivery(ea.BasicProperties.UserId, "control", ea.Exchange, _rabbitConfig.Exchange,
                     ea.RoutingKey, _agentConfig.ShortName);
-                if (message.Type != RelayMessageType.BridgeRequest || !message.Sender.StartsWith("bridge:", StringComparison.Ordinal)
+                if (message.Type == WorkflowDirectiveType) message = AdmitWorkflowDirective(message);
+                else if (message.Type != RelayMessageType.BridgeRequest || !message.Sender.StartsWith("bridge:", StringComparison.Ordinal)
                     || !Guid.TryParseExact(message.CorrelationId, "N", out _) || message.TaskId is not null
-                    || message.WorkflowId is not null || message.SignalName is not null)
+                    || message.WorkflowId is not null || message.SignalName is not null || message.Epoch is not null
+                    || message.Sandbox is not null)
                     throw new StockIdentityDenied("broker_route_denied");
             }
 
@@ -411,6 +427,24 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             workflowId: workflowId,
             signalName: signalName);
 
+    /// <summary>
+    /// Admits a typed workflow directive (#492) already verified as the epoch control principal on
+    /// <c>fleet.group</c> routed to this agent: the pinned sandbox and epoch must match this enrollment, and it
+    /// must carry a TaskId and session nonce. It then runs as an ordinary Temporal directive; its reply goes
+    /// out as a typed workflow reply on the bridge reply route.
+    /// </summary>
+    private RelayMessage AdmitWorkflowDirective(RelayMessage message)
+    {
+        if (message.Sender != TemporalBridgeRoute || message.Epoch != _stockBroker!.Epoch || message.Sandbox != _stockBroker.Sandbox
+            || !Guid.TryParseExact(message.CorrelationId, "N", out _) || message.TaskId is not { Length: > 0 and <= 512 }
+            || message.WorkflowId is not null || message.SignalName is not null)
+            throw new StockIdentityDenied("broker_route_denied");
+        if (!_workflowSessions.ContainsKey(message.TaskId) && _workflowSessions.Count >= MaxWorkflowSessions)
+            throw new StockIdentityDenied("broker_capacity");
+        _workflowSessions[message.TaskId] = message.CorrelationId!; // a resend carries the same session
+        return message with { Type = RelayMessageType.Directive, CorrelationId = null, Epoch = null, Sandbox = null };
+    }
+
     private static string TruncateForLog(string text) =>
         text.Length <= 80 ? text : text[..80] + "...";
 
@@ -426,5 +460,5 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
         string Type = RelayMessageType.Directive, string? CorrelationId = null, string? TaskId = null,
-        string? WorkflowId = null, string? SignalName = null);
+        string? WorkflowId = null, string? SignalName = null, Guid? Epoch = null, string? Sandbox = null);
 }

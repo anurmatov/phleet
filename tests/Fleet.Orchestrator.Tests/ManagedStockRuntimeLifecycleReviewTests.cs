@@ -59,6 +59,23 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
     }
 
     [Fact]
+    public async Task Start_whose_daemon_pid_is_up_but_health_never_answers_is_never_recorded_applied()
+    {
+        var binding = _t.Binding("fleet-agent1-f4f4f4f4", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        // Review F4: PID/cmdline and Ready pass, but the daemon's GET /health never answers 200.
+        _t._cli.OnExec = script => script == StockOpenShellRuntime.DaemonHealthScript ? 1 : 0;
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+
+        var result = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.Equal("activation_unconfirmed", result.Code);
+        Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "exec", "-n", binding.SandboxName, "--", "bash", "-c", StockOpenShellRuntime.DaemonHealthScript]));
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+    }
+
+    [Fact]
     public async Task Error_phase_binding_gets_a_verified_stop_before_any_other_lifecycle_action()
     {
         var binding = _t.Binding("fleet-agent1-33333333", Guid.NewGuid());

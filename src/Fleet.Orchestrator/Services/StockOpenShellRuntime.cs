@@ -1068,6 +1068,13 @@ public sealed class StockOpenShellRuntime(
         "test ! -f \"$HOME/.fleet-staged\" && p=$(cat \"$HOME/.fleet-ready\") && [ -n \"$p\" ]"
         + " && grep -qa 'Fleet.Agent.dll' \"/proc/$p/cmdline\" && ! grep -qa 'prepare-stock-native' \"/proc/$p/cmdline\"";
 
+    /// <summary>
+    /// Review F4: the daemon's own <c>GET /health</c> on its loopback port answers 200 (the ready marker alone is
+    /// written before the daemon serves).
+    /// </summary>
+    internal const string DaemonHealthScript = "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 2; "
+        + "printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3; IFS= read -r status <&3; case \"$status\" in *' 200 '*) exit 0;; esac; exit 1";
+
     /// <summary>Writes this boot's activation; the launcher consumes it, prepares and starts the daemon.</summary>
     private async Task<string?> ActivateOnceAsync(ManagedBinding binding, CancellationToken ct)
     {
@@ -1075,8 +1082,8 @@ public sealed class StockOpenShellRuntime(
         var until = DateTimeOffset.UtcNow + StopSettle;
         while (DateTimeOffset.UtcNow < until)
         {
-            // Applied only when the daemon is up AND the exact UUID is observed Ready (never Error/Completed).
-            if (await ExecAsync(binding, DaemonReadyScript, ct) == 0)
+            // Applied only when the daemon is up and healthy AND the exact UUID is observed Ready (never Error/Completed).
+            if (await ExecAsync(binding, DaemonReadyScript, ct) == 0 && await ExecAsync(binding, DaemonHealthScript, ct, "bash") == 0)
             {
                 var after = await GetAsync(binding.SandboxName, ct);
                 if (after is null) return "sandbox_unobservable";
@@ -1088,10 +1095,10 @@ public sealed class StockOpenShellRuntime(
         return "activation_unconfirmed";
     }
 
-    private async Task<int> ExecAsync(ManagedBinding binding, string script, CancellationToken ct)
+    private async Task<int> ExecAsync(ManagedBinding binding, string script, CancellationToken ct, string shell = "sh")
     {
         if (await VerifyIdentityAsync(binding, ct) is not null) return -1;
-        var run = await cli.RunAsync(["sandbox", "exec", "-n", binding.SandboxName, "--", "sh", "-c", script], null, LegTimeout, ct);
+        var run = await cli.RunAsync(["sandbox", "exec", "-n", binding.SandboxName, "--", shell, "-c", script], null, LegTimeout, ct);
         return run.TimedOut ? -1 : run.ExitCode;
     }
 

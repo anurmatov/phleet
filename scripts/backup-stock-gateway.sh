@@ -12,7 +12,9 @@
 # to control/ with control/MANIFEST.json (capture time, identities, source/binding digests, native
 # epochs, refresh times); restore never imports them. A missing, foreign-owned, group/other-accessible,
 # symlinked, inconsistent or changed control input fails without COMPLETE. No live DB query or
-# credential read is added; API/manual positional invocation is unchanged.
+# credential read is added; API/manual positional invocation is unchanged. A key-encryption key configured
+# as [openshell.gateway.credential_storage] key_encryption_key_path must exist under STATE_DIR for every
+# backup; subscription backups require that explicit path (an env-only or default KEK refuses).
 #
 # Coverage is complete or the run fails: gateway.db, the gateway TOML and every trust file it uses
 # (TLS server cert/key, the gateway CA guest_tls_ca names, client CA, JWT signing/public key and kid
@@ -108,7 +110,54 @@ def linked(path):
             return False
         path = parent
 
+def configured_kek(config_path):
+    """The gateway's [openshell.gateway.credential_storage] KEK: ("path", abs) | ("env"|"none"|"unknown", None)."""
+    text = open(config_path, encoding="utf-8").read()
+    try:
+        import tomllib
+        try:
+            storage = tomllib.loads(text).get("openshell", {}).get("gateway", {}).get("credential_storage")
+        except tomllib.TOMLDecodeError:
+            return ("unknown", None)
+    except ModuleNotFoundError:  # Python < 3.11: one plain table with basic-string values only
+        storage, table = None, None
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].strip()
+            header = re.fullmatch(r"\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
+            if header:
+                table = header.group(1)
+                if table == "openshell.gateway.credential_storage":
+                    storage = {}
+                continue
+            if "credential_storage" in line:
+                return ("unknown", None)
+            if table == "openshell.gateway.credential_storage" and line:
+                pair = re.fullmatch(r'([A-Za-z0-9_]+)\s*=\s*"([^"\\]*)"', line)
+                if not pair:
+                    return ("unknown", None)
+                storage[pair.group(1)] = pair.group(2)
+    if storage is None:
+        return ("none", None)
+    if not isinstance(storage, dict):
+        return ("unknown", None)
+    if "key_encryption_key_env" in storage:
+        return ("env", None)
+    path = storage.get("key_encryption_key_path")
+    return ("path", path) if isinstance(path, str) and os.path.isabs(path) else ("unknown", None)
+
+# #502 review B1: a configured key-encryption key is part of coverage (the DB's provider credentials are
+# unrecoverable without it). It must be a regular, non-linked file under STATE_DIR; subscription snapshots
+# additionally need it configured explicitly by path, since an env or default KEK cannot be covered here.
+kek_mode, kek_path = configured_kek(config) if regular(config) and not linked(config) else ("unknown", None)
+kek_rel, kek_config = None, kek_path
+if kek_mode == "path":
+    kek_path = os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(kek_path))), os.path.basename(kek_path))
+    kek_rel = os.path.relpath(kek_path, state)
 missing = [p for p in ["gateway.db", *REQUIRED] if not regular(os.path.join(state, p)) or linked(os.path.join(state, p))]
+if kek_mode == "path" and (kek_rel.startswith("..") or not regular(kek_path) or linked(kek_path)):
+    missing.append("key_encryption_key_path")
+if sys.argv[4] and kek_mode != "path":
+    missing.append("key_encryption_key_path (subscription snapshots need an explicit KEK path under STATE_DIR)")
 if not regular(config) or linked(config):
     missing.append("CONFIG_FILE")
 if missing:
@@ -166,6 +215,7 @@ def control_manifest(paths):
         "nativeAppliedEpoch": epoch("applied"), "nativeCandidateEpoch": epoch("candidate"),
         "statusObservedAtUtc": refresh["statusObservedAtUtc"], "providerLastRefreshAtUtc": refresh["providerLastRefreshAtUtc"],
         "nextRefreshAtUtc": refresh["nextRefreshAtUtc"],
+        "keyEncryptionKey": "state/" + kek_rel, "keyEncryptionKeyConfigPath": kek_config,
     }
 control_before = {p: (os.lstat(p).st_ino, os.lstat(p).st_mtime_ns, os.lstat(p).st_size) for p in control}
 control_raw, manifest = control_manifest(control) if control else (None, None)
@@ -210,7 +260,7 @@ if control:
             handle.write(data)
     with open(os.path.join(out, "control", "MANIFEST.json"), "w") as handle:
         json.dump(manifest, handle, indent=1, sort_keys=True)
-for required in REQUIRED:
+for required in REQUIRED + ([kek_rel] if kek_rel else []):
     if not os.path.isfile(os.path.join(out, "state", required)):
         sys.exit("coverage_incomplete_in_snapshot: " + required)
 if not os.path.isfile(os.path.join(out, "config", os.path.basename(config))):

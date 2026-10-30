@@ -118,6 +118,13 @@ state="$WORK/state"; mkdir -p "$state/tls/jwt" "$WORK/control"
 for f in gateway.pem gateway-key.pem ca.pem client-ca.pem jwt/signing.pem jwt/public.pem jwt/kid; do printf 'synthetic %s\n' "$f" > "$state/tls/$f"; done
 python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("create table t(x)"); c.execute("insert into t values (1)"); c.commit()' "$state/gateway.db"
 printf '[openshell]\nversion = 2\n' > "$WORK/gateway.toml"
+# #502 review B1: subscription snapshots need the explicitly configured KEK under STATE_DIR.
+mkdir -p "$state/credentials"; printf 'synthetic-kek-32-bytes-not-real!' > "$state/credentials/key-encryption-key.bin"
+printf '[openshell]\nversion = 2\n\n[openshell.gateway.credential_storage]\nkey_encryption_key_path = "%s"\n' \
+  "$state/credentials/key-encryption-key.bin" > "$WORK/gateway-kek.toml"
+printf '[openshell]\nversion = 2\n\n[openshell.gateway.credential_storage]\nkey_encryption_key_env = "SYNTHETIC_KEK_ENV"\n' > "$WORK/gateway-env.toml"
+printf '[openshell]\nversion = 2\n\n[openshell.gateway.credential_storage]\nkey_encryption_key_path = "%s"\n' \
+  "$state/credentials/absent.bin" > "$WORK/gateway-absent.toml"
 PROVIDER=3f2b8c1e-5d4a-4b6f-9e7d-1a2b3c4d5e6f OWNER=4f0c6c8e-6f39-4f5b-9d50-6b1b4b7e2a11
 cat > "$WORK/control/subscription.json" <<JSON
 {"version":1,"purpose":"compatibility_only","agent":"agent1","providerName":"agent1-codex-sub","providerId":"$PROVIDER","providerWorkspace":"ws-a","sandboxWorkspace":"ws-a","accountId":"synthetic-account_01","ownerGeneration":"$OWNER","gatewayGeneration":"gateway-1@start","profileSha256":"$(printf 'c%.0s' $(seq 1 64))","expiresAt":"2099-01-01T00:00:00Z"}
@@ -143,7 +150,10 @@ CTL=(--subscription-source "$WORK/control/subscription.json" --managed-binding "
 expect 0 "positional API/manual backup is unchanged" bash "$BACKUP" "$WORK/plain" "$WORK/gateway.toml" "$state"
 plain=$(ls -d "$WORK/plain"/gateway-* | head -n 1)
 [[ ! -e "$plain/control" ]] || fail "plain backup grew control records"
-expect 0 "subscription backup completes with control records" bash "$BACKUP" "$WORK/sub" "$WORK/gateway.toml" "$state" "${CTL[@]}"
+expect 1 "subscription backup without an explicit KEK path fails" bash "$BACKUP" "$WORK/nokek" "$WORK/gateway.toml" "$state" "${CTL[@]}"
+expect 1 "subscription backup with an env-only KEK fails" bash "$BACKUP" "$WORK/envkek" "$WORK/gateway-env.toml" "$state" "${CTL[@]}"
+expect 1 "a configured but missing KEK fails coverage even for a positional backup" bash "$BACKUP" "$WORK/absentkek" "$WORK/gateway-absent.toml" "$state"
+expect 0 "subscription backup completes with control records" bash "$BACKUP" "$WORK/sub" "$WORK/gateway-kek.toml" "$state" "${CTL[@]}"
 snap=$(ls -d "$WORK/sub"/gateway-* | head -n 1)
 for f in COMPLETE control/MANIFEST.json control/subscription.json control/applied-runtime-binding.json control/refresh-observation.json; do
   [[ -f "$snap/$f" ]] || fail "snapshot lacks $f"
@@ -153,6 +163,7 @@ import json, sys
 m = json.load(open(sys.argv[1]))
 assert m["providerId"] == sys.argv[2] and m["nativeAppliedEpoch"] == sys.argv[3] and m["providerLastRefreshAtUtc"] == "2000-01-01T00:00:00Z"
 assert m["providerWorkspace"] == m["sandboxWorkspace"] == "ws-a" and len(m["sourceSha256"]) == 64 and len(m["bindingSha256"]) == 64
+assert m["keyEncryptionKey"] == "state/credentials/key-encryption-key.bin"
 assert all("token" not in k.lower() for k in m)
 PY
 ok "manifest records identities, digests, epochs and refresh times (no credential values)"
@@ -237,18 +248,27 @@ refuse_for "inventory is empty" "an empty checksum inventory is refused" eligibl
 cp -R "$snap" "$WORK/no-ca"; rm "$WORK/no-ca/state/tls/ca.pem"
 grep -v '  state/tls/ca.pem$' "$WORK/no-ca/SHA256SUMS" > "$WORK/no-ca/SHA256SUMS.new"; mv "$WORK/no-ca/SHA256SUMS.new" "$WORK/no-ca/SHA256SUMS"
 refuse_for "lacks required" "missing gateway state with a consistent inventory is refused" eligible_at "$WORK/no-ca" "$WORK/control/now.json"
+cp -R "$snap" "$WORK/no-kek"; rm "$WORK/no-kek/state/credentials/key-encryption-key.bin"
+grep -v '  state/credentials/key-encryption-key.bin$' "$WORK/no-kek/SHA256SUMS" > "$WORK/no-kek/SHA256SUMS.new"; mv "$WORK/no-kek/SHA256SUMS.new" "$WORK/no-kek/SHA256SUMS"
+refuse_for "configured KEK is not covered" "a snapshot missing the configured KEK and its inventory entry is refused" eligible_at "$WORK/no-kek" "$WORK/control/now.json"
+# Python < 3.11 has no tomllib: the same KEK rules hold through the minimal fallback parser.
+mkdir -p "$WORK/notoml"; printf 'raise ModuleNotFoundError("tomllib")\n' > "$WORK/notoml/tomllib.py"
+PYTHONPATH="$WORK/notoml" expect 0 "fallback parser: subscription backup with an explicit KEK completes" \
+  bash "$BACKUP" "$WORK/sub-fallback" "$WORK/gateway-kek.toml" "$state" "${CTL[@]}"
+PYTHONPATH="$WORK/notoml" expect 1 "fallback parser: env-only KEK still fails" bash "$BACKUP" "$WORK/env-fallback" "$WORK/gateway-env.toml" "$state" "${CTL[@]}"
+PYTHONPATH="$WORK/notoml" refuse_for "configured KEK is not covered" "fallback parser: missing KEK snapshot is refused" eligible_at "$WORK/no-kek" "$WORK/control/now.json"
 cp -R "$snap" "$WORK/extra"; printf 'x' > "$WORK/extra/state/unlisted"
 refuse_for "does not cover every file" "an unlisted extra file is refused" eligible_at "$WORK/extra" "$WORK/control/now.json"
 
 ln -s "$WORK/control/binding.json" "$WORK/control/binding-link.json"
-expect 1 "symlinked control input fails without COMPLETE" bash "$BACKUP" "$WORK/bad1" "$WORK/gateway.toml" "$state" \
+expect 1 "symlinked control input fails without COMPLETE" bash "$BACKUP" "$WORK/bad1" "$WORK/gateway-kek.toml" "$state" \
   --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding-link.json" --refresh-observation "$WORK/control/refresh.json"
 cp "$WORK/control/refresh.json" "$WORK/control/refresh-open.json"; chmod 644 "$WORK/control/refresh-open.json"
-expect 1 "group/other-readable control input fails" bash "$BACKUP" "$WORK/bad2" "$WORK/gateway.toml" "$state" \
+expect 1 "group/other-readable control input fails" bash "$BACKUP" "$WORK/bad2" "$WORK/gateway-kek.toml" "$state" \
   --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding.json" --refresh-observation "$WORK/control/refresh-open.json"
 printf '{"providerId":"9a9a9a9a-0000-4000-8000-000000000001","ownerGeneration":"%s","statusObservedAtUtc":"2026-10-30T12:00:00Z","providerLastRefreshAtUtc":null,"nextRefreshAtUtc":"2026-10-30T12:35:00Z"}' "$OWNER" > "$WORK/control/refresh-other.json"
 chmod 600 "$WORK/control/refresh-other.json"
-expect 1 "mismatched refresh observation fails" bash "$BACKUP" "$WORK/bad3" "$WORK/gateway.toml" "$state" \
+expect 1 "mismatched refresh observation fails" bash "$BACKUP" "$WORK/bad3" "$WORK/gateway-kek.toml" "$state" \
   --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding.json" --refresh-observation "$WORK/control/refresh-other.json"
 expect 1 "partial control flags are a usage error" bash "$BACKUP" "$WORK/bad4" "$WORK/gateway.toml" "$state" --subscription-source "$WORK/control/subscription.json"
 for bad in bad1 bad2 bad3; do

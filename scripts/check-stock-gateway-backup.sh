@@ -45,6 +45,41 @@ def strict(raw):
         return dict(items)
     return json.loads(raw, object_pairs_hook=pairs)
 
+def configured_kek(config_path):
+    """The gateway's [openshell.gateway.credential_storage] KEK: ("path", abs) | ("env"|"none"|"unknown", None)."""
+    text = open(config_path, encoding="utf-8").read()
+    try:
+        import tomllib
+        try:
+            storage = tomllib.loads(text).get("openshell", {}).get("gateway", {}).get("credential_storage")
+        except tomllib.TOMLDecodeError:
+            return ("unknown", None)
+    except ModuleNotFoundError:  # Python < 3.11: one plain table with basic-string values only
+        storage, table = None, None
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].strip()
+            header = re.fullmatch(r"\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
+            if header:
+                table = header.group(1)
+                if table == "openshell.gateway.credential_storage":
+                    storage = {}
+                continue
+            if "credential_storage" in line:
+                return ("unknown", None)
+            if table == "openshell.gateway.credential_storage" and line:
+                pair = re.fullmatch(r'([A-Za-z0-9_]+)\s*=\s*"([^"\\]*)"', line)
+                if not pair:
+                    return ("unknown", None)
+                storage[pair.group(1)] = pair.group(2)
+    if storage is None:
+        return ("none", None)
+    if not isinstance(storage, dict):
+        return ("unknown", None)
+    if "key_encryption_key_env" in storage:
+        return ("env", None)
+    path = storage.get("key_encryption_key_path")
+    return ("path", path) if isinstance(path, str) and os.path.isabs(path) else ("unknown", None)
+
 UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?Z")
 def instant(value, what, nullable=False):
     """Strict UTC timestamp to an aware datetime (sub-second kept); null only where explicitly allowed."""
@@ -100,6 +135,13 @@ except (ValueError, UnicodeDecodeError):
 if manifest.get("bindingSha256") != listed["control/applied-runtime-binding.json"] \
         or manifest.get("sourceSha256") != listed["control/subscription.json"]:
     refuse("snapshot manifest does not match its control records")
+# Review B1: the KEK the snapshot's own gateway config names must be in the verified inventory.
+config_name = next(n for n in listed if n.startswith("config/"))
+kek_mode, kek_path = configured_kek(os.path.join(snapshot, config_name))
+kek_entry = manifest.get("keyEncryptionKey")
+if kek_mode != "path" or kek_path != manifest.get("keyEncryptionKeyConfigPath") or not isinstance(kek_entry, str) \
+        or not kek_entry.startswith("state/") or kek_entry not in listed:
+    refuse("configured KEK is not covered by the snapshot inventory")
 
 # 2. Current control inputs: regular, non-linked, owned by this uid, no group/other access (review L3, as backup).
 for path in (source_path, binding_path, refresh_path):

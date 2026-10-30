@@ -831,6 +831,9 @@ scripts/backup-stock-gateway.sh DIR TOML STATE \
   --refresh-observation FILE
 ```
 
+Subscription backups also require the gateway's key-encryption key configured explicitly as
+`[openshell.gateway.credential_storage] key_encryption_key_path` under STATE_DIR (an env-only or default KEK cannot
+be covered and refuses); any configured KEK path must exist for every backup, and it is recorded in the manifest.
 `--managed-binding` is the operator's byte copy of the owned agent's `AppliedRuntimeBinding` row (exported under
 separately scoped single-agent read authority; no export helper is added). `--refresh-observation` is the
 independently retained latest observation: exactly `providerId`, `ownerGeneration`, `statusObservedAtUtc`,
@@ -839,8 +842,8 @@ They land in `control/` with `control/MANIFEST.json` (capture time, gateway gene
 binding digests, native epochs, state, retired count, refresh times). Before any restore, with every owned
 writer stopped, run `scripts/check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT --subscription-source …
 --managed-binding … --refresh-observation …` with a refresh observation taken after the snapshot. It refuses a
-snapshot whose checksum inventory is empty, incomplete or mismatched, that lacks the gateway DB/config/trust or
-control records, or whose DB fails `integrity_check`; current control inputs that are not regular 0600 files owned
+snapshot whose checksum inventory is empty, incomplete or mismatched, that lacks the gateway DB/config/trust, the
+KEK its own config names, or the control records, or whose DB fails `integrity_check`; current control inputs that are not regular 0600 files owned
 by the operator; a binding row that differs from the recorded `bindingSha256` or any owner/epoch/workspace/provider
 tuple, state or retired reference; a changed source or identity; and a refresh at or after the (sub-second)
 capture time, compared as parsed UTC instants. Missing or malformed freshness fields are refusals. Capture and

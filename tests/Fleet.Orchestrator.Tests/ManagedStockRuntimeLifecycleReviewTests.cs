@@ -1129,3 +1129,511 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         return harness;
     }
 }
+
+/// <summary>
+/// #502 subscription lifecycle over the synthetic adapter fakes: persisted workspace scoping with same-named resources in
+/// two workspaces, cleanup after source loss/change, clock-driven pending/running expiry, and actual Docker/API
+/// retirement transitions with retained history. Source checks, not runtime qualification (#493/#501).
+/// </summary>
+public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
+{
+    private const string ProviderId = StockSubscriptionBindingTests.ProviderId;
+    private const string Provider = "agent1-codex-sub";
+    private const string SyntheticProfileHash = "b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702";
+    private readonly ManagedStockRuntimeAdapterTests _t = new(PrivateBase.Create("managed-sub-"));
+    private readonly MutableClock _clock = new() { Now = DateTimeOffset.UtcNow };
+    private readonly ScopedCli _cli;
+
+    public ManagedStockSubscriptionLifecycleTests()
+    {
+        _cli = new ScopedCli(_clock);
+        // The agent's provider in ws-a, and a same-named foreign provider in ws-b that must never be touched.
+        _cli.Providers[("ws-a", Provider)] = (ProviderId, "codex-subscription-native", ["CODEX_AUTH_ACCESS_TOKEN"]);
+        _cli.Providers[("ws-b", Provider)] = ("9a9a9a9a-0000-4000-8000-000000000001", "codex-subscription-native", ["CODEX_AUTH_ACCESS_TOKEN"]);
+        _t._store.ProfileHashes = ManagedStockRuntimeAdapterTests.FakeStore.PinnedProfiles.TrimEnd('}')
+            + ",\"codex-subscription-native\":\"" + SyntheticProfileHash + "\"}";
+    }
+
+    public void Dispose() => _t.Dispose();
+
+    private string WriteSource(string workspace = "ws-a", DateTimeOffset? expires = null) =>
+        StockSubscriptionBindingTests.WriteSource(_t._dir, Source(workspace, expires));
+
+    private System.Text.Json.Nodes.JsonObject Source(string workspace = "ws-a", DateTimeOffset? expires = null)
+    {
+        var source = StockSubscriptionBindingTests.Source(workspace: workspace, expires: expires ?? _clock.Now.AddHours(2), profile: SyntheticProfileHash);
+        source["gatewayGeneration"] = _t._host.Generation;
+        return source;
+    }
+
+    private Agent SubscriptionAgent(string desired, string applied, ManagedRecord? record = null)
+    {
+        var agent = _t.ManagedAgent(desired, applied, record);
+        agent.NativeAuthMode = "subscription";
+        agent.ProviderApiKeyEnvRef = null;
+        return agent;
+    }
+
+    private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null) => _t.Runtime(dockerStop, cli: _cli, clock: _clock);
+
+    private ManagedBinding SubBinding(string name, string phase = "Ready", string? workspace = "ws-a", DateTimeOffset? expires = null, bool attached = true)
+    {
+        var id = Guid.NewGuid().ToString();
+        if (workspace is not null)
+        {
+            _cli.Cli(workspace).Sandboxes[name] = (id, phase);
+            if (attached) _cli.Attached[(workspace, name)] = [Provider];
+        }
+        return new ManagedBinding(name, id, Guid.NewGuid(), "stock-agent:synthetic", 1, new string('b', 64), "subscription", "", Provider, _t._host.Generation)
+        {
+            SandboxWorkspace = workspace,
+            Subscription = new ManagedSubscription("ws-a", ProviderId, "synthetic-account_01", Guid.Parse(StockSubscriptionBindingTests.Owner),
+                new string('d', 64), expires ?? _clock.Now.AddHours(2)),
+        };
+    }
+
+    private bool ResourceCall((string? Ws, List<string> Args, IReadOnlyDictionary<string, string>? Env) c) => c.Args[0] is not "--version";
+
+    // ── C3: first apply, persisted scopes, no provider mutation, same-named foreign workspace untouched ──
+
+    [Fact]
+    public async Task First_apply_persists_both_scopes_and_scopes_every_resource_call()
+    {
+        WriteSource();
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = ["exited"];
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        var applied = record.Applied!;
+        Assert.Equal(("subscription", "ws-a", Provider, ""), (applied.AuthMode, applied.SandboxWorkspace, applied.Provider, applied.KeyRef));
+        Assert.Equal(("ws-a", ProviderId, "synthetic-account_01"), (applied.Subscription!.ProviderWorkspace, applied.Subscription.ProviderId, applied.Subscription.AccountId));
+        Assert.Empty(applied.ServiceProviders);
+        // Every resource call carries exactly --workspace ws-a; nothing ran in ws-b or unscoped.
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+        Assert.Empty(_cli.Cli("ws-b").Calls);
+        // No provider create/update/import/rotate/delete and no credential value in any child environment.
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" && c.Args[1] is "create" or "update" or "delete" or "get");
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Contains("rotate") || c.Args.Contains("configure"));
+        Assert.All(_cli.Calls, c => Assert.Null(c.Env));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal([Provider], create.Args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => create.Args[p.i + 1]));
+        // The candidate (with both scopes) was checkpointed before the create.
+        var first = ManagedRecord.Parse(_t._store.History.First(h => ManagedRecord.Parse(h).Candidate is not null));
+        Assert.Equal(("ws-a", ProviderId), (first.Candidate!.SandboxWorkspace, first.Candidate.Subscription!.ProviderId));
+        // Workload bundle: nonsecret selection only, no API-key reference; enrollment capped at the outside expiry.
+        var settings = System.Text.Json.Nodes.JsonNode.Parse(_cli.Cli("ws-a").Uploads.Last(u => u.Remote == "/home/agent/app/appsettings.json").Content!)!;
+        Assert.Equal("subscription", settings["Agent"]!["NativeAuthMode"]!.GetValue<string>());
+        Assert.Null(settings["Agent"]!["ProviderApiKeyEnvRef"]);
+        Assert.Equal("synthetic-account_01", settings["StockOpenShell"]!["SubscriptionAccountId"]!.GetValue<string>());
+        var authority = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!;
+        Assert.True(authority["ExpiresAt"]!.GetValue<DateTimeOffset>() <= applied.Subscription.ExpiresAt);
+    }
+
+    [Theory]
+    [InlineData("absent")]
+    [InlineData("wrong_type")]
+    [InlineData("extra_key")]
+    [InlineData("wrong_uuid")]
+    [InlineData("reauthorize")]
+    [InlineData("window")]
+    [InlineData("generation")]
+    [InlineData("profile")]
+    public async Task Unverifiable_provider_refuses_before_any_mutation(string fault)
+    {
+        WriteSource();
+        switch (fault)
+        {
+            case "absent": _cli.Providers.Remove(("ws-a", Provider)); break;
+            case "wrong_type": _cli.Providers[("ws-a", Provider)] = (ProviderId, "openai", ["CODEX_AUTH_ACCESS_TOKEN"]); break;
+            case "extra_key": _cli.Providers[("ws-a", Provider)] = (ProviderId, "codex-subscription-native", ["CODEX_AUTH_ACCESS_TOKEN", "OPENAI_API_KEY"]); break;
+            case "wrong_uuid": _cli.Providers[("ws-a", Provider)] = ("9a9a9a9a-0000-4000-8000-000000000002", "codex-subscription-native", ["CODEX_AUTH_ACCESS_TOKEN"]); break;
+            case "reauthorize": _cli.RefreshState = ("reauthorization_required", "reauthorize", "oauth_invalid_grant"); break;
+            case "window": _cli.NextRefreshIn = TimeSpan.FromSeconds(100); break;
+            case "generation": _t._host.Generation = "gateway-2@later"; break;
+            case "profile": _cli.ProfileYaml = "profile: changed\n"; break;
+        }
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker"));
+        var dockerStops = 0;
+
+        var result = await Runtime(_ => { dockerStops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal(409, result.Status);
+        Assert.Equal(fault == "profile" ? "provider_profile_hash_mismatch:codex-subscription-native" : "subscription_provider_unverified", result.Code);
+        Assert.Equal(0, dockerStops);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        var unchanged = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("none", null, null, "docker"), (unchanged.State, unchanged.Candidate, unchanged.Applied, _t._store.Get("agent1").AppliedRuntimeKind));
+    }
+
+    [Fact]
+    public async Task Conflicting_recorded_owner_is_refused()
+    {
+        WriteSource();
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker"));
+        var other = SubscriptionAgent(desired: "openshell", applied: "openshell",
+            new ManagedRecord { State = "stopped", Applied = SubBinding("fleet-agent2-77777777", "Stopped") });
+        other.Name = other.ShortName = other.ContainerName = "agent2";
+        _t._store.Add(other);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "subscription_owner_conflict"), (result.Status, result.Code));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+    }
+
+    // ── C2: outside source checks and expiry ──
+
+    [Theory]
+    [InlineData("missing", "subscription_binding_missing")]
+    [InlineData("mode", "subscription_binding_invalid")]
+    [InlineData("expired", "subscription_binding_expired")]
+    [InlineData("api_ref", "openshell_requires_codex_api_key_policy_and_no_socket")]
+    [InlineData("extra_route", "managed_route_unsupported:mcp:other")]
+    public async Task Source_and_selection_faults_refuse_before_effects(string fault, string code)
+    {
+        var path = fault == "missing" ? null : WriteSource(expires: fault == "expired" ? _clock.Now.AddSeconds(-5) : null);
+        if (fault == "mode") File.SetUnixFileMode(path!, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.OtherRead);
+        var agent = SubscriptionAgent(desired: "openshell", applied: "docker");
+        if (fault == "api_ref") agent.ProviderApiKeyEnvRef = "SYNTHETIC_API_KEY";
+        if (fault == "extra_route") agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "other", Url = "https://other.example.test/mcp", TransportType = "http" });
+        _t._store.Add(agent);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal((409, code), (result.Status, result.Code));
+        Assert.Empty(_cli.Calls.Where(ResourceCall));
+        var unchanged = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("none", null, null, "docker"), (unchanged.State, unchanged.Candidate, unchanged.Applied, _t._store.Get("agent1").AppliedRuntimeKind));
+    }
+
+    [Fact]
+    public async Task Expiry_during_a_pending_apply_cuts_the_candidate_without_activation()
+    {
+        WriteSource(expires: _clock.Now.AddMinutes(10));
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = ["exited"];
+        _cli.Cli("ws-a").OnCreate = () => _clock.Now = _clock.Now.AddMinutes(11);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "subscription_binding_expired"), (result.Status, result.Code));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("revoked", record.State);
+        Assert.Equal(["subscription_binding_expired"], record.Errors);
+        Assert.Null(record.Candidate);
+        var kept = Assert.Single(record.Superseded); // custody kept, still countable
+        Assert.Equal("ws-a", kept.SandboxWorkspace);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Any(a => a.Contains(".fleet-activate")));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "attach"]));
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "stop", kept.SandboxName]));
+        Assert.Equal("Stopped", _cli.Cli("ws-a").Sandboxes[kept.SandboxName].Phase);
+        Assert.Empty(_cli.Attached[("ws-a", kept.SandboxName)]);
+        Assert.Equal(1, Count(await Runtime().RollbackPreflightAsync(default), "subscriptionBindings"));
+    }
+
+    [Fact]
+    public async Task Running_expiry_on_the_monitor_pass_revokes_and_stops_once()
+    {
+        var binding = SubBinding("fleet-agent1-e1e1e1e1", expires: _clock.Now.AddMinutes(1));
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "applied", Applied = binding }));
+        _t.WriteAuthority("active");
+        var runtime = Runtime();
+
+        await runtime.CheckSubscriptionExpiryAsync("agent1", default); // not yet expired: nothing happens
+        Assert.Empty(_cli.Calls);
+        _clock.Now = _clock.Now.AddMinutes(2);
+        await runtime.CheckSubscriptionExpiryAsync("agent1", default);
+
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("revoked", "subscription_binding_expired"), (record.State, Assert.Single(record.Errors)));
+        Assert.Equal("revoked", System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!["State"]!.GetValue<string>());
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "provider", "detach", binding.SandboxName, Provider]));
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        var calls = _cli.Calls.Count;
+        await runtime.CheckSubscriptionExpiryAsync("agent1", default);
+        Assert.Equal(calls, _cli.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Partial_running_expiry_is_held_and_never_retried_by_the_monitor()
+    {
+        var binding = SubBinding("fleet-agent1-e2e2e2e2", expires: _clock.Now.AddSeconds(-1));
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "applied", Applied = binding }));
+        _cli.AttachedListFails = true;
+        var runtime = Runtime();
+
+        await runtime.CheckSubscriptionExpiryAsync("agent1", default);
+
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains("subscription_binding_expired", record.Errors);
+        Assert.Contains(record.Errors, e => e.Contains("provider_attachment_unobservable"));
+        Assert.Contains(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName])); // stop still ran
+        var calls = _cli.Calls.Count;
+        await runtime.CheckSubscriptionExpiryAsync("agent1", default);
+        await runtime.CheckSubscriptionExpiryAsync("agent1", default);
+        Assert.Equal(calls, _cli.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Start_after_expiry_is_revoke_and_stop_not_activation()
+    {
+        var binding = SubBinding("fleet-agent1-e3e3e3e3", phase: "Stopped", expires: _clock.Now.AddSeconds(-1));
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding }));
+
+        var result = await Runtime().StartAsync("agent1", default);
+
+        Assert.Equal("subscription_binding_expired", result.Code);
+        Assert.Equal("revoked", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "start"]));
+    }
+
+    // ── C6: cleanup uses persisted tuples after source loss/change ──
+
+    [Theory]
+    [InlineData("deleted")]
+    [InlineData("changed")]
+    public async Task Revoke_after_source_loss_or_change_uses_the_persisted_workspace(string change)
+    {
+        var binding = SubBinding("fleet-agent1-c6c6c6c6");
+        // A same-named sandbox with the same-named provider attached in the foreign workspace.
+        _cli.Cli("ws-b").Sandboxes[binding.SandboxName] = (Guid.NewGuid().ToString(), "Ready");
+        _cli.Attached[("ws-b", binding.SandboxName)] = [Provider];
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "applied", Applied = binding }));
+        var path = WriteSource();
+        if (change == "deleted") File.Delete(path);
+        else WriteSource(workspace: "ws-b");
+
+        var result = await Runtime().RevokeAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        Assert.Equal("Stopped", _cli.Cli("ws-a").Sandboxes[binding.SandboxName].Phase);
+        Assert.Empty(_cli.Attached[("ws-a", binding.SandboxName)]);
+        Assert.Empty(_cli.Cli("ws-b").Calls);
+        Assert.DoesNotContain(_cli.Calls, c => c.Ws == "ws-b");
+        Assert.Equal(("Ready", 1), (_cli.Cli("ws-b").Sandboxes[binding.SandboxName].Phase, _cli.Attached[("ws-b", binding.SandboxName)].Count));
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+    }
+
+    [Fact]
+    public async Task Missing_persisted_scope_is_unrecoverable_without_any_unscoped_command()
+    {
+        var binding = SubBinding("fleet-agent1-00000000", workspace: null);
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready"); // an ambient same-name sandbox exists
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "applied", Applied = binding }));
+
+        var result = await Runtime().RevokeAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.Contains(result.Errors, e => e.EndsWith("subscription_binding_unrecoverable", StringComparison.Ordinal));
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.Empty(_cli.Calls);
+        Assert.Empty(_cli.Unscoped.Calls);
+    }
+
+    [Fact]
+    public async Task Independent_detach_failure_never_suppresses_stop_and_keeps_state()
+    {
+        var binding = SubBinding("fleet-agent1-d1d1d1d1");
+        _cli.DetachFails = true;
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "applied", Applied = binding }));
+
+        var result = await Runtime().RevokeAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        Assert.Contains(result.Errors, e => e.StartsWith("detach:", StringComparison.Ordinal) && e.EndsWith("provider_detach_unknown", StringComparison.Ordinal));
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.NotEmpty(_t._broker.Deletes);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("needs_attention", binding.SandboxWorkspace), (record.State, record.Applied!.SandboxWorkspace));
+    }
+
+    // ── C9: actual adapter transitions retire subscription history atomically ──
+
+    private Agent DockerTargetWithHistory(out ManagedBinding applied, out ManagedBinding history, string state = "applied")
+    {
+        applied = SubBinding("fleet-agent1-a9a9a9a9");
+        history = SubBinding("fleet-agent1-b9b9b9b9", phase: "Stopped", attached: false);
+        var agent = SubscriptionAgent(desired: "docker", applied: "openshell", new ManagedRecord { State = state, Applied = applied, Superseded = [history] });
+        agent.NativeAuthMode = null; // desired selection explicitly changed away from subscription
+        _t._store.Add(agent);
+        _t.WriteAuthority("active");
+        return agent;
+    }
+
+    [Fact]
+    public async Task Subscription_to_docker_archives_and_retires_every_tuple_in_one_commit()
+    {
+        DockerTargetWithHistory(out var applied, out var history);
+        var runtime = Runtime();
+        Assert.Equal(1, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var stored = _t._store.Get("agent1");
+        Assert.Equal("docker", stored.AppliedRuntimeKind);
+        var record = ManagedRecord.Parse(stored.AppliedRuntimeBinding);
+        Assert.Null(record.Applied);
+        Assert.Empty(record.SubscriptionTuples());
+        Assert.Equal(new[] { applied.Epoch, history.Epoch }.Order(), record.RetiredSubscriptions.Select(r => r.Epoch).Order());
+        foreach (var retired in record.RetiredSubscriptions)
+        {
+            Assert.Equal(("ws-a", ProviderId), (retired.SandboxWorkspace, retired.ProviderId));
+            Assert.Equal(retired.ArchiveSha256, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(retired.ArchivePath))));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(retired.ArchivePath));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(Path.GetDirectoryName(retired.ArchivePath)!));
+            var archive = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(retired.ArchivePath))!;
+            Assert.Equal("docker", archive["handoff"]!["target"]!.GetValue<string>());
+            Assert.Equal(retired.SandboxId, archive["binding"]!["sandboxId"]!.GetValue<string>());
+        }
+        Assert.Equal(0, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+        // Inert history: a later Start/revoke never dispatches to the retired sandboxes.
+        Assert.Equal("managed_binding_missing", (await runtime.StartAsync("agent1", default)).Code);
+    }
+
+    [Theory]
+    [InlineData("docker_failed")]
+    [InlineData("archive_conflict")]
+    [InlineData("lost_cas")]
+    [InlineData("still_attached")]
+    public async Task Interrupted_retirement_keeps_old_tuples_countable(string fault)
+    {
+        DockerTargetWithHistory(out _, out var history);
+        switch (fault)
+        {
+            case "docker_failed": _t._dockerResult = (false, "image missing"); break;
+            case "archive_conflict":
+                var dir = Path.Combine(_t._dir, "managed", "agent1", "retired");
+                Directory.CreateDirectory(dir);
+                File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                File.WriteAllText(Path.Combine(dir, history.Epoch.ToString("N") + ".json"), "{\"binding\":{\"different\":true}}");
+                break;
+            case "lost_cas": _t._store.RejectKind = "docker"; break;
+            case "still_attached": _cli.Attached[("ws-a", history.SandboxName)] = [Provider]; _cli.DetachFails = true; break;
+        }
+        var runtime = Runtime();
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.False(result.Ok);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Empty(record.RetiredSubscriptions);
+        Assert.Equal(2, record.SubscriptionTuples().Count());
+        Assert.Equal(1, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
+        if (fault == "lost_cas") // archives written before a lost CAS remain evidence only
+            Assert.Equal(2, Directory.GetFiles(Path.Combine(_t._dir, "managed", "agent1", "retired")).Length);
+    }
+
+    [Fact]
+    public async Task Subscription_to_api_creates_a_verified_api_binding_and_retires_history()
+    {
+        var old = SubBinding("fleet-agent1-f9f9f9f9", phase: "Stopped", attached: false);
+        var agent = _t.ManagedAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "revoked", Applied = old });
+        _t._store.Add(agent);
+        var runtime = Runtime();
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("api_key", null, "applied"), (record.Applied!.AuthMode, record.Applied.SandboxWorkspace, record.State));
+        Assert.NotEqual(old.SandboxId, record.Applied.SandboxId);
+        Assert.Equal(old.Epoch, Assert.Single(record.RetiredSubscriptions).Epoch);
+        Assert.Empty(record.SubscriptionTuples());
+        Assert.Equal(0, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
+        // The old subscription sandbox was only touched in its persisted workspace; the API sandbox keeps the ambient scope.
+        Assert.All(_cli.Calls.Where(c => c.Args.Contains(old.SandboxName)), c => Assert.Equal("ws-a", c.Ws));
+        Assert.Contains(_cli.Unscoped.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+    }
+
+    [Fact]
+    public async Task Desired_subscription_alone_counts_and_unparsable_records_count()
+    {
+        _t._store.Add(SubscriptionAgent(desired: "docker", applied: "docker"));
+        var broken = _t.ManagedAgent(desired: "docker", applied: "docker");
+        broken.Name = broken.ShortName = "agent2";
+        broken.NativeAuthMode = null;
+        broken.AppliedRuntimeBinding = "{not json";
+        _t._store.Add(broken);
+        Assert.Equal(2, Count(await Runtime().RollbackPreflightAsync(default), "subscriptionBindings"));
+    }
+
+    private static int Count(object preflight, string key) =>
+        System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(preflight)).RootElement.GetProperty(key).GetInt32();
+
+    internal sealed class MutableClock : TimeProvider
+    {
+        public DateTimeOffset Now;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    /// <summary>
+    /// The pinned CLI as seen per workspace: a leading <c>--workspace W</c> selects that workspace's sandboxes, providers
+    /// and attachments; calls without it go to a separate unscoped fake. Stock outputs follow the pinned 0.1.5 shapes.
+    /// </summary>
+    internal sealed class ScopedCli(MutableClock clock) : IStockCli
+    {
+        public readonly List<(string? Ws, List<string> Args, IReadOnlyDictionary<string, string>? Env)> Calls = [];
+        public readonly ManagedStockRuntimeAdapterTests.FakeCli Unscoped = new();
+        private readonly Dictionary<string, ManagedStockRuntimeAdapterTests.FakeCli> _workspaces = new();
+        public readonly Dictionary<(string Ws, string Name), (string Id, string Type, string[] Keys)> Providers = new();
+        public readonly Dictionary<(string Ws, string Sandbox), HashSet<string>> Attached = new();
+        public (string Status, string Recovery, string Failure) RefreshState = ("refreshed", "-", "");
+        public TimeSpan NextRefreshIn = TimeSpan.FromMinutes(35);
+        public string ProfileYaml = "profile: synthetic\n";
+        public bool DetachFails, AttachedListFails;
+
+        public ManagedStockRuntimeAdapterTests.FakeCli Cli(string workspace) =>
+            _workspaces.TryGetValue(workspace, out var cli) ? cli : _workspaces[workspace] = new();
+
+        public async Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv, TimeSpan timeout, CancellationToken ct)
+        {
+            var list = args.ToList();
+            string? ws = null;
+            if (list.Count >= 2 && list[0] == "--workspace") { ws = list[1]; list = list[2..]; }
+            if (list.Count >= 2 && list[0] == "--color") list = list[2..];
+            lock (Calls) Calls.Add((ws, list, secretEnv));
+            string At(int i) => list.Count > i ? list[i] : "";
+            if (ws is null) return await Unscoped.RunAsync(list, secretEnv, timeout, ct);
+            switch ((At(0), At(1), At(2)))
+            {
+                case ("provider", "list", _):
+                    var entries = Providers.Where(p => p.Key.Ws == ws).Select(p => new
+                    {
+                        id = p.Value.Id, name = p.Key.Name, workspace = ws, type = p.Value.Type, credential_keys = p.Value.Keys,
+                    });
+                    return new(0, System.Text.Json.JsonSerializer.Serialize(new { providers = entries, next_page_token = "" }));
+                case ("provider", "refresh", "status"):
+                    var now = clock.Now;
+                    return new(0, StockSubscriptionBindingTests.RefreshStatus(At(3), RefreshState.Status, RefreshState.Recovery,
+                        expires: Stamp(now.AddMinutes(40)), next: Stamp(now + NextRefreshIn), last: Stamp(now.AddMinutes(-25)), failure: RefreshState.Failure));
+                case ("profile", "export", _):
+                    return new(0, ProfileYaml);
+                case ("sandbox", "provider", "list"):
+                    if (AttachedListFails) return new(1, "");
+                    var names = Attached.TryGetValue((ws, At(3)), out var set) ? set.ToArray() : [];
+                    return new(0, System.Text.Json.JsonSerializer.Serialize(new { providers = names.Select(n => new { name = n, type = "codex-subscription-native", credential_keys = Array.Empty<string>(), config_keys = Array.Empty<string>() }), next_page_token = "" }));
+                case ("sandbox", "provider", "attach"):
+                    (Attached.TryGetValue((ws, At(3)), out var attach) ? attach : Attached[(ws, At(3))] = []).Add(At(4));
+                    return new(0, "");
+                case ("sandbox", "provider", "detach"):
+                    if (DetachFails) return new(1, "");
+                    if (Attached.TryGetValue((ws, At(3)), out var detach)) detach.Remove(At(4));
+                    return new(0, "");
+                case ("sandbox", "create", _):
+                    var name = list[list.IndexOf("--name") + 1];
+                    Attached[(ws, name)] = [.. list.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => list[p.i + 1])];
+                    return await Cli(ws).RunAsync(list, secretEnv, timeout, ct);
+                default:
+                    return await Cli(ws).RunAsync(list, secretEnv, timeout, ct);
+            }
+        }
+
+        private static string Stamp(DateTimeOffset value) => value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+    }
+}

@@ -60,6 +60,57 @@ public class ManagedStockRuntimeTests
         Assert.Equal("managed_runtime_unavailable", AgentPatchHelpers.RuntimeApplyFault(a));
     }
 
+    [Theory]
+    // #502 C1: subscription accepts only a null/cleared API-key reference; API behavior unchanged; mixed/unknown refused.
+    [InlineData("openshell", "subscription", null, 0, null)]
+    [InlineData("openshell", "subscription", "", 0, null)]
+    [InlineData("openshell", "subscription", "TEST_API_KEY", 400, "subscription_rejects_provider_key_reference")]
+    [InlineData("openshell", "api_key", "TEST_API_KEY", 0, null)]
+    [InlineData("openshell", "api_key", "", 400, "openshell_requires_codex_api_key_policy_and_no_socket")]
+    [InlineData("openshell", "oauth", null, 400, "unsupported_native_auth_mode")]
+    [InlineData("openshell", "Subscription", null, 400, "unsupported_native_auth_mode")]
+    [InlineData("docker", "subscription", null, 0, null)]
+    public async Task Subscription_selection_is_atomic_and_needs_no_key_reference(string runtime, string auth, string? keyRef, int status, string? code)
+    {
+        using var db = Db();
+        db.SandboxPolicies.Add(new() { Name = "test", Versions = [new() { Version = 1, Yaml = PolicyYaml, Sha256 = SandboxPolicyValidation.Hash(PolicyYaml) }] });
+        await db.SaveChangesAsync();
+        var a = Agent();
+        a.AppliedRuntimeBinding = "previous-binding";
+        a.NativeAuthMode = "api_key";
+        a.ProviderApiKeyEnvRef = "OLD_KEY";
+        var fault = await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, a, runtime, 1, auth, keyRef ?? (auth == "subscription" ? "" : null));
+        if (status == 0)
+        {
+            Assert.Null(fault);
+            Assert.Equal(auth, a.NativeAuthMode);
+            if (auth == "subscription") Assert.Null(a.ProviderApiKeyEnvRef);
+        }
+        else
+        {
+            Assert.Equal((status, code), (fault!.Status, fault.Code));
+            // Nothing from a refused request reaches the agent: the earlier selection is intact.
+            Assert.Equal(("docker", "api_key", "OLD_KEY"), (a.RuntimeKind, a.NativeAuthMode, a.ProviderApiKeyEnvRef));
+        }
+        Assert.Equal("previous-binding", a.AppliedRuntimeBinding);
+        Assert.Equal("docker", a.AppliedRuntimeKind);
+    }
+
+    [Fact]
+    public async Task Subscription_keeping_an_old_key_reference_is_a_mixed_save()
+    {
+        using var db = Db();
+        db.SandboxPolicies.Add(new() { Name = "test", Versions = [new() { Version = 1, Yaml = PolicyYaml, Sha256 = SandboxPolicyValidation.Hash(PolicyYaml) }] });
+        await db.SaveChangesAsync();
+        var a = Agent();
+        a.NativeAuthMode = "api_key";
+        a.ProviderApiKeyEnvRef = "OLD_KEY";
+        // Not sending the reference keeps the stored one, which subscription refuses rather than silently clearing.
+        var fault = await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, a, "openshell", 1, "subscription", null);
+        Assert.Equal((400, "subscription_rejects_provider_key_reference"), (fault!.Status, fault.Code));
+        Assert.Equal("api_key", a.NativeAuthMode);
+    }
+
     [Fact]
     public async Task Missing_version_refuses_and_docker_defaults_are_unchanged()
     {

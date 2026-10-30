@@ -20,7 +20,13 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     private const string Key = "sk-synthetic-value-never-in-argv";
     private const string BotToken = "424242:synthetic-bot-secret-never-in-argv";
     private const string IngestToken = "cj1.ingest.agent1.synthetic-journal-mac-never-in-argv";
-    internal readonly string _dir = Directory.CreateTempSubdirectory("managed-stock-").FullName;
+    internal readonly string _dir;
+
+    public ManagedStockRuntimeAdapterTests() : this(null) { }
+
+    /// <summary>#502: subscription fixtures need a ConfigDir whose ancestors carry no group/other write bits.</summary>
+    internal ManagedStockRuntimeAdapterTests(string? baseDir) =>
+        _dir = baseDir ?? Directory.CreateTempSubdirectory("managed-stock-").FullName;
     internal readonly FakeCli _cli = new();
     internal readonly FakeStore _store = new();
     internal readonly FakeHost _host = new();
@@ -997,14 +1003,15 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     // ── fixtures ───────────────────────────────────────────────────────────
 
     internal readonly List<string> _dockerProvisions = [];
-    private (bool Ok, string Message) _dockerResult = (true, "provisioned");
+    internal (bool Ok, string Message) _dockerResult = (true, "provisioned");
     private JsonObject? _serviceHosts = new() { ["temporal"] = "temporal.example.test", ["telegram"] = "telegram.example.test" };
     private string? _journalHost;
     private string? _generatedMcp;
     private string _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"}}";
     internal string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
-    internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, AgentRegistry? registry = null)
+    internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, AgentRegistry? registry = null,
+        IStockCli? cli = null, TimeProvider? clock = null)
     {
         Directory.CreateDirectory(_dir);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -1022,7 +1029,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         File.WriteAllText(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), "model = \"synthetic\"\n");
         var services = new ServiceCollection();
         if (registry is not null) services.AddSingleton(registry);
-        return new StockOpenShellRuntime(Config(), _cli, Provisioner(), _store, _host, _broker.Credentials,
+        return new StockOpenShellRuntime(Config(), cli ?? _cli, Provisioner(), _store, _host, _broker.Credentials,
             services.BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)
         {
             LegTimeout = TimeSpan.FromMilliseconds(400),
@@ -1037,6 +1044,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 return Task.FromResult(_dockerResult);
             },
             DockerWorkspace = _ => DockerWorkspaceDir,
+            Clock = clock ?? TimeProvider.System,
         };
     }
 

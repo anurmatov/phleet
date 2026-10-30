@@ -1522,6 +1522,13 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
         // Inert history: a later Start/revoke never dispatches to the retired sandboxes.
         Assert.Equal("managed_binding_missing", (await runtime.StartAsync("agent1", default)).Code);
+        // C12a: the named operator's seven-day evidence deletion removes archives only; the compact retirement
+        // references stay and nothing is revived or counted again.
+        foreach (var retired in record.RetiredSubscriptions) File.Delete(retired.ArchivePath);
+        Assert.Equal(2, ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).RetiredSubscriptions.Count);
+        Assert.Equal(0, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
+        await runtime.CheckSubscriptionExpiryAsync("agent1", default);
+        Assert.Equal("managed_binding_missing", (await runtime.RevokeAsync("agent1", default)).Code);
     }
 
     [Theory]

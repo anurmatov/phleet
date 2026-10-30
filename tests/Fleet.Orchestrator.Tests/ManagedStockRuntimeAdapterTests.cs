@@ -1420,14 +1420,27 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
 /// <summary>
 /// #503 shared fixture: a valid saved policy whose <c>network_middlewares</c> bind the fixed <c>stock-memory</c> signer to
-/// exactly the given receiving hosts, each with its one inspected, enforced <c>host:443</c> MCP endpoint.
+/// exactly the given receiving hosts, each with its one inspected, enforced <c>host:443</c> MCP endpoint and exact MCP rules.
 /// </summary>
 internal static class SignedPolicy
 {
     internal static readonly (string Service, string Host) Memory = ("memory", "memory.example.test");
     internal static readonly (string Service, string Host) Temporal = ("temporal", "temporal.example.test");
     internal static readonly (string Service, string Host) Telegram = ("telegram", "telegram.example.test");
+
+    /// <summary>#503 W5: the exact tool each receiver endpoint's rules allow (declared before <see cref="MemoryOnly"/>, which reads it).</summary>
+    internal static readonly Dictionary<string, string> Tools = new()
+    {
+        ["memory"] = "memory_get", ["temporal"] = "temporal_start_workflow", ["telegram"] = "send_message",
+    };
+
     internal static readonly string MemoryOnly = Yaml(Memory);
+
+    /// <summary>The one supported MCP rule form (pinned stock shape): the control methods, then tools/call per exact tool.</summary>
+    internal static string Rules(params string[] tools) =>
+        "        rules:\n          - allow:\n              method: initialize\n          - allow:\n              method: notifications/initialized\n"
+        + "          - allow:\n              method: tools/list\n"
+        + string.Concat(tools.Select(t => $"          - allow:\n              method: tools/call\n              tool: {t}\n"));
 
     internal static string Yaml(params (string Service, string Host)[] routes) => Yaml(routes, routes);
 
@@ -1439,7 +1452,7 @@ internal static class SignedPolicy
         text.Append(endpoints.Any() ? "network_policies:\n" : "network_policies: {}\n");
         foreach (var (service, host) in endpoints)
             text.Append($"  fleet-{service}:\n    endpoints:\n      - host: {host}\n        port: 443\n        protocol: mcp\n        enforcement: enforce\n"
-                + $"        access: {(service == "memory" ? "read-only" : "read-write")}\n    binaries:\n      - path: /usr/bin/codex\n");
+                + Rules(Tools[service]) + "    binaries:\n      - path: /usr/bin/codex\n");
         if (signed.Any()) text.Append("network_middlewares:\n");
         foreach (var (service, host) in signed)
         {

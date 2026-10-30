@@ -468,7 +468,8 @@ subset (`stock-memory`/`stock-temporal`/`stock-telegram` → registration `stock
 `fail_closed`, one exact lowercase host). Apply (both auth modes) refuses before any old-runtime Stop or provider/broker/
 create/policy-set effect with 409 `managed_signer_policy_missing`/`_mismatch`/`_scope`. It requires the stored hash
 to be the SHA-256 of the exact saved bytes, the entries to equal memory plus the selected routes, and one enforced
-`host:443` MCP endpoint per receiver (memory read-only). Start/restart/pre-activation check the applied version
+`host:443` MCP endpoint per receiver with exact MCP rules, never an access preset (pinned stock rejects MCP presets;
+memory allows `tools/call` for `memory_get` only). Start/restart/pre-activation check the applied version
 and its outside enrollment (`managed_signer_authority_unavailable`), never desired. Never normalize or inject into
 saved YAML. Cleanup (Stop/revoke/expiry/retirement) never depends on this check. Backups require the registration's
 CA under STATE_DIR (`coverage_incomplete: signer_tls_ca`) and record `SNAPSHOT_MODE`. Eligibility is

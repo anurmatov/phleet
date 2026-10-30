@@ -183,7 +183,7 @@ internal static class SandboxPolicyValidation
                     }
                     if (Get(rule, "endpoints") is { } endpoints) foreach (var e in List(endpoints))
                     {
-                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding");
+                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding", "rules");
                         Require(Regex.IsMatch(Scalar(endpoint, "host"), @"^[A-Za-z0-9*_.:-]{1,253}\z"), "Invalid endpoint host.");
                         Require(int.TryParse(PlainScalar(endpoint, "port"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) && port is >= 1 and <= 65535, "Invalid endpoint port.");
                         Option(endpoint, "protocol", "tcp", "rest", "mcp", "json-rpc", "websocket", "graphql", "sql");
@@ -193,6 +193,13 @@ internal static class SandboxPolicyValidation
                         if (Scalar(endpoint, "protocol") is "" or "tcp")
                             Require(Get(endpoint, "access") is null && Get(endpoint, "enforcement") is null,
                                 "L7 access/enforcement requires an explicit inspected protocol.");
+                        if (Scalar(endpoint, "protocol") == "mcp")
+                        {
+                            // #503 W5: pinned stock rejects every MCP access preset (l7_validate.rs:273–281).
+                            Require(Get(endpoint, "access") is null, "protocol mcp does not support access presets; use the exact MCP rules.");
+                            McpRules(endpoint);
+                        }
+                        else Require(Get(endpoint, "rules") is null, "Rules are supported only on protocol: mcp endpoints.");
                         if (Get(endpoint, "credential_binding") is { } binding)
                         {
                             var profile = Scalar(Map(binding, "provider"), "provider");
@@ -234,6 +241,46 @@ internal static class SandboxPolicyValidation
         yaml.Load(new StringReader(text));
         Require(yaml.Documents.Count == 1, "Use one policy document.");
         return Map(yaml.Documents[0].RootNode, "version", "filesystem_policy", "process", "landlock", "network_policies", "network_middlewares");
+    }
+
+    /// <summary>The only MCP methods a saved rule may allow besides <see cref="McpToolCall"/>, which names one exact tool.</summary>
+    internal static readonly string[] McpControlMethods = ["initialize", "notifications/initialized", "tools/list"];
+    internal const string McpToolCall = "tools/call";
+    // Plain lowercase names only, so no tool selector can carry a stock glob character.
+    private static readonly Regex McpToolName = new(@"\A[a-z][a-z0-9_]{0,63}\z", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// #503 W5: the one supported MCP rule form, in the pinned stock shape (openshell-policy lib.rs:4630–4678): every
+    /// control method in <see cref="McpControlMethods"/>, then <c>tools/call</c> once per exact tool. No wildcard,
+    /// <c>any</c> selector, parameter matcher, deny rule, access preset or <c>allow_all_known_mcp_methods</c>.
+    /// Returns the allowed tool names; throws <see cref="ArgumentException"/> for any other form.
+    /// </summary>
+    internal static IReadOnlySet<string> McpRules(YamlMappingNode endpoint)
+    {
+        const string form = "MCP rules allow exactly initialize, notifications/initialized and tools/list, plus tools/call once per exact tool name.";
+        var rules = List(Get(endpoint, "rules") ?? throw new ArgumentException("protocol mcp needs explicit rules. " + form)).ToList();
+        Require(rules.Count <= 32, form);
+        var methods = new HashSet<string>(StringComparer.Ordinal);
+        var tools = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in rules)
+        {
+            var rule = Map(item, "allow");
+            var allow = Map(Get(rule, "allow") ?? throw new ArgumentException(form), "method", "tool");
+            var method = Get(allow, "method") is { } m ? Value(m) : "";
+            if (method == McpToolCall)
+            {
+                var tool = Get(allow, "tool") is { } t ? Value(t) : "";
+                Require(McpToolName.IsMatch(tool), "tools/call names one exact tool (lowercase letters, digits, underscore; no wildcard or list).");
+                Require(tools.Add(tool), "Duplicate MCP rule.");
+            }
+            else
+            {
+                Require(McpControlMethods.Contains(method) && Get(allow, "tool") is null, form);
+                Require(methods.Add(method), "Duplicate MCP rule.");
+            }
+        }
+        Require(methods.Count == McpControlMethods.Length && tools.Count > 0, form);
+        return tools;
     }
 
     private static void Option(YamlMappingNode map, string key, params string[] choices)

@@ -960,7 +960,16 @@ network_policies:
         port: 443
         protocol: mcp
         enforcement: enforce
-        access: read-only
+        rules:
+          - allow:
+              method: initialize
+          - allow:
+              method: notifications/initialized
+          - allow:
+              method: tools/list
+          - allow:
+              method: tools/call
+              tool: memory_get
     binaries:
       - path: /usr/bin/codex
 network_middlewares:
@@ -976,8 +985,28 @@ network_middlewares:
 ```
 
 For selected Temporal or Telegram routes, add `stock-temporal` (order `10`, `service: temporal`) and `stock-telegram`
-(order `20`, `service: telegram`), each with its own `host:443` MCP endpoint (any existing accepted access preset).
+(order `20`, `service: telegram`), each with its own `host:443` MCP endpoint and the same rules, with one `tools/call`
+rule per exact tool the agent uses there (for example `temporal_start_workflow`, `send_message`). The receivers still
+apply the agent's grants; the policy rules only narrow what reaches them.
 A policy without bindings still saves for storage or manual use; it can never activate a managed agent.
+
+**MCP endpoint rules (W5).** Pinned stock refuses every access preset on a `protocol: mcp` endpoint
+([`l7_validate.rs:273–281`](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy/src/l7_validate.rs#L273-L281))
+and requires explicit rules unless every known method is allowed. Saved MCP endpoints therefore use exactly this rule
+form, in the pinned shape
+([`lib.rs:4630–4678`](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy/src/lib.rs#L4630-L4678)):
+
+| rule | accepted form |
+|---|---|
+| control | exactly `initialize`, `notifications/initialized` and `tools/list`, each once, as `allow.method` (slash-separated wire names) |
+| tools | `allow.method: tools/call` with one plain `allow.tool` name (lowercase letters, digits, underscore), at least one, each once |
+| refused | any `access` preset on MCP, `rules` on any other protocol, wildcards or globs, `any` lists, `params`, `path`, `deny_rules`, the `mcp` block (so no `allow_all_known_mcp_methods`), other methods, duplicates |
+
+**Literal design mismatch, disclosed.** The approved #503 design table says memory uses `access: read-only` and other
+receivers keep "their existing accepted access preset". Pinned stock rejects both for MCP, so the read-only intent is
+kept as the memory endpoint allowing `tools/call` for `memory_get` only; the approved issue text is not edited. A version
+saved with a preset on an MCP endpoint keeps its bytes and is refused at apply as `managed_signer_policy_mismatch`;
+append a new version with the rules above and select it (see **Old unbound bindings** below for the steps).
 
 ### Managed admission
 
@@ -987,7 +1016,7 @@ never changes meaning. Stock may reserialize the policy it stores, so compare it
 | stage | check | refusal |
 |---|---|---|
 | save (create/append) | the subset above, with the existing size/event/depth/alias/tag limits | 400, no row |
-| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, memory `access: read-only` | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
+| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset; memory allows `tools/call` for `memory_get` only | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
 | bypass ambiguity | wildcard endpoint hosts, a duplicate, alternate-port, plaintext/TCP or case/trailing-dot variant of a receiving host, extra or unselected signer entries | `managed_signer_policy_scope` |
 | policy file | written from the saved bytes, then read back against the stored hash | `managed_files_failed` |
 | Start, restart, before activation | the persisted applied version and hash, and its outside enrollment (exact agent, UUID, epoch, stock commit, policy hash and receiving hosts), never the desired selection or the current template | 409 named fault before staging; `managed_signer_authority_unavailable` for a missing or ambiguous enrollment; drift while staging is the bounded revoke/Stop hold |
@@ -996,8 +1025,8 @@ The same `PolicySha256` is carried by the binding, the outside and guest enrollm
 `--policy`. Unrelated explicit destinations and provider profiles are unchanged. Refusals are logged with the
 category and policy version/hash only.
 
-**Old unbound bindings.** Start and restart refuse them by name; there is no unsigned grandfathering. Stop, revoke,
-expiry, retirement and Docker handoff never depend on this validator. To repair:
+**Old unbound bindings and pre-W5 access presets.** Start and restart refuse them by name; there is no unsigned
+grandfathering. Stop, revoke, expiry, retirement and Docker handoff never depend on this validator. To repair:
 1. append a reviewed bound version;
 2. select it;
 3. revoke cleanly;

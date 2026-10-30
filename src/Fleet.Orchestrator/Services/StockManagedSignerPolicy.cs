@@ -24,6 +24,9 @@ internal static class StockManagedSignerPolicy
     internal const string Scope = "managed_signer_policy_scope";
     internal const string AuthorityUnavailable = "managed_signer_authority_unavailable";
 
+    /// <summary>The one tool a memory receiver endpoint's rules may allow.</summary>
+    internal const string MemoryTool = "memory_get";
+
     /// <summary>Entry key → (receiving service, fixed unique order).</summary>
     internal static readonly IReadOnlyDictionary<string, (string Service, int Order)> Entries =
         new Dictionary<string, (string, int)>(StringComparer.Ordinal)
@@ -99,7 +102,10 @@ internal static class StockManagedSignerPolicy
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { return Mismatch; }
     }
 
-    /// <summary>Exactly one inspected, enforced <c>host:443</c> MCP endpoint per receiving host, in a rule with binaries.</summary>
+    /// <summary>
+    /// Exactly one inspected, enforced <c>host:443</c> MCP endpoint per receiving host, in a rule with binaries, stating its
+    /// traffic as the exact MCP rules (memory: <see cref="MemoryTool"/> only).
+    /// </summary>
     private static string? DescribeEndpointFault(YamlMappingNode root, IReadOnlyDictionary<string, string> expectedHosts)
     {
         var endpoints = new List<(YamlMappingNode Endpoint, YamlMappingNode Rule)>();
@@ -122,7 +128,11 @@ internal static class StockManagedSignerPolicy
             if (SandboxPolicyValidation.Scalar(endpoint, "port") != "443") return Scope;
             if (SandboxPolicyValidation.Scalar(endpoint, "protocol") != "mcp" || SandboxPolicyValidation.Scalar(endpoint, "enforcement") != "enforce"
                 || SandboxPolicyValidation.Scalar(endpoint, "tls") != "") return Mismatch;
-            if (service == StockServices.Memory && SandboxPolicyValidation.Scalar(endpoint, "access") != "read-only") return Mismatch;
+            // #503 W5: exact MCP rules, never an access preset (pinned stock rejects them) or a stock field outside the saved
+            // subset such as mcp.allow_all_known_mcp_methods; memory stays read-only as memory_get alone.
+            SandboxPolicyValidation.Map(endpoint, "host", "port", "protocol", "tls", "enforcement", "rules");
+            var tools = SandboxPolicyValidation.McpRules(endpoint);
+            if (service == StockServices.Memory && !tools.SetEquals([MemoryTool])) return Mismatch;
             if (SandboxPolicyValidation.Get(rule, "binaries") is not { } binaries || !SandboxPolicyValidation.List(binaries).Any()) return Mismatch;
         }
         return null;

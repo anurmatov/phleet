@@ -156,7 +156,8 @@ def control_manifest(paths):
         sys.exit(f"control_input_invalid: {error}")
     epoch = lambda b: (binding.get(b) or {}).get("epoch")
     return raw, {
-        "snapshotCapturedAtUtc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # Sub-second capture time, so a refresh later in the same second still supersedes it.
+        "snapshotCapturedAtUtc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "gatewayGeneration": source["gatewayGeneration"], "providerId": source["providerId"],
         "providerWorkspace": source["providerWorkspace"], "sandboxWorkspace": source["sandboxWorkspace"],
         "ownerGeneration": source["ownerGeneration"], "sourceSha256": hashlib.sha256(raw[0]).hexdigest(),

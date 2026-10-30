@@ -13,68 +13,154 @@
 #   check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT \
 #     --subscription-source FILE --managed-binding FILE --refresh-observation FILE
 #
-# #502 restore eligibility (no restore is performed): the snapshot must be COMPLETE with matching
-# SHA256SUMS and a control manifest, and must NOT be superseded. It is refused when its capture time is
-# earlier than the latest independently retained providerLastRefreshAtUtc for that provider UUID/owner
-# generation, when the current source digest, identity, native epochs, state or retirement history has
-# advanced past the manifest, or when current freshness is unknown. A null LAST_REFRESH is accepted only
-# while the latest observation is also null (no successful refresh since). No token-generation counter is
-# inferred; the control JSON copies are evidence and are never imported over live state.
+# #502 restore eligibility (no restore is performed). Refused unless: the snapshot is COMPLETE with a
+# non-empty SHA256SUMS inventory listing exactly every file, all hashes match, the gateway DB passes
+# integrity_check and the required DB/config/trust/control files are present; the current control inputs
+# are regular, owned by this uid and not group/other accessible; the current source digest, identity and
+# the complete binding row (bindingSha256, every owner/epoch/workspace/provider tuple, state and retired
+# references) equal the snapshot's; and the strictly validated current refresh observation was taken after
+# the capture and shows no provider refresh at or after it (parsed UTC instants, sub-second kept, never
+# string order). A null LAST_REFRESH is accepted only while the snapshot's was also null. No
+# token-generation counter is inferred; the control JSON copies are evidence and are never imported.
 set -euo pipefail
 
 if [[ "${1:-}" == "--restore-eligibility" ]]; then
   [[ $# -eq 8 && "$3" == "--subscription-source" && "$5" == "--managed-binding" && "$7" == "--refresh-observation" ]] \
     || { echo "usage: $0 --restore-eligibility SNAPSHOT --subscription-source FILE --managed-binding FILE --refresh-observation FILE" >&2; exit 2; }
   python3 - "$2" "$4" "$6" "$8" <<'PY'
-import hashlib, json, os, stat, sys
+import datetime, hashlib, json, os, re, sqlite3, stat, sys
 snapshot, source_path, binding_path, refresh_path = sys.argv[1:5]
 
 def refuse(reason):
     sys.exit(f"REFUSED: {reason}")
 
 def regular(path):
-    return os.path.lexists(path) and stat.S_ISREG(os.lstat(path).st_mode) and not os.path.islink(path)
+    return os.path.lexists(path) and stat.S_ISREG(os.lstat(path).st_mode)
 
+def strict(raw):
+    def pairs(items):
+        keys = [k for k, _ in items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate key")
+        return dict(items)
+    return json.loads(raw, object_pairs_hook=pairs)
+
+UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?Z")
+def instant(value, what, nullable=False):
+    """Strict UTC timestamp to an aware datetime (sub-second kept); null only where explicitly allowed."""
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or not UTC.fullmatch(value):
+        refuse(f"{what} is missing or not a UTC timestamp")
+    base, _, fraction = value[:-1].partition(".")
+    parsed = datetime.datetime.strptime(base, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    return parsed + datetime.timedelta(microseconds=int((fraction + "000000")[:6]) if fraction else 0)
+
+# 1. Complete, exact checksum inventory over the whole snapshot (review B1).
 if not os.path.isdir(snapshot) or os.path.islink(snapshot) or not regular(os.path.join(snapshot, "COMPLETE")) \
         or os.path.lexists(os.path.join(snapshot, "INVALID")) or not regular(os.path.join(snapshot, "SHA256SUMS")):
     refuse("snapshot is not complete")
+listed = {}
 for line in open(os.path.join(snapshot, "SHA256SUMS")).read().splitlines():
-    digest, name = line.split("  ", 1)
-    path = os.path.join(snapshot, name)
-    if not regular(path) or hashlib.sha256(open(path, "rb").read()).hexdigest() != digest:
+    match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+    if not match or match.group(2) in listed or match.group(2).startswith("/") or ".." in match.group(2).split("/"):
+        refuse("snapshot checksum inventory is malformed")
+    listed[match.group(2)] = match.group(1)
+present = set()
+for root, dirs, names in os.walk(snapshot):
+    for name in dirs + names:
+        path = os.path.join(root, name)
+        if os.path.islink(path):
+            refuse("snapshot contains a link")
+        if name in names and os.path.relpath(path, snapshot) not in ("SHA256SUMS", "COMPLETE"):
+            present.add(os.path.relpath(path, snapshot))
+if not listed or set(listed) != present:
+    refuse("snapshot checksum inventory is empty or does not cover every file")
+for name, digest in listed.items():
+    if hashlib.sha256(open(os.path.join(snapshot, name), "rb").read()).hexdigest() != digest:
         refuse("snapshot hash mismatch")
-manifest_path = os.path.join(snapshot, "control", "MANIFEST.json")
-if not regular(manifest_path):
-    refuse("snapshot has no subscription control manifest")
-manifest = json.load(open(manifest_path))
+REQUIRED = ["gateway.db", "state/tls/gateway.pem", "state/tls/gateway-key.pem", "state/tls/ca.pem", "state/tls/client-ca.pem",
+            "state/tls/jwt/signing.pem", "state/tls/jwt/public.pem", "state/tls/jwt/kid", "control/subscription.json",
+            "control/applied-runtime-binding.json", "control/refresh-observation.json", "control/MANIFEST.json"]
+if any(name not in listed for name in REQUIRED) or len([n for n in listed if n.startswith("config/")]) != 1:
+    refuse("snapshot lacks required gateway DB/config/trust or control coverage")
+try:
+    database = sqlite3.connect(f"file:{os.path.join(snapshot, 'gateway.db')}?mode=ro", uri=True)
+    healthy = database.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    database.close()
+except sqlite3.Error:
+    healthy = False
+if not healthy:
+    refuse("snapshot gateway DB integrity check failed")
+try:
+    manifest = strict(open(os.path.join(snapshot, "control", "MANIFEST.json"), "rb").read().decode("utf-8"))
+    recorded = strict(open(os.path.join(snapshot, "control", "applied-runtime-binding.json"), "rb").read().decode("utf-8"))
+except (ValueError, UnicodeDecodeError):
+    refuse("snapshot control records unreadable")
+if manifest.get("bindingSha256") != listed["control/applied-runtime-binding.json"] \
+        or manifest.get("sourceSha256") != listed["control/subscription.json"]:
+    refuse("snapshot manifest does not match its control records")
+
+# 2. Current control inputs: regular, non-linked, owned by this uid, no group/other access (review L3, as backup).
 for path in (source_path, binding_path, refresh_path):
     if not regular(path):
-        refuse("current control input missing or not a regular file")
+        refuse("current control input missing or not a regular non-linked file")
+    info = os.lstat(path)
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        refuse("current control input has a foreign owner or group/other access")
 try:
     current_source = open(source_path, "rb").read()
-    source = json.loads(current_source)
-    binding = json.loads(open(binding_path, "rb").read())
-    refresh = json.load(open(refresh_path))
+    current_binding = open(binding_path, "rb").read()
+    source = strict(current_source.decode("utf-8"))
+    binding = strict(current_binding.decode("utf-8"))
+    refresh = strict(open(refresh_path, "rb").read().decode("utf-8"))
 except (ValueError, UnicodeDecodeError):
     refuse("current control input unreadable")
+
+# 3. Identity, source and the complete binding row (review B2).
 identity = ("providerId", "providerWorkspace", "sandboxWorkspace", "ownerGeneration", "gatewayGeneration")
 if any(source.get(key) != manifest.get(key) for key in identity):
     refuse("current identity differs from the snapshot")
 if hashlib.sha256(current_source).hexdigest() != manifest.get("sourceSha256"):
     refuse("outside source changed since the snapshot")
-epoch = lambda b: (binding.get(b) or {}).get("epoch")
-if (epoch("applied"), epoch("candidate"), binding.get("state"), len(binding.get("retiredSubscriptions") or [])) != (
-        manifest.get("nativeAppliedEpoch"), manifest.get("nativeCandidateEpoch"), manifest.get("bindingState"), manifest.get("retiredSubscriptions")):
-    refuse("epoch, revocation or retirement state advanced since the snapshot")
-if (refresh.get("providerId"), refresh.get("ownerGeneration")) != (manifest.get("providerId"), manifest.get("ownerGeneration")) \
-        or "providerLastRefreshAtUtc" not in refresh:
+def authority(record):
+    def tuples():
+        for slot in ("applied", "candidate"):
+            if record.get(slot):
+                yield slot, record[slot]
+        for item in record.get("superseded") or []:
+            yield "superseded", item
+    out = set()
+    for slot, t in tuples():
+        sub = t.get("subscription") or {}
+        out.add((slot, t.get("epoch"), t.get("sandboxId"), t.get("sandboxWorkspace"), t.get("authMode"), t.get("provider"),
+                 sub.get("providerWorkspace"), sub.get("providerId"), sub.get("accountId"), sub.get("ownerGeneration")))
+    retired = {tuple(sorted((k, str(v)) for k, v in r.items())) for r in record.get("retiredSubscriptions") or []}
+    return out, retired, record.get("state")
+if authority(binding) != authority(recorded):
+    refuse("binding owner, epoch, revocation or retirement identities differ from the snapshot")
+if hashlib.sha256(current_binding).hexdigest() != manifest.get("bindingSha256"):
+    refuse("binding row changed since the snapshot (CAS value differs)")
+
+# 4. Freshness: strict observation fields, parsed UTC instants, never string order (reviews B3, M1, F1).
+if set(refresh) != {"providerId", "ownerGeneration", "statusObservedAtUtc", "providerLastRefreshAtUtc", "nextRefreshAtUtc"} \
+        or (refresh["providerId"], refresh["ownerGeneration"]) != (manifest.get("providerId"), manifest.get("ownerGeneration")):
     refuse("current refresh freshness unknown for this provider/owner generation")
-latest, captured = refresh["providerLastRefreshAtUtc"], manifest.get("snapshotCapturedAtUtc")
+captured = instant(manifest.get("snapshotCapturedAtUtc"), "snapshot capture time")
+observed = instant(refresh["statusObservedAtUtc"], "current refresh observation time")
+latest = instant(refresh["providerLastRefreshAtUtc"], "current last refresh", nullable=True)
+instant(refresh["nextRefreshAtUtc"], "current next refresh")
+recorded_last = instant(manifest.get("providerLastRefreshAtUtc"), "snapshot last refresh", nullable=True)
+if observed <= captured:
+    refuse("current refresh observation predates the snapshot (freshness unknown)")
 if latest is None:
-    if manifest.get("providerLastRefreshAtUtc") is not None:
+    if recorded_last is not None:
         refuse("refresh evidence regressed")
-elif not captured or captured < latest:
-    refuse("snapshot captured before the latest provider refresh (superseded)")
+else:
+    if recorded_last is not None and latest < recorded_last:
+        refuse("refresh evidence regressed")
+    if latest >= captured:
+        refuse("snapshot captured before the latest provider refresh (superseded)")
 print("ELIGIBLE: snapshot is the latest stopped checkpoint for this tuple; restore only gateway DB/KEK/config/trust while stopped")
 PY
   exit $?

@@ -122,8 +122,16 @@ PROVIDER=3f2b8c1e-5d4a-4b6f-9e7d-1a2b3c4d5e6f OWNER=4f0c6c8e-6f39-4f5b-9d50-6b1b
 cat > "$WORK/control/subscription.json" <<JSON
 {"version":1,"purpose":"compatibility_only","agent":"agent1","providerName":"agent1-codex-sub","providerId":"$PROVIDER","providerWorkspace":"ws-a","sandboxWorkspace":"ws-a","accountId":"synthetic-account_01","ownerGeneration":"$OWNER","gatewayGeneration":"gateway-1@start","profileSha256":"$(printf 'c%.0s' $(seq 1 64))","expiresAt":"2099-01-01T00:00:00Z"}
 JSON
-binding() { # binding <state> <applied-epoch>
-  printf '{"v":1,"state":"%s","applied":{"sandboxName":"fleet-agent1-aaaaaaaa","sandboxId":"11111111-1111-4111-8111-111111111111","epoch":"%s","authMode":"subscription","provider":"agent1-codex-sub","sandboxWorkspace":"ws-a","subscription":{"providerWorkspace":"ws-a","providerId":"%s","accountId":"synthetic-account_01","ownerGeneration":"%s"}},"candidate":null,"superseded":[],"retiredSubscriptions":[]}' "$1" "$2" "$PROVIDER" "$OWNER"
+binding() { # binding <state> <applied-epoch> [owner-generation]
+  printf '{"v":1,"state":"%s","applied":{"sandboxName":"fleet-agent1-aaaaaaaa","sandboxId":"11111111-1111-4111-8111-111111111111","epoch":"%s","authMode":"subscription","provider":"agent1-codex-sub","sandboxWorkspace":"ws-a","subscription":{"providerWorkspace":"ws-a","providerId":"%s","accountId":"synthetic-account_01","ownerGeneration":"%s"}},"candidate":null,"superseded":[],"retiredSubscriptions":[]}' "$1" "$2" "$PROVIDER" "${3:-$OWNER}"
+}
+now_utc() { python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))'; }
+# refuse_for <reason substring> <description> <command...>: a refusal for exactly the named reason.
+refuse_for() {
+  local reason=$1 what=$2 rc=0; shift 2
+  "$@" >"$WORK/out" 2>&1 || rc=$?
+  if [[ $rc -eq 0 ]] || ! grep -qF "$reason" "$WORK/out"; then cat "$WORK/out" >&2; fail "$what (rc=$rc, wanted: $reason)"; fi
+  ok "$what"
 }
 EPOCH=22222222-2222-4222-8222-222222222222
 binding stopped "$EPOCH" > "$WORK/control/binding.json"
@@ -149,31 +157,88 @@ assert all("token" not in k.lower() for k in m)
 PY
 ok "manifest records identities, digests, epochs and refresh times (no credential values)"
 expect 0 "freshness check accepts the complete subscription snapshot" bash "$CHECK" "$WORK/sub"
-expect 0 "synthetic stopped copy is eligible against unchanged current inputs" bash "$CHECK" --restore-eligibility "$snap" "${CTL[@]}"
+# Current inputs for eligibility: the refresh observation is taken AFTER the snapshot capture.
+observe() { # observe <last-refresh-json> [observed-at] > file
+  printf '{"providerId":"%s","ownerGeneration":"%s","statusObservedAtUtc":"%s","providerLastRefreshAtUtc":%s,"nextRefreshAtUtc":"2099-01-01T00:00:00Z"}' \
+    "$PROVIDER" "$OWNER" "${2:-$(now_utc)}" "$1"
+}
+# eligible <refresh-file> [binding-file] [source-file]; eligible_at <snapshot> <refresh-file> (bash 3.2-safe, no mapfile).
+eligible() {
+  bash "$CHECK" --restore-eligibility "$snap" --subscription-source "${3:-$WORK/control/subscription.json}" \
+    --managed-binding "${2:-$WORK/control/binding.json}" --refresh-observation "$1"
+}
+eligible_at() {
+  bash "$CHECK" --restore-eligibility "$1" --subscription-source "$WORK/control/subscription.json" \
+    --managed-binding "$WORK/control/binding.json" --refresh-observation "$2"
+}
+observe '"2000-01-01T00:00:00Z"' > "$WORK/control/now.json"
+expect 0 "synthetic stopped copy is eligible against unchanged current inputs" eligible "$WORK/control/now.json"
 
-refresh '"2099-01-01T00:00:00Z"' > "$WORK/control/refresh-later.json"
-expect 1 "snapshot captured before the latest provider refresh is refused" bash "$CHECK" --restore-eligibility "$snap" \
-  --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding.json" --refresh-observation "$WORK/control/refresh-later.json"
+observe '"2099-01-01T00:00:00Z"' > "$WORK/control/later.json"
+refuse_for "superseded" "snapshot captured before the latest provider refresh is refused" eligible "$WORK/control/later.json"
+captured=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["snapshotCapturedAtUtc"])' "$snap/control/MANIFEST.json")
+later_in_second=$(python3 - "$captured" <<'PY'
+import datetime, sys
+base, _, fraction = sys.argv[1][:-1].partition(".")
+moment = datetime.datetime.strptime(base, "%Y-%m-%dT%H:%M:%S") + datetime.timedelta(microseconds=int((fraction + "000000")[:6]))
+print((moment + datetime.timedelta(microseconds=500)).strftime("%Y-%m-%dT%H:%M:%S.%f") + "0Z")  # 7 fractional digits
+PY
+)
+observe "\"$later_in_second\"" > "$WORK/control/later-fraction.json"
+refuse_for "superseded" "a refresh 500 us after capture (sub-second, 7 digits) is refused" eligible "$WORK/control/later-fraction.json"
+# Review M1/F1 exact case: a seconds-only capture and a refresh later in that same second.
+cp -R "$snap" "$WORK/seconds-only"
+python3 - "$WORK/seconds-only" <<'PY'
+import hashlib, json, os, sys
+root = sys.argv[1]
+path = os.path.join(root, "control", "MANIFEST.json")
+manifest = json.load(open(path))
+manifest["snapshotCapturedAtUtc"] = "2026-10-30T07:14:30Z"
+open(path, "w").write(json.dumps(manifest))
+lines = [l for l in open(os.path.join(root, "SHA256SUMS")).read().splitlines() if not l.endswith("  control/MANIFEST.json")]
+lines.append(hashlib.sha256(open(path, "rb").read()).hexdigest() + "  control/MANIFEST.json")
+open(os.path.join(root, "SHA256SUMS"), "w").write("\n".join(lines) + "\n")
+PY
+observe '"2026-10-30T07:14:30.500Z"' > "$WORK/control/same-second.json"
+refuse_for "superseded" "seconds-only capture with a refresh at .500 in the same second is refused" eligible_at "$WORK/seconds-only" "$WORK/control/same-second.json"
+observe '""' > "$WORK/control/empty-last.json"
+refuse_for "current last refresh is missing or not a UTC timestamp" "an empty last-refresh value is refused" eligible "$WORK/control/empty-last.json"
+printf '{"providerId":"%s","ownerGeneration":"%s","providerLastRefreshAtUtc":null,"nextRefreshAtUtc":"2099-01-01T00:00:00Z"}' "$PROVIDER" "$OWNER" > "$WORK/control/no-observed.json"
+refuse_for "freshness unknown" "a missing observation time is refused" eligible "$WORK/control/no-observed.json"
+observe '"2000-01-01T00:00:00Z"' "2000-01-02T00:00:00Z" > "$WORK/control/old-observation.json"
+refuse_for "predates the snapshot" "an observation taken before the capture is refused" eligible "$WORK/control/old-observation.json"
+observe 'null' > "$WORK/control/regressed.json"
+refuse_for "regressed" "a later null last-refresh after a recorded refresh is refused" eligible "$WORK/control/regressed.json"
+cp "$WORK/control/now.json" "$WORK/control/now-open.json"; chmod 644 "$WORK/control/now-open.json"
+refuse_for "group/other access" "a group/other-readable current input is refused" eligible "$WORK/control/now-open.json"
+
 binding revoked "$EPOCH" > "$WORK/control/binding-revoked.json"
-expect 1 "advanced revocation state is refused" bash "$CHECK" --restore-eligibility "$snap" \
-  --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding-revoked.json" --refresh-observation "$WORK/control/refresh.json"
+refuse_for "identities differ" "advanced revocation state is refused" eligible "$WORK/control/now.json" "$WORK/control/binding-revoked.json"
 binding stopped 33333333-3333-4333-8333-333333333333 > "$WORK/control/binding-epoch.json"
-expect 1 "advanced native epoch is refused" bash "$CHECK" --restore-eligibility "$snap" \
-  --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding-epoch.json" --refresh-observation "$WORK/control/refresh.json"
+refuse_for "identities differ" "advanced native epoch is refused" eligible "$WORK/control/now.json" "$WORK/control/binding-epoch.json"
+binding stopped "$EPOCH" 5e5e5e5e-0000-4000-8000-000000000005 > "$WORK/control/binding-owner.json"
+refuse_for "identities differ" "a changed owner generation with the same epoch is refused" eligible "$WORK/control/now.json" "$WORK/control/binding-owner.json"
+printf ' ' | cat "$WORK/control/binding.json" - > "$WORK/control/binding-bytes.json"
+refuse_for "CAS value differs" "a binding row whose bytes changed is refused" eligible "$WORK/control/now.json" "$WORK/control/binding-bytes.json"
 python3 - "$WORK/control/subscription.json" "$WORK/control/subscription-changed.json" <<'PY'
 import json, sys
 source = json.load(open(sys.argv[1]))
 source["expiresAt"] = "2098-01-01T00:00:00Z"  # same identity, a different (changed) outside source
 open(sys.argv[2], "w").write(json.dumps(source))
 PY
-expect 1 "changed outside source is refused" bash "$CHECK" --restore-eligibility "$snap" \
-  --subscription-source "$WORK/control/subscription-changed.json" --managed-binding "$WORK/control/binding.json" --refresh-observation "$WORK/control/refresh.json"
+refuse_for "outside source changed" "changed outside source is refused" eligible "$WORK/control/now.json" "$WORK/control/binding.json" "$WORK/control/subscription-changed.json"
 printf '{"providerId":"%s"}' "$PROVIDER" > "$WORK/control/refresh-unknown.json"
-expect 1 "unknown current freshness is refused" bash "$CHECK" --restore-eligibility "$snap" \
-  --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding.json" --refresh-observation "$WORK/control/refresh-unknown.json"
-expect 1 "a plain snapshot without a control manifest is not eligible" bash "$CHECK" --restore-eligibility "$plain" "${CTL[@]}"
+refuse_for "freshness unknown" "unknown current freshness is refused" eligible "$WORK/control/refresh-unknown.json"
+refuse_for "lacks required" "a plain snapshot without control records is not eligible" eligible_at "$plain" "$WORK/control/now.json"
 cp -R "$snap" "$WORK/tampered"; printf 'x' >> "$WORK/tampered/control/MANIFEST.json"
-expect 1 "a snapshot whose hashes no longer match is refused" bash "$CHECK" --restore-eligibility "$WORK/tampered" "${CTL[@]}"
+refuse_for "hash mismatch" "a snapshot whose hashes no longer match is refused" eligible_at "$WORK/tampered" "$WORK/control/now.json"
+cp -R "$snap" "$WORK/empty-sums"; : > "$WORK/empty-sums/SHA256SUMS"
+refuse_for "inventory is empty" "an empty checksum inventory is refused" eligible_at "$WORK/empty-sums" "$WORK/control/now.json"
+cp -R "$snap" "$WORK/no-ca"; rm "$WORK/no-ca/state/tls/ca.pem"
+grep -v '  state/tls/ca.pem$' "$WORK/no-ca/SHA256SUMS" > "$WORK/no-ca/SHA256SUMS.new"; mv "$WORK/no-ca/SHA256SUMS.new" "$WORK/no-ca/SHA256SUMS"
+refuse_for "lacks required" "missing gateway state with a consistent inventory is refused" eligible_at "$WORK/no-ca" "$WORK/control/now.json"
+cp -R "$snap" "$WORK/extra"; printf 'x' > "$WORK/extra/state/unlisted"
+refuse_for "does not cover every file" "an unlisted extra file is refused" eligible_at "$WORK/extra" "$WORK/control/now.json"
 
 ln -s "$WORK/control/binding.json" "$WORK/control/binding-link.json"
 expect 1 "symlinked control input fails without COMPLETE" bash "$BACKUP" "$WORK/bad1" "$WORK/gateway.toml" "$state" \

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AgentConfig } from '../types'
 import { apiFetch } from '../utils'
-import { policyResponse, type RuntimeEdits } from '../managedStock'
+import { authModeChange, policyResponse, type RuntimeEdits } from '../managedStock'
 
 interface Policy { id: number; name: string }
 interface Version { id: number; version: number; yaml: string; sha256: string; providerProfileHashes: string }
@@ -103,9 +103,13 @@ export function RuntimeSelection({ config, edits, onChange }: { config?: AgentCo
       <option value="">None</option>{versions.map(v => <option key={v.id} value={v.id}>{v.policyName} · v{v.version} · {v.sha256.slice(0, 12)}</option>)}
       {edits.sandboxPolicyVersionId && !versions.some(v => String(v.id) === edits.sandboxPolicyVersionId) && <option value={edits.sandboxPolicyVersionId}>Saved version ID {edits.sandboxPolicyVersionId} (not loaded)</option>}
     </select></label>
-    <label className="config-field">Native authentication<select className="config-input" value={edits.nativeAuthMode ?? ''} onChange={e => onChange({ nativeAuthMode: e.target.value })}><option value="">Not selected (existing auth unchanged)</option><option value="api_key">API key (usage-based billing)</option></select></label>
-    <label className="config-field">API key environment reference name<input className="config-input" value={edits.providerApiKeyEnvRef ?? ''} placeholder="EXAMPLE_API_KEY" onChange={e => onChange({ providerApiKeyEnvRef: e.target.value })} /></label>
-    <p>API-key use incurs separate usage-based billing. OAuth migration is unsupported. Enter a reference name only, never a secret. Selection does not grant tools or project access.</p>
+    <label className="config-field">Native authentication<select className="config-input" value={edits.nativeAuthMode ?? ''} onChange={e => onChange(authModeChange(e.target.value))}><option value="">Not selected (existing auth unchanged)</option><option value="api_key">API key (usage-based billing)</option><option value="subscription">Subscription (unqualified compatibility only)</option></select></label>
+    {edits.nativeAuthMode === 'subscription'
+      ? <p>Requires an outside-owned provider and separate trial approval; not production-qualified.</p>
+      : <>
+        <label className="config-field">API key environment reference name<input className="config-input" value={edits.providerApiKeyEnvRef ?? ''} placeholder="EXAMPLE_API_KEY" onChange={e => onChange({ providerApiKeyEnvRef: e.target.value })} /></label>
+        <p>API-key use incurs separate usage-based billing. OAuth migration is unsupported. Enter a reference name only, never a secret. Selection does not grant tools or project access.</p>
+      </>}
     <p role="status">Managed runtime apply/reprovision is unavailable. Saving never starts, stops or migrates an agent.</p>
   </div>
 }

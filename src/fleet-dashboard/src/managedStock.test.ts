@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { savedRuntimeSelection, policyResponse, managedRuntimeView, revokeOutcome, managedStatusLines, backupLine, formatAge } from './managedStock.ts'
+import { savedRuntimeSelection, authModeChange, policyResponse, managedRuntimeView, revokeOutcome, managedStatusLines, backupLine, formatAge } from './managedStock.ts'
 
 test('save pins exact desired version and contains no applied fields', () => {
   assert.deepEqual(savedRuntimeSelection({ runtimeKind: 'openshell', sandboxPolicyVersionId: '17', nativeAuthMode: 'api_key', providerApiKeyEnvRef: 'TEST_API_KEY' }), {
@@ -134,4 +134,19 @@ test('backup age is unknown without a last-success stamp and never reads as fres
   assert.equal(backupLine({ backupState: 'unmounted', backupAgeSeconds: null }), 'backup dir not mounted')
   assert.equal(backupLine({ backupState: 'failed', backupAgeSeconds: 90000 }), 'backup failed (last success 1d ago)')
   assert.deepEqual([formatAge(45), formatAge(720), formatAge(-5)], ['45s', '12m', '0s'])
+})
+
+// #502: explicit subscription save clears the API-key reference; API and legacy saves are unchanged.
+test('subscription save clears the API-key reference and invents no defaults', () => {
+  assert.deepEqual(savedRuntimeSelection({ runtimeKind: 'openshell', sandboxPolicyVersionId: '17', nativeAuthMode: 'subscription', providerApiKeyEnvRef: 'STALE_KEY' }), {
+    runtimeKind: 'openshell', sandboxPolicyVersionId: 17, nativeAuthMode: 'subscription', providerApiKeyEnvRef: '',
+  })
+  assert.deepEqual(savedRuntimeSelection({ runtimeKind: 'openshell', sandboxPolicyVersionId: '17', nativeAuthMode: 'api_key', providerApiKeyEnvRef: 'TEST_API_KEY' }).providerApiKeyEnvRef, 'TEST_API_KEY')
+  assert.deepEqual(savedRuntimeSelection({}), {})
+  assert.deepEqual(savedRuntimeSelection({ runtimeKind: 'docker' }), { runtimeKind: 'docker', sandboxPolicyVersionId: 0, nativeAuthMode: '', providerApiKeyEnvRef: '' })
+})
+test('choosing subscription clears the reference edit; other modes leave it', () => {
+  assert.deepEqual(authModeChange('subscription'), { nativeAuthMode: 'subscription', providerApiKeyEnvRef: '' })
+  assert.deepEqual(authModeChange('api_key'), { nativeAuthMode: 'api_key' })
+  assert.deepEqual(authModeChange(''), { nativeAuthMode: '' })
 })

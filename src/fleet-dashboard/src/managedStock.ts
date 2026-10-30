@@ -8,8 +8,14 @@ export function savedRuntimeSelection(edits: RuntimeEdits): Record<string, unkno
     runtimeKind: edits.runtimeKind,
     sandboxPolicyVersionId: Number(edits.sandboxPolicyVersionId || 0),
     nativeAuthMode: edits.nativeAuthMode ?? '',
-    providerApiKeyEnvRef: edits.providerApiKeyEnvRef ?? '',
+    // #502: subscription has no API-key reference; the save explicitly clears it (the server refuses a mixed save).
+    providerApiKeyEnvRef: edits.nativeAuthMode === 'subscription' ? '' : edits.providerApiKeyEnvRef ?? '',
   }
+}
+
+/** #502: the auth selector's change, clearing the API-key reference when subscription is chosen. */
+export function authModeChange(mode: string): RuntimeEdits {
+  return mode === 'subscription' ? { nativeAuthMode: mode, providerApiKeyEnvRef: '' } : { nativeAuthMode: mode }
 }
 
 export async function policyResponse<T>(response: Response): Promise<T> {

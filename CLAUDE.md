@@ -452,3 +452,10 @@ Managed apply/lifecycle (#492) is `StockOpenShellRuntime` behind the same entry 
 (`FLEET_STOCK_MANAGED_ENABLED=false`): applied binding only for Start/Stop/cancel, CAS per agent,
 unknown outcomes held as `needs_attention`, never a Docker fallback. `upgrade.sh` runs
 `scripts/check-stock-runtime-rollout.sh` before stopping anything.
+The managed subscription branch (#502, `nativeAuthMode=subscription`, no API-key reference) is UNQUALIFIED and
+compatibility-only: outside-owned `<ConfigDir>/managed/<agent>/subscription.json`, existing stock provider only
+(never created/updated/imported), every resource call scoped to the persisted `--workspace`, expiry is
+revoke-and-stop (the 10 s monitor skips held records), retirement is archive-then-CAS, and the rollback preflight
+adds `subscriptionBindings` with the `org.phleet.managed-stock-subscription=1` label. Pins stay OpenShell 0.1.5
+`bdb956f2` / Codex 0.164.0 `6aaac694`; run the NEW guard before any checkout switch. Runbook:
+`docs/openshell-stock.md` (subscription section); native contract: `docs/openshell-subscription-auth.md`.

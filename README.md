@@ -143,6 +143,10 @@ verified memory and broker control/completion to a non-root Codex daemon/native-
 It is a bounded, experimental profile, not automatic provisioning or a general rollout.
 Each deployment needs explicit operator enrollment and its own exact-build runtime qualification;
 CI and source fixtures do not establish that qualification.
+The managed Codex **subscription** branch (#502) is experimental and compatibility-only: an outside-owned
+provider binding plus one native memory route, with no tested account isolation, no automatic enrollment or
+login, and no new environment key or tool. API-key and manual paths are unchanged. See the
+[subscription runbook](docs/openshell-stock.md#managed-codex-subscription-branch-502-unqualified-compatibility-only).
 
 ## Platform support
 
@@ -394,6 +398,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Saved sandbox policies
 
 The dashboard can save/list immutable stock policy versions and select an agent's desired
-runtime/version and API-key reference. Saving does not activate or migrate a runtime, change
+runtime/version and API-key reference (or the unqualified subscription mode, which takes none). Saving does not activate or migrate a runtime, change
 applied bindings, or grant service access. Managed apply is unavailable in this release.
 See [saved policies and errors](docs/openshell-stock.md#saved-managed-policies-no-activation).

@@ -735,3 +735,136 @@ likewise re-observes applied sandbox containers at most every 30 s per agent, di
 them host-local unless an operator-approved encrypted transfer exists. To restore, stop the gateway
 and every owned workload first, verify integrity and bindings before any admission, and keep the
 unexpected-resume hold.
+
+## Managed Codex subscription branch (#502, unqualified compatibility only)
+
+**Status: source support only, UNQUALIFIED.** This is one compatibility path for a native memory lookup under a
+subscription-backed stock provider. It is not production account isolation: the issuer route/refusal contract
+in [#501](https://github.com/anurmatov/phleet/issues/501) and the full #493/#498 qualification remain open.
+A positive trial needs separate exact human/operator authority (host, image, model, caller, login owner,
+refresh custody and window, receipts); none of that is implied by merge. Pins are unchanged: OpenShell 0.1.5
+`bdb956f2cd65a635f1294fccf1d138d263bf650f`, Codex 0.164.0 `6aaac694803004a63c6f393d153c96d22521a6b9`.
+The restricted profile is [`deploy/openshell/codex-subscription.yaml`](../deploy/openshell/codex-subscription.yaml);
+the native configuration contract is in [the subscription qualification guide](openshell-subscription-auth.md).
+
+**Selection.** `nativeAuthMode=subscription` (REST, MCP `native_auth_mode`, dashboard *Subscription
+(unqualified compatibility only)*) takes no API-key reference: a save that keeps or sends one is
+`400 subscription_rejects_provider_key_reference`, and the dashboard clears it. Saving is desired-only and never
+starts, logs in or imports anything. API-key and manual behaviour is unchanged.
+
+**Outside binding file.** The operator creates `<ConfigDir>/managed/<agent>/subscription.json` (never mounted or
+uploaded into the workload). It must be a regular file owned by the orchestrator's effective uid, mode exactly
+0600, in a directory of mode exactly 0700, and every existing ancestor must be a non-symlink without group or
+other write bits; otherwise `subscription_binding_invalid`. Bounded UTF-8 (16 KiB) version-1 JSON with exactly:
+
+| field | rule |
+|---|---|
+| `version`, `purpose` | `1`, `"compatibility_only"` |
+| `agent`, `providerName` | the agent's canonical name, and exactly `<agent>-codex-sub` |
+| `providerId`, `providerWorkspace` | the existing stock provider's UUID and its named workspace |
+| `sandboxWorkspace` | named workspace for the sandbox, equal to `providerWorkspace` in this slice; no wildcard/all-workspaces |
+| `accountId` | 1–256 of `A-Z a-z 0-9 _ -`; local selection only, not issuer authorization |
+| `ownerGeneration` | nonzero trial-lineage UUID (a local generation, not a token-generation counter) |
+| `gatewayGeneration` | the exact current gateway observation (container ID `@` StartedAt) |
+| `profileSha256` | lowercase hex; must equal the policy's pinned `codex-subscription-native` hash and the scoped export |
+| `expiresAt` | UTC `…Z` |
+
+Unknown, duplicate or missing fields refuse. Examples in this repository use placeholders only.
+
+**Readiness before any mutation.** Apply requires: exactly one `memory` MCP endpoint with the existing
+`mcp__memory__memory_get` grant and no Telegram bot, journal or other route (`managed_route_unsupported:*`,
+never silently dropped); the binding file; pinned CLI and gateway client trust in the persisted scope; the
+profile hash; the current gateway generation; sole ownership (no other agent's live tuple names the provider
+UUID or workspace/name: `subscription_owner_conflict`); the existing provider found exactly once across every
+`--workspace <providerWorkspace> provider list -o json` page with that UUID, type `codex-subscription-native`
+and only the `CODEX_AUTH_ACCESS_TOKEN` key; and `provider refresh status` ready (`configured`/`refreshed`, no
+recovery action or failure code) with fresh UTC + 120 s strictly before both NEXT_REFRESH and access expiry.
+Any miss is `subscription_provider_unverified` before the old runtime stops. The adapter never creates,
+updates, imports, rotates or deletes a subscription provider; the stock gateway stays the sole refresh owner.
+
+**Persisted scopes and cleanup.** The candidate records `SandboxWorkspace` and the subscription tuple (provider
+workspace/UUID, account, owner generation, source SHA-256, expiry) before any effect; Applied/Superseded keep it.
+Every resource command for that binding carries `--workspace <persisted>` (create/get/list/start/stop/exec/
+upload/download, logs, policy set, provider attach/detach/list). Revoke, Stop and detach read only the persisted
+tuple, never `subscription.json`, the CLI default or `OPENSHELL_WORKSPACE`: a deleted or changed source never
+redirects or blocks cleanup. Detach is verified (scoped attachment list before and after, exact UUID before and
+after); a cleanly cut candidate moves to Superseded instead of being dropped. A subscription binding with a
+missing/invalid persisted scope is `subscription_binding_unrecoverable` and `needs_attention`, with no unscoped
+command at all. Start rechecks scope, expiry and the source (missing/changed → revoke/Stop hold), and the tuple
+is revalidated immediately before attachment and activation.
+
+**Expiry.** The enrollment record expires no later than `expiresAt`, so admission self-expires. Expiry at any
+stage is revoke-and-stop: a pending apply checks before/after each external leg and before activation, Start
+cuts instead of activating, and the existing 10-second state-monitor pass cuts applied/pending tuples. Clean
+cutoff → `revoked` with `subscription_binding_expired`; partial → `needs_attention` with every cleanup error.
+Records already `needs_attention` or `revoked` are skipped by the monitor, so a failed cleanup is reported once
+and never retried every pass. No renewal, extension or automatic login follows.
+
+**Native preparation.** The workload gets `NativeAuthMode=subscription` plus nonsecret
+`StockOpenShell:SubscriptionAccountId`, `SubscriptionProvider` and `SubscriptionOwnerGeneration`. It reads only
+the stock-issued `CODEX_AUTH_ACCESS_TOKEN` handle (exact placeholder syntax; attachment is the issuance proof)
+and writes the stock example cache shape with an empty refresh token and the parsing-only ID-token stub
+(0700/0600, no foreign cache overwrite, no host-cache fallback). The config is: forced ChatGPT login and
+workspace and `model_provider = "openai-http"`, the generated defaults unchanged, the exact #498 descriptor, one
+`[features] plugins = false, apps = false` block, then exactly `[mcp_servers.memory]` with
+`enabled_tools = ["memory_get"]`. Any drift exits with a secret-free `stock_enrollment_*` reason before intake.
+The memory receiver keeps its fresh ACL, endpoint/tool/project and session/epoch checks.
+
+**Snapshot custody.** Subscription backups add evidence-only control records:
+
+```sh
+scripts/backup-stock-gateway.sh DIR TOML STATE \
+  --subscription-source FILE \
+  --managed-binding FILE \
+  --refresh-observation FILE
+```
+
+`--managed-binding` is the operator's byte copy of the owned agent's `AppliedRuntimeBinding` row (exported under
+separately scoped single-agent read authority; no export helper is added). `--refresh-observation` is the
+independently retained latest observation: exactly `providerId`, `ownerGeneration`, `statusObservedAtUtc`,
+`providerLastRefreshAtUtc` (null only when no refresh has succeeded) and `nextRefreshAtUtc`, never a credential.
+They land in `control/` with `control/MANIFEST.json` (capture time, gateway generation, identities, source and
+binding digests, native epochs, state, retired count, refresh times). Before any restore, with every owned
+writer stopped, run `scripts/check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT --subscription-source …
+--managed-binding … --refresh-observation …`. A snapshot captured before the latest retained provider refresh, or
+whose identity, source digest, epochs, revocation or retirement state has advanced, or whose current freshness is
+unknown, is refused; capture and verify a new latest stopped checkpoint instead. Restore only gateway
+DB/KEK/config/trust while stopped. The control JSON copies are never restored or imported over live state; a
+mismatch holds for separately authorized reconciliation. No gateway/native restart follows without the separate
+due-refresh/resume authority.
+
+**Retirement and ordered rollback.** An old subscription tuple stays live and countable until admission is cut,
+its providers are verified detached in their persisted workspaces, its workload/supervisor is quiescent and an
+authorized Docker or API target handoff succeeds. Then each complete old binding, cleanup evidence and handoff
+receipt is written to immutable `<ConfigDir>/managed/<agent>/retired/<epoch>.json` (fsync, atomic rename,
+0700/0600, hash readback), and one compare-and-set publishes the target and moves the tuples to inert
+`RetiredSubscriptions` references (Docker: Applied cleared; API: the new verified API binding). A failed
+verification, archive, handoff or lost CAS keeps every tuple countable; archives written before a lost CAS are
+evidence only. Retirement never happens solely from expiry or while the desired mode is still subscription.
+
+`GET /api/managed-runtime/rollback-preflight` now has exactly `desiredOpenShell`, `appliedOpenShell`,
+`unresolvedBindings` and `subscriptionBindings`; the last counts agents with desired subscription or any
+nonretired applied/candidate/superseded subscription tuple (an unreadable record counts). The orchestrator image
+declares `LABEL org.phleet.managed-stock-subscription=1`. A target without it requires `subscriptionBindings=0`;
+a target without the managed label requires all four counts zero. Ordered rollback, all on the
+subscription-capable checkout:
+1. revoke;
+2. confirm scoped stop/detach and quiescence;
+3. apply the authorized Docker or API target, with the desired mode already changed away from subscription;
+4. confirm the archive and retirement commit (`subscriptionBindings` reaches 0);
+5. run THIS checkout's `scripts/check-stock-runtime-rollout.sh --image <target>` (or `--dockerfile`);
+6. only then switch checkout/image;
+7. separate, explicit Start if authorized.
+
+An older checkout's `upgrade.sh`/guard is unsupported and unprotected while `subscriptionBindings>0`: its
+three-key parser refuses this server's four-key answer, but its managed-label shortcut skips the query, so it is
+not a safety control. `bash scripts/test-stock-subscription-rollout.sh` exercises the guard, snapshot and
+refusal rules with synthetic inputs.
+
+**Evidence retention.** Native/cache/output/snapshot/retirement evidence stays under 0700 directories and 0600
+files until closure + 7 days. The operator named in the separately authorized trial scope deletes, at that UTC
+deadline, only that trial's exact owned paths after checking path, hash, owner generation and that nothing live
+references them, and records the deletion time and counts; compact `RetiredSubscriptions` references are kept.
+Unknown ownership or a live reference stops deletion and is handed to the coordinator. No background retention
+job exists. After an invalid grant or reauthorization result, stop safely; recovery is a separately approved fresh
+login with a new owner generation, never a stale restore or a retry.

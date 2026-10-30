@@ -75,6 +75,25 @@ public sealed class ManagedStockIdentityTests : IDisposable
     }
 
     [Fact]
+    public async Task Subscription_capped_enrollment_is_refused_by_the_receiver_lookup_once_its_deadline_passes()
+    {
+        // #502: a subscription-mode enrollment record has the same shape; only its ExpiresAt is capped at the outside
+        // binding's expiry. The receiver lookup reads the record on every request, so no open session outlives it.
+        var path = Path.Combine(_dir, "agent1.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(new
+        {
+            State = "active", Agent = "agent1", SandboxId = "sandbox-s", Epoch = Guid.NewGuid(),
+            ExpiresAt = DateTimeOffset.UtcNow.AddMilliseconds(1500), GatewayIssuer = "synthetic-gateway", GatewayAudience = "synthetic-hook",
+            GatewayJwksPath = "/trust/gateway.jwks", AssertionPrivateKeyPath = "/outside/private.pem",
+            AssertionPublicKeyPath = "/outside/public.pem", MemoryHost = "memory.example.test", BrokerHost = "broker.example.test",
+            PolicySha256 = new string('b', 64), StockCommit = "bdb956f2cd65a635f1294fccf1d138d263bf650f",
+        }));
+        Assert.Equal("agent1", StockAuthoritySource.Resolve("/unused", _dir, "sandbox-s").Agent);
+        await Task.Delay(2000);
+        Assert.Equal("authority_mapping_missing", Assert.Throws<StockIdentityDenied>(() => StockAuthoritySource.Resolve("/unused", _dir, "sandbox-s")).Message);
+    }
+
+    [Fact]
     public void Without_a_directory_the_single_file_path_is_unchanged()
     {
         var file = Write("single", "agent1", "sandbox-1");

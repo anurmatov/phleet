@@ -1391,6 +1391,34 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "start"]));
     }
 
+    [Fact]
+    public async Task Saved_desired_change_never_redirects_mcp_start_of_the_applied_subscription_binding()
+    {
+        WriteSource();
+        var binding = SubBinding("fleet-agent1-5a5a5a5a", phase: "Stopped");
+        // Desired selection already saved as Docker/API key: save is desired-only, dispatch follows the applied binding.
+        var agent = _t.ManagedAgent(desired: "docker", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding });
+        _t._store.Add(agent);
+        WriteSourceMatching(binding);
+
+        var tool = await Runtime().DispatchToolAsync("agent1", "start");
+
+        Assert.Equal("started", tool);
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "start", binding.SandboxName]));
+        Assert.Empty(_cli.Unscoped.Calls);
+    }
+
+    /// <summary>Rewrites the outside source so its digest matches a persisted test binding (a recorded, unchanged source).</summary>
+    private void WriteSourceMatching(ManagedBinding binding)
+    {
+        var path = Path.Combine(_t._dir, "managed", "agent1", "subscription.json");
+        var digest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        var source = StockSubscriptionBinding.Read(_t._dir, "agent1", _clock.Now, StockOpenShellRuntime.OwnerUid(_t._dir)!.Value, StockOpenShellRuntime.OwnerUid).Source!;
+        var applied = binding with { Subscription = binding.Subscription! with { SourceSha256 = digest, ExpiresAt = source.ExpiresAt } };
+        _t._store.Get("agent1").AppliedRuntimeBinding = (record with { Applied = applied }).Serialize();
+    }
+
     // ── C6: cleanup uses persisted tuples after source loss/change ──
 
     [Theory]

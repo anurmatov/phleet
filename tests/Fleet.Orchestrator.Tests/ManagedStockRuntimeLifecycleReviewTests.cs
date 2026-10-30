@@ -1,3 +1,7 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Fleet.Orchestrator.Data;
@@ -1766,4 +1770,198 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
 
         private static string Stamp(DateTimeOffset value) => value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
     }
+}
+
+/// <summary>
+/// #502 review F1/F3: managed lifecycle dispatch through the actual <see cref="StockLegacyRuntimeGuard"/> middleware on a
+/// test host, and F2: subscription-aware delete refusal. Synthetic fakes only.
+/// </summary>
+public sealed class ManagedStockRouteAndDeleteTests : IDisposable
+{
+    private const string Token = "synthetic-operator-token";
+    private readonly ManagedStockRuntimeAdapterTests _t = new();
+
+    public void Dispose() => _t.Dispose();
+
+    private async Task<(Microsoft.AspNetCore.Builder.WebApplication App, HttpClient Client, List<string> Legacy)> HostAsync(string? token = Token)
+    {
+        var runtime = _t.Runtime();
+        var builder = Microsoft.AspNetCore.Builder.WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(runtime);
+        var app = builder.Build();
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Orchestrator:AuthToken"] = token }).Build();
+        app.UseStockLegacyRuntimeGuard(config);
+        var legacy = new List<string>();
+        foreach (var route in new[] { "/api/agents/{name}/start", "/api/agents/{name}/stop", "/api/agents/{name}/cancel", "/api/agents/{name}/cancel/{**taskId}" })
+            app.MapMethods(route, ["GET", "HEAD", "OPTIONS", "POST"], (HttpContext c) => { legacy.Add(c.Request.Method + " " + c.Request.Path); return "legacy"; });
+        await app.StartAsync();
+        return (app, app.GetTestClient(), legacy);
+    }
+
+    private ManagedBinding Applied(string phase = "Ready")
+    {
+        var binding = _t.Binding("fleet-agent1-f1f1f1f1", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, phase);
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "applied", Applied = binding }));
+        return binding;
+    }
+
+    private static HttpRequestMessage Request(string method, string path, string? token = Token)
+    {
+        var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (token is not null) request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        return request;
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/agents/agent1/stop", 405)]
+    [InlineData("HEAD", "/api/agents/agent1/stop", 405)]
+    [InlineData("OPTIONS", "/api/agents/agent1/restart", 405)]
+    [InlineData("GET", "/api/agents/agent1/cancel/task-a", 405)]
+    [InlineData("POST", "/api/agents/agent1/stop/extra", 404)]
+    [InlineData("POST", "/api/agents/agent1/stop/", 404)]
+    [InlineData("POST", "/api/agents/agent1//stop", 404)]
+    [InlineData("POST", "/api/agents/agent1/cancel_bg/a/b", 404)]
+    public async Task Reads_other_methods_and_malformed_routes_never_dispatch_or_persist(string method, string path, int status)
+    {
+        Applied();
+        var (app, client, legacy) = await HostAsync();
+        await using var _ = app;
+        var writes = _t._store.History.Count;
+
+        using var response = await client.SendAsync(Request(method, path));
+
+        Assert.Equal(status, (int)response.StatusCode);
+        Assert.Empty(_t._cli.Calls);
+        Assert.Equal(writes, _t._store.History.Count);
+        Assert.Empty(legacy);
+    }
+
+    [Theory]
+    [InlineData(null, 401)]
+    [InlineData("wrong-token", 401)]
+    public async Task Unauthenticated_post_is_refused_before_dispatch(string? token, int status)
+    {
+        Applied();
+        var (app, client, _) = await HostAsync();
+        await using var __ = app;
+
+        using var response = await client.SendAsync(Request("POST", "/api/agents/agent1/stop", token));
+
+        Assert.Equal(status, (int)response.StatusCode);
+        Assert.Empty(_t._cli.Calls);
+        Assert.Empty(_t._store.History);
+    }
+
+    [Fact]
+    public async Task Without_a_configured_operator_token_managed_dispatch_fails_closed()
+    {
+        Applied();
+        var (app, client, _) = await HostAsync(token: null);
+        await using var __ = app;
+
+        using var response = await client.SendAsync(Request("POST", "/api/agents/agent1/stop"));
+
+        Assert.Equal(503, (int)response.StatusCode);
+        Assert.Empty(_t._cli.Calls);
+    }
+
+    [Fact]
+    public async Task Authenticated_exact_post_dispatches_the_managed_action()
+    {
+        var binding = Applied();
+        var (app, client, legacy) = await HostAsync();
+        await using var __ = app;
+
+        using var response = await client.SendAsync(Request("POST", "/api/agents/agent1/stop"));
+
+        Assert.Equal(200, (int)response.StatusCode);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Empty(legacy);
+    }
+
+    [Theory]
+    [InlineData("/api/agents/agent1/cancel/task-a", "task-a", "/cancel/task-a")]
+    [InlineData("/api/agents/agent1/cancel/wf%2Fstep", "wf/step", "/cancel/wf%2Fstep")]
+    [InlineData("/api/agents/agent1/cancel_bg/task-a", "task-a", "/cancel/task-a")]
+    public async Task Targeted_cancel_keeps_the_exact_task_and_the_other_active_task_survives(string path, string target, string loopback)
+    {
+        // Review F3: the workload's loopback cancel is emulated with two active tasks; a bare /cancel clears both.
+        Applied();
+        var active = new HashSet<string> { target, "other-task" };
+        var seen = new List<string>();
+        _t._cli.OnExec = arg =>
+        {
+            if (!arg.StartsWith("/cancel", StringComparison.Ordinal)) return 0;
+            seen.Add(arg);
+            if (arg == "/cancel") active.Clear();
+            else active.Remove(Uri.UnescapeDataString(arg["/cancel/".Length..]));
+            return 0;
+        };
+        var (app, client, _) = await HostAsync();
+        await using var __ = app;
+
+        using var response = await client.SendAsync(Request("POST", path));
+
+        Assert.Equal(200, (int)response.StatusCode);
+        Assert.Equal([loopback], seen);
+        Assert.Equal(["other-task"], active);
+
+        using var all = await client.SendAsync(Request("POST", "/api/agents/agent1/cancel"));
+        Assert.Equal(200, (int)all.StatusCode);
+        Assert.Equal("/cancel", seen[^1]);
+        Assert.Empty(active);
+    }
+
+    // ── F2: delete keeps desired or nonretired subscription state ──
+
+    private ManagedBinding SubscriptionBinding(string name) =>
+        _t.Binding(name, Guid.NewGuid()) with
+        {
+            AuthMode = "subscription", KeyRef = "", Provider = "agent1-codex-sub", SandboxWorkspace = "ws-a",
+            Subscription = new ManagedSubscription("ws-a", StockSubscriptionBindingTests.ProviderId, "synthetic-account_01",
+                Guid.Parse(StockSubscriptionBindingTests.Owner), new string('d', 64), DateTimeOffset.UtcNow.AddHours(1)),
+        };
+
+    [Fact]
+    public async Task Clean_revoke_does_not_permit_delete_until_verified_retirement()
+    {
+        var applied = SubscriptionBinding("fleet-agent1-f2f2f2f2");
+        var history = SubscriptionBinding("fleet-agent1-f2f2f2f3");
+        var agent = _t.ManagedAgent(desired: "openshell", applied: "openshell",
+            new ManagedRecord { State = "revoked", Applied = applied, Superseded = [history] });
+        agent.NativeAuthMode = null;
+        agent.ProviderApiKeyEnvRef = null;
+        _t._store.Add(agent);
+        var runtime = _t.Runtime();
+
+        // revoke → DELETE: the clean revoke alone keeps the row, its rollback count and its custody history.
+        Assert.Equal("managed_subscription_not_retired", ContainerProvisioningService.DescribeManagedDeleteFault(_t._store.Get("agent1")));
+        Assert.Equal(1, SubscriptionCount(await runtime.RollbackPreflightAsync(default)));
+        Assert.Equal(2, ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).SubscriptionTuples().Count());
+
+        // Desired subscription with no binding at all also keeps the row.
+        var desired = _t.ManagedAgent(desired: "docker", applied: "docker");
+        desired.NativeAuthMode = "subscription";
+        Assert.Equal("managed_subscription_not_retired", ContainerProvisioningService.DescribeManagedDeleteFault(desired));
+
+        // Only inert retirement references remain after a verified archived retirement: delete is allowed again.
+        var retired = new ManagedRecord
+        {
+            State = "revoked",
+            RetiredSubscriptions = [new RetiredSubscription(applied.Epoch, "ws-a", applied.SandboxId, "ws-a", StockSubscriptionBindingTests.ProviderId,
+                Guid.Parse(StockSubscriptionBindingTests.Owner), "/retired/x.json", new string('e', 64), DateTimeOffset.UtcNow)],
+        };
+        var done = _t.ManagedAgent(desired: "docker", applied: "docker", retired);
+        done.NativeAuthMode = null;
+        done.ProviderApiKeyEnvRef = null;
+        Assert.Null(ContainerProvisioningService.DescribeManagedDeleteFault(done));
+        // API-key behavior is unchanged: a clean API revoke still permits delete.
+        var api = _t.ManagedAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "revoked", Applied = _t.Binding("fleet-agent1-a0a0a0a0", Guid.NewGuid()) });
+        Assert.Null(ContainerProvisioningService.DescribeManagedDeleteFault(api));
+    }
+
+    private static int SubscriptionCount(object preflight) =>
+        System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(preflight)).RootElement.GetProperty("subscriptionBindings").GetInt32();
 }

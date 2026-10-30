@@ -624,6 +624,9 @@ public sealed class ContainerProvisioningService(
         ManagedRecord record;
         try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
         catch (System.Text.Json.JsonException) { return "managed_binding_unreadable"; }
+        // #502 review F2: desired subscription or any nonretired subscription tuple keeps the row (and its rollback count
+        // and custody history) until a verified, archived retirement; a clean revoke alone is not retirement.
+        if (agent.NativeAuthMode == StockSubscriptionBinding.Mode || record.SubscriptionTuples().Any()) return "managed_subscription_not_retired";
         // A clean, finished revoke (a retired Docker handoff is recorded the same way) leaves nothing live.
         if (record is { State: "revoked", Operation: null, Candidate: null, Errors.Count: 0 }) return null;
         if (record.Unresolved) return "managed_state_unresolved";

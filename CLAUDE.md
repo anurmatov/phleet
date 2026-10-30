@@ -463,3 +463,15 @@ revoke-and-stop (the 10 s monitor skips held records), retirement is archive-the
 adds `subscriptionBindings` with the `org.phleet.managed-stock-subscription=1` label. Pins stay OpenShell 0.1.5
 `bdb956f2` / Codex 0.164.0 `6aaac694`; run the NEW guard before any checkout switch. Runbook:
 `docs/openshell-stock.md` (subscription section); native contract: `docs/openshell-subscription-auth.md`.
+Managed signer binding (#503, `StockManagedSignerPolicy`): saved YAML may carry only the fixed `network_middlewares`
+subset (`stock-memory`/`stock-temporal`/`stock-telegram` → registration `stock-memory`, orders 0/10/20,
+`fail_closed`, one exact lowercase host). Apply (both auth modes) refuses before any old-runtime Stop or provider/broker/
+create/policy-set effect with 409 `managed_signer_policy_missing`/`_mismatch`/`_scope`. It requires the stored hash
+to be the SHA-256 of the exact saved bytes, the entries to equal memory plus the selected routes, and one enforced
+`host:443` MCP endpoint per receiver (memory read-only). Start/restart/pre-activation check the applied version
+and its outside enrollment (`managed_signer_authority_unavailable`), never desired. Never normalize or inject into
+saved YAML. Cleanup (Stop/revoke/expiry/retirement) never depends on this check. Backups require the registration's
+CA under STATE_DIR (`coverage_incomplete: signer_tls_ca`) and record `SNAPSHOT_MODE`. Eligibility is
+`--restore-eligibility` (control) or `--plain-restore-eligibility` (live zero-custody preflight), with no downgrade;
+`--require-subscription-recovery` always warns with exit 3. The signer registration is a gateway-wide startup
+dependency; real startup/negotiation stays operator-only (C11/C18 UNRUN).

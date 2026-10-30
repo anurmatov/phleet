@@ -147,6 +147,11 @@ The managed Codex **subscription** branch (#502) is experimental and compatibili
 provider binding plus one native memory route, with no tested account isolation, no automatic enrollment or
 login, and no new environment key or tool. API-key and manual paths are unchanged. See the
 [subscription runbook](docs/openshell-stock.md#managed-codex-subscription-branch-502-unqualified-compatibility-only).
+Managed apply (#503) needs a saved policy that binds the fixed `stock-memory` signer to exactly the agent's
+first-party receiving hosts. It is one restricted subset, with no arbitrary middleware, and the saved bytes and
+hash stay the effective policy. Registering that signer in the gateway makes it a startup dependency of every
+sandbox on that gateway. This adds no runtime qualification; see the
+[signer binding runbook](docs/openshell-stock.md#managed-signer-policy-binding-503).
 
 | OpenShell capability | Status |
 |---|---|

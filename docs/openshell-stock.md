@@ -397,8 +397,9 @@ versions list or `/versions/{version}`. Version IDs, not “latest”, are store
 Supported YAML is a bounded subset of the pinned [stock authored schema](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy-schema/src/lib.rs):
 `version: 1`, `filesystem_policy` (absolute read-only/read-write paths and include_workdir),
 `process` (named user/group), `landlock`, and `network_policies` (binary paths, host/port,
-protocol, automatic TLS, enforcement/access presets and credential_binding).
-Advanced rules/middleware, aliases, anchors, tags and unknown fields return 400, never silently
+protocol, automatic TLS, enforcement/access presets and credential_binding), plus the one bounded
+`network_middlewares` signer subset described in [Managed signer policy binding](#managed-signer-policy-binding-503).
+Advanced rules, any other middleware, aliases, anchors, tags and unknown fields return 400, never silently
 lose fields. Each explicit credential binding requires its pinned profile content hash. These
 operator-supplied hashes are persisted immutably; this save-only release does not contact a gateway
 or establish that the installed profiles match. Future apply must independently verify them.
@@ -737,7 +738,10 @@ incomplete `gateway-*` dir. Linked OS ancestors above `STATE_DIR` (macOS `/var` 
 linked `STATE_DIR` or anything under it still refuses. Staleness is surfaced by
 `scripts/check-stock-gateway-backup.sh BACKUP_DIR [MAX_AGE_HOURS]` (default 26): it exits nonzero when
 `last-success` is missing, malformed, older than the limit or not newer than `last-failure`, or when no
-complete `gateway-*` snapshot exists (partial and incomplete dirs never count). With
+complete `gateway-*` snapshot exists (partial and incomplete dirs never count). Its pass reads
+`freshness only; restore eligibility not assessed`; it is never a restore or subscription-recovery check. Every
+snapshot records `SNAPSHOT_MODE` (`plain` or `subscription`), and a config carrying the signer registration needs its
+CA under STATE_DIR (see [Managed signer policy binding](#managed-signer-policy-binding-503)). With
 `FLEET_STOCK_MANAGED_ENABLED=true`, `setup.sh` and `upgrade.sh` run it against `FLEET_STOCK_BACKUP_DIR` (limit
 `FLEET_STOCK_BACKUP_MAX_AGE_HOURS`) before the rollout guard and refuses on a missing, failed or stale
 backup; wire the same check into host monitoring. The example compose mounts `FLEET_STOCK_BACKUP_DIR`
@@ -841,7 +845,8 @@ separately scoped single-agent read authority; no export helper is added). `--re
 independently retained latest observation: exactly `providerId`, `ownerGeneration`, `statusObservedAtUtc`,
 `providerLastRefreshAtUtc` (null only when no refresh has succeeded) and `nextRefreshAtUtc`, never a credential.
 They land in `control/` with `control/MANIFEST.json` (capture time, gateway generation, identities, source and
-binding digests, native epochs, state, retired count, refresh times). Before any restore, with every owned
+binding digests, native epochs, state, retired count, refresh times, and since #503 `stateDirectory` plus the
+three signer fields) and the snapshot is marked `SNAPSHOT_MODE=subscription`. Before any restore, with every owned
 writer stopped, run `scripts/check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT --subscription-source …
 --managed-binding … --refresh-observation …` with a refresh observation taken after the snapshot. It refuses a
 snapshot whose checksum inventory is empty, incomplete or mismatched, that lacks the gateway DB/config/trust, the
@@ -889,3 +894,226 @@ references them, and records the deletion time and counts; compact `RetiredSubsc
 Unknown ownership or a live reference stops deletion and is handed to the coordinator. No background retention
 job exists. After an invalid grant or reauthorization result, stop safely; recovery is a separately approved fresh
 login with a new owner generation, never a stale restore or a retry.
+
+## Managed signer policy binding (#503)
+
+**Status: source support, UNQUALIFIED.** A managed sandbox signs first-party MCP requests only when its saved policy
+attaches the existing outside signer (`StockSupervisorMiddleware`, `Fleet.StockIdentity`) to each receiving host.
+This section covers that one supported binding form, managed admission, the gateway registration and its maintenance
+runbook. Source tests and CI are not exact-build qualification: real signer reachability from both caller contexts,
+TLS/JWT negotiation, a receiver-attributed native memory lookup and the startup cases below remain operator checks
+(C11/C18), UNRUN until separately authorized. Pins are unchanged.
+
+### Supported policy subset
+
+Saved YAML may add a top-level `network_middlewares` map, and only in this form. Anything else returns 400 and
+writes no row:
+
+| field | the only accepted form |
+|---|---|
+| entries | at most three, keyed exactly `stock-memory`, `stock-temporal`, `stock-telegram` |
+| per entry | exactly `middleware`, `order`, `on_error`, `config`, `endpoints` |
+| `middleware` | `stock-memory`, the one fixed gateway registration |
+| `config` | exactly `service: memory`, `temporal` or `telegram`, matching the key |
+| `order` | unquoted integer: memory `0`, temporal `10`, telegram `20` |
+| `on_error` | `fail_closed` |
+| `endpoints` | exactly `include` with one exact lowercase DNS name; no wildcard, IP, scheme, port, path, query, terminal dot or `exclude`; distinct hosts |
+
+A memory-only binding, added to an otherwise valid policy:
+
+```yaml
+network_policies:
+  fleet-memory:
+    endpoints:
+      - host: memory.example.test
+        port: 443
+        protocol: mcp
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/codex
+network_middlewares:
+  stock-memory:
+    middleware: stock-memory
+    order: 0
+    on_error: fail_closed
+    config:
+      service: memory
+    endpoints:
+      include:
+        - memory.example.test
+```
+
+For selected Temporal or Telegram routes, add `stock-temporal` (order `10`, `service: temporal`) and `stock-telegram`
+(order `20`, `service: telegram`), each with its own `host:443` MCP endpoint (any existing accepted access preset).
+A policy without bindings still saves for storage or manual use; it can never activate a managed agent.
+
+### Managed admission
+
+The saved bytes are the effective policy. Nothing is inserted, normalized or rewritten, and an immutable version
+never changes meaning. Stock may reserialize the policy it stores, so compare it semantically, never byte for byte.
+
+| stage | check | refusal |
+|---|---|---|
+| save (create/append) | the subset above, with the existing size/event/depth/alias/tag limits | 400, no row |
+| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, memory `access: read-only` | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
+| bypass ambiguity | wildcard endpoint hosts, a duplicate, alternate-port, plaintext/TCP or case/trailing-dot variant of a receiving host, extra or unselected signer entries | `managed_signer_policy_scope` |
+| policy file | written from the saved bytes, then read back against the stored hash | `managed_files_failed` |
+| Start, restart, before activation | the persisted applied version and hash, and its outside enrollment (exact agent, UUID, epoch, stock commit, policy hash and receiving hosts), never the desired selection or the current template | 409 named fault before staging; `managed_signer_authority_unavailable` for a missing or ambiguous enrollment; drift while staging is the bounded revoke/Stop hold |
+
+The same `PolicySha256` is carried by the binding, the outside and guest enrollments and the bytes passed to
+`--policy`. Unrelated explicit destinations and provider profiles are unchanged. Refusals are logged with the
+category and policy version/hash only.
+
+**Old unbound bindings.** Start and restart refuse them by name; there is no unsigned grandfathering. Stop, revoke,
+expiry, retirement and Docker handoff never depend on this validator. To repair:
+1. append a reviewed bound version;
+2. select it;
+3. revoke cleanly;
+4. run a normal apply.
+Never edit a version in place.
+
+### Gateway registration
+
+The dormant block at the end of [`gateway.toml.example`](../deploy/openshell/gateway.toml.example) is the fixed
+registration. Its fields are `name = "stock-memory"`, `grpc_endpoint = "https://identity.example.test:5443"`,
+`audience`, `tls_ca_cert_path` under STATE_DIR, `max_payload_bytes = 262144`, `timeout = "2s"` and
+`allow_insecure_transport = false`.
+
+- **Gateway-wide startup dependency.** At every start the gateway negotiates with every registered service, used by a
+  policy or not ([pinned contract](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/docs/extensibility/supervisor-middleware/configure.mdx#L63)).
+  These failures keep the **entire gateway** from starting, for ALL its sandboxes, managed or manual:
+  - an unavailable or incompatible signer;
+  - an expired server certificate;
+  - a wrong CA;
+  - a rejected JWT.
+
+  Operator category: `signer_gateway_startup_blocked`. Do not restart in a loop or deregister automatically.
+- **Runtime denial is different.** If the signer fails after the gateway is up (timeout, TLS/JWT, oversized or
+  invalid response), only the affected bound request fails closed. Unrelated traffic is not claimed to stop. Do not
+  restart the gateway hoping it recovers without the signer.
+- **Order on host boot and every restart:** the outside JWT trust and verified signer HTTPS/HTTP2 readiness first,
+  then the gateway's authenticated Describe/negotiation and readiness, then managed admission. A running signer
+  process is not readiness.
+- **Exact audience.** `audience` must equal `GatewayAudience` in `managed-authority.json` exactly, case included;
+  set it explicitly. The stock default `urn:openshell:extension:middleware:stock-memory` works only when it is that
+  value. A mismatch is `signer_gateway_audience_mismatch`.
+- **Shared addressing.** One operator-supplied DNS name and port must resolve and reach the same signer from BOTH
+  the gateway container network and the host-network supervisors. Its server certificate carries that exact DNS SAN
+  and chains to the configured CA in both contexts. No container alias, loopback substitute, DNS override, new
+  network permission or listener publication is authorized here. Proof from one caller context only is
+  `signer_reachability_unverified`.
+- **Signer listener.** Use exactly these Kestrel keys:
+  - `Kestrel:Endpoints:Signer:Url = "https://<authorized-listen-address>:5443"`;
+  - `Kestrel:Endpoints:Signer:Protocols = "Http2"`;
+  - `Kestrel:Endpoints:Signer:Certificate:Path`;
+  - `Kestrel:Endpoints:Signer:Certificate:KeyPath`.
+
+  Do not add an HTTP/HTTP1 or development-certificate fallback. The private key is a 0600 file owned by the signer
+  uid, in a 0700 outside directory, never mounted into a workload or copied under STATE_DIR. Anything unverified is
+  `signer_listener_unverified` (an operator stop, not a ready state).
+- **Two trust hops.** The signer callback CA is not receiver TLS trust: each receiving HTTPS server keeps its own
+  supervisor trust. Never use a guessed Docker CA option or a plaintext workaround.
+
+### Registration maintenance (add, certificate/CA rotation, break-glass removal)
+
+Changing the registration affects every sandbox on that gateway. It needs a separately authorized maintenance
+window and gives no authority over unowned workloads. Follow this order:
+
+1. **Quiesce.** Run a normal Stop or clean revoke for EVERY owned managed record, including candidate and superseded
+   custody. Verify durable Stopped/quiescence or a clean revoke, with no live operation or unresolved cleanup.
+2. **Choose the checkpoint mode.** Take a fresh authenticated rollback preflight and review the owned records.
+   - Any desired or nonretired subscription custody, including clean-revoked or superseded tuples, means BOTH S0 and
+     S1 are control-bearing.
+   - Plain is allowed only with proved zero subscription custody.
+   - Unknown state is never plain.
+3. **Reserve the paths.** Use one recorded private maintenance root outside the daily `BACKUP_DIR`. Use canonical,
+   non-linked paths with 0700 directories and 0600 files. Create distinct, initially absent `<root>/<window-id>/S0`
+   and `<root>/<window-id>/S1` directories. Run one invocation per directory, and never reuse them for daily jobs or
+   later windows.
+4. **Seal S0.** Stop the owned gateway and all its state/refresh writers. Then take the mode-correct S0 into its
+   directory and record the exact snapshot path and hash.
+   - Absent controls, unknown freshness or a failed backup means no config change and no plain fallback.
+5. **Change while stopped.** Set the verified shared endpoint/SAN/HTTP2 settings and the exact audience.
+   - Add or rotation: put the public signer CA under STATE_DIR and update the registration.
+   - Rotation runs in a NEW window, never as a hot rotation and never reusing an old S1.
+   - Signer certificate and key updates stay in outside custody. Keep the old outside material and the old
+     config/CA for guarded rollback.
+   - **Break-glass removal** (the signer cannot be restored): remove ONLY the fixed registration. Keep the keys, CA
+     files and all custody.
+6. **Seal S1** into its own directory while stopped. Missing CA/control/freshness proof is fatal; S0 is never
+   overwritten or pruned.
+7. **Re-verify BOTH immediately before restart.** Run each checkpoint's eligibility command now.
+   - A missing, corrupt or stale S0 stops the window even when S1 is valid.
+   - Never rewrite S0 or reduce a check.
+8. **Signer first.** For any config that keeps the registration, start the owned signer first, then only the named
+   gateway, and require authenticated negotiation and readiness.
+   - A failed dependency is `signer_gateway_startup_blocked`. The gateway stays not-ready and managed activation
+     stays held.
+9. **Authenticate.** Record the new gateway generation, then check the authenticated `openshell gateway info` and a
+   scoped sandbox list; process existence is not enough. After removal, prove the registration is absent and keep
+   managed Start/apply held.
+10. **Resume only eligible records.** A clean stopped bound record uses the normal Start, through the existing
+    same-UUID/quiescence planned-restart checks. Clean-revoked or old unbound records need the reviewed bound version
+    and a normal apply. Rotation or re-adding the registration never releases a held or revoked record.
+
+A changed generation under a still-running binding takes the existing `needs_attention` hold plus an independent
+revoke/Stop fanout, with no automatic resume. A gateway that is already down does not waive quiescence, current
+custody or the S0/S1 checks. If cleanup cannot prove them, stop and seek separately authorized recovery, never
+direct record edits. Removal may restore gateway availability for eligible non-dependent users only after
+authenticated readiness. It never qualifies managed use: policies naming the missing signer stay refused, never
+stripped or resumed unsigned.
+
+### Checkpoints, eligibility and monitoring
+
+| snapshot | how it is taken | before any restore (all writers stopped) |
+|---|---|---|
+| control-bearing (`SNAPSHOT_MODE=subscription`) | positional args plus the three control inputs | `check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT --subscription-source FILE --managed-binding FILE --refresh-observation FILE` |
+| plain (`SNAPSHOT_MODE=plain`) | positional args only | `check-stock-gateway-backup.sh --plain-restore-eligibility SNAPSHOT --state-dir STATE_DIR`, plus `ORCHESTRATOR_AUTH_TOKEN` and optional `FLEET_ORCHESTRATOR_URL` |
+
+- **Signer CA coverage.** Any backup of a config carrying the registration requires its `tls_ca_cert_path` as a
+  regular, non-empty, non-linked file under STATE_DIR. Otherwise the backup fails with
+  `coverage_incomplete: signer_tls_ca` and no COMPLETE. Malformed, duplicate or ambiguous registration data fails
+  the same way under both the tomllib and Python < 3.11 parsers. No CA is moved automatically, and configs without
+  the registration are unchanged.
+- **Signer metadata.** Control manifests record `stateDirectory`, `signerRegistration`, `signerCaConfigPath` and
+  `signerCaEntry`. The three signer fields are explicit JSON nulls without a registration. Eligibility compares
+  them with the snapshot's own parsed config. A registered CA missing from the verified inventory is
+  `REFUSED: signer_tls_ca_not_covered`, even when the inventory itself is self-consistent. CA bytes are restored
+  with the rest of the trust; never borrow a CA or clear TLS.
+- **Plain branch.** It accepts only `plain`-marked snapshots without `control/`. It runs the same
+  inventory/integrity/config/trust checks, maps the configured KEK and CA against the explicit original STATE_DIR,
+  and needs a fresh authenticated `GET /api/managed-runtime/rollback-preflight`:
+  - a 10-second deadline, with the token through curl's stdin config;
+  - exactly the four counts, with `subscriptionBindings=0` and `unresolvedBindings=0`;
+  - anything else, including no token, is `REFUSED: subscription_state_unverified`.
+- **No downgrade.** A missing or unknown marker refuses; legacy unmarked artifacts need a fresh checkpoint. The plain
+  branch refuses subscription-marked or control-bearing snapshots, even with the controls and their checksum lines
+  stripped. A control-branch refusal is never retried as plain, and a pre-enrollment plain S0 stops qualifying once
+  subscription custody exists.
+- **Scope limit.** A checkpoint covers one binding/source/refresh tuple. Custody it cannot represent is
+  `subscription_snapshot_scope_unverified`: stop for separately authorized reconciliation.
+- **Retention.** Pruning keeps seven complete snapshots inside the invoked `BACKUP_DIR` only. S0/S1 survive daily
+  rotation because they live in their own once-used directories, not through an exemption. The maintenance operator
+  keeps both through closure or rollback need, under the existing #502 closure + 7 days rule, with no automatic
+  cleanup or silent extension.
+- **Daily limit.** Daily positional backups are `plain`. While subscription custody exists they are NOT
+  subscription-recovery checkpoints, however fresh. This supplement adds no control export or automated recovery
+  guarantee. Recovery needs a separately authorized, explicitly supplied current control-bearing checkpoint.
+- **Monitoring while custody may exist:** `check-stock-gateway-backup.sh --require-subscription-recovery BACKUP_DIR
+  [MAX_AGE_HOURS]`. A stale or failed backup still exits 1. Otherwise only the newest complete snapshot in that
+  directory is classified, and it always warns with exit 3:
+  - plain or unmarked: `WARN: subscription_recovery_unqualified`;
+  - control-bearing: `WARN: subscription_recovery_unverified`.
+
+  Keep exit 3 as a warning, not "recovery healthy". The separately authorized eligibility run is the only recovery
+  check.
+
+**Rollback.** Drain every rollback-preflight count first: authorized Stop/revoke, verified quiescence, archived
+subscription retirement and target handoff. Then disable managed activation and run this checkout's guard before any
+image or checkout switch. For a registration rollback, stop all owned records and writers, then choose S0/S1 by
+current custody and re-run that mode's check now. Restore config/DB/KEK/complete trust (with the config's signer CA)
+with their original ownership and modes; control JSON is evidence and is never imported. Then require verified
+signer readiness first if the registration is present, then the gateway's authenticated readiness and generation
+reconciliation, before any separately authorized Start. A config without the registration never permits a
+signer-dependent managed Start.

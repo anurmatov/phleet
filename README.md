@@ -148,6 +148,10 @@ provider binding plus one native memory route, with no tested account isolation,
 login, and no new environment key or tool. API-key and manual paths are unchanged. See the
 [subscription runbook](docs/openshell-stock.md#managed-codex-subscription-branch-502-unqualified-compatibility-only).
 
+| OpenShell capability | Status |
+|---|---|
+| Isolated Codex subscriptions | **UNQUALIFIED** at stock 0.1.5 / Codex 0.164.0; [separate docs/profile qualification](docs/openshell-subscription-auth.md), no migration or managed subscription support |
+
 ## Platform support
 
 | Platform | Provider | Status |

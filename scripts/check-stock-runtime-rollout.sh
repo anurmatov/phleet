@@ -44,7 +44,7 @@ esac
 managed=false; subscription=false
 has_label "$MANAGED_LABEL" "$2" && managed=true
 has_label "$SUBSCRIPTION_LABEL" "$2" && subscription=true
-if $managed && $subscription; then echo "OK: target supports managed and subscription bindings"; exit 0; fi
+if $managed && $subscription; then echo "OK: target supports managed bindings, including subscription bindings"; exit 0; fi
 
 token=${ORCHESTRATOR_AUTH_TOKEN:-}
 [[ -n "$token" ]] || refuse "target lacks managed subscription capability and no operator token is configured for the preflight"

@@ -391,7 +391,7 @@ than routed to a same-named Docker container. No managed binding can be created 
 
 All `/api/sandbox-policies` reads and writes require `Orchestrator:AuthToken`, including in dev
 mode. Create with `POST /api/sandbox-policies` (`name`, `yaml`, optional `providerProfileHashes`
-object mapping profile names to lowercase SHA256 content hashes). List with GET; append using
+object mapping profile names to lowercase [profile content digests](#profile-content-digest-503)). List with GET; append using
 `POST /api/sandbox-policies/{id}/versions` (`version`, `yaml`, `providerProfileHashes`). GET the
 versions list or `/versions/{version}`. Version IDs, not “latest”, are stored on agents.
 Supported YAML is a bounded subset of the pinned [stock authored schema](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy-schema/src/lib.rs):
@@ -403,6 +403,23 @@ Advanced rules, any other middleware, aliases, anchors, tags and unknown fields 
 lose fields. Each explicit credential binding requires its pinned profile content hash. These
 operator-supplied hashes are persisted immutably; this save-only release does not contact a gateway
 or establish that the installed profiles match. Future apply must independently verify them.
+
+<a id="profile-content-digest-503"></a>**Profile content digest (#503).** A profile pin is the canonical digest of the
+installed profile's full export. Compute it with
+`openshell [--workspace WS] profile export NAME -o json | scripts/stock-profile-digest.sh`, run in the workspace
+apply will check. The pinned CLI renders maps such as `annotations` from an unordered map, so two exports of one
+unchanged profile can differ byte for byte. A hash of raw CLI output, or of the file you imported, is therefore not a
+pin. The digest is the lowercase SHA-256 of the canonical UTF-8 form of the whole JSON object, with every field kept:
+- object keys are sorted by code point at every level, and a duplicate key refuses;
+- arrays keep their exported order;
+- there is no insignificant whitespace, and strings are escaped as Python `json.dumps(ensure_ascii=False)` does;
+- numbers must be signed 64-bit integers.
+
+Any other number, invalid text or nesting deeper than 64 refuses. Managed apply exports each pinned profile with
+`-o json` and computes the same digest (`StockProfileDigest`); a shared fixture test keeps the checker and the script
+equal. A different digest is `provider_profile_hash_mismatch:<profile>`. An export that cannot be canonicalized is
+`provider_profile_unverifiable:<profile>`, never a pass. Re-pin by appending a policy version, never by retrying until a
+hash matches. Pins taken from raw YAML output before #503 never match: append a version carrying the canonical digest.
 
 400 means invalid/unsupported input; 404 means missing policy/version; 409 means name/version
 conflict or unavailable apply; 503 means database/auth configuration unavailable, not an empty
@@ -562,7 +579,7 @@ Operator inputs (nothing is generated; the policy YAML is stored as supplied):
 - Import two custom stock profiles: `telegram` (credential `env_vars: [TELEGRAM_BOT_TOKEN]`, endpoint
   `api.telegram.org:443`, `protocol: rest`) and `fleet-journal` (credential
   `env_vars: [FLEET_JOURNAL_INGEST_TOKEN]`, endpoint your journal host on `443`). Name the agent's
-  `dotnet` host binary in `binaries`, then pin both profiles' hashes in the policy version. An agent
+  `dotnet` host binary in `binaries`, then pin both profiles' [content digests](#profile-content-digest-503) in the policy version. An agent
   with the `fleet-comms-journal` endpoint or files/send also needs `fleet-journal-read` (credential
   `env_vars: [FLEET_JOURNAL_READ_TOKEN]`, the same journal host on `443`; `binaries`: the native
   Codex binary for the read MCP, the `dotnet` host for files/send), and cross-chat needs
@@ -782,7 +799,7 @@ other write bits; otherwise `subscription_binding_invalid`. Bounded UTF-8 (16 Ki
 | `accountId` | 1–256 of `A-Z a-z 0-9 _ -`; local selection only, not issuer authorization |
 | `ownerGeneration` | nonzero trial-lineage UUID (a local generation, not a token-generation counter) |
 | `gatewayGeneration` | the exact current gateway observation (container ID `@` StartedAt) |
-| `profileSha256` | lowercase hex; must equal the policy's pinned `codex-subscription-native` hash and the scoped export |
+| `profileSha256` | the [profile content digest](#profile-content-digest-503) of the scoped `--workspace <providerWorkspace>` export; must equal the policy's pinned `codex-subscription-native` digest |
 | `expiresAt` | UTC `…Z` |
 
 Unknown, duplicate or missing fields refuse. Examples in this repository use placeholders only.

@@ -22,7 +22,7 @@ namespace Fleet.Orchestrator.Tests;
 /// </summary>
 public sealed class ManagedSignerPolicyIntegrationTests : IAsyncLifetime
 {
-    private const string ProfileHash = "b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702"; // the fake export
+    private static readonly string ProfileHash = SyntheticProfile.Digest; // the fake export's canonical digest
     private readonly ManagedStockRuntimeAdapterTests _t = new();
     private readonly CapturingCli _cli;
     private WebApplication _app = null!;

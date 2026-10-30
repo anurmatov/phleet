@@ -475,3 +475,7 @@ CA under STATE_DIR (`coverage_incomplete: signer_tls_ca`) and record `SNAPSHOT_M
 `--restore-eligibility` (control) or `--plain-restore-eligibility` (live zero-custody preflight), with no downgrade;
 `--require-subscription-recovery` always warns with exit 3. The signer registration is a gateway-wide startup
 dependency; real startup/negotiation stays operator-only (C11/C18 UNRUN).
+Provider profile pins (`providerProfileHashes`, subscription.json `profileSha256`) are `StockProfileDigest`
+canonical full-document digests of `profile export NAME -o json`. Operators compute them with
+`scripts/stock-profile-digest.sh`, and both sides are kept equal by a shared fixture. Never use a raw-output hash: the
+stock CLI's map order varies between identical exports.

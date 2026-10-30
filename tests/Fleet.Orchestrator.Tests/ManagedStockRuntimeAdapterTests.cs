@@ -1133,7 +1133,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public readonly HashSet<string> Hang = [];
         public string Version = "openshell 0.1.5";
         public bool CreateTimesOut;
-        public string ProfileYaml = "profile: synthetic\n";
+        /// <summary>#503 W2: the profile export document; consecutive exports alternate map order like the pinned CLI.</summary>
+        public string ProfileExport = SyntheticProfile.Export;
+        private int _exports;
 
         public async Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv, TimeSpan timeout, CancellationToken ct)
         {
@@ -1155,7 +1157,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("sandbox", "upload") => Transfer(Name(2), () => Upload(args[3], args[4])),
                 ("sandbox", "exec") => Transfer(args[3], () => new(OnExec?.Invoke(args[^1]) ?? 0, "")),
                 ("sandbox", "list") => ListFails ? new(1, "") : List(args),
-                ("profile", "export") => new(0, ProfileYaml),
+                ("profile", "export") => new(0, Interlocked.Increment(ref _exports) % 2 == 0 ? SyntheticProfile.Reordered(ProfileExport) : ProfileExport),
                 _ => new(0, ""),
             };
         }
@@ -1244,7 +1246,11 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     internal sealed class FakeStore : IManagedBindingStore
     {
         // Every selectable provider profile pinned to the synthetic export's SHA-256.
-        internal const string PinnedProfiles = "{\"openai\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"telegram\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal-read\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\",\"fleet-journal-cross-chat\":\"b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702\"}";
+        internal static readonly string PinnedProfiles = new JsonObject
+        {
+            ["openai"] = SyntheticProfile.Digest, ["telegram"] = SyntheticProfile.Digest, ["fleet-journal"] = SyntheticProfile.Digest,
+            ["fleet-journal-read"] = SyntheticProfile.Digest, ["fleet-journal-cross-chat"] = SyntheticProfile.Digest,
+        }.ToJsonString();
         private readonly List<Agent> _agents = [];
         public bool RejectNextSwap;
         /// <summary>Rejects (false) or fails (DB exception) any swap that commits this applied kind.</summary>
@@ -1416,4 +1422,31 @@ internal static class SignedPolicy
         }
         return text.ToString();
     }
+}
+
+/// <summary>
+/// #503 W2 shared fixture: a synthetic <c>profile export -o json</c> document pinned by its canonical digest. The pinned
+/// CLI renders maps from an unordered map, so <see cref="Reordered"/> is the same document as another export prints it.
+/// </summary>
+internal static class SyntheticProfile
+{
+    internal const string Export = "{\"id\":\"synthetic\",\"display_name\":\"Synthetic\",\"annotations\":{\"phleet.dev/status\":\"UNQUALIFIED\","
+        + "\"phleet.dev/source\":\"synthetic\",\"owner\":\"example\"},\"credentials\":[{\"name\":\"api_key\",\"env_vars\":[\"OPENAI_API_KEY\"]}],"
+        + "\"endpoints\":[{\"host\":\"api.example.test\",\"port\":443,\"protocol\":\"rest\",\"enforcement\":\"enforce\"}],\"binaries\":[\"/usr/bin/codex\"]}";
+
+    internal static readonly string Digest = StockProfileDigest.Compute(Export)!;
+
+    /// <summary>A real field change: the export now also allows another binary.</summary>
+    internal static readonly string Mutated = Export.Replace("[\"/usr/bin/codex\"]", "[\"/usr/bin/codex\",\"/usr/bin/other\"]");
+
+    /// <summary>The same document with every object's keys in reverse order and different whitespace.</summary>
+    internal static string Reordered(string export) =>
+        Reverse(JsonNode.Parse(export)!)!.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+
+    private static JsonNode? Reverse(JsonNode? node) => node switch
+    {
+        JsonObject o => new JsonObject(o.Reverse().Select(p => KeyValuePair.Create(p.Key, Reverse(p.Value?.DeepClone())))),
+        JsonArray a => new JsonArray([.. a.Select(item => Reverse(item?.DeepClone()))]),
+        _ => node?.DeepClone(),
+    };
 }

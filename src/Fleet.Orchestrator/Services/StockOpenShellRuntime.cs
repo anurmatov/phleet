@@ -870,9 +870,10 @@ public sealed class StockOpenShellRuntime(
         const string profile = StockSubscriptionBinding.ProfileId;
         if (pinned?.TryGetValue(profile, out var hash) != true) return "provider_profile_unpinned:" + profile;
         if (hash != sourceHash) return StockSubscriptionBinding.ProviderUnverified;
-        var export = await cli.RunAsync(InWorkspace(providerWorkspace, ["profile", "export", profile, "-o", "yaml"]), null, LegTimeout, ct);
+        var export = await cli.RunAsync(InWorkspace(providerWorkspace, ProfileExport(profile)), null, LegTimeout, ct);
         if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
-        var actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(export.Stdout)));
+        // #503 W2: the canonical full-document digest, never the raw output (map order varies between exports).
+        if (StockProfileDigest.Compute(export.Stdout) is not { } actual) return "provider_profile_unverifiable:" + profile;
         return actual == hash ? null : "provider_profile_hash_mismatch:" + profile;
     }
 
@@ -957,8 +958,8 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// Every provider profile the agent selects must be pinned, and each pinned profile's exported YAML
-    /// must hash to the version's saved value, before any old-runtime Stop.
+    /// Every provider profile the agent selects must be pinned, and each pinned profile's exported document must have
+    /// the version's saved canonical digest (<see cref="StockProfileDigest"/>), before any old-runtime Stop.
     /// </summary>
     private async Task<string?> ProfileHashFaultAsync(SandboxPolicyVersion policy, Agent agent, CancellationToken ct, StockSubscriptionSource? source = null)
     {
@@ -976,14 +977,18 @@ public sealed class StockOpenShellRuntime(
         }
         foreach (var (profile, hash) in pinned ?? [])
         {
-            var export = await cli.RunAsync(source is null ? ["profile", "export", profile, "-o", "yaml"]
-                : InWorkspace(source.ProviderWorkspace, ["profile", "export", profile, "-o", "yaml"]), null, LegTimeout, ct);
+            var export = await cli.RunAsync(source is null ? ProfileExport(profile) : InWorkspace(source.ProviderWorkspace, ProfileExport(profile)),
+                null, LegTimeout, ct);
             if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
-            var actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(export.Stdout)));
+            // #503 W2: one canonical full-document digest; an export that cannot be canonicalized is never a pass.
+            if (StockProfileDigest.Compute(export.Stdout) is not { } actual) return "provider_profile_unverifiable:" + profile;
             if (!string.Equals(actual, hash, StringComparison.Ordinal)) return "provider_profile_hash_mismatch:" + profile;
         }
         return null;
     }
+
+    /// <summary>The pinned CLI's full JSON export of one provider profile, the input of <see cref="StockProfileDigest"/>.</summary>
+    private static IReadOnlyList<string> ProfileExport(string profile) => ["profile", "export", profile, "-o", "json"];
 
     // ── operation envelope: one writer per agent, checkpointed progress ────
 

@@ -1151,7 +1151,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
 {
     private const string ProviderId = StockSubscriptionBindingTests.ProviderId;
     private const string Provider = "agent1-codex-sub";
-    private const string SyntheticProfileHash = "b44acdcd83b1965ebff85528e0b56645a4714be483b6bc860fbbe562acade702";
+    private static readonly string SyntheticProfileHash = SyntheticProfile.Digest;
     private readonly ManagedStockRuntimeAdapterTests _t = new(PrivateBase.Create("managed-sub-"));
     private readonly MutableClock _clock = new() { Now = DateTimeOffset.UtcNow };
     private readonly ScopedCli _cli;
@@ -1266,7 +1266,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
             case "reauthorize": _cli.RefreshState = ("reauthorization_required", "reauthorize", "oauth_invalid_grant"); break;
             case "window": _cli.NextRefreshIn = TimeSpan.FromSeconds(100); break;
             case "generation": _t._host.Generation = "gateway-2@later"; break;
-            case "profile": _cli.ProfileYaml = "profile: changed\n"; break;
+            case "profile": _cli.ProfileExport = SyntheticProfile.Mutated; break;
         }
         _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker"));
         var dockerStops = 0;
@@ -1442,7 +1442,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding }));
         _t.Enroll(binding);
         WriteSourceMatching(binding);
-        _cli.ProfileYaml = "profile: changed-after-apply\n";
+        _cli.ProfileExport = SyntheticProfile.Mutated; // a real field change after apply
 
         var result = await Runtime().StartAsync("agent1", default);
 
@@ -1451,7 +1451,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "start"]) || c.Args.Any(a => a.Contains(".fleet-activate")));
         Assert.Equal("stopped", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
 
-        _cli.ProfileYaml = "profile: synthetic\n"; // the pinned bytes again: Start proceeds
+        _cli.ProfileExport = SyntheticProfile.Reordered(SyntheticProfile.Export); // the pinned document, other map order: Start proceeds
         Assert.True((await Runtime().StartAsync("agent1", default)).Ok);
     }
 
@@ -1729,7 +1729,8 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         public readonly Dictionary<(string Ws, string Sandbox), HashSet<string>> Attached = new();
         public (string Status, string Recovery, string Failure) RefreshState = ("refreshed", "-", "");
         public TimeSpan NextRefreshIn = TimeSpan.FromMinutes(35);
-        public string ProfileYaml = "profile: synthetic\n";
+        public string ProfileExport = SyntheticProfile.Export;
+        private int _exports;
         public bool DetachFails, AttachedListFails;
 
         public ManagedStockRuntimeAdapterTests.FakeCli Cli(string workspace) =>
@@ -1757,7 +1758,8 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
                     return new(0, StockSubscriptionBindingTests.RefreshStatus(At(3), RefreshState.Status, RefreshState.Recovery,
                         expires: Stamp(now.AddMinutes(40)), next: Stamp(now + NextRefreshIn), last: Stamp(now.AddMinutes(-25)), failure: RefreshState.Failure));
                 case ("profile", "export", _):
-                    return new(0, ProfileYaml);
+                    // #503 W2: consecutive exports alternate map order, as the pinned CLI's unordered maps do.
+                    return new(0, Interlocked.Increment(ref _exports) % 2 == 0 ? SyntheticProfile.Reordered(ProfileExport) : ProfileExport);
                 case ("sandbox", "provider", "list"):
                     if (AttachedListFails) return new(1, "");
                     var names = Attached.TryGetValue((ws, At(3)), out var set) ? set.ToArray() : [];

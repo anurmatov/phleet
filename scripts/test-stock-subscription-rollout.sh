@@ -329,7 +329,7 @@ registration() { # registration [ca-line]: the fixed registration as in deploy/o
 }
 with_ca() { printf 'tls_ca_cert_path = "%s"' "$1"; }
 { cat "$WORK/gateway-kek.toml"; registration "$(with_ca "$SIGNER_CA")"; } > "$WORK/gateway-signer.toml"
-{ cat "$WORK/gateway.toml"; registration "$(with_ca "$SIGNER_CA")"; } > "$WORK/gateway-signer-plain.toml"
+{ cat "$WORK/gateway-kek.toml"; registration "$(with_ca "$SIGNER_CA")"; } > "$WORK/gateway-signer-plain.toml"
 { cat "$WORK/gateway.toml"; registration; } > "$WORK/signer-no-ca.toml"
 { cat "$WORK/gateway.toml"; registration "$(with_ca "$state/tls/signer/absent.pem")"; } > "$WORK/signer-absent.toml"
 printf 'outside ca\n' > "$WORK/outside-ca.pem"
@@ -395,7 +395,15 @@ observe '"2000-01-01T00:00:00Z"' > "$WORK/control/after-s1.json"
 expect 0 "control S1/registered CA is eligible" eligible_at "$s1" "$WORK/control/after-s1.json"
 expect 0 "control S0/no registration is still eligible after S1" eligible_at "$snap" "$WORK/control/after-s1.json"
 # C13 cases c and d: plain snapshots with a live zero-custody preflight.
-STUB_BODY=$(four 0 0 0 0) expect 0 "plain/no registration is eligible with live zero custody" plain_eligible "$plain"
+# B1: the plain branch restores only an explicitly configured KEK it can find in the inventory.
+expect 0 "positional backup with an explicit KEK path" bash "$BACKUP" "$WORK/plain-kek" "$WORK/gateway-kek.toml" "$state"
+plainkek=$(newest "$WORK/plain-kek")
+STUB_BODY=$(four 0 0 0 0) expect 0 "plain/no registration is eligible with live zero custody" plain_eligible "$plainkek"
+STUB_BODY=$(four 0 0 0 0) refuse_for "configured KEK is not covered" "plain refuses a default-KEK snapshot (no key in the inventory)" plain_eligible "$plain"
+expect 0 "legacy positional backup with an env-only KEK is unchanged" bash "$BACKUP" "$WORK/plain-env" "$WORK/gateway-env.toml" "$state"
+STUB_BODY=$(four 0 0 0 0) refuse_for "configured KEK is not covered" "plain refuses an env-only-KEK snapshot (no key in the inventory)" plain_eligible "$(newest "$WORK/plain-env")"
+strip_entry "$plainkek" "$WORK/plain-nokek" state/credentials/key-encryption-key.bin
+STUB_BODY=$(four 0 0 0 0) refuse_for "configured KEK is not covered" "plain refuses a KEK path plus checksum line removed" plain_eligible "$WORK/plain-nokek"
 expect 0 "positional backup with the registration covers its CA" bash "$BACKUP" "$WORK/plain-sig" "$WORK/gateway-signer-plain.toml" "$state"
 plainsig=$(newest "$WORK/plain-sig")
 STUB_BODY=$(four 0 0 0 0) expect 0 "plain/registered CA is eligible with live zero custody" plain_eligible "$plainsig"
@@ -406,7 +414,7 @@ STUB_BODY=$(four 0 0 0 0) refuse_for "signer_tls_ca_not_covered" "plain: CA plus
 PYTHONPATH="$WORK/notoml" STUB_BODY=$(four 0 0 0 0) refuse_for "signer_tls_ca_not_covered" "fallback parser: plain CA removal is refused" plain_eligible "$WORK/plain-noca"
 strip_entry "$s1" "$WORK/s1-noca" state/tls/signer/stock-identity-ca.pem
 refuse_for "signer_tls_ca_not_covered" "control: CA plus its checksum line removed is refused" eligible_at "$WORK/s1-noca" "$WORK/control/after-s1.json"
-STUB_BODY=$(four 0 0 0 0) refuse_for "signer_tls_ca_not_covered" "plain: a STATE_DIR the CA is not under is refused" plain_eligible "$plainsig" "$WORK/elsewhere"
+STUB_BODY=$(four 0 0 0 0) refuse_for "configured KEK is not covered" "plain: a STATE_DIR the KEK and CA are not under is refused" plain_eligible "$plainsig" "$WORK/elsewhere"
 # Wrong or null signer metadata in a control manifest.
 remanifest "$s1" "$WORK/s1-null" 'm["signerCaEntry"] = None'
 refuse_for "signer metadata does not match" "control S1 with a null CA entry is refused" eligible_at "$WORK/s1-null" "$WORK/control/after-s1.json"
@@ -417,23 +425,77 @@ refuse_for "signer metadata does not match" "control S0 claiming a registration 
 remanifest "$snap" "$WORK/s0-missing" 'del m["signerCaEntry"]'
 refuse_for "lacks the recorded STATE_DIR or signer metadata" "control S0 with a missing (not null) signer field is refused" eligible_at "$WORK/s0-missing" "$WORK/control/after-s1.json"
 
+# CA1: a linked component below STATE_DIR (tls/alias -> tls/signer) never stands in for the configured CA path.
+ln -s signer "$state/tls/alias"
+ALIAS_CA="$state/tls/alias/stock-identity-ca.pem"
+{ cat "$WORK/gateway-kek.toml"; registration "$(with_ca "$ALIAS_CA")"; } > "$WORK/signer-alias.toml"
+for parser in tomllib fallback; do
+  pp=""; [[ $parser == tomllib ]] || pp="$WORK/notoml"
+  PYTHONPATH="$pp" refuse_for "coverage_incomplete: signer_tls_ca" "$parser: a CA under a linked tls/alias directory fails a positional backup" \
+    bash "$BACKUP" "$WORK/alias-$parser" "$WORK/signer-alias.toml" "$state"
+  PYTHONPATH="$pp" refuse_for "coverage_incomplete: signer_tls_ca" "$parser: a CA under a linked tls/alias directory fails a subscription backup" \
+    bash "$BACKUP" "$WORK/alias-sub-$parser" "$WORK/signer-alias.toml" "$state" "${CTL[@]}"
+  ! ls -d "$WORK/alias-$parser"/gateway-* "$WORK/alias-sub-$parser"/gateway-* >/dev/null 2>&1 || fail "$parser alias backup left a snapshot"
+done
+with_config() { # with_config <snapshot> <copy> <config>: the snapshot with its config replaced, inventory rewritten
+  rm -rf "$2"; cp -R "$1" "$2"; cp "$3" "$2/config/$(ls "$2/config")"; resum "$2"
+}
+with_config "$plainsig" "$WORK/plain-alias" "$WORK/signer-alias.toml"
+for parser in tomllib fallback; do
+  pp=""; [[ $parser == tomllib ]] || pp="$WORK/notoml"
+  PYTHONPATH="$pp" STUB_BODY=$(four 0 0 0 0) refuse_for "signer_tls_ca_not_covered" \
+    "$parser: plain refuses a config naming tls/alias whose inventory holds only tls/signer" plain_eligible "$WORK/plain-alias"
+done
+with_config "$s1" "$WORK/s1-alias" "$WORK/signer-alias.toml"
+remanifest "$WORK/s1-alias" "$WORK/s1-alias-meta" "m['signerCaConfigPath'] = '$ALIAS_CA'"
+refuse_for "signer_tls_ca_not_covered" "control refuses a config naming tls/alias whose inventory holds only tls/signer" eligible_at "$WORK/s1-alias-meta" "$WORK/control/after-s1.json"
+rm "$state/tls/alias"
+# P1: tomllib reads quoted/escaped keys as the registration; the fallback must refuse, never skip, what it cannot parse.
+printf '\n[[openshell."super\\u0076isor"."middle\\u0077are"]]\nname = "stock-memory"\n' > "$WORK/escaped-registration.part"
+# After an unrelated table, as an operator config would have it, so the header is not caught by accident.
+{ cat "$WORK/gateway-kek.toml"; printf '\n[openshell.drivers.docker]\nimage_pull_policy = "if_not_present"\n'
+  cat "$WORK/escaped-registration.part"; } > "$WORK/signer-escaped.toml"
+printf '[openshell]\nversion = 2\n"super\\u0076isor"."middle\\u0077are" = [{ name = "stock-memory" }]\n\n[openshell.gateway.credential_storage]\nkey_encryption_key_path = "%s"\n' \
+  "$state/credentials/key-encryption-key.bin" > "$WORK/signer-escaped-key.toml"
+python3 - "$WORK/signer-escaped.toml" "$WORK/signer-escaped-key.toml" <<'PY' || fail "tomllib does not read the escaped forms as the registration"
+import sys, tomllib
+for path in sys.argv[1:]:
+    assert tomllib.loads(open(path).read())["openshell"]["supervisor"]["middleware"] == [{"name": "stock-memory"}], path
+PY
+with_config "$plainkek" "$WORK/plain-escaped" "$WORK/signer-escaped.toml"
+with_config "$snap" "$WORK/s0-escaped" "$WORK/signer-escaped.toml"
+for parser in tomllib fallback; do
+  pp=""; [[ $parser == tomllib ]] || pp="$WORK/notoml"
+  for config in escaped escaped-key; do
+    PYTHONPATH="$pp" refuse_for "coverage_incomplete: signer_tls_ca" "$parser: $config registration without a CA fails a positional backup" \
+      bash "$BACKUP" "$WORK/p1-$parser-$config" "$WORK/signer-$config.toml" "$state"
+  done
+  # tomllib reads the registration and finds no CA; the fallback cannot read the config at all, so it refuses at the
+  # first config-dependent check (the KEK) instead. Either way the snapshot is never eligible.
+  reason=signer_tls_ca_not_covered; [[ $parser == tomllib ]] || reason="configured KEK is not covered"
+  PYTHONPATH="$pp" STUB_BODY=$(four 0 0 0 0) refuse_for "$reason" "$parser: plain refuses the escaped registration without a CA" \
+    plain_eligible "$WORK/plain-escaped"
+  PYTHONPATH="$pp" refuse_for "$reason" "$parser: control refuses the escaped registration without a CA" \
+    eligible_at "$WORK/s0-escaped" "$WORK/control/after-s1.json"
+done
+
 # C13a: custody, marker and downgrade negatives for the plain branch; no restore or start side effect is possible here.
-STUB_BODY=$(four 0 1 0 1) refuse_for "subscription_state_unverified" "plain refuses while subscriptionBindings>0" plain_eligible "$plain"
-STUB_BODY=$(four 0 1 1 0) refuse_for "subscription_state_unverified" "plain refuses while unresolvedBindings>0" plain_eligible "$plain"
-STUB_BODY='{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0}' refuse_for "subscription_state_unverified" "plain refuses a malformed preflight answer" plain_eligible "$plain"
-STUB_BODY='not json' refuse_for "subscription_state_unverified" "plain refuses an unparsable preflight answer" plain_eligible "$plain"
-STUB_FAIL=1 STUB_BODY=$(four 0 0 0 0) refuse_for "subscription_state_unverified" "plain refuses an unavailable or timed-out preflight" plain_eligible "$plain"
+STUB_BODY=$(four 0 1 0 1) refuse_for "subscription_state_unverified" "plain refuses while subscriptionBindings>0" plain_eligible "$plainkek"
+STUB_BODY=$(four 0 1 1 0) refuse_for "subscription_state_unverified" "plain refuses while unresolvedBindings>0" plain_eligible "$plainkek"
+STUB_BODY='{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0}' refuse_for "subscription_state_unverified" "plain refuses a malformed preflight answer" plain_eligible "$plainkek"
+STUB_BODY='not json' refuse_for "subscription_state_unverified" "plain refuses an unparsable preflight answer" plain_eligible "$plainkek"
+STUB_FAIL=1 STUB_BODY=$(four 0 0 0 0) refuse_for "subscription_state_unverified" "plain refuses an unavailable or timed-out preflight" plain_eligible "$plainkek"
 rm -f "$STUB_CALLS"
-ORCHESTRATOR_AUTH_TOKEN= STUB_BODY=$(four 0 0 0 0) refuse_for "subscription_state_unverified" "plain refuses without an operator token" plain_eligible "$plain"
+ORCHESTRATOR_AUTH_TOKEN= STUB_BODY=$(four 0 0 0 0) refuse_for "subscription_state_unverified" "plain refuses without an operator token" plain_eligible "$plainkek"
 [[ ! -e "$STUB_CALLS" ]] || fail "plain eligibility queried without a token"
 STUB_BODY=$(four 0 0 0 0) refuse_for "not plain" "a subscription-marked snapshot is refused by the plain branch" plain_eligible "$snap"
 strip_entry "$snap" "$WORK/stripped" control
 STUB_BODY=$(four 0 0 0 0) refuse_for "not plain" "a subscription snapshot with controls and their checksum lines stripped is still refused" plain_eligible "$WORK/stripped"
-strip_entry "$plain" "$WORK/unmarked" SNAPSHOT_MODE
+strip_entry "$plainkek" "$WORK/unmarked" SNAPSHOT_MODE
 STUB_BODY=$(four 0 0 0 0) refuse_for "marker missing or unknown" "plain: a missing mode marker is refused" plain_eligible "$WORK/unmarked"
 strip_entry "$snap" "$WORK/unmarked-sub" SNAPSHOT_MODE
 refuse_for "marker missing or unknown" "control: a missing mode marker is refused" eligible_at "$WORK/unmarked-sub" "$WORK/control/after-s1.json"
-rm -rf "$WORK/other-marker"; cp -R "$plain" "$WORK/other-marker"; printf 'mixed\n' > "$WORK/other-marker/SNAPSHOT_MODE"; resum "$WORK/other-marker"
+rm -rf "$WORK/other-marker"; cp -R "$plainkek" "$WORK/other-marker"; printf 'mixed\n' > "$WORK/other-marker/SNAPSHOT_MODE"; resum "$WORK/other-marker"
 STUB_BODY=$(four 0 0 0 0) refuse_for "marker missing or unknown" "an unknown mode marker is refused" plain_eligible "$WORK/other-marker"
 rm -rf "$WORK/upgraded"; cp -R "$plain" "$WORK/upgraded"; printf 'subscription\n' > "$WORK/upgraded/SNAPSHOT_MODE"; resum "$WORK/upgraded"
 refuse_for "lacks required" "a plain snapshot re-marked subscription has no control payload and is refused" eligible_at "$WORK/upgraded" "$WORK/control/after-s1.json"

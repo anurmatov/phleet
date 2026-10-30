@@ -26,8 +26,9 @@
 #   check-stock-gateway-backup.sh --plain-restore-eligibility SNAPSHOT --state-dir STATE_DIR
 #
 # #503 plain branch (no restore is performed): only a SNAPSHOT_MODE=plain snapshot with no control/ directory, the
-# same complete inventory/integrity/config/trust checks, a configured KEK and the fixed signer CA mapped from the
-# snapshot's own config against the explicit original STATE_DIR, then a fresh authenticated rollback preflight
+# same complete inventory/integrity/config/trust checks, an explicit key_encryption_key_path (an env-only or default
+# KEK refuses) and the fixed signer CA, each required in the inventory at exactly its configured path under the
+# explicit original STATE_DIR (mapped lexically, never through a link below it), then a fresh authenticated rollback preflight
 # (FLEET_ORCHESTRATOR_URL / ORCHESTRATOR_AUTH_TOKEN, token via curl stdin config, 10 s) that must report exactly the
 # four counts with subscriptionBindings=0 and unresolvedBindings=0; anything else is REFUSED: subscription_state_unverified.
 # Both branches require the matching SNAPSHOT_MODE marker (missing/unknown/other refuses; no downgrade either way) and,
@@ -120,6 +121,10 @@ def gateway_config(config_path):
                     return unknown  # a duplicate, mis-kinded or nested relevant table
                 continue
             key = line.split("=", 1)[0].strip()
+            # #503 P1: an unsupported header (quoted, escaped or spaced keys), a non-bare key or a continuation line is
+            # never skipped: tomllib may read it as relevant data, so the fallback fails closed instead.
+            if line and (line.startswith("[") or "=" not in line or not re.fullmatch(r"[A-Za-z0-9_.-]+", key)):
+                return unknown
             if "credential_storage" in line or "middleware" in key or re.match(r"(openshell\.)?supervisor\b", key):
                 return unknown  # dotted keys or inline tables for relevant data are not parsed here
             if current is not None and line:
@@ -147,6 +152,18 @@ def gateway_config(config_path):
         signer = ("none", None) if not named else ("unknown", None) if len(named) > 1 \
             else ("registered", ca if isinstance(ca, str) and os.path.isabs(ca) else None)
     return (*kek, *signer)
+
+def state_relative(path, state_dir):
+    """#503 CA1: a configured file's location under STATE_DIR, mapped lexically. Only OS links ABOVE STATE_DIR are
+    resolved (macOS /var -> /private/var), never a component below it, so a linked alias can never stand in for the
+    configured path. None when the path is not canonical-absolute or not under STATE_DIR."""
+    if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path:
+        return None
+    root, parts = anchored(state_dir), path.strip("/").split("/")
+    for depth in range(1, len(parts)):
+        if anchored("/" + "/".join(parts[:depth])) == root:
+            return "/".join(parts[depth:])
+    return None
 
 UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?Z")
 def instant(value, what, nullable=False):
@@ -208,10 +225,11 @@ config_name = next(n for n in listed if n.startswith("config/"))
 kek_mode, kek_path, signer_mode, signer_config = gateway_config(os.path.join(snapshot, config_name))
 
 def covered(path, state_dir):
-    """The inventory entry for a file the snapshot config names under STATE_DIR, or None when outside/unlisted."""
-    rel = os.path.relpath(anchored(path), state_dir)
-    entry = "state/" + rel
-    return entry if not rel.startswith("..") and entry in listed else None
+    """The inventory entry of exactly the configured path under STATE_DIR (mapped lexically, never through a link below
+    it), or None when noncanonical, outside or unlisted."""
+    rel = state_relative(path, state_dir)
+    entry = None if rel is None else "state/" + rel
+    return entry if entry in listed else None
 
 def signer_entry(state_dir):
     """#503 H1: None without the fixed registration; otherwise its CA's verified inventory entry, else refused."""
@@ -227,8 +245,9 @@ if mode == "plain":
     if not os.path.isabs(state_dir):
         refuse("STATE_DIR must be the absolute original gateway state directory")
     state_dir = anchored(state_dir)
-    if kek_mode == "unknown" or kek_mode == "path" and covered(kek_path, state_dir) is None:
-        refuse("configured KEK is not covered by the snapshot inventory")
+    # #503 B1: an env-only or default KEK leaves no key in the snapshot, so it is never restore-eligible here.
+    if kek_mode != "path" or covered(kek_path, state_dir) is None:
+        refuse("configured KEK is not covered by the snapshot inventory (plain restore needs an explicit key_encryption_key_path)")
     signer_entry(state_dir)
     sys.exit(0)  # the live no-custody proof follows in the caller
 

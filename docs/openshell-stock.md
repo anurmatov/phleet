@@ -1025,7 +1025,7 @@ window and gives no authority over unowned workloads. Follow this order:
 2. **Choose the checkpoint mode.** Take a fresh authenticated rollback preflight and review the owned records.
    - Any desired or nonretired subscription custody, including clean-revoked or superseded tuples, means BOTH S0 and
      S1 are control-bearing.
-   - Plain is allowed only with proved zero subscription custody.
+   - Plain is allowed only with proved zero subscription custody and an explicit, covered KEK path.
    - Unknown state is never plain.
 3. **Reserve the paths.** Use one recorded private maintenance root outside the daily `BACKUP_DIR`. Use canonical,
    non-linked paths with 0700 directories and 0600 files. Create distinct, initially absent `<root>/<window-id>/S0`
@@ -1072,18 +1072,25 @@ stripped or resumed unsigned.
 | plain (`SNAPSHOT_MODE=plain`) | positional args only | `check-stock-gateway-backup.sh --plain-restore-eligibility SNAPSHOT --state-dir STATE_DIR`, plus `ORCHESTRATOR_AUTH_TOKEN` and optional `FLEET_ORCHESTRATOR_URL` |
 
 - **Signer CA coverage.** Any backup of a config carrying the registration requires its `tls_ca_cert_path` as a
-  regular, non-empty, non-linked file under STATE_DIR. Otherwise the backup fails with
-  `coverage_incomplete: signer_tls_ca` and no COMPLETE. Malformed, duplicate or ambiguous registration data fails
-  the same way under both the tomllib and Python < 3.11 parsers. No CA is moved automatically, and configs without
-  the registration are unchanged.
+  regular, non-empty file at exactly that configured path under STATE_DIR. The path is mapped lexically: only OS
+  links above STATE_DIR are resolved, and any linked component below it (for example `tls/alias -> tls/signer`)
+  refuses. Otherwise the backup fails with `coverage_incomplete: signer_tls_ca` and no COMPLETE. Malformed,
+  duplicate or ambiguous registration data fails the same way under both parsers. The Python < 3.11 fallback
+  refuses any header or key form it cannot parse (quoted, escaped or spaced keys, continuation lines) rather than
+  skipping it. No CA is moved automatically, and configs without the registration are unchanged.
 - **Signer metadata.** Control manifests record `stateDirectory`, `signerRegistration`, `signerCaConfigPath` and
   `signerCaEntry`. The three signer fields are explicit JSON nulls without a registration. Eligibility compares
-  them with the snapshot's own parsed config. A registered CA missing from the verified inventory is
-  `REFUSED: signer_tls_ca_not_covered`, even when the inventory itself is self-consistent. CA bytes are restored
+  them with the snapshot's own parsed config. A registered CA whose exact configured path is missing from the
+  verified inventory is `REFUSED: signer_tls_ca_not_covered`, even when the inventory itself is self-consistent or
+  a linked alias would reach a listed file. CA bytes are restored
   with the rest of the trust; never borrow a CA or clear TLS.
 - **Plain branch.** It accepts only `plain`-marked snapshots without `control/`. It runs the same
-  inventory/integrity/config/trust checks, maps the configured KEK and CA against the explicit original STATE_DIR,
-  and needs a fresh authenticated `GET /api/managed-runtime/rollback-preflight`:
+  inventory/integrity/config/trust checks. It requires an explicit `key_encryption_key_path` and maps that KEK and
+  the CA lexically against the explicit original STATE_DIR; both must be in the inventory at their configured paths.
+  An env-only or default KEK leaves no key in the snapshot, so it refuses
+  (`configured KEK is not covered by the snapshot inventory`). The legacy positional backup still runs for such
+  configs, but it is freshness evidence only. The branch also needs a fresh authenticated
+  `GET /api/managed-runtime/rollback-preflight`:
   - a 10-second deadline, with the token through curl's stdin config;
   - exactly the four counts, with `subscriptionBindings=0` and `unresolvedBindings=0`;
   - anything else, including no token, is `REFUSED: subscription_state_unverified`.

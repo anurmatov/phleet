@@ -16,9 +16,10 @@
 # as [openshell.gateway.credential_storage] key_encryption_key_path must exist under STATE_DIR for every
 # backup; subscription backups require that explicit path (an env-only or default KEK refuses).
 # #503: a config with the fixed [[openshell.supervisor.middleware]] name = "stock-memory" signer registration needs its
-# explicit absolute tls_ca_cert_path as a regular, non-empty, non-linked file under STATE_DIR in every backup, else
-# "coverage_incomplete: signer_tls_ca"; malformed, duplicate or ambiguous registration data fails the same way rather
-# than reading as absent (both the tomllib and Python < 3.11 parsers). Every snapshot records SNAPSHOT_MODE (plain for
+# explicit absolute tls_ca_cert_path as a regular, non-empty file at exactly that path under STATE_DIR in every backup,
+# mapped lexically (only OS links above STATE_DIR resolve; a linked component below it refuses), else
+# "coverage_incomplete: signer_tls_ca". Malformed, duplicate or ambiguous registration data fails the same way rather
+# than reading as absent; the Python < 3.11 fallback refuses any header or key form it cannot parse. Every snapshot records SNAPSHOT_MODE (plain for
 # a positional run, subscription with the three control inputs) inside SHA256SUMS; subscription manifests also record
 # stateDirectory and signerRegistration/signerCaConfigPath/signerCaEntry (explicit nulls without a registration).
 # Pruning keeps seven complete snapshots inside the invoked BACKUP_DIR only: maintenance S0/S1 checkpoints go to their
@@ -162,6 +163,10 @@ def gateway_config(config_path):
                     return unknown  # a duplicate, mis-kinded or nested relevant table
                 continue
             key = line.split("=", 1)[0].strip()
+            # #503 P1: an unsupported header (quoted, escaped or spaced keys), a non-bare key or a continuation line is
+            # never skipped: tomllib may read it as relevant data, so the fallback fails closed instead.
+            if line and (line.startswith("[") or "=" not in line or not re.fullmatch(r"[A-Za-z0-9_.-]+", key)):
+                return unknown
             if "credential_storage" in line or "middleware" in key or re.match(r"(openshell\.)?supervisor\b", key):
                 return unknown  # dotted keys or inline tables for relevant data are not parsed here
             if current is not None and line:
@@ -190,6 +195,18 @@ def gateway_config(config_path):
             else ("registered", ca if isinstance(ca, str) and os.path.isabs(ca) else None)
     return (*kek, *signer)
 
+def state_relative(path, state_dir):
+    """#503 CA1: a configured file's location under STATE_DIR, mapped lexically. Only OS links ABOVE STATE_DIR are
+    resolved (macOS /var -> /private/var), never a component below it, so a linked alias can never stand in for the
+    configured path. None when the path is not canonical-absolute or not under STATE_DIR."""
+    if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path:
+        return None
+    root, parts = anchored(state_dir), path.strip("/").split("/")
+    for depth in range(1, len(parts)):
+        if anchored("/" + "/".join(parts[:depth])) == root:
+            return "/".join(parts[depth:])
+    return None
+
 # #502 review B1: a configured key-encryption key is part of coverage (the DB's provider credentials are
 # unrecoverable without it). It must be a regular, non-linked file under STATE_DIR; subscription snapshots
 # additionally need it configured explicitly by path, since an env or default KEK cannot be covered here.
@@ -199,18 +216,17 @@ kek_rel, kek_config = None, kek_path
 if kek_mode == "path":
     kek_path = anchored(kek_path)
     kek_rel = os.path.relpath(kek_path, state)
-# #503 H1: the fixed stock-memory signer registration needs its explicit CA as a regular, non-empty, non-linked file
-# under STATE_DIR in every backup (positional or subscription); malformed or ambiguous registration data is never absence.
-signer_rel = None
-if signer_mode == "registered" and signer_config:
-    signer_path = anchored(signer_config)
-    signer_rel = os.path.relpath(signer_path, state)
+# #503 H1/CA1: the fixed stock-memory signer registration needs its explicit CA, at exactly the configured path, as a
+# regular, non-empty file under STATE_DIR in every backup (positional or subscription), with no linked component below
+# STATE_DIR; malformed or ambiguous registration data is never absence.
+signer_rel = state_relative(signer_config, state) if signer_mode == "registered" else None
+signer_path = os.path.join(state, signer_rel) if signer_rel else None
 missing = [p for p in ["gateway.db", *REQUIRED] if not regular(os.path.join(state, p)) or linked(os.path.join(state, p))]
 if kek_mode == "path" and (kek_rel.startswith("..") or not regular(kek_path) or linked(kek_path)):
     missing.append("key_encryption_key_path")
 if sys.argv[4] and kek_mode != "path":
     missing.append("key_encryption_key_path (subscription snapshots need an explicit KEK path under STATE_DIR)")
-if config_ok and (signer_mode == "unknown" or signer_mode == "registered" and (signer_rel is None or signer_rel.startswith("..")
+if config_ok and (signer_mode == "unknown" or signer_mode == "registered" and (signer_path is None
         or not regular(signer_path) or linked(signer_path) or os.lstat(signer_path).st_size == 0)):
     missing.append("signer_tls_ca")
 if not regular(config) or linked(config):

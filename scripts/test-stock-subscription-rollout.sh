@@ -539,13 +539,7 @@ rm -rf "$WORK/downgraded"; cp -R "$snap" "$WORK/downgraded"; printf 'plain\n' > 
 STUB_BODY=$(four 0 0 0 0) refuse_for "refuses a control-bearing snapshot" "a control snapshot re-marked plain is refused by the plain branch" plain_eligible "$WORK/downgraded"
 refuse_for "not subscription" "the re-marked control snapshot is refused by the control branch too (no downgrade)" eligible_at "$WORK/downgraded" "$WORK/control/after-s1.json"
 
-# ── #503 N1 (C16): once-used maintenance S0/S1 directories outside daily rotation, pre-restart re-verification ──
-daily="$WORK/daily"; maint="$WORK/maintenance/window-1"
-mkdir -p "$daily"
-for day in 1 2 3 4 5 6 7 8 9; do mkdir -p "$daily/gateway-2026010${day}T000000Z"; : > "$daily/gateway-2026010${day}T000000Z/COMPLETE"; done
-[[ ! -e "$maint" ]] || fail "maintenance window directory pre-exists"
-expect 0 "maintenance S0 goes to its own initially absent directory" bash "$BACKUP" "$maint/S0" "$WORK/gateway-kek.toml" "$state" "${CTL[@]}"
-expect 0 "maintenance S1 goes to its own initially absent directory" bash "$BACKUP" "$maint/S1" "$WORK/gateway-signer.toml" "$state" "${CTL[@]}"
+# ── #503 W1: sealed-snapshot validation is read-only and repeatable, including for a WAL-mode gateway DB ──
 tree_digest() { python3 - "$1" <<'PY'
 import hashlib, os, sys
 h = hashlib.sha256()
@@ -556,6 +550,79 @@ for base, dirs, names in sorted(os.walk(sys.argv[1])):
 print(h.hexdigest())
 PY
 }
+walstate="$WORK/state-wal"; rm -rf "$walstate"; cp -R "$state" "$walstate"
+python3 - "$walstate/gateway.db" <<'PY' || fail "could not put the synthetic gateway DB in WAL mode"
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+db.execute("insert into t values (2)"); db.commit(); db.close()
+PY
+printf '[openshell]\nversion = 2\n\n[openshell.gateway.credential_storage]\nkey_encryption_key_path = "%s"\n' \
+  "$walstate/credentials/key-encryption-key.bin" > "$WORK/gateway-wal.toml"
+expect 0 "plain backup of a WAL-mode gateway DB" bash "$BACKUP" "$WORK/wal-plain" "$WORK/gateway-wal.toml" "$walstate"
+expect 0 "subscription backup of a WAL-mode gateway DB" bash "$BACKUP" "$WORK/wal-sub" "$WORK/gateway-wal.toml" "$walstate" "${CTL[@]}"
+walplain=$(newest "$WORK/wal-plain"); walsub=$(newest "$WORK/wal-sub")
+python3 - "$walplain/gateway.db" "$walsub/gateway.db" <<'PY' || fail "sealed WAL-mode snapshots are not single self-contained files"
+import os, sys
+for path in sys.argv[1:]:
+    assert open(path, "rb").read(20)[18] == 2, path  # WAL-mode header carried into the sealed copy
+    assert not any(os.path.lexists(path + s) for s in ("-wal", "-shm", "-journal")), path
+PY
+ok "sealed WAL-mode snapshots keep the WAL header and carry no sidecars"
+observe '"2000-01-01T00:00:00Z"' > "$WORK/control/after-wal.json"
+for run in 1 2 3; do
+  for kind in plain sub; do
+    snapdir=$walplain; [[ $kind == plain ]] || snapdir=$walsub
+    before=$(tree_digest "$snapdir")
+    if [[ $kind == plain ]]; then
+      STUB_BODY=$(four 0 0 0 0) expect 0 "WAL plain eligibility run $run" plain_eligible "$snapdir" "$walstate"
+    else
+      expect 0 "WAL subscription eligibility run $run" eligible_at "$snapdir" "$WORK/control/after-wal.json"
+    fi
+    [[ "$(tree_digest "$snapdir")" == "$before" ]] || fail "$kind eligibility run $run changed the sealed snapshot's files or hashes"
+    ! ls "$snapdir"/gateway.db-* >/dev/null 2>&1 || fail "$kind eligibility run $run created DB sidecars"
+  done
+done
+ok "repeated plain and subscription eligibility leave the WAL-mode snapshot file set and hashes unchanged"
+corrupt_db() { # corrupt_db <snapshot> <copy>: damage the table b-tree page, then a self-consistent inventory
+  rm -rf "$2"; cp -R "$1" "$2"
+  python3 - "$2/gateway.db" <<'PY'
+import sys
+with open(sys.argv[1], "r+b") as handle:
+    handle.seek(4096 + 8); handle.write(b"\xff" * 64)
+PY
+  resum "$2"
+}
+corrupt_db "$walplain" "$WORK/wal-plain-corrupt"; corrupt_db "$walsub" "$WORK/wal-sub-corrupt"
+STUB_BODY=$(four 0 0 0 0) refuse_for "integrity check failed" "a corrupt WAL-mode plain snapshot is still refused" plain_eligible "$WORK/wal-plain-corrupt" "$walstate"
+refuse_for "integrity check failed" "a corrupt WAL-mode subscription snapshot is still refused" eligible_at "$WORK/wal-sub-corrupt" "$WORK/control/after-wal.json"
+! ls "$WORK/wal-plain-corrupt"/gateway.db-* "$WORK/wal-sub-corrupt"/gateway.db-* >/dev/null 2>&1 || fail "refusing a corrupt snapshot created sidecars"
+# A preserved failed snapshot that already gained sidecars (from an older mode=ro read) stays refused and untouched.
+for kind in plain sub; do
+  snapdir=$walplain; [[ $kind == plain ]] || snapdir=$walsub
+  rm -rf "$WORK/wal-$kind-sidecars"; cp -R "$snapdir" "$WORK/wal-$kind-sidecars"
+  python3 -c 'import sqlite3,sys; d=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True); d.execute("PRAGMA integrity_check").fetchone(); d.close()' \
+    "$WORK/wal-$kind-sidecars/gateway.db"
+  ls "$WORK/wal-$kind-sidecars"/gateway.db-wal "$WORK/wal-$kind-sidecars"/gateway.db-shm >/dev/null 2>&1 || fail "the older mode=ro read did not reproduce the sidecars"
+  preserved=$(tree_digest "$WORK/wal-$kind-sidecars")
+  if [[ $kind == plain ]]; then
+    STUB_BODY=$(four 0 0 0 0) refuse_for "does not cover every file" "a preserved plain snapshot with sidecars is refused" plain_eligible "$WORK/wal-$kind-sidecars" "$walstate"
+  else
+    refuse_for "does not cover every file" "a preserved subscription snapshot with sidecars is refused" eligible_at "$WORK/wal-$kind-sidecars" "$WORK/control/after-wal.json"
+  fi
+  [[ "$(tree_digest "$WORK/wal-$kind-sidecars")" == "$preserved" ]] || fail "refusal deleted or changed the preserved $kind snapshot's files"
+done
+ok "preserved sidecar-bearing snapshots are refused and left exactly as found"
+rm -rf "$WORK/wal-listed"; cp -R "$walplain" "$WORK/wal-listed"; : > "$WORK/wal-listed/gateway.db-wal"; resum "$WORK/wal-listed"
+STUB_BODY=$(four 0 0 0 0) refuse_for "not self-contained" "a snapshot listing a DB sidecar is refused" plain_eligible "$WORK/wal-listed" "$walstate"
+
+# ── #503 N1 (C16): once-used maintenance S0/S1 directories outside daily rotation, pre-restart re-verification ──
+daily="$WORK/daily"; maint="$WORK/maintenance/window-1"
+mkdir -p "$daily"
+for day in 1 2 3 4 5 6 7 8 9; do mkdir -p "$daily/gateway-2026010${day}T000000Z"; : > "$daily/gateway-2026010${day}T000000Z/COMPLETE"; done
+[[ ! -e "$maint" ]] || fail "maintenance window directory pre-exists"
+expect 0 "maintenance S0 goes to its own initially absent directory" bash "$BACKUP" "$maint/S0" "$WORK/gateway-kek.toml" "$state" "${CTL[@]}"
+expect 0 "maintenance S1 goes to its own initially absent directory" bash "$BACKUP" "$maint/S1" "$WORK/gateway-signer.toml" "$state" "${CTL[@]}"
 before=$(tree_digest "$WORK/maintenance")
 expect 0 "a daily positional run prunes inside its own directory" bash "$BACKUP" "$daily" "$WORK/gateway.toml" "$state"
 [[ $(ls -d "$daily"/gateway-* | wc -l | tr -d ' ') -eq 7 ]] || fail "daily directory did not keep exactly seven snapshots"

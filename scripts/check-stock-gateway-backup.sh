@@ -34,7 +34,9 @@
 # Both branches require the matching SNAPSHOT_MODE marker (missing/unknown/other refuses; no downgrade either way) and,
 # for a config with the [[openshell.supervisor.middleware]] name = "stock-memory" registration, its tls_ca_cert_path
 # under STATE_DIR in the verified inventory (else REFUSED: signer_tls_ca_not_covered); the subscription branch also
-# compares the manifest's stateDirectory and signer fields, which are explicit nulls without a registration.
+# compares the manifest's stateDirectory and signer fields, which are explicit nulls without a registration. Both
+# branches are read-only and repeatable: the sealed gateway.db is opened immutable (no WAL/SHM sidecars are created) and
+# must be self-contained; a snapshot already carrying sidecars is refused and left exactly as found.
 #
 #   check-stock-gateway-backup.sh --require-subscription-recovery BACKUP_DIR [MAX_AGE_HOURS]
 #
@@ -219,8 +221,13 @@ CONTROL = ["control/subscription.json", "control/applied-runtime-binding.json", 
 if any(name not in listed for name in REQUIRED + (CONTROL if mode == "subscription" else [])) \
         or len([n for n in listed if n.startswith("config/")]) != 1:
     refuse("snapshot lacks required gateway DB/config/trust or control coverage")
+# #503 W1: the sealed DB is one self-contained file, read as immutable. Plain mode=ro on a WAL-mode copy creates
+# gateway.db-wal/-shm beside it, mutating the very snapshot the next re-verification must find unchanged; immutable=1
+# writes nothing. A listed sidecar is refused (never deleted or ignored), so the immutable read is the whole database.
+if any(name in listed for name in ("gateway.db-wal", "gateway.db-shm", "gateway.db-journal")):
+    refuse("snapshot gateway DB is not self-contained (sidecar files)")
 try:
-    database = sqlite3.connect(f"file:{os.path.join(snapshot, 'gateway.db')}?mode=ro", uri=True)
+    database = sqlite3.connect(f"file:{os.path.join(snapshot, 'gateway.db')}?mode=ro&immutable=1", uri=True)
     healthy = database.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     database.close()
 except sqlite3.Error:

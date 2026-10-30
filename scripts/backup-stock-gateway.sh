@@ -324,6 +324,10 @@ source.close()
 if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
     sys.exit("integrity_check_failed")
 target.close()
+# #503 W1: the sealed DB must be one self-contained file (closing the only connection checkpoints a WAL copy), since
+# eligibility reads it immutable; a leftover sidecar fails the run rather than entering the inventory.
+if any(os.path.lexists(os.path.join(out, "gateway.db" + suffix)) for suffix in ("-wal", "-shm", "-journal")):
+    sys.exit("snapshot_db_not_self_contained")
 for path in before:
     dest = os.path.join(out, "config", os.path.basename(path)) if path == config \
         else os.path.join(out, "state", os.path.relpath(path, state))

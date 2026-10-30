@@ -1095,6 +1095,12 @@ stripped or resumed unsigned.
   - a 10-second deadline, with the token through curl's stdin config;
   - exactly the four counts, with `subscriptionBindings=0` and `unresolvedBindings=0`;
   - anything else, including no token, is `REFUSED: subscription_state_unverified`.
+- **Read-only, repeatable checks.** Both eligibility branches open the sealed `gateway.db` as immutable, so SQLite
+  never adds `gateway.db-wal`/`-shm` next to it, even for a WAL-mode database. Running a check again, as the
+  pre-restart S0/S1 re-verification requires, sees the same files and hashes. A sealed DB must be one
+  self-contained file: the backup fails if a sidecar remains at seal, and eligibility refuses a listed sidecar. A
+  snapshot that already gained sidecars (an older checker's plain read-only open) is refused and kept as evidence;
+  never delete the sidecars, rewrite its inventory or bypass the check. Take a fresh checkpoint instead.
 - **No downgrade.** A missing or unknown marker refuses; legacy unmarked artifacts need a fresh checkpoint. The plain
   branch refuses subscription-marked or control-bearing snapshots, even with the controls and their checksum lines
   stripped. A control-branch refusal is never retried as plain, and a pre-enrollment plain S0 stops qualifying once

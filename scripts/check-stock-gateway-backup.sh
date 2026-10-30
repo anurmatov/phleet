@@ -22,17 +22,48 @@
 # the capture and shows no provider refresh at or after it (parsed UTC instants, sub-second kept, never
 # string order). A null LAST_REFRESH is accepted only while the snapshot's was also null. No
 # token-generation counter is inferred; the control JSON copies are evidence and are never imported.
+#
+#   check-stock-gateway-backup.sh --plain-restore-eligibility SNAPSHOT --state-dir STATE_DIR
+#
+# #503 plain branch (no restore is performed): only a SNAPSHOT_MODE=plain snapshot with no control/ directory, the
+# same complete inventory/integrity/config/trust checks, a configured KEK and the fixed signer CA mapped from the
+# snapshot's own config against the explicit original STATE_DIR, then a fresh authenticated rollback preflight
+# (FLEET_ORCHESTRATOR_URL / ORCHESTRATOR_AUTH_TOKEN, token via curl stdin config, 10 s) that must report exactly the
+# four counts with subscriptionBindings=0 and unresolvedBindings=0; anything else is REFUSED: subscription_state_unverified.
+# Both branches require the matching SNAPSHOT_MODE marker (missing/unknown/other refuses; no downgrade either way) and,
+# for a config with the [[openshell.supervisor.middleware]] name = "stock-memory" registration, its tls_ca_cert_path
+# under STATE_DIR in the verified inventory (else REFUSED: signer_tls_ca_not_covered); the subscription branch also
+# compares the manifest's stateDirectory and signer fields, which are explicit nulls without a registration.
+#
+#   check-stock-gateway-backup.sh --require-subscription-recovery BACKUP_DIR [MAX_AGE_HOURS]
+#
+# #503 N2 monitor while subscription custody may exist: the same staleness checks (exit 1), then the newest complete
+# snapshot in BACKUP_DIR only is classified, always as a warning with exit 3: plain or unmarked is
+# WARN: subscription_recovery_unqualified, control-bearing is WARN: subscription_recovery_unverified. Daily positional
+# backups never qualify subscription recovery; without the flag a pass means freshness only, not restore eligibility.
 set -euo pipefail
 
-if [[ "${1:-}" == "--restore-eligibility" ]]; then
-  [[ $# -eq 8 && "$3" == "--subscription-source" && "$5" == "--managed-binding" && "$7" == "--refresh-observation" ]] \
-    || { echo "usage: $0 --restore-eligibility SNAPSHOT --subscription-source FILE --managed-binding FILE --refresh-observation FILE" >&2; exit 2; }
-  python3 - "$2" "$4" "$6" "$8" <<'PY'
+if [[ "${1:-}" == "--restore-eligibility" || "${1:-}" == "--plain-restore-eligibility" ]]; then
+  if [[ "$1" == "--restore-eligibility" ]]; then
+    [[ $# -eq 8 && "$3" == "--subscription-source" && "$5" == "--managed-binding" && "$7" == "--refresh-observation" ]] \
+      || { echo "usage: $0 --restore-eligibility SNAPSHOT --subscription-source FILE --managed-binding FILE --refresh-observation FILE" >&2; exit 2; }
+    set -- subscription "$2" "$4" "$6" "$8"
+  else
+    [[ $# -eq 4 && "$3" == "--state-dir" ]] || { echo "usage: $0 --plain-restore-eligibility SNAPSHOT --state-dir STATE_DIR" >&2; exit 2; }
+    set -- plain "$2" "$4"
+  fi
+  MODE=$1
+  python3 - "$@" <<'PY' || exit $?
 import datetime, hashlib, json, os, re, sqlite3, stat, sys
-snapshot, source_path, binding_path, refresh_path = sys.argv[1:5]
+mode, snapshot = sys.argv[1:3]
 
 def refuse(reason):
     sys.exit(f"REFUSED: {reason}")
+
+def anchored(path):
+    """Resolve OS-level links above the leaf (macOS /var -> /private/var) but keep the leaf itself, as the backup does."""
+    path = os.path.abspath(path)
+    return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
 
 def regular(path):
     return os.path.lexists(path) and stat.S_ISREG(os.lstat(path).st_mode)
@@ -45,40 +76,77 @@ def strict(raw):
         return dict(items)
     return json.loads(raw, object_pairs_hook=pairs)
 
-def configured_kek(config_path):
-    """The gateway's [openshell.gateway.credential_storage] KEK: ("path", abs) | ("env"|"none"|"unknown", None)."""
+def gateway_config(config_path):
+    """The gateway's [openshell.gateway.credential_storage] KEK, ("path", abs) | ("env"|"none"|"unknown", None), and its
+    fixed [[openshell.supervisor.middleware]] name = "stock-memory" signer registration, ("registered", abs CA path or
+    None) | ("none", None) | ("unknown", None). Malformed, duplicate or ambiguous relevant data is "unknown", never absence."""
     text = open(config_path, encoding="utf-8").read()
+    unknown = ("unknown", None, "unknown", None)
+    invalid = object()
     try:
         import tomllib
         try:
-            storage = tomllib.loads(text).get("openshell", {}).get("gateway", {}).get("credential_storage")
+            data = tomllib.loads(text)
         except tomllib.TOMLDecodeError:
-            return ("unknown", None)
-    except ModuleNotFoundError:  # Python < 3.11: one plain table with basic-string values only
-        storage, table = None, None
+            return unknown
+        def table(*keys):
+            node = data
+            for key in keys:
+                if not isinstance(node, dict):
+                    return invalid
+                node = node.get(key)
+                if node is None:
+                    return None
+            return node
+        storage = table("openshell", "gateway", "credential_storage")
+        middleware = table("openshell", "supervisor", "middleware")
+        if storage is invalid or middleware is invalid:
+            return unknown
+    except ModuleNotFoundError:  # Python < 3.11: plain tables and [[arrays]] with basic-string/integer/boolean values only
+        storage, middleware, current = None, None, None
         for raw in text.splitlines():
             line = raw.split("#", 1)[0].strip()
-            header = re.fullmatch(r"\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
+            array = re.fullmatch(r"\[\[\s*([A-Za-z0-9_.-]+)\s*\]\]", line)
+            header = array or re.fullmatch(r"\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
             if header:
-                table = header.group(1)
-                if table == "openshell.gateway.credential_storage":
-                    storage = {}
+                name, current = header.group(1), None
+                if name == "openshell.gateway.credential_storage" and not array and storage is None:
+                    storage = current = {}
+                elif name == "openshell.supervisor.middleware" and array:
+                    middleware = [] if middleware is None else middleware
+                    current = {}
+                    middleware.append(current)
+                elif name.startswith(("openshell.gateway.credential_storage", "openshell.supervisor")):
+                    return unknown  # a duplicate, mis-kinded or nested relevant table
                 continue
-            if "credential_storage" in line:
-                return ("unknown", None)
-            if table == "openshell.gateway.credential_storage" and line:
-                pair = re.fullmatch(r'([A-Za-z0-9_]+)\s*=\s*"([^"\\]*)"', line)
-                if not pair:
-                    return ("unknown", None)
-                storage[pair.group(1)] = pair.group(2)
+            key = line.split("=", 1)[0].strip()
+            if "credential_storage" in line or "middleware" in key or re.match(r"(openshell\.)?supervisor\b", key):
+                return unknown  # dotted keys or inline tables for relevant data are not parsed here
+            if current is not None and line:
+                pair = re.fullmatch(r'([A-Za-z0-9_]+)\s*=\s*("[^"\\]*"|-?[0-9]+|true|false)', line)
+                if not pair or pair.group(1) in current:
+                    return unknown
+                value = pair.group(2)
+                current[pair.group(1)] = value[1:-1] if value.startswith('"') else value == "true" if value in ("true", "false") else int(value)
     if storage is None:
-        return ("none", None)
-    if not isinstance(storage, dict):
-        return ("unknown", None)
-    if "key_encryption_key_env" in storage:
-        return ("env", None)
-    path = storage.get("key_encryption_key_path")
-    return ("path", path) if isinstance(path, str) and os.path.isabs(path) else ("unknown", None)
+        kek = ("none", None)
+    elif not isinstance(storage, dict):
+        kek = ("unknown", None)
+    elif "key_encryption_key_env" in storage:
+        kek = ("env", None)
+    else:
+        path = storage.get("key_encryption_key_path")
+        kek = ("path", path) if isinstance(path, str) and os.path.isabs(path) else ("unknown", None)
+    if middleware is None:
+        signer = ("none", None)
+    elif not isinstance(middleware, list) or not all(isinstance(m, dict) and isinstance(m.get("name"), str) for m in middleware):
+        signer = ("unknown", None)
+    else:
+        named = [m for m in middleware if m["name"] == "stock-memory"]
+        ca = named[0].get("tls_ca_cert_path") if len(named) == 1 else None
+        signer = ("none", None) if not named else ("unknown", None) if len(named) > 1 \
+            else ("registered", ca if isinstance(ca, str) and os.path.isabs(ca) else None)
+    return (*kek, *signer)
 
 UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?Z")
 def instant(value, what, nullable=False):
@@ -114,10 +182,19 @@ if not listed or set(listed) != present:
 for name, digest in listed.items():
     if hashlib.sha256(open(os.path.join(snapshot, name), "rb").read()).hexdigest() != digest:
         refuse("snapshot hash mismatch")
+# #503 F1: the recorded mode marker decides the branch; it is never inferred, and there is no downgrade either way.
+marker = open(os.path.join(snapshot, "SNAPSHOT_MODE"), "rb").read() if "SNAPSHOT_MODE" in listed else None
+if marker not in (b"plain\n", b"subscription\n"):
+    refuse("snapshot mode marker missing or unknown (take a fresh qualified checkpoint)")
+if marker != (mode + "\n").encode():
+    refuse(f"snapshot mode marker is {marker.decode().strip()}, not {mode}: no mode downgrade or cross-branch restore")
+if mode == "plain" and (os.path.lexists(os.path.join(snapshot, "control")) or any(n.startswith("control/") for n in listed)):
+    refuse("plain eligibility refuses a control-bearing snapshot")
 REQUIRED = ["gateway.db", "state/tls/gateway.pem", "state/tls/gateway-key.pem", "state/tls/ca.pem", "state/tls/client-ca.pem",
-            "state/tls/jwt/signing.pem", "state/tls/jwt/public.pem", "state/tls/jwt/kid", "control/subscription.json",
-            "control/applied-runtime-binding.json", "control/refresh-observation.json", "control/MANIFEST.json"]
-if any(name not in listed for name in REQUIRED) or len([n for n in listed if n.startswith("config/")]) != 1:
+            "state/tls/jwt/signing.pem", "state/tls/jwt/public.pem", "state/tls/jwt/kid"]
+CONTROL = ["control/subscription.json", "control/applied-runtime-binding.json", "control/refresh-observation.json", "control/MANIFEST.json"]
+if any(name not in listed for name in REQUIRED + (CONTROL if mode == "subscription" else [])) \
+        or len([n for n in listed if n.startswith("config/")]) != 1:
     refuse("snapshot lacks required gateway DB/config/trust or control coverage")
 try:
     database = sqlite3.connect(f"file:{os.path.join(snapshot, 'gateway.db')}?mode=ro", uri=True)
@@ -127,6 +204,35 @@ except sqlite3.Error:
     healthy = False
 if not healthy:
     refuse("snapshot gateway DB integrity check failed")
+config_name = next(n for n in listed if n.startswith("config/"))
+kek_mode, kek_path, signer_mode, signer_config = gateway_config(os.path.join(snapshot, config_name))
+
+def covered(path, state_dir):
+    """The inventory entry for a file the snapshot config names under STATE_DIR, or None when outside/unlisted."""
+    rel = os.path.relpath(anchored(path), state_dir)
+    entry = "state/" + rel
+    return entry if not rel.startswith("..") and entry in listed else None
+
+def signer_entry(state_dir):
+    """#503 H1: None without the fixed registration; otherwise its CA's verified inventory entry, else refused."""
+    if signer_mode == "none":
+        return None
+    if signer_mode != "registered" or not signer_config or covered(signer_config, state_dir) is None:
+        refuse("signer_tls_ca_not_covered")
+    return covered(signer_config, state_dir)
+
+if mode == "plain":
+    # #503: explicit operator-selected original STATE_DIR; CA/KEK mapping derived from the snapshot config against it.
+    state_dir = sys.argv[3]
+    if not os.path.isabs(state_dir):
+        refuse("STATE_DIR must be the absolute original gateway state directory")
+    state_dir = anchored(state_dir)
+    if kek_mode == "unknown" or kek_mode == "path" and covered(kek_path, state_dir) is None:
+        refuse("configured KEK is not covered by the snapshot inventory")
+    signer_entry(state_dir)
+    sys.exit(0)  # the live no-custody proof follows in the caller
+
+source_path, binding_path, refresh_path = sys.argv[3:6]
 try:
     manifest = strict(open(os.path.join(snapshot, "control", "MANIFEST.json"), "rb").read().decode("utf-8"))
     recorded = strict(open(os.path.join(snapshot, "control", "applied-runtime-binding.json"), "rb").read().decode("utf-8"))
@@ -136,12 +242,19 @@ if manifest.get("bindingSha256") != listed["control/applied-runtime-binding.json
         or manifest.get("sourceSha256") != listed["control/subscription.json"]:
     refuse("snapshot manifest does not match its control records")
 # Review B1: the KEK the snapshot's own gateway config names must be in the verified inventory.
-config_name = next(n for n in listed if n.startswith("config/"))
-kek_mode, kek_path = configured_kek(os.path.join(snapshot, config_name))
 kek_entry = manifest.get("keyEncryptionKey")
 if kek_mode != "path" or kek_path != manifest.get("keyEncryptionKeyConfigPath") or not isinstance(kek_entry, str) \
         or not kek_entry.startswith("state/") or kek_entry not in listed:
     refuse("configured KEK is not covered by the snapshot inventory")
+# #503: signer metadata against the parsed snapshot config and recorded STATE_DIR; explicit nulls only without a registration.
+state_dir = manifest.get("stateDirectory")
+signer_keys = ("signerRegistration", "signerCaConfigPath", "signerCaEntry")
+if not isinstance(state_dir, str) or not os.path.isabs(state_dir) or any(key not in manifest for key in signer_keys):
+    refuse("snapshot manifest lacks the recorded STATE_DIR or signer metadata")
+entry = signer_entry(state_dir)
+expected = (None, None, None) if entry is None else ("stock-memory", signer_config, entry)
+if tuple(manifest[key] for key in signer_keys) != expected:
+    refuse("signer metadata does not match the snapshot config")
 
 # 2. Current control inputs: regular, non-linked, owned by this uid, no group/other access (review L3, as backup).
 for path in (source_path, binding_path, refresh_path):
@@ -205,17 +318,43 @@ else:
         refuse("snapshot captured before the latest provider refresh (superseded)")
 print("ELIGIBLE: snapshot is the latest stopped checkpoint for this tuple; restore only gateway DB/KEK/config/trust while stopped")
 PY
-  exit $?
+  [[ "$MODE" == "plain" ]] || exit 0
+  # #503 F1: a fresh authenticated no-custody proof at invocation, never a cached count or file. The token goes
+  # through curl's stdin config (-K -), never argv or logs.
+  unverified() { echo "REFUSED: subscription_state_unverified ($1)" >&2; exit 1; }
+  token=${ORCHESTRATOR_AUTH_TOKEN:-}
+  [[ -n "$token" ]] || unverified "no operator token configured"
+  url=${FLEET_ORCHESTRATOR_URL:-http://127.0.0.1:3600}
+  esc=${token//\\/\\\\}; esc=${esc//\"/\\\"}
+  body=$(printf 'header = "Authorization: Bearer %s"\n' "$esc" \
+    | curl -fsS --max-time 10 -K - "$url/api/managed-runtime/rollback-preflight") || unverified "rollback preflight unavailable"
+  python3 - "$body" <<'PY' || unverified "subscription custody or unresolved bindings present, or the answer is invalid"
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+keys = {"desiredOpenShell", "appliedOpenShell", "unresolvedBindings", "subscriptionBindings"}
+if not isinstance(data, dict) or set(data) != keys or any(type(data[k]) is not int or data[k] < 0 for k in keys):
+    sys.exit(1)
+if data["subscriptionBindings"] or data["unresolvedBindings"]:
+    print("managed counts: " + ", ".join(f"{k}={data[k]}" for k in sorted(keys)), file=sys.stderr)
+    sys.exit(1)
+PY
+  echo "ELIGIBLE: plain snapshot with live proof of no subscription custody; restore only gateway DB/KEK/config/trust while stopped"
+  exit 0
 fi
 
-[[ $# -ge 1 && $# -le 2 ]] || { echo "usage: $0 BACKUP_DIR [MAX_AGE_HOURS]" >&2; exit 2; }
+REQUIRE_RECOVERY=0
+if [[ "${1:-}" == "--require-subscription-recovery" ]]; then REQUIRE_RECOVERY=1; shift; fi
+[[ $# -ge 1 && $# -le 2 ]] || { echo "usage: $0 [--require-subscription-recovery] BACKUP_DIR [MAX_AGE_HOURS]" >&2; exit 2; }
 BACKUP_DIR=$1
 MAX_AGE_HOURS=${2:-26}
 [[ "$MAX_AGE_HOURS" =~ ^[1-9][0-9]*$ ]] || { echo "usage: MAX_AGE_HOURS must be a positive integer" >&2; exit 2; }
 
-python3 - "$BACKUP_DIR" "$MAX_AGE_HOURS" <<'PY'
+python3 - "$BACKUP_DIR" "$MAX_AGE_HOURS" "$REQUIRE_RECOVERY" <<'PY'
 import datetime, os, sys
-backup_dir, max_hours = sys.argv[1], int(sys.argv[2])
+backup_dir, max_hours, require_recovery = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
 
 def stamp(name):
     path = os.path.join(backup_dir, name)
@@ -246,7 +385,19 @@ def complete(name):
             and os.path.isfile(os.path.join(path, "COMPLETE")) and os.path.isfile(os.path.join(path, "SHA256SUMS"))
             and not os.path.lexists(os.path.join(path, "INVALID"))
             and (not os.path.lexists(control) or os.path.isfile(os.path.join(control, "MANIFEST.json"))))
-if not any(complete(name) for name in os.listdir(backup_dir)):
+snapshots = sorted(name for name in os.listdir(backup_dir) if complete(name))
+if not snapshots:
     sys.exit(f"STALE: no complete gateway snapshot in {backup_dir}")
-print(f"OK: last gateway backup {int(age.total_seconds() // 60)}m ago")
+if not require_recovery:
+    print(f"OK: last gateway backup {int(age.total_seconds() // 60)}m ago (freshness only; restore eligibility not assessed)")
+    sys.exit(0)
+# #503 N2: classify only the newest complete snapshot in this directory; never discover controls elsewhere. Every
+# outcome is a warning (exit 3): only a separately authorized eligibility run can qualify subscription recovery.
+marker = os.path.join(backup_dir, snapshots[-1], "SNAPSHOT_MODE")
+mode = open(marker, "rb").read() if os.path.isfile(marker) and not os.path.islink(marker) else None
+if mode == b"subscription\n":
+    print(f"WARN: subscription_recovery_unverified: newest snapshot {snapshots[-1]} carries control records; current restore eligibility is not assessed")
+else:
+    print(f"WARN: subscription_recovery_unqualified: newest snapshot {snapshots[-1]} is plain or unmarked, not a subscription-recovery checkpoint")
+sys.exit(3)
 PY

@@ -15,6 +15,14 @@
 # credential read is added; API/manual positional invocation is unchanged. A key-encryption key configured
 # as [openshell.gateway.credential_storage] key_encryption_key_path must exist under STATE_DIR for every
 # backup; subscription backups require that explicit path (an env-only or default KEK refuses).
+# #503: a config with the fixed [[openshell.supervisor.middleware]] name = "stock-memory" signer registration needs its
+# explicit absolute tls_ca_cert_path as a regular, non-empty, non-linked file under STATE_DIR in every backup, else
+# "coverage_incomplete: signer_tls_ca"; malformed, duplicate or ambiguous registration data fails the same way rather
+# than reading as absent (both the tomllib and Python < 3.11 parsers). Every snapshot records SNAPSHOT_MODE (plain for
+# a positional run, subscription with the three control inputs) inside SHA256SUMS; subscription manifests also record
+# stateDirectory and signerRegistration/signerCaConfigPath/signerCaEntry (explicit nulls without a registration).
+# Pruning keeps seven complete snapshots inside the invoked BACKUP_DIR only: maintenance S0/S1 checkpoints go to their
+# own once-used directories outside the daily tree (docs/openshell-stock.md), never into it.
 #
 # Coverage is complete or the run fails: gateway.db, the gateway TOML and every trust file it uses
 # (TLS server cert/key, the gateway CA guest_tls_ca names, client CA, JWT signing/public key and kid
@@ -110,54 +118,101 @@ def linked(path):
             return False
         path = parent
 
-def configured_kek(config_path):
-    """The gateway's [openshell.gateway.credential_storage] KEK: ("path", abs) | ("env"|"none"|"unknown", None)."""
+def gateway_config(config_path):
+    """The gateway's [openshell.gateway.credential_storage] KEK, ("path", abs) | ("env"|"none"|"unknown", None), and its
+    fixed [[openshell.supervisor.middleware]] name = "stock-memory" signer registration, ("registered", abs CA path or
+    None) | ("none", None) | ("unknown", None). Malformed, duplicate or ambiguous relevant data is "unknown", never absence."""
     text = open(config_path, encoding="utf-8").read()
+    unknown = ("unknown", None, "unknown", None)
+    invalid = object()
     try:
         import tomllib
         try:
-            storage = tomllib.loads(text).get("openshell", {}).get("gateway", {}).get("credential_storage")
+            data = tomllib.loads(text)
         except tomllib.TOMLDecodeError:
-            return ("unknown", None)
-    except ModuleNotFoundError:  # Python < 3.11: one plain table with basic-string values only
-        storage, table = None, None
+            return unknown
+        def table(*keys):
+            node = data
+            for key in keys:
+                if not isinstance(node, dict):
+                    return invalid
+                node = node.get(key)
+                if node is None:
+                    return None
+            return node
+        storage = table("openshell", "gateway", "credential_storage")
+        middleware = table("openshell", "supervisor", "middleware")
+        if storage is invalid or middleware is invalid:
+            return unknown
+    except ModuleNotFoundError:  # Python < 3.11: plain tables and [[arrays]] with basic-string/integer/boolean values only
+        storage, middleware, current = None, None, None
         for raw in text.splitlines():
             line = raw.split("#", 1)[0].strip()
-            header = re.fullmatch(r"\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
+            array = re.fullmatch(r"\[\[\s*([A-Za-z0-9_.-]+)\s*\]\]", line)
+            header = array or re.fullmatch(r"\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
             if header:
-                table = header.group(1)
-                if table == "openshell.gateway.credential_storage":
-                    storage = {}
+                name, current = header.group(1), None
+                if name == "openshell.gateway.credential_storage" and not array and storage is None:
+                    storage = current = {}
+                elif name == "openshell.supervisor.middleware" and array:
+                    middleware = [] if middleware is None else middleware
+                    current = {}
+                    middleware.append(current)
+                elif name.startswith(("openshell.gateway.credential_storage", "openshell.supervisor")):
+                    return unknown  # a duplicate, mis-kinded or nested relevant table
                 continue
-            if "credential_storage" in line:
-                return ("unknown", None)
-            if table == "openshell.gateway.credential_storage" and line:
-                pair = re.fullmatch(r'([A-Za-z0-9_]+)\s*=\s*"([^"\\]*)"', line)
-                if not pair:
-                    return ("unknown", None)
-                storage[pair.group(1)] = pair.group(2)
+            key = line.split("=", 1)[0].strip()
+            if "credential_storage" in line or "middleware" in key or re.match(r"(openshell\.)?supervisor\b", key):
+                return unknown  # dotted keys or inline tables for relevant data are not parsed here
+            if current is not None and line:
+                pair = re.fullmatch(r'([A-Za-z0-9_]+)\s*=\s*("[^"\\]*"|-?[0-9]+|true|false)', line)
+                if not pair or pair.group(1) in current:
+                    return unknown
+                value = pair.group(2)
+                current[pair.group(1)] = value[1:-1] if value.startswith('"') else value == "true" if value in ("true", "false") else int(value)
     if storage is None:
-        return ("none", None)
-    if not isinstance(storage, dict):
-        return ("unknown", None)
-    if "key_encryption_key_env" in storage:
-        return ("env", None)
-    path = storage.get("key_encryption_key_path")
-    return ("path", path) if isinstance(path, str) and os.path.isabs(path) else ("unknown", None)
+        kek = ("none", None)
+    elif not isinstance(storage, dict):
+        kek = ("unknown", None)
+    elif "key_encryption_key_env" in storage:
+        kek = ("env", None)
+    else:
+        path = storage.get("key_encryption_key_path")
+        kek = ("path", path) if isinstance(path, str) and os.path.isabs(path) else ("unknown", None)
+    if middleware is None:
+        signer = ("none", None)
+    elif not isinstance(middleware, list) or not all(isinstance(m, dict) and isinstance(m.get("name"), str) for m in middleware):
+        signer = ("unknown", None)
+    else:
+        named = [m for m in middleware if m["name"] == "stock-memory"]
+        ca = named[0].get("tls_ca_cert_path") if len(named) == 1 else None
+        signer = ("none", None) if not named else ("unknown", None) if len(named) > 1 \
+            else ("registered", ca if isinstance(ca, str) and os.path.isabs(ca) else None)
+    return (*kek, *signer)
 
 # #502 review B1: a configured key-encryption key is part of coverage (the DB's provider credentials are
 # unrecoverable without it). It must be a regular, non-linked file under STATE_DIR; subscription snapshots
 # additionally need it configured explicitly by path, since an env or default KEK cannot be covered here.
-kek_mode, kek_path = configured_kek(config) if regular(config) and not linked(config) else ("unknown", None)
+config_ok = regular(config) and not linked(config)
+kek_mode, kek_path, signer_mode, signer_config = gateway_config(config) if config_ok else ("unknown", None, "unknown", None)
 kek_rel, kek_config = None, kek_path
 if kek_mode == "path":
-    kek_path = os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(kek_path))), os.path.basename(kek_path))
+    kek_path = anchored(kek_path)
     kek_rel = os.path.relpath(kek_path, state)
+# #503 H1: the fixed stock-memory signer registration needs its explicit CA as a regular, non-empty, non-linked file
+# under STATE_DIR in every backup (positional or subscription); malformed or ambiguous registration data is never absence.
+signer_rel = None
+if signer_mode == "registered" and signer_config:
+    signer_path = anchored(signer_config)
+    signer_rel = os.path.relpath(signer_path, state)
 missing = [p for p in ["gateway.db", *REQUIRED] if not regular(os.path.join(state, p)) or linked(os.path.join(state, p))]
 if kek_mode == "path" and (kek_rel.startswith("..") or not regular(kek_path) or linked(kek_path)):
     missing.append("key_encryption_key_path")
 if sys.argv[4] and kek_mode != "path":
     missing.append("key_encryption_key_path (subscription snapshots need an explicit KEK path under STATE_DIR)")
+if config_ok and (signer_mode == "unknown" or signer_mode == "registered" and (signer_rel is None or signer_rel.startswith("..")
+        or not regular(signer_path) or linked(signer_path) or os.lstat(signer_path).st_size == 0)):
+    missing.append("signer_tls_ca")
 if not regular(config) or linked(config):
     missing.append("CONFIG_FILE")
 if missing:
@@ -216,6 +271,9 @@ def control_manifest(paths):
         "statusObservedAtUtc": refresh["statusObservedAtUtc"], "providerLastRefreshAtUtc": refresh["providerLastRefreshAtUtc"],
         "nextRefreshAtUtc": refresh["nextRefreshAtUtc"],
         "keyEncryptionKey": "state/" + kek_rel, "keyEncryptionKeyConfigPath": kek_config,
+        # #503: the recorded STATE_DIR and the parsed registration; all three signer fields are null without one.
+        "stateDirectory": state, "signerRegistration": "stock-memory" if signer_rel else None,
+        "signerCaConfigPath": signer_config if signer_rel else None, "signerCaEntry": "state/" + signer_rel if signer_rel else None,
     }
 control_before = {p: (os.lstat(p).st_ino, os.lstat(p).st_mtime_ns, os.lstat(p).st_size) for p in control}
 control_raw, manifest = control_manifest(control) if control else (None, None)
@@ -263,6 +321,11 @@ if control:
 for required in REQUIRED + ([kek_rel] if kek_rel else []):
     if not os.path.isfile(os.path.join(out, "state", required)):
         sys.exit("coverage_incomplete_in_snapshot: " + required)
+if signer_rel and not os.path.isfile(os.path.join(out, "state", signer_rel)):
+    sys.exit("coverage_incomplete: signer_tls_ca")
+# #503 F1: the snapshot mode is recorded, never inferred: complete control inputs make it subscription.
+with open(os.path.join(out, "SNAPSHOT_MODE"), "w") as handle:
+    handle.write("subscription\n" if control else "plain\n")
 if not os.path.isfile(os.path.join(out, "config", os.path.basename(config))):
     sys.exit("coverage_incomplete_in_snapshot: CONFIG_FILE")
 sums = []

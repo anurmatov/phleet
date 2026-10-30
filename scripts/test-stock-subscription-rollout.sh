@@ -4,6 +4,10 @@
 #
 #   bash scripts/test-stock-subscription-rollout.sh
 #
+# #503 adds: fixed signer-registration CA coverage (both TOML parsers), SNAPSHOT_MODE markers and the four
+# control/plain x registered/unregistered eligibility cases with no downgrade, dedicated maintenance S0/S1 retention and
+# pre-restart re-verification, and the freshness-only default versus the --require-subscription-recovery warnings.
+#
 # Covers: the subscription-capable guard against old-capability and incapable targets (before any checkout
 # switch), the exact previous guard (06c30ae2) refusing the four-key preflight while its managed-label
 # shortcut skips the query (unsupported, not a safety control), subscription snapshot control records and
@@ -32,6 +36,7 @@ cat > "$WORK/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 cat >/dev/null
 echo "curl" >> "$STUB_CALLS"
+[[ -z "${STUB_FAIL:-}" ]] || exit 22
 printf '%s' "$STUB_BODY"
 STUB
 chmod 755 "$WORK/bin/curl"
@@ -240,7 +245,7 @@ PY
 refuse_for "outside source changed" "changed outside source is refused" eligible "$WORK/control/now.json" "$WORK/control/binding.json" "$WORK/control/subscription-changed.json"
 printf '{"providerId":"%s"}' "$PROVIDER" > "$WORK/control/refresh-unknown.json"
 refuse_for "freshness unknown" "unknown current freshness is refused" eligible "$WORK/control/refresh-unknown.json"
-refuse_for "lacks required" "a plain snapshot without control records is not eligible" eligible_at "$plain" "$WORK/control/now.json"
+refuse_for "no mode downgrade" "a plain snapshot without control records is not eligible" eligible_at "$plain" "$WORK/control/now.json"
 cp -R "$snap" "$WORK/tampered"; printf 'x' >> "$WORK/tampered/control/MANIFEST.json"
 refuse_for "hash mismatch" "a snapshot whose hashes no longer match is refused" eligible_at "$WORK/tampered" "$WORK/control/now.json"
 cp -R "$snap" "$WORK/empty-sums"; : > "$WORK/empty-sums/SHA256SUMS"
@@ -280,5 +285,213 @@ mkdir -p "$WORK/nomanifest/gateway-20261030T000000Z/control"
 : > "$WORK/nomanifest/gateway-20261030T000000Z/COMPLETE"; : > "$WORK/nomanifest/gateway-20261030T000000Z/SHA256SUMS"
 date -u +%Y-%m-%dT%H:%M:%SZ > "$WORK/nomanifest/last-success"
 expect 1 "freshness refuses a control snapshot without its manifest" bash "$CHECK" "$WORK/nomanifest"
+
+# ── #503 H1/F1: fixed signer registration CA coverage, mode markers and both eligibility branches ──
+expect_rc() { # expect_rc <rc> <text> <description> <command...>: exactly this exit code and output text
+  local want=$1 text=$2 what=$3 rc=0; shift 3
+  "$@" >"$WORK/out" 2>&1 || rc=$?
+  if [[ $rc -ne $want ]] || ! grep -qF -- "$text" "$WORK/out"; then cat "$WORK/out" >&2; fail "$what (rc=$rc, wanted $want: $text)"; fi
+  ok "$what"
+}
+newest() { ls -d "$1"/gateway-* | sort | tail -n 1; }
+strip_entry() { # strip_entry <snapshot> <copy> <entry>: drop one file and its inventory line (a self-consistent reduced list)
+  rm -rf "$2"; cp -R "$1" "$2"; rm -rf "${2:?}/$3"
+  grep -v "  $3" "$2/SHA256SUMS" > "$2/SHA256SUMS.new" || true; mv "$2/SHA256SUMS.new" "$2/SHA256SUMS"
+}
+resum() { # resum <snapshot>: rewrite SHA256SUMS over the current files (simulates a self-consistent edited snapshot)
+  python3 - "$1" <<'PY'
+import hashlib, os, sys
+root = sys.argv[1]
+lines = []
+for base, _, names in os.walk(root):
+    for name in sorted(names):
+        rel = os.path.relpath(os.path.join(base, name), root)
+        if rel not in ("SHA256SUMS", "COMPLETE"):
+            lines.append(hashlib.sha256(open(os.path.join(base, name), "rb").read()).hexdigest() + "  " + rel)
+open(os.path.join(root, "SHA256SUMS"), "w").write("\n".join(lines) + "\n")
+PY
+}
+remanifest() { # remanifest <snapshot> <copy> <python statement on m>: edit control/MANIFEST.json and resum
+  rm -rf "$2"; cp -R "$1" "$2"
+  python3 - "$2/control/MANIFEST.json" "$3" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+exec(sys.argv[2])
+open(sys.argv[1], "w").write(json.dumps(m))
+PY
+  resum "$2"
+}
+plain_eligible() { bash "$CHECK" --plain-restore-eligibility "$1" --state-dir "${2:-$state}"; }
+SIGNER_CA="$state/tls/signer/stock-identity-ca.pem"
+mkdir -p "$state/tls/signer"; printf 'synthetic signer ca\n' > "$SIGNER_CA"
+registration() { # registration [ca-line]: the fixed registration as in deploy/openshell/gateway.toml.example
+  printf '\n[[openshell.supervisor.middleware]]\nname = "stock-memory"\ngrpc_endpoint = "https://identity.example.test:5443"\naudience = "synthetic-hook"\n%s\nmax_payload_bytes = 262144\ntimeout = "2s"\nallow_insecure_transport = false\n' "${1:-}"
+}
+with_ca() { printf 'tls_ca_cert_path = "%s"' "$1"; }
+{ cat "$WORK/gateway-kek.toml"; registration "$(with_ca "$SIGNER_CA")"; } > "$WORK/gateway-signer.toml"
+{ cat "$WORK/gateway.toml"; registration "$(with_ca "$SIGNER_CA")"; } > "$WORK/gateway-signer-plain.toml"
+{ cat "$WORK/gateway.toml"; registration; } > "$WORK/signer-no-ca.toml"
+{ cat "$WORK/gateway.toml"; registration "$(with_ca "$state/tls/signer/absent.pem")"; } > "$WORK/signer-absent.toml"
+printf 'outside ca\n' > "$WORK/outside-ca.pem"
+{ cat "$WORK/gateway.toml"; registration "$(with_ca "$WORK/outside-ca.pem")"; } > "$WORK/signer-outside.toml"
+{ cat "$WORK/gateway.toml"; registration "$(with_ca "$state/tls/signer/linked-ca.pem")"; } > "$WORK/signer-linked.toml"
+: > "$state/tls/signer/empty-ca.pem"
+{ cat "$WORK/gateway.toml"; registration "$(with_ca "$state/tls/signer/empty-ca.pem")"; } > "$WORK/signer-empty.toml"
+{ cat "$WORK/gateway-signer-plain.toml"; registration "$(with_ca "$SIGNER_CA")"; } > "$WORK/signer-duplicate.toml"
+{ cat "$WORK/gateway.toml"; registration "$(with_ca "$SIGNER_CA")" | sed 's/^\[\[\(.*\)\]\]$/[\1]/'; } > "$WORK/signer-table.toml"
+{ cat "$WORK/gateway.toml"; printf '\n[[openshell.supervisor.middleware]]\nname = "other-service"\ngrpc_endpoint = "https://other.example.test:50051"\nmax_payload_bytes = 1024\n'; } > "$WORK/other-middleware.toml"
+for parser in tomllib fallback; do
+  pp=""; [[ $parser == tomllib ]] || pp="$WORK/notoml"
+  for bad in no-ca absent outside empty duplicate table; do
+    PYTHONPATH="$pp" refuse_for "coverage_incomplete: signer_tls_ca" "$parser: registration case '$bad' fails even a positional backup" \
+      bash "$BACKUP" "$WORK/sig-$parser-$bad" "$WORK/signer-$bad.toml" "$state"
+    ! ls -d "$WORK/sig-$parser-$bad"/gateway-* >/dev/null 2>&1 || fail "$parser $bad left a snapshot"
+  done
+  ln -s "$SIGNER_CA" "$state/tls/signer/linked-ca.pem"
+  PYTHONPATH="$pp" refuse_for "coverage_incomplete: signer_tls_ca" "$parser: a linked registration CA fails" bash "$BACKUP" "$WORK/sig-$parser-linked" "$WORK/signer-linked.toml" "$state"
+  rm "$state/tls/signer/linked-ca.pem"
+  PYTHONPATH="$pp" expect 0 "$parser: another service's registration keeps a config without the fixed one unchanged" bash "$BACKUP" "$WORK/other-$parser" "$WORK/other-middleware.toml" "$state"
+done
+# The shipped example, rendered for this STATE_DIR with its dormant registration uncommented, parses under both parsers.
+python3 - "$ROOT/deploy/openshell/gateway.toml.example" "$state" "$WORK/example.toml" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read().replace("/var/lib/openshell", sys.argv[2])
+text = re.sub(r"^# (\[\[openshell\.supervisor\.middleware\]\]|(name|grpc_endpoint|audience|tls_ca_cert_path|max_payload_bytes|timeout|allow_insecure_transport)\s+=.*)$",
+              r"\1", text, flags=re.M)
+assert text.count('name                     = "stock-memory"') == 1 and "\n[[openshell.supervisor.middleware]]\n" in text
+open(sys.argv[3], "w").write(text)
+PY
+cp "$SIGNER_CA" "$state/tls/stock-identity-ca.pem"
+expect 0 "tomllib: the rendered example with its registration covers the CA" bash "$BACKUP" "$WORK/example-tomllib" "$WORK/example.toml" "$state"
+PYTHONPATH="$WORK/notoml" expect 0 "fallback: the rendered example (array tables, supervisor_image) parses the same" bash "$BACKUP" "$WORK/example-fallback" "$WORK/example.toml" "$state"
+for parser in tomllib fallback; do
+  grep -q "  state/tls/stock-identity-ca.pem$" "$(newest "$WORK/example-$parser")/SHA256SUMS" || fail "$parser example snapshot lacks the signer CA"
+done
+rm "$state/tls/stock-identity-ca.pem"
+ok "both parsers cover the example registration CA in the inventory"
+
+# C13 case a: control-bearing S0 without a registration records explicit-null signer metadata and the mode marker.
+python3 - "$snap" "$state" <<'PY' || fail "S0 manifest signer metadata"
+import json, os, sys
+m = json.load(open(os.path.join(sys.argv[1], "control", "MANIFEST.json")))
+assert all(k in m and m[k] is None for k in ("signerRegistration", "signerCaConfigPath", "signerCaEntry"))
+assert m["stateDirectory"] == os.path.join(os.path.realpath(os.path.dirname(sys.argv[2])), os.path.basename(sys.argv[2]))
+assert open(os.path.join(sys.argv[1], "SNAPSHOT_MODE"), "rb").read() == b"subscription\n"
+assert "  SNAPSHOT_MODE" in open(os.path.join(sys.argv[1], "SHA256SUMS")).read()
+PY
+ok "control S0 without registration: explicit-null signer fields, subscription marker in the inventory"
+[[ "$(cat "$plain/SNAPSHOT_MODE")" == plain ]] || fail "positional snapshot is not marked plain"
+# C13 case b: control-bearing S1 with the registration.
+expect 0 "control S1 with the registration completes" bash "$BACKUP" "$WORK/s1" "$WORK/gateway-signer.toml" "$state" "${CTL[@]}"
+s1=$(newest "$WORK/s1")
+python3 - "$s1" "$SIGNER_CA" <<'PY' || fail "S1 manifest signer metadata"
+import json, os, sys
+m = json.load(open(os.path.join(sys.argv[1], "control", "MANIFEST.json")))
+assert (m["signerRegistration"], m["signerCaConfigPath"], m["signerCaEntry"]) == ("stock-memory", sys.argv[2], "state/tls/signer/stock-identity-ca.pem")
+assert "  state/tls/signer/stock-identity-ca.pem" in open(os.path.join(sys.argv[1], "SHA256SUMS")).read()
+PY
+ok "control S1 records the registration, CA path and its contained inventory entry"
+observe '"2000-01-01T00:00:00Z"' > "$WORK/control/after-s1.json"
+expect 0 "control S1/registered CA is eligible" eligible_at "$s1" "$WORK/control/after-s1.json"
+expect 0 "control S0/no registration is still eligible after S1" eligible_at "$snap" "$WORK/control/after-s1.json"
+# C13 cases c and d: plain snapshots with a live zero-custody preflight.
+STUB_BODY=$(four 0 0 0 0) expect 0 "plain/no registration is eligible with live zero custody" plain_eligible "$plain"
+expect 0 "positional backup with the registration covers its CA" bash "$BACKUP" "$WORK/plain-sig" "$WORK/gateway-signer-plain.toml" "$state"
+plainsig=$(newest "$WORK/plain-sig")
+STUB_BODY=$(four 0 0 0 0) expect 0 "plain/registered CA is eligible with live zero custody" plain_eligible "$plainsig"
+PYTHONPATH="$WORK/notoml" STUB_BODY=$(four 0 0 0 0) expect 0 "fallback parser: plain/registered CA is eligible" plain_eligible "$plainsig"
+# CA plus its checksum line removed (self-consistent reduced inventory) never restores.
+strip_entry "$plainsig" "$WORK/plain-noca" state/tls/signer/stock-identity-ca.pem
+STUB_BODY=$(four 0 0 0 0) refuse_for "signer_tls_ca_not_covered" "plain: CA plus its checksum line removed is refused" plain_eligible "$WORK/plain-noca"
+PYTHONPATH="$WORK/notoml" STUB_BODY=$(four 0 0 0 0) refuse_for "signer_tls_ca_not_covered" "fallback parser: plain CA removal is refused" plain_eligible "$WORK/plain-noca"
+strip_entry "$s1" "$WORK/s1-noca" state/tls/signer/stock-identity-ca.pem
+refuse_for "signer_tls_ca_not_covered" "control: CA plus its checksum line removed is refused" eligible_at "$WORK/s1-noca" "$WORK/control/after-s1.json"
+STUB_BODY=$(four 0 0 0 0) refuse_for "signer_tls_ca_not_covered" "plain: a STATE_DIR the CA is not under is refused" plain_eligible "$plainsig" "$WORK/elsewhere"
+# Wrong or null signer metadata in a control manifest.
+remanifest "$s1" "$WORK/s1-null" 'm["signerCaEntry"] = None'
+refuse_for "signer metadata does not match" "control S1 with a null CA entry is refused" eligible_at "$WORK/s1-null" "$WORK/control/after-s1.json"
+remanifest "$s1" "$WORK/s1-path" 'm["signerCaConfigPath"] = "/elsewhere/ca.pem"'
+refuse_for "signer metadata does not match" "control S1 with a different CA path is refused" eligible_at "$WORK/s1-path" "$WORK/control/after-s1.json"
+remanifest "$snap" "$WORK/s0-claims" 'm["signerRegistration"] = "stock-memory"'
+refuse_for "signer metadata does not match" "control S0 claiming a registration its config lacks is refused" eligible_at "$WORK/s0-claims" "$WORK/control/after-s1.json"
+remanifest "$snap" "$WORK/s0-missing" 'del m["signerCaEntry"]'
+refuse_for "lacks the recorded STATE_DIR or signer metadata" "control S0 with a missing (not null) signer field is refused" eligible_at "$WORK/s0-missing" "$WORK/control/after-s1.json"
+
+# C13a: custody, marker and downgrade negatives for the plain branch; no restore or start side effect is possible here.
+STUB_BODY=$(four 0 1 0 1) refuse_for "subscription_state_unverified" "plain refuses while subscriptionBindings>0" plain_eligible "$plain"
+STUB_BODY=$(four 0 1 1 0) refuse_for "subscription_state_unverified" "plain refuses while unresolvedBindings>0" plain_eligible "$plain"
+STUB_BODY='{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0}' refuse_for "subscription_state_unverified" "plain refuses a malformed preflight answer" plain_eligible "$plain"
+STUB_BODY='not json' refuse_for "subscription_state_unverified" "plain refuses an unparsable preflight answer" plain_eligible "$plain"
+STUB_FAIL=1 STUB_BODY=$(four 0 0 0 0) refuse_for "subscription_state_unverified" "plain refuses an unavailable or timed-out preflight" plain_eligible "$plain"
+rm -f "$STUB_CALLS"
+ORCHESTRATOR_AUTH_TOKEN= STUB_BODY=$(four 0 0 0 0) refuse_for "subscription_state_unverified" "plain refuses without an operator token" plain_eligible "$plain"
+[[ ! -e "$STUB_CALLS" ]] || fail "plain eligibility queried without a token"
+STUB_BODY=$(four 0 0 0 0) refuse_for "not plain" "a subscription-marked snapshot is refused by the plain branch" plain_eligible "$snap"
+strip_entry "$snap" "$WORK/stripped" control
+STUB_BODY=$(four 0 0 0 0) refuse_for "not plain" "a subscription snapshot with controls and their checksum lines stripped is still refused" plain_eligible "$WORK/stripped"
+strip_entry "$plain" "$WORK/unmarked" SNAPSHOT_MODE
+STUB_BODY=$(four 0 0 0 0) refuse_for "marker missing or unknown" "plain: a missing mode marker is refused" plain_eligible "$WORK/unmarked"
+strip_entry "$snap" "$WORK/unmarked-sub" SNAPSHOT_MODE
+refuse_for "marker missing or unknown" "control: a missing mode marker is refused" eligible_at "$WORK/unmarked-sub" "$WORK/control/after-s1.json"
+rm -rf "$WORK/other-marker"; cp -R "$plain" "$WORK/other-marker"; printf 'mixed\n' > "$WORK/other-marker/SNAPSHOT_MODE"; resum "$WORK/other-marker"
+STUB_BODY=$(four 0 0 0 0) refuse_for "marker missing or unknown" "an unknown mode marker is refused" plain_eligible "$WORK/other-marker"
+rm -rf "$WORK/upgraded"; cp -R "$plain" "$WORK/upgraded"; printf 'subscription\n' > "$WORK/upgraded/SNAPSHOT_MODE"; resum "$WORK/upgraded"
+refuse_for "lacks required" "a plain snapshot re-marked subscription has no control payload and is refused" eligible_at "$WORK/upgraded" "$WORK/control/after-s1.json"
+rm -rf "$WORK/downgraded"; cp -R "$snap" "$WORK/downgraded"; printf 'plain\n' > "$WORK/downgraded/SNAPSHOT_MODE"; resum "$WORK/downgraded"
+STUB_BODY=$(four 0 0 0 0) refuse_for "refuses a control-bearing snapshot" "a control snapshot re-marked plain is refused by the plain branch" plain_eligible "$WORK/downgraded"
+refuse_for "not subscription" "the re-marked control snapshot is refused by the control branch too (no downgrade)" eligible_at "$WORK/downgraded" "$WORK/control/after-s1.json"
+
+# ── #503 N1 (C16): once-used maintenance S0/S1 directories outside daily rotation, pre-restart re-verification ──
+daily="$WORK/daily"; maint="$WORK/maintenance/window-1"
+mkdir -p "$daily"
+for day in 1 2 3 4 5 6 7 8 9; do mkdir -p "$daily/gateway-2026010${day}T000000Z"; : > "$daily/gateway-2026010${day}T000000Z/COMPLETE"; done
+[[ ! -e "$maint" ]] || fail "maintenance window directory pre-exists"
+expect 0 "maintenance S0 goes to its own initially absent directory" bash "$BACKUP" "$maint/S0" "$WORK/gateway-kek.toml" "$state" "${CTL[@]}"
+expect 0 "maintenance S1 goes to its own initially absent directory" bash "$BACKUP" "$maint/S1" "$WORK/gateway-signer.toml" "$state" "${CTL[@]}"
+tree_digest() { python3 - "$1" <<'PY'
+import hashlib, os, sys
+h = hashlib.sha256()
+for base, dirs, names in sorted(os.walk(sys.argv[1])):
+    for name in sorted(names):
+        path = os.path.join(base, name)
+        h.update(os.path.relpath(path, sys.argv[1]).encode() + b"\0" + open(path, "rb").read() + b"\0")
+print(h.hexdigest())
+PY
+}
+before=$(tree_digest "$WORK/maintenance")
+expect 0 "a daily positional run prunes inside its own directory" bash "$BACKUP" "$daily" "$WORK/gateway.toml" "$state"
+[[ $(ls -d "$daily"/gateway-* | wc -l | tr -d ' ') -eq 7 ]] || fail "daily directory did not keep exactly seven snapshots"
+[[ "$(tree_digest "$WORK/maintenance")" == "$before" ]] || fail "daily pruning touched the maintenance checkpoints"
+ok "daily pruning beyond seven leaves S0/S1 paths and bytes unchanged"
+pre_restart() { # pre_restart <S0 snapshot> <S1 snapshot> <observation>: BOTH must be currently eligible right before restart
+  eligible_at "$1" "$3" && eligible_at "$2" "$3"
+}
+S0=$(newest "$maint/S0"); S1=$(newest "$maint/S1")
+observe '"2000-01-01T00:00:00Z"' > "$WORK/control/pre-restart.json"
+expect 0 "both current S0 and S1 pass the pre-restart re-verification" pre_restart "$S0" "$S1" "$WORK/control/pre-restart.json"
+refuse_for "snapshot is not complete" "a missing S0 forbids restart even with a valid S1" pre_restart "$maint/S0/gateway-absent" "$S1" "$WORK/control/pre-restart.json"
+rm -rf "$WORK/s0-corrupt"; cp -R "$S0" "$WORK/s0-corrupt"; printf 'x' >> "$WORK/s0-corrupt/gateway.db"
+refuse_for "hash mismatch" "a corrupt S0 forbids restart even with a valid S1" pre_restart "$WORK/s0-corrupt" "$S1" "$WORK/control/pre-restart.json"
+# A provider refresh between S0 and S1 makes S0 stale while a later S1 stays eligible: restart is still forbidden.
+refreshed=$(now_utc)
+refresh "\"$refreshed\"" > "$WORK/control/refresh-between.json"; chmod 600 "$WORK/control/refresh-between.json"
+expect 0 "a later S1 after a provider refresh" bash "$BACKUP" "$WORK/maintenance/window-2/S1" "$WORK/gateway-signer.toml" "$state" \
+  --subscription-source "$WORK/control/subscription.json" --managed-binding "$WORK/control/binding.json" --refresh-observation "$WORK/control/refresh-between.json"
+observe "\"$refreshed\"" > "$WORK/control/after-refresh.json"
+expect 0 "the later S1 is currently eligible" eligible_at "$(newest "$WORK/maintenance/window-2/S1")" "$WORK/control/after-refresh.json"
+refuse_for "superseded" "a stale S0 forbids restart even with a currently valid S1" pre_restart "$S0" "$(newest "$WORK/maintenance/window-2/S1")" "$WORK/control/after-refresh.json"
+
+# ── #503 N2 (C17): freshness-only default and the subscription-recovery warning mode ──
+expect_rc 0 "freshness only; restore eligibility not assessed" "the no-flag check is explicitly freshness-only" bash "$CHECK" "$WORK/plain"
+expect_rc 3 "WARN: subscription_recovery_unqualified" "fresh positional/plain newest snapshot warns unqualified (exit 3)" bash "$CHECK" --require-subscription-recovery "$WORK/plain"
+expect_rc 3 "WARN: subscription_recovery_unqualified" "a fresh daily directory warns unqualified (exit 3)" bash "$CHECK" --require-subscription-recovery "$daily" 26
+expect_rc 3 "WARN: subscription_recovery_unverified" "a fresh control-bearing newest snapshot warns unverified (exit 3)" bash "$CHECK" --require-subscription-recovery "$WORK/sub"
+rm -rf "$WORK/legacy-daily"; cp -R "$WORK/plain" "$WORK/legacy-daily"; cp -R "$plain" "$WORK/legacy-daily/gateway-29990101T000000Z"
+rm "$WORK/legacy-daily/gateway-29990101T000000Z/SNAPSHOT_MODE"
+expect_rc 3 "WARN: subscription_recovery_unqualified" "an unmarked newest snapshot warns unqualified (exit 3)" bash "$CHECK" --require-subscription-recovery "$WORK/legacy-daily"
+rm -rf "$WORK/stale-daily"; cp -R "$WORK/sub" "$WORK/stale-daily"; printf '2000-01-01T00:00:00Z\n' > "$WORK/stale-daily/last-success"
+expect_rc 1 "STALE" "a stale backup stays exit 1 with the flag" bash "$CHECK" --require-subscription-recovery "$WORK/stale-daily"
+rm -rf "$WORK/failed-daily"; cp -R "$WORK/sub" "$WORK/failed-daily"; cp "$WORK/failed-daily/last-success" "$WORK/failed-daily/last-failure"
+expect_rc 1 "STALE" "a failed latest run stays exit 1 with the flag" bash "$CHECK" --require-subscription-recovery "$WORK/failed-daily"
 
 echo "PASS: $pass checks"

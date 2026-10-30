@@ -46,3 +46,25 @@ operator_enabled = true
 sandbox_runtime_image = "<stock sandbox runtime image>@sha256:<digest>"
 supervisor_image      = "<stock supervisor image>@sha256:<digest>"
 image_pull_policy     = "if_not_present"
+
+# #503 stock-memory signer registration: DORMANT until the signer runbook in docs/openshell-stock.md.
+# Registering it makes the outside signer a hard startup dependency of THIS ENTIRE gateway. At every start and
+# restart the gateway authenticates to every registered service (Describe/negotiation) and refuses to start when one
+# is unavailable or incompatible (expired certificate, wrong CA, rejected JWT), for ALL sandboxes, managed or not.
+# Uncomment it only inside a separately authorized maintenance window: quiesce every owned managed record, take S0,
+# edit, take S1, re-verify BOTH, start the signer first and only then this gateway. Requirements:
+#   - grpc_endpoint: one DNS name:port resolvable and reachable from BOTH this gateway container and the host-network
+#     supervisors, served over HTTPS + HTTP/2 with that exact DNS SAN (no loopback or container-only alias);
+#   - audience: exactly the outside managed-authority.json GatewayAudience, case included; never rely on the stock
+#     default urn:openshell:extension:middleware:stock-memory;
+#   - tls_ca_cert_path: the CA of the signer's server certificate, a regular file under STATE_DIR (here the default
+#     /var/lib/openshell); gateway backups refuse a registration whose CA is missing, empty, linked or outside it;
+#   - allow_insecure_transport stays false. The signer's private key stays in outside custody, never under STATE_DIR.
+# [[openshell.supervisor.middleware]]
+# name                     = "stock-memory"
+# grpc_endpoint            = "https://identity.example.test:5443"
+# audience                 = "<gateway-audience>"
+# tls_ca_cert_path         = "/var/lib/openshell/tls/stock-identity-ca.pem"
+# max_payload_bytes        = 262144
+# timeout                  = "2s"
+# allow_insecure_transport = false

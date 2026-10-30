@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/* \
 
 # Managed stock OpenShell (#492): this image understands managed bindings (rollout guard input).
 LABEL org.phleet.managed-stock-runtime=1
+# #502: this image understands managed subscription bindings (persisted workspaces, retirement, four-key preflight).
+LABEL org.phleet.managed-stock-subscription=1
 # Opt-in exact stock CLI. Both build args or neither: the binary must match the SHA-256 and report
 # the pinned version. Without them no CLI is installed and managed apply reports stock_cli_missing.
 ARG OPENSHELL_CLI_URL=

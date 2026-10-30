@@ -309,7 +309,7 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
         Assert.Contains("managed_runtime_unavailable", await revoke.Content.ReadAsStringAsync());
         var preflight = await Client.GetAsync("/api/managed-runtime/rollback-preflight");
         Assert.Equal(System.Net.HttpStatusCode.OK, preflight.StatusCode);
-        Assert.Equal("{\"desiredOpenShell\":1,\"appliedOpenShell\":0,\"unresolvedBindings\":0}", await preflight.Content.ReadAsStringAsync());
+        Assert.Equal("{\"desiredOpenShell\":1,\"appliedOpenShell\":0,\"unresolvedBindings\":0,\"subscriptionBindings\":0}", await preflight.Content.ReadAsStringAsync());
     }
 
     [Fact]

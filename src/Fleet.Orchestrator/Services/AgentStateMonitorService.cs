@@ -60,6 +60,16 @@ public sealed class AgentStateMonitorService : BackgroundService
                     { _logger.LogWarning("Managed container refresh for {Agent} failed ({Type})", agent.AgentName, ex.GetType().Name); }
                 }
 
+            // #502: on this same 10-second pass, applied and pending subscription bindings past their outside expiry get
+            // the bounded revoke-and-stop. Already held (needs_attention) or revoked records are skipped, never retried.
+            if (_managed is { Enabled: true })
+                foreach (var agent in _registry.GetAll().Where(a => a.RuntimeKind == "openshell" || a.AppliedRuntimeKind == "openshell").ToList())
+                {
+                    try { await _managed.CheckSubscriptionExpiryAsync(agent.AgentName, stoppingToken); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    { _logger.LogWarning("Managed subscription expiry check for {Agent} failed ({Type})", agent.AgentName, ex.GetType().Name); }
+                }
+
             // Refresh container start times periodically
             if (DateTimeOffset.UtcNow - _lastContainerRefresh >= ContainerRefreshInterval)
             {

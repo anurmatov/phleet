@@ -288,7 +288,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
         var json = JsonSerializer.Serialize(await Runtime().RollbackPreflightAsync(default));
 
-        Assert.Equal("{\"desiredOpenShell\":1,\"appliedOpenShell\":0,\"unresolvedBindings\":1}", json);
+        Assert.Equal("{\"desiredOpenShell\":1,\"appliedOpenShell\":0,\"unresolvedBindings\":1,\"subscriptionBindings\":0}", json);
     }
 
     // ── broker provisioner ─────────────────────────────────────────────────

@@ -191,7 +191,35 @@ public sealed record ManagedBinding(string SandboxName, string SandboxId, Guid E
 
     /// <summary>Last observed Docker identities of the workload and native supervisor (#492 §7/§11); absent in older records.</summary>
     public ManagedContainers? Containers { get; init; }
+
+    /// <summary>
+    /// #502: the named stock workspace every resource call for this sandbox carries (<c>--workspace</c>). Null for
+    /// API-key and older bindings, whose calls keep the existing ambient scope.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? SandboxWorkspace { get; init; }
+
+    /// <summary>#502: the outside subscription identity, captured before any effect; null for API-key bindings.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ManagedSubscription? Subscription { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsSubscription => AuthMode == StockSubscriptionBinding.Mode;
 }
+
+/// <summary>
+/// #502 persisted subscription identity: provider workspace/UUID, selected account, local owner generation, source digest
+/// and expiry. Cleanup uses these and the binding's sandbox workspace, never the current outside file or CLI default.
+/// </summary>
+public sealed record ManagedSubscription(string ProviderWorkspace, string ProviderId, string AccountId, Guid OwnerGeneration,
+    string SourceSha256, DateTimeOffset ExpiresAt);
+
+/// <summary>
+/// #502 inert custody reference to an atomically retired subscription binding archived under
+/// <c>managed/&lt;agent&gt;/retired/&lt;epoch&gt;.json</c>. Never a dispatch, attach or start input.
+/// </summary>
+public sealed record RetiredSubscription(Guid Epoch, string SandboxWorkspace, string SandboxId, string ProviderWorkspace,
+    string ProviderId, Guid OwnerGeneration, string ArchivePath, string ArchiveSha256, DateTimeOffset RetiredAt);
 
 /// <summary>
 /// Docker container IDs of a binding's workload and native supervisor plus their observed status:
@@ -233,7 +261,13 @@ public sealed record ManagedRecord
     /// They stay tracked for custody, with their sandbox UUIDs; nothing deletes their sandboxes.
     /// </summary>
     public IReadOnlyList<ManagedBinding> Superseded { get; init; } = [];
+    /// <summary>#502: archive references of atomically retired subscription bindings (inert history, never rehydrated).</summary>
+    public IReadOnlyList<RetiredSubscription> RetiredSubscriptions { get; init; } = [];
     public IReadOnlyList<string> Errors { get; init; } = [];
+
+    /// <summary>#502: every nonretired subscription tuple still in this record (applied, candidate or superseded).</summary>
+    public IEnumerable<ManagedBinding> SubscriptionTuples() =>
+        new[] { Applied, Candidate }.OfType<ManagedBinding>().Concat(Superseded).Where(b => b.IsSubscription);
     public DateTimeOffset UpdatedAt { get; init; }
 
     public static ManagedRecord Parse(string? json) =>
@@ -342,6 +376,10 @@ public sealed class StockOpenShellRuntime(
     internal Func<string, Task<bool>>? DockerStop { get; init; }
     internal Func<string, CancellationToken, Task<(bool Ok, string Message)>>? ProvisionDocker { get; init; }
     internal Func<Agent, string>? DockerWorkspace { get; init; }
+    /// <summary>#502 seams: the effective uid the outside binding owner must equal, and the UTC clock for expiry/refresh windows.</summary>
+    internal Func<uint>? EffectiveUid { get; init; }
+    internal TimeProvider Clock { get; init; } = TimeProvider.System;
+    private DateTimeOffset Now => Clock.GetUtcNow();
 
     public sealed record Result(bool Ok, int Status, string Code, IReadOnlyList<string> Errors)
     {
@@ -351,6 +389,28 @@ public sealed class StockOpenShellRuntime(
     }
 
     public bool Enabled => config.GetValue<bool>("StockOpenShell:ManagedEnabled");
+
+    /// <summary>
+    /// #502: a subscription binding must carry valid persisted sandbox and provider scopes; without them no resource command
+    /// may run at all (never the ambient workspace). Null for API-key/legacy bindings and valid subscription bindings.
+    /// </summary>
+    internal static string? ScopeFault(ManagedBinding binding) =>
+        !binding.IsSubscription ? null
+        : StockSubscriptionBinding.ValidWorkspace(binding.SandboxWorkspace) && binding.Subscription is { } s
+            && StockSubscriptionBinding.ValidWorkspace(s.ProviderWorkspace) ? null : StockSubscriptionBinding.Unrecoverable;
+
+    /// <summary>
+    /// #502: every resource call for a subscription binding is prefixed with its persisted <c>--workspace</c>; API-key and
+    /// older bindings keep their existing ambient arguments unchanged.
+    /// </summary>
+    internal static IReadOnlyList<string> Scoped(ManagedBinding binding, IReadOnlyList<string> args)
+    {
+        if (!binding.IsSubscription) return args;
+        if (ScopeFault(binding) is not null) throw new InvalidOperationException(StockSubscriptionBinding.Unrecoverable);
+        return ["--workspace", binding.SandboxWorkspace!, .. args];
+    }
+
+    private static IReadOnlyList<string> InWorkspace(string workspace, IReadOnlyList<string> args) => ["--workspace", workspace, .. args];
 
     /// <summary>True when apply/lifecycle for this agent belongs to the managed adapter rather than Docker.</summary>
     public static bool Owns(Agent agent) => agent.RuntimeKind == "openshell" || agent.AppliedRuntimeKind == "openshell";
@@ -442,7 +502,7 @@ public sealed class StockOpenShellRuntime(
         const string script = "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 2; "
             + "printf 'POST %s HTTP/1.0\\r\\nContent-Length: 0\\r\\n\\r\\n' \"$1\" >&3; "
             + "IFS= read -r status <&3; case \"$status\" in *' 200 '*) exit 0;; *' 404 '*) exit 4;; esac; exit 1";
-        var run = await cli.RunAsync(["sandbox", "exec", "-n", binding.SandboxName, "--", "bash", "-c", script, "cancel", path], null, LegTimeout, ct);
+        var run = await cli.RunAsync(Scoped(binding, ["sandbox", "exec", "-n", binding.SandboxName, "--", "bash", "-c", script, "cancel", path]), null, LegTimeout, ct);
         if (await GuardAsync(agent, binding, ct) is { } after) return after;
         return run switch
         {
@@ -461,7 +521,7 @@ public sealed class StockOpenShellRuntime(
         if (fault is not null) return (fault, null);
         if (agent!.AppliedRuntimeKind != "openshell" || record!.Applied is not { } binding) return (Result.Refused(409, "managed_binding_missing"), null);
         if (await GuardAsync(agent, binding, ct) is { } before) return (before, null);
-        var run = await cli.RunAsync(["logs", binding.SandboxName, "-n", Math.Clamp(lines, 1, 1000).ToString()], null, LegTimeout, ct);
+        var run = await cli.RunAsync(Scoped(binding, ["logs", binding.SandboxName, "-n", Math.Clamp(lines, 1, 1000).ToString()]), null, LegTimeout, ct);
         // Output read across a UUID swap belongs to another sandbox: discard it and hold.
         if (await GuardAsync(agent, binding, ct) is { } after) return (after, null);
         return run.ExitCode == 0 && !run.TimedOut ? (Result.Done("logs"), run.Stdout) : (Result.Refused(502, "stock_logs_unavailable"), null);
@@ -546,16 +606,25 @@ public sealed class StockOpenShellRuntime(
     {
         var agents = await store.ListAsync(ct);
         var unresolved = 0;
+        var subscription = 0;
         foreach (var agent in agents)
         {
-            try { if (ManagedRecord.Parse(agent.AppliedRuntimeBinding).Unresolved) unresolved++; }
-            catch (JsonException) { unresolved++; }
+            // #502: desired subscription or ANY nonretired applied/candidate/superseded subscription tuple counts; only
+            // atomically retired references are inert. An unreadable record counts everywhere (never read as none).
+            try
+            {
+                var record = ManagedRecord.Parse(agent.AppliedRuntimeBinding);
+                if (record.Unresolved) unresolved++;
+                if (agent.NativeAuthMode == StockSubscriptionBinding.Mode || record.SubscriptionTuples().Any()) subscription++;
+            }
+            catch (JsonException) { unresolved++; subscription++; }
         }
         return new
         {
             desiredOpenShell = agents.Count(a => a.RuntimeKind == "openshell"),
             appliedOpenShell = agents.Count(a => a.AppliedRuntimeKind == "openshell"),
             unresolvedBindings = unresolved,
+            subscriptionBindings = subscription,
         };
     }
 
@@ -564,18 +633,26 @@ public sealed class StockOpenShellRuntime(
     /// proceed: identity/auth selection, routes, trust/config, broker HTTPS auth, pinned provider
     /// profile hashes, CLI version and gateway observation.
     /// </summary>
-    public async Task<string?> DescribePreflightFaultAsync(Agent agent, CancellationToken ct)
+    public async Task<string?> DescribePreflightFaultAsync(Agent agent, CancellationToken ct) => (await PreflightAsync(agent, ct)).Fault;
+
+    private async Task<(string? Fault, StockSubscriptionSource? Source)> PreflightAsync(Agent agent, CancellationToken ct)
     {
-        if (!Enabled) return "managed_runtime_disabled";
-        if (agent.RuntimeKind != "openshell") return null; // OpenShell→Docker needs no managed prerequisites beyond stop.
-        if (agent.Provider != "codex" || agent.NativeAuthMode != "api_key" || string.IsNullOrEmpty(agent.ProviderApiKeyEnvRef)
-            || agent.MountDockerSock || agent.LocalBaseUrl is not null)
-            return "openshell_requires_codex_api_key_policy_and_no_socket";
+        if (!Enabled) return ("managed_runtime_disabled", null);
+        if (agent.RuntimeKind != "openshell") return (null, null); // OpenShell→Docker needs no managed prerequisites beyond stop.
+        var subscription = agent.NativeAuthMode == StockSubscriptionBinding.Mode;
+        if (agent.Provider != "codex" || agent.MountDockerSock || agent.LocalBaseUrl is not null
+            || (subscription ? agent.ProviderApiKeyEnvRef is not null : agent.NativeAuthMode != "api_key" || string.IsNullOrEmpty(agent.ProviderApiKeyEnvRef)))
+            return ("openshell_requires_codex_api_key_policy_and_no_socket", null);
         if (agent.Name != agent.ShortName || agent.Name != agent.Name.ToLowerInvariant() || !Regex.IsMatch(agent.Name, @"\A[a-z0-9][a-z0-9-]{0,40}\z"))
-            return "managed_agent_name_unsupported";
+            return ("managed_agent_name_unsupported", null);
         var policy = agent.SandboxPolicyVersionId is { } id ? await store.LoadPolicyAsync(id, ct) : null;
-        if (policy is null) return "sandbox_policy_version_not_found";
-        if (string.IsNullOrEmpty(credentials.Get(agent.ProviderApiKeyEnvRef))) return "provider_key_reference_unresolved";
+        if (policy is null) return ("sandbox_policy_version_not_found", null);
+        return subscription ? await SubscriptionPreflightAsync(agent, policy, ct) : (await ApiPreflightAsync(agent, policy, ct), null);
+    }
+
+    private async Task<string?> ApiPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(credentials.Get(agent.ProviderApiKeyEnvRef!))) return "provider_key_reference_unresolved";
         // The agent's own bot token and derived journal ingest token stay outside in stock providers; the
         // workload gets only the public bot id and stock placeholders. Missing values refuse here.
         if (ContainerProvisioningService.HasTelegramBot(agent) && TelegramCredential(agent).Fault is { } telegramFault) return telegramFault;
@@ -614,9 +691,136 @@ public sealed class StockOpenShellRuntime(
         return await host.GatewayGenerationAsync(ct) is null ? "gateway_unavailable" : null;
     }
 
+    /// <summary>
+    /// #502 compatibility-only subscription admission, before any mutation or old-runtime Stop: exactly the native memory
+    /// endpoint with its existing <c>memory_get</c> grant and no other route (extra selections refuse, never dropped), the
+    /// outside binding file, the pinned CLI and gateway client trust in the persisted scope, the restricted profile hash,
+    /// gateway generation, sole ownership, the existing provider (no create/update/import) and its refresh window.
+    /// </summary>
+    private async Task<(string? Fault, StockSubscriptionSource? Source)> SubscriptionPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct)
+    {
+        if (ContainerProvisioningService.HasTelegramBot(agent)) return ("managed_route_unsupported:telegram", null);
+        if (agent.JournalEnabled) return ("managed_route_unsupported:journal", null);
+        if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory") is { } extra) return ("managed_route_unsupported:mcp:" + extra.McpName, null);
+        if (agent.McpEndpoints.Count(e => e.McpName == "memory") != 1) return ("managed_memory_route_missing", null);
+        if (!agent.Tools.Any(t => t.IsEnabled && t.ToolName == "mcp__memory__memory_get")) return ("managed_memory_grant_missing", null);
+        if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return ("managed_agent_image_missing", null);
+        if (DescribeConfigDirFault() is { } dirFault) return (dirFault, null);
+        if (LoadTemplate() is null) return ("managed_authority_template_invalid", null);
+        var (source, sourceFault) = ReadSource(agent.Name);
+        if (sourceFault is not null) return (sourceFault, null);
+        if (broker.DescribePreflightFault() is { } brokerFault) return (brokerFault, null);
+        if (await broker.VerifyAccessAsync(ct) is { } accessFault) return (accessFault, null);
+        var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
+        if (version.Missing) return ("stock_cli_missing", null);
+        var tokens = version.Stdout.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (version.ExitCode != 0 || tokens.Length < 2 || tokens[0] != "openshell"
+            || !(tokens[1] == PinnedCliVersion || tokens[1].StartsWith(PinnedCliVersion + "+", StringComparison.Ordinal)))
+            return ("stock_cli_version_mismatch", null);
+        var probe = await cli.RunAsync(InWorkspace(source!.SandboxWorkspace, ["sandbox", "list", "-o", "json", "--page-size", "1"]), null, LegTimeout, ct);
+        if (probe.Missing || probe.TimedOut || probe.ExitCode != 0 || !IsJson(probe.Stdout)) return ("gateway_client_unverified", null);
+        if (await ProfileHashFaultAsync(policy, agent, ct, source) is { } profileFault) return (profileFault, null);
+        var generation = await host.GatewayGenerationAsync(ct);
+        if (generation is null) return ("gateway_unavailable", null);
+        if (generation != source.GatewayGeneration) return (StockSubscriptionBinding.ProviderUnverified, null);
+        if (await OwnershipFaultAsync(agent, source, ct) is { } ownerFault) return (ownerFault, null);
+        if (await ProviderFaultAsync(source.ProviderWorkspace, source.ProviderName, source.ProviderId, ct) is { } providerFault) return (providerFault, null);
+        return (null, source);
+    }
+
+    private (StockSubscriptionSource? Source, string? Fault) ReadSource(string agentName) =>
+        StockSubscriptionBinding.Read(ConfigDir, agentName, Now, EffectiveUid?.Invoke() ?? CurrentEffectiveUid(), OwnerUid);
+
+    private static uint CurrentEffectiveUid() => OperatingSystem.IsWindows() ? uint.MaxValue : GetEffectiveUid();
+
+    /// <summary>The persisted subscription identity a source maps to (captured before any effect).</summary>
+    private static ManagedSubscription Tuple(StockSubscriptionSource source) =>
+        new(source.ProviderWorkspace, source.ProviderId, source.AccountId, source.OwnerGeneration, source.SourceSha256, source.ExpiresAt);
+
+    /// <summary>
+    /// Sole owner: no other agent's nonretired subscription tuple may name the same provider UUID or the same
+    /// workspace/name, and this agent's own live (not revoked) tuple may not be rebound to a different identity.
+    /// </summary>
+    private async Task<string?> OwnershipFaultAsync(Agent agent, StockSubscriptionSource source, CancellationToken ct)
+    {
+        IReadOnlyList<Agent> agents;
+        try { agents = await store.ListAsync(ct); }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return "runtime_state_unavailable"; }
+        foreach (var other in agents)
+        {
+            ManagedRecord owned;
+            try { owned = ManagedRecord.Parse(other.AppliedRuntimeBinding); }
+            catch (JsonException) { if (other.Name != agent.Name) return StockSubscriptionBinding.OwnerConflict; continue; }
+            foreach (var tuple in owned.SubscriptionTuples())
+            {
+                var same = tuple.Subscription?.ProviderId == source.ProviderId
+                    || tuple.Subscription?.ProviderWorkspace == source.ProviderWorkspace && tuple.Provider == source.ProviderName;
+                if (other.Name != agent.Name) { if (same) return StockSubscriptionBinding.OwnerConflict; continue; }
+                if (owned.State != "revoked" && (owned.Applied == tuple || owned.Candidate == tuple) && !SameIdentity(tuple, source))
+                    return StockSubscriptionBinding.Changed;
+            }
+        }
+        return null;
+    }
+
+    private static bool SameIdentity(ManagedBinding binding, StockSubscriptionSource source) =>
+        binding.SandboxWorkspace == source.SandboxWorkspace && binding.Provider == source.ProviderName && binding.Subscription is { } s
+        && s.ProviderWorkspace == source.ProviderWorkspace && s.ProviderId == source.ProviderId && s.AccountId == source.AccountId
+        && s.OwnerGeneration == source.OwnerGeneration;
+
+    /// <summary>
+    /// The existing provider, observed only inside its persisted workspace: exactly one entry of that name across every
+    /// paginated page, with the exact UUID, the restricted profile type and only the subscription credential key; then
+    /// its refresh status and window. Never create/update/import/rotate/delete.
+    /// </summary>
+    private async Task<string?> ProviderFaultAsync(string workspace, string name, string providerId, CancellationToken ct)
+    {
+        var token = "";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var matches = new List<StockProviderEntry>();
+        for (var page = 0; ; page++)
+        {
+            if (page >= MaxListPages) return StockSubscriptionBinding.ProviderUnverified;
+            var list = await cli.RunAsync(InWorkspace(workspace, token.Length == 0 ? ["provider", "list", "-o", "json"]
+                : ["provider", "list", "-o", "json", "--page-token", token]), null, LegTimeout, ct);
+            if (list.Missing || list.TimedOut || list.ExitCode != 0
+                || StockSubscriptionBinding.ParseProviderPage(list.Stdout) is not { } parsed) return StockSubscriptionBinding.ProviderUnverified;
+            if (parsed.Entries.Any(e => e.Workspace != workspace)) return StockSubscriptionBinding.ProviderUnverified;
+            matches.AddRange(parsed.Entries.Where(e => e.Name == name));
+            token = parsed.NextToken;
+            if (token.Length == 0) break;
+            if (!seen.Add(token)) return StockSubscriptionBinding.ProviderUnverified;
+        }
+        if (matches is not [{ } provider] || provider.Id != providerId || provider.Type != StockSubscriptionBinding.ProfileId
+            || !provider.CredentialKeys.SequenceEqual([StockSubscriptionBinding.CredentialKey]))
+            return StockSubscriptionBinding.ProviderUnverified;
+        var status = await cli.RunAsync(InWorkspace(workspace, ["--color", "never", "provider", "refresh", "status", name,
+            "--credential-key", StockSubscriptionBinding.CredentialKey]), null, LegTimeout, ct);
+        if (status.Missing || status.TimedOut || status.ExitCode != 0) return StockSubscriptionBinding.ProviderUnverified;
+        return StockSubscriptionBinding.RefreshFault(StockSubscriptionBinding.ParseRefreshStatus(status.Stdout, name), Now);
+    }
+
+    /// <summary>
+    /// #502: the outside source and existing provider revalidated against a persisted tuple immediately before attachment
+    /// or activation. Missing/changed source, expiry or provider drift is a named fault; nothing is re-imported.
+    /// </summary>
+    private async Task<string?> RevalidateAsync(string agentName, ManagedBinding binding, CancellationToken ct)
+    {
+        if (ScopeFault(binding) is { } scope) return scope;
+        if (binding.Subscription!.ExpiresAt <= Now) return StockSubscriptionBinding.Expired;
+        var (source, fault) = ReadSource(agentName);
+        if (fault is not null) return fault;
+        if (source!.SourceSha256 != binding.Subscription.SourceSha256 || !SameIdentity(binding, source)) return StockSubscriptionBinding.Changed;
+        if (await host.GatewayGenerationAsync(ct) is not { } generation || generation != source.GatewayGeneration)
+            return StockSubscriptionBinding.ProviderUnverified;
+        return await ProviderFaultAsync(binding.Subscription.ProviderWorkspace, binding.Provider, binding.Subscription.ProviderId, ct);
+    }
+
     /// <summary>The stock provider profiles this agent's apply attaches: the native key, then each outside service.</summary>
     internal static IEnumerable<string> SelectedProfiles(Agent agent)
     {
+        // #502: a subscription agent selects only the restricted subscription profile (no service routes).
+        if (agent.NativeAuthMode == StockSubscriptionBinding.Mode) { yield return StockSubscriptionBinding.ProfileId; yield break; }
         yield return "openai";
         if (ContainerProvisioningService.HasTelegramBot(agent)) yield return TelegramProfile;
         if (JournalCapture(agent)) yield return JournalProfile;
@@ -634,15 +838,24 @@ public sealed class StockOpenShellRuntime(
     /// Every provider profile the agent selects must be pinned, and each pinned profile's exported YAML
     /// must hash to the version's saved value, before any old-runtime Stop.
     /// </summary>
-    private async Task<string?> ProfileHashFaultAsync(SandboxPolicyVersion policy, Agent agent, CancellationToken ct)
+    private async Task<string?> ProfileHashFaultAsync(SandboxPolicyVersion policy, Agent agent, CancellationToken ct, StockSubscriptionSource? source = null)
     {
         Dictionary<string, string>? pinned;
         try { pinned = JsonSerializer.Deserialize<Dictionary<string, string>>(string.IsNullOrWhiteSpace(policy.ProviderProfileHashes) ? "{}" : policy.ProviderProfileHashes); }
         catch (JsonException) { return "provider_profile_hashes_invalid"; }
         if (SelectedProfiles(agent).FirstOrDefault(p => pinned?.ContainsKey(p) != true) is { } unpinned) return "provider_profile_unpinned:" + unpinned;
+        // #502: the subscription profile is exported only in the persisted provider workspace, and the outside binding
+        // must name that same pinned hash; other pinned profiles are not selected by a subscription agent.
+        if (source is not null)
+        {
+            var subscriptionHash = pinned![StockSubscriptionBinding.ProfileId];
+            if (subscriptionHash != source.ProfileSha256) return StockSubscriptionBinding.ProviderUnverified;
+            pinned = new() { [StockSubscriptionBinding.ProfileId] = subscriptionHash };
+        }
         foreach (var (profile, hash) in pinned ?? [])
         {
-            var export = await cli.RunAsync(["profile", "export", profile, "-o", "yaml"], null, LegTimeout, ct);
+            var export = await cli.RunAsync(source is null ? ["profile", "export", profile, "-o", "yaml"]
+                : InWorkspace(source.ProviderWorkspace, ["profile", "export", profile, "-o", "yaml"]), null, LegTimeout, ct);
             if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
             var actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(export.Stdout)));
             if (!string.Equals(actual, hash, StringComparison.Ordinal)) return "provider_profile_hash_mismatch:" + profile;
@@ -888,17 +1101,31 @@ public sealed class StockOpenShellRuntime(
             record = record with { State = "revoked" };
             await checkpoint(record);
         }
+        // #502: every old subscription tuple must be verified cut, detached and quiescent BEFORE the Docker handoff;
+        // otherwise it stays live/countable and nothing is handed off.
+        var retiring = RetirementTuples(agent, record);
+        if (retiring.Count > 0 && await RetirementFaultAsync(agent.Name, retiring, ct) is { } unverified)
+            return Hold(record, 502, "subscription_retirement_unverified", unverified);
         var provisioned = ProvisionDocker is { } provision ? await provision(agent.Name, ct)
             : await services.GetRequiredService<ContainerProvisioningService>().ProvisionDockerTransitionAsync(agent.Name, ct);
         if (!provisioned.Ok) return Hold(record, 502, "docker_transition_failed", provisioned.Message);
-        return (record with { State = "revoked", Candidate = null, Errors = [] }, "docker", null, Result.Done("applied_docker"));
+        var handedOff = record with { State = "revoked", Candidate = null, Errors = [] };
+        if (retiring.Count == 0) return (handedOff, "docker", null, Result.Done("applied_docker"));
+        // Archive before commit; the final CAS then publishes Docker and the retirement together (Applied=null).
+        var (retired, archiveFault) = ArchiveRetirements(agent.Name, retiring, "docker");
+        if (archiveFault is not null)
+            return (handedOff with { State = "needs_attention", Errors = ["subscription_archive_failed", archiveFault] }, "docker", null,
+                Result.Refused(502, "subscription_archive_failed", [archiveFault]));
+        return (Retire(handedOff, retiring, retired!), "docker", null, Result.Done("applied_docker"));
     }
 
     private async Task<(ManagedRecord, string?, int?, Result)> ApplyOpenShellAsync(Agent agent, ManagedRecord record,
         Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
         // Every prerequisite, including gateway client trust and generated inputs, precedes any old-runtime action.
-        if (await DescribePreflightFaultAsync(agent, ct) is { } preflight) return (record, null, null, Result.Refused(409, preflight));
+        var (preflight, source) = await PreflightAsync(agent, ct);
+        if (preflight is not null) return (record, null, null, Result.Refused(409, preflight));
+        var subscription = source is not null;
         string generated;
         try { generated = await GeneratedInputsAsync(agent, ct); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
@@ -910,13 +1137,17 @@ public sealed class StockOpenShellRuntime(
         var generation = await host.GatewayGenerationAsync(ct);
         if (generation is null) return (record, null, null, Result.Refused(503, "gateway_unavailable"));
         var image = config["StockOpenShell:AgentImage"]!;
+        var mode = subscription ? StockSubscriptionBinding.Mode : "api_key";
 
         // Reprovision and stopped/revoked rollback keep the verified sandbox and its persistent workspace.
         var reuse = agent.AppliedRuntimeKind == "openshell" && record.Applied is not null;
         // Review A7: the recovery path for managed_image_change_requires_revoke. After a clean revoke the old sandbox
         // is cut and stopped; a changed image then gets a fresh sandbox from the pinned new image, carrying the old
-        // sandbox's workspace (the old sandbox itself stays stopped and revoked).
-        var retired = reuse && record.State == "revoked" && record.Applied!.Image != image ? record.Applied : null;
+        // sandbox's workspace (the old sandbox itself stays stopped and revoked). #502: a changed auth mode or
+        // sandbox workspace takes the same path (a subscription sandbox lives only in its persisted workspace).
+        var replaced = reuse && (record.Applied!.Image != image || record.Applied.AuthMode != mode
+            || subscription && record.Applied.SandboxWorkspace != source!.SandboxWorkspace);
+        var retired = replaced && record.State == "revoked" ? record.Applied : null;
         if (retired is not null)
         {
             if (record.Applied!.GatewayGeneration != generation && !await PlannedRestartAsync(agent.Name, record, record.Applied, ct))
@@ -931,15 +1162,37 @@ public sealed class StockOpenShellRuntime(
             if (old.GatewayGeneration != generation && !await PlannedRestartAsync(agent.Name, record, old, ct))
                 return (record, null, null, Result.Refused(409, "gateway_generation_changed"));
             if (old.Image != image) return (record, null, null, Result.Refused(409, "managed_image_change_requires_revoke"));
+            if (replaced) return (record, null, null, Result.Refused(409, "managed_auth_change_requires_revoke"));
             if (await VerifyIdentityAsync(old, ct) is { } identity) return (record, null, null, identity);
         }
         var epoch = Guid.NewGuid();
+        // #502: the subscription identity and both workspaces are captured in the candidate BEFORE any effect.
+        var tuple = subscription ? Tuple(source!) : null;
         var candidate = reuse
-            ? record.Applied! with { Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef!, GatewayGeneration = generation, ServiceProviders = serviceProviders }
-            : new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch, image,
-                policy.Id, policy.Sha256, "api_key", agent.ProviderApiKeyEnvRef!, $"fleet-{agent.Name}-openai", generation) { ServiceProviders = serviceProviders };
-        var applying = record with { State = "applying", Candidate = candidate, Errors = [] };
+            ? record.Applied! with
+            {
+                Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef ?? "",
+                GatewayGeneration = generation, ServiceProviders = serviceProviders, Subscription = tuple,
+                Provider = subscription ? source!.ProviderName : record.Applied!.Provider,
+            }
+            : new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch, image, policy.Id, policy.Sha256, mode,
+                agent.ProviderApiKeyEnvRef ?? "", subscription ? source!.ProviderName : $"fleet-{agent.Name}-openai", generation)
+            {
+                ServiceProviders = serviceProviders, SandboxWorkspace = source?.SandboxWorkspace, Subscription = tuple,
+            };
+        // #502: a reused sandbox rebound to a new outside identity keeps the old tuple as custody history.
+        var history = reuse && record.Applied!.IsSubscription && subscription && !SameIdentity(record.Applied, source!)
+            ? [.. record.Superseded, record.Applied] : record.Superseded;
+        var applying = record with { State = "applying", Candidate = candidate, Errors = [], Superseded = history };
         await checkpoint(applying);
+
+        // #502: a pending subscription apply runs against its expiry-linked deadline; after expiry no further positive
+        // step runs and the candidate is revoked and stopped instead.
+        using var expiry = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (subscription) expiry.CancelAfter(Remaining(tuple!.ExpiresAt));
+        ct = expiry.Token;
+        bool Expired() => subscription && Now >= tuple!.ExpiresAt;
+        Task<(ManagedRecord, string?, int?, Result)> CutAsync(ManagedRecord at) => ExpireAsync(agent.Name, at);
 
         var template = LoadTemplate()!;
         var epochDir = Path.Combine(ConfigDir, "managed", agent.Name, epoch.ToString("N"));
@@ -951,21 +1204,28 @@ public sealed class StockOpenShellRuntime(
             if (!reuse)
             {
                 WriteBrokerPasswords(agent.Name, passwords);
-                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, "pending", epoch, policy.Sha256, "revoked"));
+                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, "pending", epoch, policy.Sha256, "revoked", tuple?.ExpiresAt));
             }
             bundle = await BuildBundleAsync(agent, template, generated, epochDir, passwords["workload"], epoch, policy,
-                reuse ? candidate.SandboxId : "pending", botId, serviceSecrets.Select(s => s.Value));
+                reuse ? candidate.SandboxId : "pending", botId, serviceSecrets.Select(s => s.Value), candidate);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
         { return Hold(applying, 500, "managed_files_failed"); }
-        var key = credentials.Get(agent.ProviderApiKeyEnvRef!);
-        if (string.IsNullOrEmpty(key)) return Hold(applying, 409, "provider_key_reference_unresolved");
-        var secret = new Dictionary<string, string> { ["OPENAI_API_KEY"] = key };
+        Dictionary<string, string>? secret = null;
+        if (!subscription)
+        {
+            var key = credentials.Get(agent.ProviderApiKeyEnvRef!);
+            if (string.IsNullOrEmpty(key)) return Hold(applying, 409, "provider_key_reference_unresolved");
+            secret = new Dictionary<string, string> { ["OPENAI_API_KEY"] = key };
+        }
 
         // Every outside provider exists with its current value before create/attach; values only in the CLI env.
+        // #502: a subscription provider is never created, updated, imported or rotated here: the existing one is only
+        // verified in its persisted workspace, immediately before attachment.
         async Task<string?> EnsureProvidersAsync()
         {
-            if (await EnsureProviderAsync(candidate.Provider, "openai", secret, ct) is { } fault) return fault;
+            if (subscription) return await RevalidateAsync(agent.Name, candidate, ct);
+            if (await EnsureProviderAsync(candidate.Provider, "openai", secret!, ct) is { } fault) return fault;
             foreach (var service in serviceSecrets)
                 if (await EnsureProviderAsync(service.Provider, service.Profile, new Dictionary<string, string> { [service.Key] = service.Value }, ct) is { } serviceFault)
                     return serviceFault;
@@ -981,9 +1241,12 @@ public sealed class StockOpenShellRuntime(
             try
             {
                 WriteBrokerPasswords(agent.Name, passwords);
-                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "revoked"));
+                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "revoked", tuple?.ExpiresAt));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return await HoldStoppedAsync(applying, candidate, "managed_files_failed", [], ct); }
+            // #502: retained subscription history of an API reuse is verified before it can be retired at commit.
+            if (RetirementTuples(agent, record) is { Count: > 0 } held && await RetirementFaultAsync(agent.Name, held, ct) is { } unverifiedHistory)
+                return await HoldStoppedAsync(applying, candidate, "subscription_retirement_unverified", [unverifiedHistory], ct);
         }
         else
         {
@@ -1002,65 +1265,96 @@ public sealed class StockOpenShellRuntime(
                 // Nothing new exists yet: hold the revoked record itself (no UUID-less candidate), so revoke clears it.
                 if (carried is not null) return Hold(record, 502, "image_change_workspace_unresolved", carried);
             }
-            if (await EnsureProvidersAsync() is { } providerFault) return Hold(applying, 502, providerFault);
+            // #502: a mode change away from subscription first verifies every old tuple cut, detached and quiescent.
+            if (RetirementTuples(agent, record) is { Count: > 0 } old && await RetirementFaultAsync(agent.Name, old, ct) is { } unverified)
+                return Hold(record, 502, "subscription_retirement_unverified", unverified);
+            if (Expired()) return await CutAsync(applying);
+            if (await EnsureProvidersAsync() is { } providerFault)
+                return providerFault == StockSubscriptionBinding.Expired ? await CutAsync(applying) : Hold(applying, 502, providerFault);
             // Pinned contract: an explicit canonical launcher, staged; no --upload with a trailing command.
-            var create = await cli.RunAsync([
+            var create = await cli.RunAsync(Scoped(candidate, [
                 "sandbox", "create", "--name", candidate.SandboxName, "--from", candidate.Image,
                 "--policy", Path.Combine(epochDir, "policy.yaml"), .. candidate.AllProviders().SelectMany(p => new[] { "--provider", p }),
                 "--no-auto-providers",
                 "--restart-policy", "never", "--label", "fleet.agent=" + agent.Name, "--label", "fleet.epoch=" + epoch.ToString("N"),
-                "--env", "FLEET_STOCK_STAGED=1", "--detach", "--", Entrypoint], null, TimeSpan.FromMinutes(5), ct);
+                "--env", "FLEET_STOCK_STAGED=1", "--detach", "--", Entrypoint]), null, TimeSpan.FromMinutes(5), ct);
             // Whatever create reported, record any sandbox that now exists so cleanup keeps its identity.
-            if (await GetAsync(candidate.SandboxName, ct) is { } made)
-            {
-                candidate = candidate with { SandboxId = made.Id };
-                applying = applying with { Candidate = candidate };
-                await checkpoint(applying);
-            }
+            using (var observe = new CancellationTokenSource(FanoutTimeout))
+                if (await GetAsync(candidate, observe.Token) is { } made)
+                {
+                    candidate = candidate with { SandboxId = made.Id };
+                    applying = applying with { Candidate = candidate };
+                    await checkpoint(applying);
+                }
+            if (Expired()) return await CutAsync(applying);
             if (create.ExitCode != 0 || create.TimedOut || string.IsNullOrEmpty(candidate.SandboxId))
                 return string.IsNullOrEmpty(candidate.SandboxId) ? Hold(applying, 502, "sandbox_create_unknown")
                     : await HoldStoppedAsync(applying, candidate, "sandbox_create_unknown", [], ct);
         }
 
         // Staging: the launcher waits without a daemon, so transfers race no native task or file writer.
-        if (await StageAsync(candidate, ct) is { } stage) return await HoldStoppedAsync(applying, candidate, stage, [], ct);
+        if (await StageAsync(candidate, ct) is { } stage) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, stage, [], ct);
         // Reuse keeps the workspace but refreshes its MCP routes, which follow the current grants.
         foreach (var (local, remote) in reuse ? new[] { ("app", WorkloadHome), ("trust", WorkloadHome), (Path.Combine("workspace", ".mcp.json"), "/workspace/.mcp.json") }
                      : [("app", WorkloadHome), ("trust", WorkloadHome), ("workspace", "/")])
             if (await UploadAsync(candidate, Path.Combine(bundle, local), remote, ct) is { } upload)
-                return await HoldStoppedAsync(applying, candidate, upload, [], ct);
+                return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, upload, [], ct);
         if (reuse)
         {
             if (record.Applied!.PolicyVersionId != policy.Id)
             {
-                var set = await cli.RunAsync(["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"], null, LegTimeout, ct);
-                if (set.ExitCode != 0 || set.TimedOut) return await HoldStoppedAsync(applying, candidate, "policy_update_unknown", [], ct);
+                var set = await cli.RunAsync(Scoped(candidate, ["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"]), null, LegTimeout, ct);
+                if (set.ExitCode != 0 || set.TimedOut) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, "policy_update_unknown", [], ct);
             }
-            if (await EnsureProvidersAsync() is { } providerFault) return await HoldStoppedAsync(applying, candidate, providerFault, [], ct);
+            if (Expired()) return await CutAsync(applying);
+            if (await EnsureProvidersAsync() is { } providerFault)
+                return providerFault == StockSubscriptionBinding.Expired ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, providerFault, [], ct);
             // The cut detached every old provider; attach exactly the current set (a dropped bot/journal stays detached).
             foreach (var provider in candidate.AllProviders())
             {
-                var attach = await cli.RunAsync(["sandbox", "provider", "attach", candidate.SandboxName, provider], null, LegTimeout, ct);
-                if (attach.ExitCode != 0 || attach.TimedOut) return await HoldStoppedAsync(applying, candidate, "provider_attach_unknown", [], ct);
+                var attach = await cli.RunAsync(Scoped(candidate, ["sandbox", "provider", "attach", candidate.SandboxName, provider]), null, LegTimeout, ct);
+                if (attach.ExitCode != 0 || attach.TimedOut) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, "provider_attach_unknown", [], ct);
             }
         }
 
         // Broker users exist only now; then the outside and guest enrollments carry the exact UUID/epoch.
+        if (Expired()) return await CutAsync(applying);
         var created = await broker.CreateEpochAsync(epoch, agent.ShortName, ct, passwords);
-        if (!created.Ok) return await HoldStoppedAsync(applying, candidate, created.Code!, [.. created.OwnedPartials], ct);
+        if (!created.Ok) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, created.Code!, [.. created.OwnedPartials], ct);
         try
         {
-            var active = Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "active");
+            var active = Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "active", tuple?.ExpiresAt);
             WriteRecord(AuthorityPath(agent.Name), active);
             WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), active);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return await HoldStoppedAsync(applying, candidate, "managed_files_failed", [], ct); }
         if (await UploadAsync(candidate, Path.Combine(bundle, "trust", "enrollment.json"), WorkloadEnrollmentFile, ct) is { } enrollment)
-            return await HoldStoppedAsync(applying, candidate, enrollment, [], ct);
-        if (await ActivateAsync(candidate, ct) is { } activate) return await HoldStoppedAsync(applying, candidate, activate, [], ct);
+            return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, enrollment, [], ct);
+        // #502: source, provider and refresh window revalidated immediately before activation; expiry cuts instead.
+        if (subscription && await RevalidateAsync(agent.Name, candidate, ct) is { } drift)
+            return drift == StockSubscriptionBinding.Expired || Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, drift, [], ct);
+        if (await ActivateAsync(candidate, ct) is { } activate) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, activate, [], ct);
+        if (Expired()) return await CutAsync(applying);
         // An image-change re-apply keeps the replaced, revoked and stopped sandbox tracked instead of dropping it.
-        var superseded = retired is not null && retired.SandboxId != candidate.SandboxId ? [.. record.Superseded, retired] : record.Superseded;
-        return (record with { State = "applied", Applied = candidate, Candidate = null, Errors = [], Superseded = superseded }, "openshell", policy.Id, Result.Done("applied_openshell"));
+        var superseded = retired is not null && retired.SandboxId != candidate.SandboxId ? [.. history, retired] : history;
+        var applied = record with { State = "applied", Applied = candidate, Candidate = null, Errors = [], Superseded = superseded };
+        // #502: a verified handoff away from subscription archives and atomically retires every old subscription tuple
+        // in this same final CAS; an archive failure keeps them countable and holds the record.
+        if (!subscription && RetirementTuples(agent, applied) is { Count: > 0 } retiring)
+        {
+            var (refs, archiveFault) = ArchiveRetirements(agent.Name, retiring, "openshell:" + mode);
+            if (archiveFault is not null)
+                return (applied with { State = "needs_attention", Errors = ["subscription_archive_failed", archiveFault] }, "openshell", policy.Id,
+                    Result.Refused(502, "subscription_archive_failed", [archiveFault]));
+            applied = Retire(applied, retiring, refs!);
+        }
+        return (applied, "openshell", policy.Id, Result.Done("applied_openshell"));
+    }
+
+    private TimeSpan Remaining(DateTimeOffset expiresAt)
+    {
+        var left = expiresAt - Now;
+        return left <= TimeSpan.Zero ? TimeSpan.Zero : left > TimeSpan.FromDays(1) ? TimeSpan.FromDays(1) : left;
     }
 
     /// <summary>Bare <c>--credential KEY</c> arguments: the CLI reads each value from its own environment.</summary>
@@ -1182,7 +1476,8 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Stop if needed, then confirm no workload/native-supervisor container remains.</summary>
     private async Task<string?> StopVerifiedAsync(ManagedBinding binding, CancellationToken ct)
     {
-        var sandbox = await GetAsync(binding.SandboxName, ct);
+        if (ScopeFault(binding) is { } scope) return scope;
+        var sandbox = await GetAsync(binding, ct);
         if (sandbox is null) return "sandbox_unobservable";
         if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
         // Error/Completed may still leave a native supervisor running: only Stopped skips the verified Stop.
@@ -1209,7 +1504,8 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Start into the staged launcher (no daemon) and wait until it reports staged.</summary>
     private async Task<string?> StageOnceAsync(ManagedBinding binding, CancellationToken ct)
     {
-        var sandbox = await GetAsync(binding.SandboxName, ct);
+        if (ScopeFault(binding) is { } scope) return scope;
+        var sandbox = await GetAsync(binding, ct);
         if (sandbox is null) return "sandbox_unobservable";
         if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
         // A just-created sandbox already runs the staged launcher; a stopped one boots into it.
@@ -1248,8 +1544,8 @@ public sealed class StockOpenShellRuntime(
             // Applied only when the daemon is up and healthy AND the exact UUID is observed Ready (never Error/Completed).
             if (await ExecAsync(binding, DaemonReadyScript, ct) == 0 && await ExecAsync(binding, DaemonHealthScript, ct, "bash") == 0)
             {
-                var after = await GetAsync(binding.SandboxName, ct);
-                if (after is null) return "sandbox_unobservable";
+                var after = await GetAsync(binding, ct);
+                if (after is null) return ScopeFault(binding) ?? "sandbox_unobservable";
                 if (after.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
                 if (after.Value.Phase == "Ready") return null;
             }
@@ -1261,14 +1557,14 @@ public sealed class StockOpenShellRuntime(
     private async Task<int> ExecAsync(ManagedBinding binding, string script, CancellationToken ct, string shell = "sh")
     {
         if (await VerifyIdentityAsync(binding, ct) is not null) return -1;
-        var run = await cli.RunAsync(["sandbox", "exec", "-n", binding.SandboxName, "--", shell, "-c", script], null, LegTimeout, ct);
+        var run = await cli.RunAsync(Scoped(binding, ["sandbox", "exec", "-n", binding.SandboxName, "--", shell, "-c", script]), null, LegTimeout, ct);
         return run.TimedOut ? -1 : run.ExitCode;
     }
 
     private async Task<string?> UploadAsync(ManagedBinding binding, string local, string remote, CancellationToken ct)
     {
         if (await VerifyIdentityAsync(binding, ct) is { } identity) return identity.Code;
-        var run = await cli.RunAsync(["sandbox", "upload", binding.SandboxName, local, remote], null, TransferTimeout, ct);
+        var run = await cli.RunAsync(Scoped(binding, ["sandbox", "upload", binding.SandboxName, local, remote]), null, TransferTimeout, ct);
         return run.ExitCode == 0 && !run.TimedOut ? null : "input_upload_unknown";
     }
 
@@ -1291,13 +1587,31 @@ public sealed class StockOpenShellRuntime(
             record = record with { Applied = binding };
             await checkpoint(record);
         }
+        if (binding.IsSubscription)
+        {
+            // #502: Start rechecks scope, expiry and the outside source on the actual target. Expiry is revoke-and-stop;
+            // a missing or changed source is drift (existing revoke/Stop hold, never re-import); a provider that cannot
+            // be verified right now refuses before any positive step.
+            if (ScopeFault(binding) is { } scope) return Hold(record, 409, scope);
+            if (binding.Subscription!.ExpiresAt <= Now) return await ExpireAsync(agent.Name, record);
+            var (source, sourceFault) = ReadSource(agent.Name);
+            if (sourceFault == StockSubscriptionBinding.Expired) return await ExpireAsync(agent.Name, record);
+            var drift = sourceFault ?? (source!.SourceSha256 != binding.Subscription.SourceSha256 || !SameIdentity(binding, source)
+                ? StockSubscriptionBinding.Changed : null);
+            if (drift is not null) return Hold(record, 409, drift, [.. await RevokeFanoutAsync(agent.Name, record, ct)]);
+            if (await RevalidateAsync(agent.Name, binding, ct) is { } unverified) return (record, null, null, Result.Refused(409, unverified));
+        }
         // A repeat Start on an applied, running binding never re-stages or stops it: success when
         // Ready, otherwise a mutation-free refusal.
-        if (record.State == "applied" && await GetAsync(binding.SandboxName, ct) is { } live && live.Id == binding.SandboxId
+        if (record.State == "applied" && await GetAsync(binding, ct) is { } live && live.Id == binding.SandboxId
             && live.Phase is not ("Stopped" or "Completed" or "Error"))
             return (record, null, null, live.Phase == "Ready" ? Result.Done("started") : Result.Refused(409, "sandbox_not_stopped"));
         // Every boot is staged; the daemon starts only with this boot's activation.
-        if ((await StageAsync(binding, ct) ?? await ActivateAsync(binding, ct)) is { } fault)
+        if (await StageAsync(binding, ct) is { } staged) return await HoldStoppedAsync(record, binding, staged, [], ct);
+        // #502: the subscription tuple is revalidated immediately before activation; expiry cuts instead.
+        if (binding.IsSubscription && await RevalidateAsync(agent.Name, binding, ct) is { } changed)
+            return changed == StockSubscriptionBinding.Expired ? await ExpireAsync(agent.Name, record) : await HoldStoppedAsync(record, binding, changed, [], ct);
+        if (await ActivateAsync(binding, ct) is { } fault)
             return await HoldStoppedAsync(record, binding, fault, [], ct);
         return (record with { State = "applied", Errors = [] }, null, null, Result.Done("started"));
     }
@@ -1327,14 +1641,186 @@ public sealed class StockOpenShellRuntime(
     private async Task<(ManagedRecord, string?, int?, Result)> RevokeCoreAsync(Agent agent, ManagedRecord record,
         Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
-        if (record.Applied is null && record.Candidate is null) return (record, null, null, Result.Refused(409, "managed_binding_missing"));
+        var docker = agent.AppliedRuntimeKind == "docker";
+        if (record.Applied is null && record.Candidate is null)
+        {
+            // #502: a Docker handoff that atomically retired its subscription bindings keeps no Applied binding; revoke
+            // stays the supported retry of its authority retirement (inert history is never revoked or rehydrated).
+            if (docker && record.State == "needs_attention" && record.RetiredSubscriptions.Count > 0
+                && record.Errors.All(e => e is RetirePending or "authority_retire_failed" or "handoff_record_unfinalized" || e.StartsWith("interrupted_", StringComparison.Ordinal)))
+                return RetireAuthority(agent.Name) ? (record with { State = "revoked", Errors = [] }, null, null, Result.Done("revoked"))
+                    : Hold(record, 502, "docker_handoff_unresolved", "authority_retire_failed");
+            return (record, null, null, Result.Refused(409, "managed_binding_missing"));
+        }
         // Review R2: a handed-off Docker agent keeps (or regains) a retired authority, never a held revoked one;
         // this is also the supported retry of an earlier authority_retire_failed.
-        var docker = agent.AppliedRuntimeKind == "docker";
         var errors = await RevokeFanoutAsync(agent.Name, record, ct, keepRetired: docker);
         if (errors.Count > 0) return Hold(record, 502, "revoke_unresolved", [.. errors]);
         if (docker && !RetireAuthority(agent.Name)) return Hold(record, 502, "docker_handoff_unresolved", "authority_retire_failed");
-        return (record with { State = "revoked", Candidate = null, Errors = [] }, null, null, Result.Done("revoked"));
+        return (WithCustody(record) with { State = "revoked", Candidate = null, Errors = [] }, null, null, Result.Done("revoked"));
+    }
+
+    /// <summary>
+    /// #502: a cleanly cut subscription candidate is never dropped; it moves to Superseded so its persisted
+    /// workspace/UUID tuple stays countable custody until an atomic, archived retirement.
+    /// </summary>
+    private static ManagedRecord WithCustody(ManagedRecord record) =>
+        record.Candidate is { IsSubscription: true } candidate && candidate != record.Applied && !record.Superseded.Contains(candidate)
+            ? record with { Superseded = [.. record.Superseded, candidate] } : record;
+
+    /// <summary>
+    /// #502 revoke-and-stop at subscription expiry (any stage): admission cut, scoped detach, broker revoke, bounded Stop
+    /// and quiescence over every applied/candidate target. Clean → revoked with <c>subscription_binding_expired</c>;
+    /// partial → needs_attention with every cleanup error. No renewal or retry.
+    /// </summary>
+    private async Task<(ManagedRecord, string?, int?, Result)> ExpireAsync(string agentName, ManagedRecord record)
+    {
+        var errors = await RevokeFanoutAsync(agentName, record, CancellationToken.None);
+        if (errors.Count > 0) return Hold(record, 502, StockSubscriptionBinding.Expired, [.. errors]);
+        logger.LogWarning("Managed subscription for {Agent} expired; revoked and stopped", agentName);
+        return (WithCustody(record) with { State = "revoked", Candidate = null, Errors = [StockSubscriptionBinding.Expired] }, null, null,
+            Result.Refused(409, StockSubscriptionBinding.Expired));
+    }
+
+    /// <summary>
+    /// #502 running/pending expiry enforcement on the existing 10-second state-monitor pass: an applied or candidate
+    /// subscription tuple past its expiry gets the bounded revoke-and-stop. Records already held (needs_attention) or
+    /// revoked are skipped, so a failed cleanup is reported once and never re-invoked every pass; a live in-flight apply
+    /// cancels at its own expiry deadline instead.
+    /// </summary>
+    public async Task CheckSubscriptionExpiryAsync(string name, CancellationToken ct)
+    {
+        if (!Enabled) return;
+        Agent? agent;
+        try { agent = await store.LoadAsync(name, ct); }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return; }
+        if (agent is null) return;
+        ManagedRecord record;
+        try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
+        catch (JsonException) { return; }
+        if (record.State is "needs_attention" or "revoked") return;
+        var now = Now;
+        if (!new[] { record.Applied, record.Candidate }.Any(b => b?.Subscription is { } s && s.ExpiresAt <= now)) return;
+        if (record.Operation is { } op && OperationLive(agent.Name, op)) return;
+        await RunAsync(name, "expiry", async (_, current, _, _) =>
+            current.State is "needs_attention" or "revoked" ? (current, null, null, Result.Refused(409, current.State))
+            : await ExpireAsync(name, current), CancellationToken.None);
+    }
+
+    // ── #502 subscription retirement: verified cut, archive, then one atomic CAS ──
+
+    /// <summary>
+    /// Old subscription tuples a handoff away from subscription retires. None while the desired selection is still
+    /// subscription: retirement never happens solely from expiry or before the desired mode changed.
+    /// </summary>
+    private static List<ManagedBinding> RetirementTuples(Agent agent, ManagedRecord record) =>
+        agent.NativeAuthMode == StockSubscriptionBinding.Mode ? [] : [.. record.SubscriptionTuples().DistinctBy(b => b.Epoch)];
+
+    /// <summary>
+    /// Retirement eligibility for every old tuple, in its persisted scope: valid scope, exact UUID (or the sandbox proven
+    /// absent), none of its providers still attached, and no workload/supervisor container running. First fault or null.
+    /// </summary>
+    private async Task<string?> RetirementFaultAsync(string agentName, IReadOnlyList<ManagedBinding> tuples, CancellationToken ct)
+    {
+        using var bounded = new CancellationTokenSource(FanoutTimeout);
+        var token = bounded.Token;
+        foreach (var tuple in tuples)
+        {
+            var label = tuple.Epoch.ToString("N") + ":";
+            if (ScopeFault(tuple) is { } scope) return label + scope;
+            if (string.IsNullOrEmpty(tuple.SandboxId))
+            {
+                if (!await SandboxDeletedAsync(tuple, token)) return label + "sandbox_not_proven_absent";
+                continue;
+            }
+            if (await VerifyIdentityAsync(tuple, token) is { } identity)
+            {
+                if (identity.Code != "sandbox_unobservable" || !await SandboxDeletedAsync(tuple, token)) return label + identity.Code;
+            }
+            else if (await AttachedAsync(tuple, token) is not { } attached) return label + "provider_attachment_unobservable";
+            else if (tuple.AllProviders().Any(attached.Contains)) return label + "provider_still_attached";
+            if (await QuiescentAsync(tuple, token) is { } quiet) return label + quiet;
+        }
+        logger.LogInformation("Managed subscription retirement for {Agent}: {Count} tuple(s) verified cut and quiescent", agentName, tuples.Count);
+        return null;
+    }
+
+    private static readonly JsonSerializerOptions ArchiveOptions = new(JsonSerializerDefaults.Web);
+
+    /// <summary>
+    /// Writes each complete old binding, its identities, cleanup evidence and the successful handoff receipt to an
+    /// immutable <c>managed/&lt;agent&gt;/retired/&lt;epoch&gt;.json</c> (temp write, fsync, atomic rename, 0700/0600, hash
+    /// readback). An identical earlier archive of the same epoch (a lost CAS) is reused; different content conflicts.
+    /// </summary>
+    private (List<RetiredSubscription>? Refs, string? Fault) ArchiveRetirements(string agentName, IReadOnlyList<ManagedBinding> tuples, string target)
+    {
+        var refs = new List<RetiredSubscription>();
+        var directory = Path.Combine(ConfigDir, "managed", agentName, "retired");
+        try
+        {
+            RefuseLinkedAncestors(directory);
+            PrivateDirectory(directory);
+            if (!OperatingSystem.IsWindows() && File.GetUnixFileMode(directory) != (UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute))
+                return (null, "archive_directory_not_private");
+            foreach (var tuple in tuples)
+            {
+                var path = Path.Combine(directory, tuple.Epoch.ToString("N") + ".json");
+                var binding = JsonSerializer.SerializeToNode(tuple, ArchiveOptions)!;
+                var now = Now;
+                byte[] bytes;
+                if (AuthorityEntry(path) is { } entry)
+                {
+                    if (!entry) return (null, "archive_entry_unsafe:" + tuple.Epoch.ToString("N"));
+                    bytes = File.ReadAllBytes(path);
+                    var existing = JsonNode.Parse(bytes)?["binding"];
+                    if (existing is null || !JsonNode.DeepEquals(existing, binding)) return (null, "archive_conflict:" + tuple.Epoch.ToString("N"));
+                    now = JsonNode.Parse(bytes)!["retiredAt"]!.GetValue<DateTimeOffset>();
+                }
+                else
+                {
+                    bytes = Encoding.UTF8.GetBytes(new JsonObject
+                    {
+                        ["version"] = 1,
+                        ["agent"] = agentName,
+                        ["retiredAt"] = now.ToString("O"),
+                        ["binding"] = binding,
+                        ["cleanupEvidence"] = new JsonArray("admission_cut", "scoped_uuid_verified", "providers_detached_verified", "quiescent_verified"),
+                        ["handoff"] = new JsonObject { ["target"] = target, ["succeededAt"] = now.ToString("O") },
+                    }.ToJsonString());
+                    var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+                    if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                    try
+                    {
+                        using (var stream = new FileStream(temp, options)) { stream.Write(bytes); stream.Flush(flushToDisk: true); }
+                        File.Move(temp, path, overwrite: false);
+                    }
+                    finally { if (File.Exists(temp)) File.Delete(temp); }
+                }
+                var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+                if (AuthorityEntry(path) != true || Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))) != hash
+                    || !OperatingSystem.IsWindows() && File.GetUnixFileMode(path) != (UnixFileMode.UserRead | UnixFileMode.UserWrite))
+                    return (null, "archive_readback_failed:" + tuple.Epoch.ToString("N"));
+                refs.Add(new(tuple.Epoch, tuple.SandboxWorkspace!, tuple.SandboxId, tuple.Subscription!.ProviderWorkspace, tuple.Subscription.ProviderId,
+                    tuple.Subscription.OwnerGeneration, path, hash, now));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or FormatException)
+        { return (null, "archive_write_failed"); }
+        return (refs, null);
+    }
+
+    /// <summary>Removes the archived tuples from Applied/Candidate/Superseded and appends their inert references.</summary>
+    private static ManagedRecord Retire(ManagedRecord record, IReadOnlyList<ManagedBinding> tuples, IReadOnlyList<RetiredSubscription> refs)
+    {
+        var epochs = tuples.Select(t => t.Epoch).ToHashSet();
+        return record with
+        {
+            Applied = record.Applied is { IsSubscription: true } a && epochs.Contains(a.Epoch) ? null : record.Applied,
+            Candidate = record.Candidate is { IsSubscription: true } c && epochs.Contains(c.Epoch) ? null : record.Candidate,
+            Superseded = [.. record.Superseded.Where(h => !(h.IsSubscription && epochs.Contains(h.Epoch)))],
+            RetiredSubscriptions = [.. record.RetiredSubscriptions, .. refs],
+        };
     }
 
     /// <summary>Changed/unobservable generation: hold, then one bounded revoke/Stop fanout; never Start.</summary>
@@ -1394,7 +1880,7 @@ public sealed class StockOpenShellRuntime(
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
                 or InvalidOperationException or StockIdentityDenied) { retired = false; }
         }
-        if (!retired && !await SandboxDeletedAsync(binding.SandboxName, ct)) return false;
+        if (!retired && !await SandboxDeletedAsync(binding, ct)) return false;
         return await QuiescentAsync(binding, ct) is null;
     }
 
@@ -1406,15 +1892,17 @@ public sealed class StockOpenShellRuntime(
     /// unobservable. Pinned 0.1.5 <c>sandbox list -o json</c> prints <c>{"sandboxes":[…],"next_page_token":"…"}</c>
     /// (review F9); an unparsable page, a repeated token or an unexhausted page bound is never absence.
     /// </summary>
-    private async Task<bool> SandboxDeletedAsync(string name, CancellationToken ct)
+    private async Task<bool> SandboxDeletedAsync(ManagedBinding binding, CancellationToken ct)
     {
-        if (await GetAsync(name, ct) is not null) return false;
+        // #502: absence is proven only inside the binding's persisted scope, never the ambient default.
+        if (ScopeFault(binding) is not null || await GetAsync(binding, ct) is not null) return false;
+        var name = binding.SandboxName;
         var token = "";
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var page = 0; page < MaxListPages; page++)
         {
-            var list = await cli.RunAsync(token.Length == 0 ? ["sandbox", "list", "-o", "json"]
-                : ["sandbox", "list", "-o", "json", "--page-token", token], null, LegTimeout, ct);
+            var list = await cli.RunAsync(Scoped(binding, token.Length == 0 ? ["sandbox", "list", "-o", "json"]
+                : ["sandbox", "list", "-o", "json", "--page-token", token]), null, LegTimeout, ct);
             if (list.Missing || list.TimedOut || list.ExitCode != 0) return false;
             try
             {
@@ -1436,7 +1924,8 @@ public sealed class StockOpenShellRuntime(
 
     private async Task<string?> StoppedQuiescentAsync(ManagedBinding binding, CancellationToken ct)
     {
-        var sandbox = await GetAsync(binding.SandboxName, ct);
+        if (ScopeFault(binding) is { } scope) return scope;
+        var sandbox = await GetAsync(binding, ct);
         if (sandbox is null) return "sandbox_unobservable";
         if (sandbox.Value.Id != binding.SandboxId) return "sandbox_identity_changed";
         return sandbox.Value.Phase == "Stopped" ? await QuiescentAsync(binding, ct) : "sandbox_not_stopped";
@@ -1481,30 +1970,56 @@ public sealed class StockOpenShellRuntime(
                 var revoked = await broker.RevokeEpochAsync(target.Epoch, token);
                 return revoked.Ok ? null : string.Join(",", revoked.OwnedPartials.DefaultIfEmpty(revoked.Code ?? "broker_revoke_unresolved"));
             }));
+            // #502: a subscription target without a valid persisted scope gets no resource command at all.
+            if (ScopeFault(target) is { } scope)
+            {
+                errors.Add("scope:" + target.SandboxName + ":" + scope);
+                continue;
+            }
             // Review A1: a target recorded before its UUID (a failed pre-create apply) is clean only once the paged
             // absence proof shows its exact owned name absent; nothing is detached, stopped or deleted for it.
             if (string.IsNullOrEmpty(target.SandboxId))
                 legs.Add(Leg("unverified_target:" + target.SandboxName, async token =>
-                    await SandboxDeletedAsync(target.SandboxName, token) ? null : "sandbox_not_proven_absent"));
+                    await SandboxDeletedAsync(target, token) ? null : "sandbox_not_proven_absent"));
         }
-        foreach (var target in targets.Where(t => !string.IsNullOrEmpty(t.SandboxId)).DistinctBy(t => t.SandboxId))
+        var scoped = targets.Where(t => ScopeFault(t) is null && !string.IsNullOrEmpty(t.SandboxId)).ToList();
+        foreach (var target in scoped.DistinctBy(t => (t.SandboxWorkspace, t.SandboxId)))
         {
-            // Applied and candidate may share one sandbox; detach the union of their providers.
-            var providers = targets.Where(t => t.SandboxId == target.SandboxId).SelectMany(t => t.AllProviders()).Distinct(StringComparer.Ordinal).ToList();
+            // Applied and candidate may share one sandbox; detach the union of their providers. #502: grouped by persisted
+            // sandbox workspace/UUID, including retained superseded subscription tuples of the same sandbox.
+            var group = scoped.Where(t => t.SandboxId == target.SandboxId && t.SandboxWorkspace == target.SandboxWorkspace)
+                .Concat(target.IsSubscription ? record.Superseded.Where(h => h.IsSubscription && h.SandboxId == target.SandboxId
+                    && h.SandboxWorkspace == target.SandboxWorkspace) : []).ToList();
+            var providers = group.SelectMany(t => t.AllProviders()).Distinct(StringComparer.Ordinal).ToList();
             legs.Add(Leg("detach:" + target.SandboxName, async token =>
             {
+                if (target.IsSubscription) return await VerifiedDetachAsync(target, providers, token) is { } detach ? await DeletedOrAsync(detach, target, token) : null;
                 if (await VerifyIdentityAsync(target, token) is { } identity) return await DeletedOrAsync(identity.Code, target, token);
                 // Every attached provider is detached; one failure does not skip the others.
                 var unresolved = false;
                 foreach (var provider in providers)
                 {
-                    var run = await cli.RunAsync(["sandbox", "provider", "detach", target.SandboxName, provider], null, LegTimeout, token);
+                    var run = await cli.RunAsync(Scoped(target, ["sandbox", "provider", "detach", target.SandboxName, provider]), null, LegTimeout, token);
                     unresolved |= run.ExitCode != 0 || run.TimedOut;
                 }
                 return unresolved ? "provider_detach_unknown" : null;
             }));
             if (stop) legs.Add(Leg("stop:" + target.SandboxName, async token =>
                 await LifecycleAsync("stop", target, token) is { } fault ? await DeletedOrAsync(fault, target, token) : await QuiescentAsync(target, token)));
+        }
+        // #502: retained superseded subscription sandboxes not already covered: verified detach (only providers still
+        // attached), then verified stop/quiescence, each in its own persisted workspace; a missing scope never runs.
+        var covered = scoped.Select(t => (t.SandboxWorkspace, t.SandboxId)).ToHashSet();
+        foreach (var history in record.Superseded.Where(h => h.IsSubscription && !string.IsNullOrEmpty(h.SandboxId))
+                     .DistinctBy(h => (h.SandboxWorkspace, h.SandboxId)).Where(h => !covered.Contains((h.SandboxWorkspace, h.SandboxId))))
+        {
+            if (ScopeFault(history) is { } scope) { errors.Add("scope:" + history.SandboxName + ":" + scope); continue; }
+            var providers = record.Superseded.Where(h => h.IsSubscription && h.SandboxId == history.SandboxId && h.SandboxWorkspace == history.SandboxWorkspace)
+                .SelectMany(h => h.AllProviders()).Distinct(StringComparer.Ordinal).ToList();
+            legs.Add(Leg("detach:" + history.SandboxName, async token =>
+                await VerifiedDetachAsync(history, providers, token) is { } detach ? await DeletedOrAsync(detach, history, token) : null));
+            if (stop) legs.Add(Leg("stop:" + history.SandboxName, async token =>
+                await StopVerifiedAsync(history, token) is { } fault ? await DeletedOrAsync(fault, history, token) : null));
         }
         foreach (var leg in await Task.WhenAll(legs))
             if (leg is not null) errors.Add(leg);
@@ -1513,7 +2028,7 @@ public sealed class StockOpenShellRuntime(
         // Review F6r: a sandbox verifiably deleted (absent from every list page) has nothing left to detach or
         // stop; it is clean only once no container runs under its UUID. Any other fault stays unresolved.
         async Task<string?> DeletedOrAsync(string? fault, ManagedBinding target, CancellationToken token) =>
-            fault == "sandbox_unobservable" && await SandboxDeletedAsync(target.SandboxName, token) ? await QuiescentAsync(target, token) : fault;
+            fault == "sandbox_unobservable" && await SandboxDeletedAsync(target, token) ? await QuiescentAsync(target, token) : fault;
 
         async Task<string?> Leg(string label, Func<CancellationToken, Task<string?>> action)
         {
@@ -1532,11 +2047,49 @@ public sealed class StockOpenShellRuntime(
         }
     }
 
+    /// <summary>
+    /// #502 verified detach inside the persisted scope: exact UUID before and after, detach only the union providers the
+    /// scoped attachment list still shows (idempotent for an already detached tuple), then prove none remain attached.
+    /// </summary>
+    private async Task<string?> VerifiedDetachAsync(ManagedBinding target, IReadOnlyList<string> providers, CancellationToken ct)
+    {
+        if (await VerifyIdentityAsync(target, ct) is { } identity) return identity.Code;
+        if (await AttachedAsync(target, ct) is not { } attached) return "provider_attachment_unobservable";
+        var unresolved = false;
+        foreach (var provider in providers.Where(attached.Contains))
+        {
+            var run = await cli.RunAsync(Scoped(target, ["sandbox", "provider", "detach", target.SandboxName, provider]), null, LegTimeout, ct);
+            unresolved |= run.ExitCode != 0 || run.TimedOut;
+        }
+        if (await VerifyIdentityAsync(target, ct) is { } after) return after.Code;
+        if (await AttachedAsync(target, ct) is not { } remaining) return "provider_attachment_unobservable";
+        return unresolved || providers.Any(remaining.Contains) ? "provider_detach_unknown" : null;
+    }
+
+    /// <summary>Every provider attached to the sandbox, across all scoped pages; null when unobservable or ambiguous.</summary>
+    private async Task<HashSet<string>?> AttachedAsync(ManagedBinding target, CancellationToken ct)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var token = "";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var page = 0; page < MaxListPages; page++)
+        {
+            var list = await cli.RunAsync(Scoped(target, token.Length == 0 ? ["sandbox", "provider", "list", target.SandboxName, "-o", "json"]
+                : ["sandbox", "provider", "list", target.SandboxName, "-o", "json", "--page-token", token]), null, LegTimeout, ct);
+            if (list.Missing || list.TimedOut || list.ExitCode != 0 || StockSubscriptionBinding.ParseAttachedPage(list.Stdout) is not { } parsed) return null;
+            names.UnionWith(parsed.Names);
+            token = parsed.NextToken;
+            if (token.Length == 0) return names;
+            if (!seen.Add(token)) return null;
+        }
+        return null;
+    }
+
     /// <summary>Name-based stock control with exact-UUID checks before and after; a changed target is unknown.</summary>
     private async Task<string?> LifecycleAsync(string verb, ManagedBinding binding, CancellationToken ct)
     {
         if (await VerifyIdentityAsync(binding, ct) is { } before) return before.Code;
-        var run = await cli.RunAsync(["sandbox", verb, binding.SandboxName], null, LegTimeout, ct);
+        var run = await cli.RunAsync(Scoped(binding, ["sandbox", verb, binding.SandboxName]), null, LegTimeout, ct);
         if (run.Missing) return "stock_cli_missing";
         if (run.TimedOut || run.ExitCode != 0) return verb + "_unknown";
         return await VerifyIdentityAsync(binding, ct) is { } after ? after.Code : null;
@@ -1544,14 +2097,18 @@ public sealed class StockOpenShellRuntime(
 
     private async Task<Result?> VerifyIdentityAsync(ManagedBinding binding, CancellationToken ct)
     {
-        var sandbox = await GetAsync(binding.SandboxName, ct);
+        if (ScopeFault(binding) is { } scope) return Result.Refused(409, scope);
+        var sandbox = await GetAsync(binding, ct);
         if (sandbox is null) return Result.Refused(502, "sandbox_unobservable");
         return sandbox.Value.Id == binding.SandboxId ? null : Result.Refused(409, "sandbox_identity_changed");
     }
 
-    private async Task<(string Id, string Phase)?> GetAsync(string name, CancellationToken ct)
+    private async Task<(string Id, string Phase)?> GetAsync(ManagedBinding binding, CancellationToken ct)
     {
-        var run = await cli.RunAsync(["sandbox", "get", name, "-o", "json"], null, LegTimeout, ct);
+        // #502: a subscription binding without a valid persisted scope is never looked up unscoped.
+        if (ScopeFault(binding) is not null) return null;
+        var name = binding.SandboxName;
+        var run = await cli.RunAsync(Scoped(binding, ["sandbox", "get", name, "-o", "json"]), null, LegTimeout, ct);
         if (run.ExitCode != 0 || run.TimedOut) return null;
         try
         {
@@ -1651,7 +2208,7 @@ public sealed class StockOpenShellRuntime(
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_stage_failed"; }
         if (await VerifyIdentityAsync(binding, ct) is { } before) return before.Code;
-        var download = await cli.RunAsync(["sandbox", "download", binding.SandboxName, "/workspace", staging], null, TransferTimeout, ct);
+        var download = await cli.RunAsync(Scoped(binding, ["sandbox", "download", binding.SandboxName, "/workspace", staging]), null, TransferTimeout, ct);
         if (download.ExitCode != 0 || download.TimedOut) return "workspace_download_unknown";
         if (await VerifyIdentityAsync(binding, ct) is { } after) return after.Code;
         // Mirror the working tree (deletions included); excluded account/control state is never touched.
@@ -1729,15 +2286,20 @@ public sealed class StockOpenShellRuntime(
     private static string? TemplateHost(JsonObject template, string service) =>
         template["ServiceHosts"]?[service]?.GetValue<string>() is { Length: > 0 } host ? host : null;
 
-    internal static JsonObject Authority(JsonObject template, Agent agent, string sandboxId, Guid epoch, string policySha, string state)
+    internal static JsonObject Authority(JsonObject template, Agent agent, string sandboxId, Guid epoch, string policySha, string state,
+        DateTimeOffset? capAt = null)
     {
+        // #502: a subscription enrollment expires no later than its outside binding, so admission self-expires even
+        // when cleanup cannot run.
+        var expires = DateTimeOffset.UtcNow.AddDays(365);
+        if (capAt is { } cap && cap < expires) expires = cap;
         var record = new JsonObject
         {
             ["State"] = state,
             ["Agent"] = agent.Name,
             ["SandboxId"] = sandboxId,
             ["Epoch"] = epoch.ToString(),
-            ["ExpiresAt"] = DateTimeOffset.UtcNow.AddDays(365).ToString("O"),
+            ["ExpiresAt"] = expires.ToString("O"),
         };
         foreach (var field in new[] { "GatewayIssuer", "GatewayAudience", "GatewayJwksPath", "AssertionPrivateKeyPath", "AssertionPublicKeyPath", "MemoryHost", "BrokerHost" })
             record[field] = template[field]!.GetValue<string>();
@@ -1823,7 +2385,7 @@ public sealed class StockOpenShellRuntime(
     }
 
     private async Task<string> BuildBundleAsync(Agent agent, JsonObject template, string generated, string epochDir, string workloadPassword,
-        Guid epoch, SandboxPolicyVersion policy, string sandboxId, long? botId, IEnumerable<string> outsideSecrets)
+        Guid epoch, SandboxPolicyVersion policy, string sandboxId, long? botId, IEnumerable<string> outsideSecrets, ManagedBinding binding)
     {
         var bundle = Path.Combine(epochDir, "bundle");
         PrivateDirectory(Path.Combine(bundle, "app"));
@@ -1842,8 +2404,21 @@ public sealed class StockOpenShellRuntime(
             ["AppRoot"] = WorkloadAppRoot,
         };
         var agentNode = settings["Agent"]!.AsObject();
-        agentNode["NativeAuthMode"] = "api_key";
-        agentNode["ProviderApiKeyEnvRef"] = agent.ProviderApiKeyEnvRef;
+        if (binding.Subscription is { } subscription)
+        {
+            // #502: only the selected nonsecret account/provider/owner-generation metadata; never the outside file,
+            // token material, credentials or approval evidence, and no API-key reference or fallback.
+            agentNode["NativeAuthMode"] = StockSubscriptionBinding.Mode;
+            agentNode.Remove("ProviderApiKeyEnvRef");
+            settings["StockOpenShell"]!["SubscriptionAccountId"] = subscription.AccountId;
+            settings["StockOpenShell"]!["SubscriptionProvider"] = binding.Provider;
+            settings["StockOpenShell"]!["SubscriptionOwnerGeneration"] = subscription.OwnerGeneration.ToString("D");
+        }
+        else
+        {
+            agentNode["NativeAuthMode"] = "api_key";
+            agentNode["ProviderApiKeyEnvRef"] = agent.ProviderApiKeyEnvRef;
+        }
         agentNode["WorkDir"] = "/workspace";
         (settings["RabbitMq"] ??= new JsonObject())["Host"] = template["BrokerHost"]!.GetValue<string>();
         // #492: credential slots stay empty. The agent fills them from the placeholders stock issues for
@@ -1868,7 +2443,7 @@ public sealed class StockOpenShellRuntime(
         foreach (var dir in new[] { "roles", "projects" })
             if (Directory.Exists(Path.Combine(generated, dir))) CopyTree(Path.Combine(generated, dir), Path.Combine(bundle, "app", dir), []);
         WriteText(Path.Combine(bundle, "workspace", ".mcp.json"), WorkloadMcp(template, agent));
-        WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent, sandboxId, epoch, policy.Sha256, "revoked"));
+        WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), Authority(template, agent, sandboxId, epoch, policy.Sha256, "revoked", binding.Subscription?.ExpiresAt));
         WriteText(Path.Combine(bundle, "trust", "workload-broker-password"), workloadPassword);
         return bundle;
     }

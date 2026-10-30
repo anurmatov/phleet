@@ -40,8 +40,10 @@ class RolloutGuardTests(unittest.TestCase):
         return subprocess.run(["bash", str(GUARD), *args], env=environment, capture_output=True, text=True)
 
     def dockerfile(self, labelled):
+        # #502: a fully capable target declares the managed AND the subscription capability.
         path = Path(self.tmp.name, "Dockerfile")
-        path.write_text("FROM x\n" + ("LABEL org.phleet.managed-stock-runtime=1\n" if labelled else ""))
+        path.write_text("FROM x\n" + ("LABEL org.phleet.managed-stock-runtime=1\n"
+                                       "LABEL org.phleet.managed-stock-subscription=1\n" if labelled else ""))
         return str(path)
 
     def test_capable_source_passes_without_any_preflight_call(self):
@@ -54,14 +56,15 @@ class RolloutGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_incapable_target_needs_zero_counts(self):
-        zero = '{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0}'
+        zero = '{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0,"subscriptionBindings":0}'
         ok = self.run_guard("--dockerfile", self.dockerfile(False), ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT=zero)
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertIn("Authorization: Bearer t", self.calls.read_text())
 
     def test_incapable_target_refuses_managed_unavailable_or_malformed(self):
         cases = [
-            dict(ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT='{"desiredOpenShell":0,"appliedOpenShell":1,"unresolvedBindings":0}'),
+            dict(ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT='{"desiredOpenShell":0,"appliedOpenShell":1,"unresolvedBindings":0,"subscriptionBindings":0}'),
+            dict(ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT='{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0}'),
             dict(ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_RC="7"),
             dict(ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT='{"desiredOpenShell":0}'),
             dict(ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT="not json"),

@@ -86,7 +86,7 @@ class RolloutTokenTests(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 f'printf "%s\\n" "$@" > "{argv}"\n'
                 f'cat > "{stdin}"\n'
-                'printf \'{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0}\'\n')
+                'printf \'{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0,"subscriptionBindings":0}\'\n')
             curl.chmod(0o755)
             dockerfile = Path(tmp, "Dockerfile")
             dockerfile.write_text("FROM x\n")

@@ -262,7 +262,17 @@ public sealed record ManagedRecord
     /// </summary>
     public IReadOnlyList<ManagedBinding> Superseded { get; init; } = [];
     /// <summary>#502: archive references of atomically retired subscription bindings (inert history, never rehydrated).</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyList<RetiredSubscription> RetiredSubscriptions { get; init; } = [];
+
+    /// <summary>Serialized form of <see cref="RetiredSubscriptions"/>, omitted when empty so API-key records keep their shape.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("retiredSubscriptions")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<RetiredSubscription>? RetiredSubscriptionsJson
+    {
+        get => RetiredSubscriptions.Count == 0 ? null : RetiredSubscriptions;
+        init => RetiredSubscriptions = value ?? [];
+    }
     public IReadOnlyList<string> Errors { get; init; } = [];
 
     /// <summary>#502: every nonretired subscription tuple still in this record (applied, candidate or superseded).</summary>

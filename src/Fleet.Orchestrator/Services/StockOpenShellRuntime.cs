@@ -388,6 +388,8 @@ public sealed class StockOpenShellRuntime(
     internal Func<Agent, string>? DockerWorkspace { get; init; }
     /// <summary>#502 seams: the effective uid the outside binding owner must equal, and the UTC clock for expiry/refresh windows.</summary>
     internal Func<uint>? EffectiveUid { get; init; }
+    /// <summary>#502 seam for the retired/ directory fsync (production: <see cref="SyncDirectory"/>).</summary>
+    internal Func<string, bool>? DirectorySync { get; init; }
     internal TimeProvider Clock { get; init; } = TimeProvider.System;
     private DateTimeOffset Now => Clock.GetUtcNow();
 
@@ -1821,7 +1823,10 @@ public sealed class StockOpenShellRuntime(
                     if (!entry) return (null, "archive_entry_unsafe:" + tuple.Epoch.ToString("N"));
                     bytes = File.ReadAllBytes(path);
                     var existing = JsonNode.Parse(bytes)?["binding"];
-                    if (existing is null || !JsonNode.DeepEquals(existing, binding)) return (null, "archive_conflict:" + tuple.Epoch.ToString("N"));
+                    // Same epoch, same tuple identity: an earlier attempt's archive (before a lost CAS or a failed sync) is
+                    // reused. Later display-only observations (containers, rebound generation) are not identity.
+                    if (existing is null || !JsonNode.DeepEquals(ArchiveIdentity(existing), ArchiveIdentity(binding)))
+                        return (null, "archive_conflict:" + tuple.Epoch.ToString("N"));
                     now = JsonNode.Parse(bytes)!["retiredAt"]!.GetValue<DateTimeOffset>();
                 }
                 else
@@ -1844,8 +1849,6 @@ public sealed class StockOpenShellRuntime(
                         File.Move(temp, path, overwrite: false);
                     }
                     finally { if (File.Exists(temp)) File.Delete(temp); }
-                    // Review L1: the rename itself is made durable before the CAS can point at the archive.
-                    if (!SyncDirectory(directory)) return (null, "archive_directory_sync_failed:" + tuple.Epoch.ToString("N"));
                 }
                 var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
                 if (AuthorityEntry(path) != true || Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))) != hash
@@ -1857,7 +1860,19 @@ public sealed class StockOpenShellRuntime(
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or FormatException)
         { return (null, "archive_write_failed"); }
+        // Review L1: every archive the CAS will reference, newly written or reused from an earlier attempt, is made
+        // durable by syncing the retired/ directory first; a failed sync keeps the hold and every tuple countable.
+        if (!(DirectorySync ?? SyncDirectory)(directory)) return (null, "archive_directory_sync_failed");
         return (refs, null);
+    }
+
+    /// <summary>The archived tuple's identity: everything but display-only observations (containers, gateway generation).</summary>
+    private static JsonNode ArchiveIdentity(JsonNode binding)
+    {
+        var copy = binding.DeepClone().AsObject();
+        copy.Remove("containers");
+        copy.Remove("gatewayGeneration");
+        return copy;
     }
 
     /// <summary>Removes the archived tuples from Applied/Candidate/Superseded and appends their inert references.</summary>

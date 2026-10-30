@@ -1011,7 +1011,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     internal string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
     internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, AgentRegistry? registry = null,
-        IStockCli? cli = null, TimeProvider? clock = null)
+        IStockCli? cli = null, TimeProvider? clock = null, Func<string, bool>? directorySync = null)
     {
         Directory.CreateDirectory(_dir);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -1045,6 +1045,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             },
             DockerWorkspace = _ => DockerWorkspaceDir,
             Clock = clock ?? TimeProvider.System,
+            DirectorySync = directorySync,
         };
     }
 

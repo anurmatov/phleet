@@ -1174,7 +1174,8 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         return agent;
     }
 
-    private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null) => _t.Runtime(dockerStop, cli: _cli, clock: _clock);
+    private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, Func<string, bool>? directorySync = null) =>
+        _t.Runtime(dockerStop, cli: _cli, clock: _clock, directorySync: directorySync);
 
     private ManagedBinding SubBinding(string name, string phase = "Ready", string? workspace = "ws-a", DateTimeOffset? expires = null, bool attached = true)
     {
@@ -1609,6 +1610,53 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.Equal(1, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
         if (fault == "lost_cas") // archives written before a lost CAS remain evidence only
             Assert.Equal(2, Directory.GetFiles(Path.Combine(_t._dir, "managed", "agent1", "retired")).Length);
+    }
+
+    [Fact]
+    public async Task Failed_archive_sync_holds_and_a_retry_reusing_the_leftover_archive_syncs_before_retiring()
+    {
+        // Review L1: a reused archive (left by an earlier failed attempt) is synced too before the retirement CAS.
+        DockerTargetWithHistory(out _, out _);
+        var syncs = 0;
+        var syncOk = false;
+        var runtime = Runtime(directorySync: _ => { syncs++; return syncOk; });
+        var archives = Path.Combine(_t._dir, "managed", "agent1", "retired");
+        void Held(StockOpenShellRuntime.Result result)
+        {
+            Assert.Equal("subscription_archive_failed", result.Code);
+            Assert.Contains("archive_directory_sync_failed", result.Errors);
+            var held = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+            Assert.Equal("needs_attention", held.State);
+            Assert.Empty(held.RetiredSubscriptions);
+            Assert.Equal(2, held.SubscriptionTuples().Count());
+        }
+
+        Held(await runtime.ApplyAsync("agent1", default));
+        Assert.Equal(1, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
+        var leftover = Directory.GetFiles(archives).Order().Select(f => (f, File.ReadAllBytes(f))).ToList();
+        Assert.Equal(2, leftover.Count);
+
+        // Recovery: revoke the held handoff, then retry the transition; the leftover archives are reused.
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+        syncs = 0;
+        Held(await runtime.ApplyAsync("agent1", default)); // reuse without a successful sync never retires
+        Assert.True(syncs > 0);
+        Assert.Equal(1, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
+
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+        syncOk = true;
+        syncs = 0;
+        var retried = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(retried.Ok, retried.Message);
+        Assert.True(syncs > 0);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(2, record.RetiredSubscriptions.Count);
+        // The exact leftover archive bytes were reused (same epoch, same tuple identity), not rewritten.
+        Assert.Equal(leftover.Select(l => l.Item2), Directory.GetFiles(archives).Order().Select(File.ReadAllBytes));
+        Assert.All(record.RetiredSubscriptions, r => Assert.Equal(r.ArchiveSha256,
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(r.ArchivePath)))));
+        Assert.Equal(0, Count(await runtime.RollbackPreflightAsync(default), "subscriptionBindings"));
     }
 
     [Fact]

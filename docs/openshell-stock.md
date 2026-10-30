@@ -790,8 +790,10 @@ tuple, never `subscription.json`, the CLI default or `OPENSHELL_WORKSPACE`: a de
 redirects or blocks cleanup. Detach is verified (scoped attachment list before and after, exact UUID before and
 after); a cleanly cut candidate moves to Superseded instead of being dropped. A subscription binding with a
 missing/invalid persisted scope is `subscription_binding_unrecoverable` and `needs_attention`, with no unscoped
-command at all. Start rechecks scope, expiry and the source (missing/changed → revoke/Stop hold), and the tuple
-is revalidated immediately before attachment and activation.
+command at all. Start rechecks scope, expiry and the source (missing/changed → revoke/Stop hold), and the tuple,
+including the scoped profile rehash against the binding's pinned policy, is revalidated immediately before
+attachment and activation. Start runs against the expiry deadline: expiry during or right after activation is
+revoke-and-stop, never a committed applied state.
 
 **Expiry.** The enrollment record expires no later than `expiresAt`, so admission self-expires. Expiry at any
 stage is revoke-and-stop: a pending apply checks before/after each external leg and before activation, Start
@@ -826,9 +828,13 @@ independently retained latest observation: exactly `providerId`, `ownerGeneratio
 They land in `control/` with `control/MANIFEST.json` (capture time, gateway generation, identities, source and
 binding digests, native epochs, state, retired count, refresh times). Before any restore, with every owned
 writer stopped, run `scripts/check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT --subscription-source …
---managed-binding … --refresh-observation …`. A snapshot captured before the latest retained provider refresh, or
-whose identity, source digest, epochs, revocation or retirement state has advanced, or whose current freshness is
-unknown, is refused; capture and verify a new latest stopped checkpoint instead. Restore only gateway
+--managed-binding … --refresh-observation …` with a refresh observation taken after the snapshot. It refuses a
+snapshot whose checksum inventory is empty, incomplete or mismatched, that lacks the gateway DB/config/trust or
+control records, or whose DB fails `integrity_check`; current control inputs that are not regular 0600 files owned
+by the operator; a binding row that differs from the recorded `bindingSha256` or any owner/epoch/workspace/provider
+tuple, state or retired reference; a changed source or identity; and a refresh at or after the (sub-second)
+capture time, compared as parsed UTC instants. Missing or malformed freshness fields are refusals. Capture and
+verify a new latest stopped checkpoint instead. Restore only gateway
 DB/KEK/config/trust while stopped. The control JSON copies are never restored or imported over live state; a
 mismatch holds for separately authorized reconciliation. No gateway/native restart follows without the separate
 due-refresh/resume authority.

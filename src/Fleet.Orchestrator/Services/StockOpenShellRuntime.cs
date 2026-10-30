@@ -662,7 +662,9 @@ public sealed class StockOpenShellRuntime(
     /// </summary>
     public async Task<string?> DescribePreflightFaultAsync(Agent agent, CancellationToken ct) => (await PreflightAsync(agent, ct)).Fault;
 
-    private async Task<(string? Fault, StockSubscriptionSource? Source)> PreflightAsync(Agent agent, CancellationToken ct)
+    /// <param name="signerAdmission">#503: false only for the planned-restart trust recheck in Start, whose signer
+    /// admission is the applied binding's own (<see cref="AppliedSignerFaultAsync"/>), never the desired selection's.</param>
+    private async Task<(string? Fault, StockSubscriptionSource? Source)> PreflightAsync(Agent agent, CancellationToken ct, bool signerAdmission = true)
     {
         if (!Enabled) return ("managed_runtime_disabled", null);
         if (agent.RuntimeKind != "openshell") return (null, null); // OpenShell→Docker needs no managed prerequisites beyond stop.
@@ -674,10 +676,11 @@ public sealed class StockOpenShellRuntime(
             return ("managed_agent_name_unsupported", null);
         var policy = agent.SandboxPolicyVersionId is { } id ? await store.LoadPolicyAsync(id, ct) : null;
         if (policy is null) return ("sandbox_policy_version_not_found", null);
-        return subscription ? await SubscriptionPreflightAsync(agent, policy, ct) : (await ApiPreflightAsync(agent, policy, ct), null);
+        return subscription ? await SubscriptionPreflightAsync(agent, policy, ct, signerAdmission)
+            : (await ApiPreflightAsync(agent, policy, ct, signerAdmission), null);
     }
 
-    private async Task<string?> ApiPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct)
+    private async Task<string?> ApiPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct, bool signerAdmission)
     {
         if (string.IsNullOrEmpty(credentials.Get(agent.ProviderApiKeyEnvRef!))) return "provider_key_reference_unresolved";
         // The agent's own bot token and derived journal ingest token stay outside in stock providers; the
@@ -704,7 +707,7 @@ public sealed class StockOpenShellRuntime(
         if (JournalRead(agent) && (JournalHost(template) is null || JournalReadPath(agent) is null))
             return "managed_route_unsupported:mcp:" + StockJournalReadRoute.McpName;
         // #503: the saved artifact must bind the fixed signer to exactly this agent's selected receiving hosts.
-        if (SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return signerFault;
+        if (signerAdmission && SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return signerFault;
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
         if (await broker.VerifyAccessAsync(ct) is { } accessFault) return accessFault;
         var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
@@ -726,7 +729,8 @@ public sealed class StockOpenShellRuntime(
     /// outside binding file, the pinned CLI and gateway client trust in the persisted scope, the restricted profile hash,
     /// gateway generation, sole ownership, the existing provider (no create/update/import) and its refresh window.
     /// </summary>
-    private async Task<(string? Fault, StockSubscriptionSource? Source)> SubscriptionPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct)
+    private async Task<(string? Fault, StockSubscriptionSource? Source)> SubscriptionPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct,
+        bool signerAdmission)
     {
         if (ContainerProvisioningService.HasTelegramBot(agent)) return ("managed_route_unsupported:telegram", null);
         if (agent.JournalEnabled) return ("managed_route_unsupported:journal", null);
@@ -737,7 +741,7 @@ public sealed class StockOpenShellRuntime(
         if (DescribeConfigDirFault() is { } dirFault) return (dirFault, null);
         if (LoadTemplate() is not { } template) return ("managed_authority_template_invalid", null);
         // #503: the same signer admission as API-key apply, here for the native memory route alone.
-        if (SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return (signerFault, null);
+        if (signerAdmission && SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return (signerFault, null);
         var (source, sourceFault) = ReadSource(agent.Name);
         if (sourceFault is not null) return (sourceFault, null);
         if (broker.DescribePreflightFault() is { } brokerFault) return (brokerFault, null);
@@ -1709,7 +1713,7 @@ public sealed class StockOpenShellRuntime(
             // #489 planned restart: rebind the recorded generation only after the same-UUID/Stopped/
             // quiescent checks across every owned record and the gateway trust preflight; else hold.
             if (generation != "gateway_generation_changed" || !await PlannedRestartAsync(agent.Name, record, binding, ct)
-                || await DescribePreflightFaultAsync(agent, ct) is not null || await host.GatewayGenerationAsync(ct) is not { } current)
+                || (await PreflightAsync(agent, ct, signerAdmission: false)).Fault is not null || await host.GatewayGenerationAsync(ct) is not { } current)
                 return await HoldForGenerationAsync(agent, record, generation, ct);
             binding = binding with { GatewayGeneration = current };
             record = record with { Applied = binding };

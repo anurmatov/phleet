@@ -2025,6 +2025,23 @@ public sealed class ManagedSignerLifecycleTests : IDisposable
         Assert.Contains(_t._cli.Calls, Activation);
     }
 
+    [Fact]
+    public async Task Planned_restart_start_never_holds_an_applied_bound_binding_for_an_unbound_desired_selection()
+    {
+        var (agent, _) = Stopped("fleet-agent1-c4000004");
+        _t._store.PolicyYaml2 = ManagedStockRuntimeTests.PolicyYaml; // saved as desired after the valid apply
+        agent.SandboxPolicyVersionId = 2;
+        var runtime = _t.Runtime();
+        _t._host.Generation = "gateway-2@planned";
+
+        var start = await runtime.StartAsync("agent1", default);
+
+        Assert.True(start.Ok, start.Message);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("applied", 1, "gateway-2@planned"), (record.State, record.Applied!.PolicyVersionId, record.Applied.GatewayGeneration));
+        Assert.Empty(_t._broker.Deletes); // no revoke fanout
+    }
+
     [Theory]
     [InlineData("policy_row", StockManagedSignerPolicy.Missing)]
     [InlineData("hash", StockManagedSignerPolicy.Mismatch)]

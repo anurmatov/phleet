@@ -104,26 +104,32 @@ def gateway_config(config_path):
         if storage is invalid or middleware is invalid:
             return unknown
     except ModuleNotFoundError:  # Python < 3.11: plain tables and [[arrays]] with basic-string/integer/boolean values only
-        storage, middleware, current = None, None, None
+        storage, middleware, current, table = None, None, None, ""
+        relevant = ("openshell.gateway.credential_storage", "openshell.supervisor.middleware")
         for raw in text.splitlines():
             line = raw.split("#", 1)[0].strip()
             array = re.fullmatch(r"\[\[\s*([A-Za-z0-9_.-]+)\s*\]\]", line)
             header = array or re.fullmatch(r"\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
             if header:
-                name, current = header.group(1), None
-                if name == "openshell.gateway.credential_storage" and not array and storage is None:
+                table, current = header.group(1), None
+                if table == "openshell.gateway.credential_storage" and not array and storage is None:
                     storage = current = {}
-                elif name == "openshell.supervisor.middleware" and array:
+                elif table == "openshell.supervisor.middleware" and array:
                     middleware = [] if middleware is None else middleware
                     current = {}
                     middleware.append(current)
-                elif name.startswith(("openshell.gateway.credential_storage", "openshell.supervisor")):
+                elif table.startswith(("openshell.gateway.credential_storage", "openshell.supervisor")):
                     return unknown  # a duplicate, mis-kinded or nested relevant table
                 continue
             key = line.split("=", 1)[0].strip()
             # #503 P1: an unsupported header (quoted, escaped or spaced keys), a non-bare key or a continuation line is
             # never skipped: tomllib may read it as relevant data, so the fallback fails closed instead.
             if line and (line.startswith("[") or "=" not in line or not re.fullmatch(r"[A-Za-z0-9_.-]+", key)):
+                return unknown
+            # #503 P1: an assignment that is, contains or sits under relevant data outside its parsed table (e.g. a root
+            # openshell = { supervisor = { middleware = [...] } } inline table) is never skipped either.
+            path = f"{table}.{key}" if table else key
+            if current is None and line and any(r == path or r.startswith(path + ".") or path.startswith(r + ".") for r in relevant):
                 return unknown
             if "credential_storage" in line or "middleware" in key or re.match(r"(openshell\.)?supervisor\b", key):
                 return unknown  # dotted keys or inline tables for relevant data are not parsed here

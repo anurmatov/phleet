@@ -1077,7 +1077,8 @@ stripped or resumed unsigned.
   refuses. Otherwise the backup fails with `coverage_incomplete: signer_tls_ca` and no COMPLETE. Malformed,
   duplicate or ambiguous registration data fails the same way under both parsers. The Python < 3.11 fallback
   refuses any header or key form it cannot parse (quoted, escaped or spaced keys, continuation lines) rather than
-  skipping it. No CA is moved automatically, and configs without the registration are unchanged.
+  skipping it. It also refuses any assignment to, inside or above the relevant tables outside their own headers,
+  such as a root `openshell = { supervisor = { … } }` inline table. No CA is moved automatically, and configs without the registration are unchanged.
 - **Signer metadata.** Control manifests record `stateDirectory`, `signerRegistration`, `signerCaConfigPath` and
   `signerCaEntry`. The three signer fields are explicit JSON nulls without a registration. Eligibility compares
   them with the snapshot's own parsed config. A registered CA whose exact configured path is missing from the

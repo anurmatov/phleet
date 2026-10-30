@@ -479,6 +479,42 @@ for parser in tomllib fallback; do
     eligible_at "$WORK/s0-escaped" "$WORK/control/after-s1.json"
 done
 
+# P1: an inline-table assignment to an ancestor of the relevant tables is the registration too (tomllib), never absence.
+printf 'openshell = { version = 2, supervisor = { middleware = [{ name = "stock-memory" }] } }\n' > "$WORK/signer-root-inline.toml"
+printf '[openshell]\nversion = 2\nsupervisor = { middleware = [{ name = "stock-memory" }] }\n' > "$WORK/signer-table-inline.toml"
+printf 'openshell = { version = 2, gateway = { credential_storage = { key_encryption_key_path = "%s" } }, supervisor = { middleware = [{ name = "stock-memory" }] } }\n' \
+  "$state/credentials/key-encryption-key.bin" > "$WORK/signer-root-inline-kek.toml"
+python3 - "$WORK"/signer-root-inline.toml "$WORK"/signer-table-inline.toml "$WORK"/signer-root-inline-kek.toml <<'PY' || fail "tomllib does not read the inline forms as the registration"
+import sys, tomllib
+for path in sys.argv[1:]:
+    assert tomllib.loads(open(path).read())["openshell"]["supervisor"]["middleware"] == [{"name": "stock-memory"}], path
+PY
+with_config "$plainkek" "$WORK/plain-inline" "$WORK/signer-root-inline-kek.toml"
+with_config "$snap" "$WORK/s0-inline" "$WORK/signer-root-inline-kek.toml"
+for parser in tomllib fallback; do
+  pp=""; [[ $parser == tomllib ]] || pp="$WORK/notoml"
+  for config in root-inline table-inline root-inline-kek; do
+    PYTHONPATH="$pp" refuse_for "coverage_incomplete: signer_tls_ca" "$parser: $config registration without a CA fails a positional backup" \
+      bash "$BACKUP" "$WORK/inline-$parser-$config" "$WORK/signer-$config.toml" "$state"
+    ! ls -d "$WORK/inline-$parser-$config"/gateway-* >/dev/null 2>&1 || fail "$parser $config left a snapshot"
+  done
+  # The fallback also cannot read this config's KEK, so its coverage list names that before signer_tls_ca.
+  PYTHONPATH="$pp" refuse_for "signer_tls_ca" "$parser: root inline registration without a CA fails a subscription backup" \
+    bash "$BACKUP" "$WORK/inline-sub-$parser" "$WORK/signer-root-inline-kek.toml" "$state" "${CTL[@]}"
+  reason=signer_tls_ca_not_covered; [[ $parser == tomllib ]] || reason="configured KEK is not covered"
+  PYTHONPATH="$pp" STUB_BODY=$(four 0 0 0 0) refuse_for "$reason" "$parser: plain refuses the root inline registration without a CA" \
+    plain_eligible "$WORK/plain-inline"
+  PYTHONPATH="$pp" refuse_for "$reason" "$parser: control refuses the root inline registration without a CA" \
+    eligible_at "$WORK/s0-inline" "$WORK/control/after-s1.json"
+done
+# Unrelated inline values keep working in the fallback: only relevant paths fail closed.
+{ cat "$WORK/gateway-kek.toml"; printf '\n[openshell.gateway]\nextra = { level = "info" }\n'; } > "$WORK/unrelated-inline.toml"
+for parser in tomllib fallback; do
+  pp=""; [[ $parser == tomllib ]] || pp="$WORK/notoml"
+  PYTHONPATH="$pp" expect 0 "$parser: an unrelated inline table keeps a config without the registration backing up" \
+    bash "$BACKUP" "$WORK/unrelated-$parser" "$WORK/unrelated-inline.toml" "$state"
+done
+
 # C13a: custody, marker and downgrade negatives for the plain branch; no restore or start side effect is possible here.
 STUB_BODY=$(four 0 1 0 1) refuse_for "subscription_state_unverified" "plain refuses while subscriptionBindings>0" plain_eligible "$plainkek"
 STUB_BODY=$(four 0 1 1 0) refuse_for "subscription_state_unverified" "plain refuses while unresolvedBindings>0" plain_eligible "$plainkek"

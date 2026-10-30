@@ -1419,6 +1419,53 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         _t._store.Get("agent1").AppliedRuntimeBinding = (record with { Applied = applied }).Serialize();
     }
 
+    [Fact]
+    public async Task Start_with_a_changed_provider_profile_is_refused_before_activation()
+    {
+        // Review S1: the scoped profile export is rehashed against the applied binding's pinned policy and the source.
+        WriteSource();
+        var binding = SubBinding("fleet-agent1-51515151", phase: "Stopped");
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding }));
+        WriteSourceMatching(binding);
+        _cli.ProfileYaml = "profile: changed-after-apply\n";
+
+        var result = await Runtime().StartAsync("agent1", default);
+
+        Assert.Equal((409, "provider_profile_hash_mismatch:codex-subscription-native"), (result.Status, result.Code));
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.Take(2).SequenceEqual(["profile", "export"]));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "start"]) || c.Args.Any(a => a.Contains(".fleet-activate")));
+        Assert.Equal("stopped", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+
+        _cli.ProfileYaml = "profile: synthetic\n"; // the pinned bytes again: Start proceeds
+        Assert.True((await Runtime().StartAsync("agent1", default)).Ok);
+    }
+
+    [Fact]
+    public async Task Expiry_during_start_activation_is_revoke_and_stop_never_applied()
+    {
+        // Review S2: the deadline passes while the daemon activates; Start must cut instead of committing applied.
+        WriteSource(expires: _clock.Now.AddMinutes(5));
+        var binding = SubBinding("fleet-agent1-52525252", phase: "Stopped", expires: _clock.Now.AddMinutes(5));
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding }));
+        WriteSourceMatching(binding);
+        _t.WriteAuthority("active");
+        _cli.Cli("ws-a").OnExec = script =>
+        {
+            if (script.Contains(".fleet-activate")) _clock.Now = _clock.Now.AddMinutes(6);
+            return script.Contains("-f \"$HOME/.fleet-staged\"") && !script.Contains('!') ? 0 : 0;
+        };
+
+        var result = await Runtime().StartAsync("agent1", default);
+
+        Assert.Equal("subscription_binding_expired", result.Code);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("revoked", "subscription_binding_expired"), (record.State, Assert.Single(record.Errors)));
+        Assert.Contains(_cli.Calls, c => c.Args.Any(a => a.Contains(".fleet-activate")));
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Equal("Stopped", _cli.Cli("ws-a").Sandboxes[binding.SandboxName].Phase);
+        Assert.Equal("revoked", System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!["State"]!.GetValue<string>());
+    }
+
     // ── C6: cleanup uses persisted tuples after source loss/change ──
 
     [Theory]

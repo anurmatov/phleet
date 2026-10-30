@@ -823,7 +823,32 @@ public sealed class StockOpenShellRuntime(
         if (source!.SourceSha256 != binding.Subscription.SourceSha256 || !SameIdentity(binding, source)) return StockSubscriptionBinding.Changed;
         if (await host.GatewayGenerationAsync(ct) is not { } generation || generation != source.GatewayGeneration)
             return StockSubscriptionBinding.ProviderUnverified;
+        // Review S1: the restricted profile is rehashed against the binding's pinned policy and the outside source.
+        if (await SubscriptionProfileFaultAsync(binding.PolicyVersionId, binding.Subscription.ProviderWorkspace, source.ProfileSha256, ct) is { } profile)
+            return profile;
         return await ProviderFaultAsync(binding.Subscription.ProviderWorkspace, binding.Provider, binding.Subscription.ProviderId, ct);
+    }
+
+    /// <summary>
+    /// The subscription profile exported in its persisted provider workspace must hash to the pinned value of the
+    /// binding's policy version, which must equal the outside source's <c>profileSha256</c>.
+    /// </summary>
+    private async Task<string?> SubscriptionProfileFaultAsync(int policyVersionId, string providerWorkspace, string sourceHash, CancellationToken ct)
+    {
+        SandboxPolicyVersion? policy;
+        try { policy = await store.LoadPolicyAsync(policyVersionId, ct); }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return "runtime_state_unavailable"; }
+        if (policy is null) return "sandbox_policy_version_not_found";
+        Dictionary<string, string>? pinned;
+        try { pinned = JsonSerializer.Deserialize<Dictionary<string, string>>(string.IsNullOrWhiteSpace(policy.ProviderProfileHashes) ? "{}" : policy.ProviderProfileHashes); }
+        catch (JsonException) { return "provider_profile_hashes_invalid"; }
+        const string profile = StockSubscriptionBinding.ProfileId;
+        if (pinned?.TryGetValue(profile, out var hash) != true) return "provider_profile_unpinned:" + profile;
+        if (hash != sourceHash) return StockSubscriptionBinding.ProviderUnverified;
+        var export = await cli.RunAsync(InWorkspace(providerWorkspace, ["profile", "export", profile, "-o", "yaml"]), null, LegTimeout, ct);
+        if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
+        var actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(export.Stdout)));
+        return actual == hash ? null : "provider_profile_hash_mismatch:" + profile;
     }
 
     /// <summary>The stock provider profiles this agent's apply attaches: the native key, then each outside service.</summary>
@@ -1597,6 +1622,12 @@ public sealed class StockOpenShellRuntime(
             record = record with { Applied = binding };
             await checkpoint(record);
         }
+        // Review S2: a subscription Start runs against its expiry deadline throughout; expiry at any point, including
+        // during or right after activation, is revoke-and-stop, never a committed applied state.
+        using var expiry = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (binding.Subscription is { } deadline) expiry.CancelAfter(Remaining(deadline.ExpiresAt));
+        ct = expiry.Token;
+        bool Expired() => binding.Subscription is { } s && Now >= s.ExpiresAt;
         if (binding.IsSubscription)
         {
             // #502: Start rechecks scope, expiry and the outside source on the actual target. Expiry is revoke-and-stop;
@@ -1617,12 +1648,14 @@ public sealed class StockOpenShellRuntime(
             && live.Phase is not ("Stopped" or "Completed" or "Error"))
             return (record, null, null, live.Phase == "Ready" ? Result.Done("started") : Result.Refused(409, "sandbox_not_stopped"));
         // Every boot is staged; the daemon starts only with this boot's activation.
-        if (await StageAsync(binding, ct) is { } staged) return await HoldStoppedAsync(record, binding, staged, [], ct);
+        if (await StageAsync(binding, ct) is { } staged)
+            return Expired() ? await ExpireAsync(agent.Name, record) : await HoldStoppedAsync(record, binding, staged, [], ct);
         // #502: the subscription tuple is revalidated immediately before activation; expiry cuts instead.
         if (binding.IsSubscription && await RevalidateAsync(agent.Name, binding, ct) is { } changed)
-            return changed == StockSubscriptionBinding.Expired ? await ExpireAsync(agent.Name, record) : await HoldStoppedAsync(record, binding, changed, [], ct);
+            return changed == StockSubscriptionBinding.Expired || Expired() ? await ExpireAsync(agent.Name, record) : await HoldStoppedAsync(record, binding, changed, [], ct);
         if (await ActivateAsync(binding, ct) is { } fault)
-            return await HoldStoppedAsync(record, binding, fault, [], ct);
+            return Expired() ? await ExpireAsync(agent.Name, record) : await HoldStoppedAsync(record, binding, fault, [], ct);
+        if (Expired()) return await ExpireAsync(agent.Name, record);
         return (record with { State = "applied", Errors = [] }, null, null, Result.Done("started"));
     }
 
@@ -1701,20 +1734,25 @@ public sealed class StockOpenShellRuntime(
     public async Task CheckSubscriptionExpiryAsync(string name, CancellationToken ct)
     {
         if (!Enabled) return;
+        // Review L2: an unreadable state is a reported hold with a stable category, never a silent pass.
         Agent? agent;
         try { agent = await store.LoadAsync(name, ct); }
-        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return; }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException)
+        { logger.LogWarning("Managed subscription expiry check for {Agent}: {Category}", name, "subscription_expiry_state_unavailable"); return; }
         if (agent is null) return;
         ManagedRecord record;
         try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
-        catch (JsonException) { return; }
+        catch (JsonException)
+        { logger.LogWarning("Managed subscription expiry check for {Agent}: {Category}", name, "subscription_expiry_record_unreadable"); return; }
         if (record.State is "needs_attention" or "revoked") return;
         var now = Now;
         if (!new[] { record.Applied, record.Candidate }.Any(b => b?.Subscription is { } s && s.ExpiresAt <= now)) return;
         if (record.Operation is { } op && OperationLive(agent.Name, op)) return;
-        await RunAsync(name, "expiry", async (_, current, _, _) =>
+        var result = await RunAsync(name, "expiry", async (_, current, _, _) =>
             current.State is "needs_attention" or "revoked" ? (current, null, null, Result.Refused(409, current.State))
             : await ExpireAsync(name, current), CancellationToken.None);
+        if (result.Code != StockSubscriptionBinding.Expired)
+            logger.LogWarning("Managed subscription expiry check for {Agent}: {Category}", name, "subscription_expiry_held:" + result.Code);
     }
 
     // ── #502 subscription retirement: verified cut, archive, then one atomic CAS ──
@@ -1806,6 +1844,8 @@ public sealed class StockOpenShellRuntime(
                         File.Move(temp, path, overwrite: false);
                     }
                     finally { if (File.Exists(temp)) File.Delete(temp); }
+                    // Review L1: the rename itself is made durable before the CAS can point at the archive.
+                    if (!SyncDirectory(directory)) return (null, "archive_directory_sync_failed:" + tuple.Epoch.ToString("N"));
                 }
                 var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
                 if (AuthorityEntry(path) != true || Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))) != hash
@@ -2560,6 +2600,27 @@ public sealed class StockOpenShellRuntime(
 
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "open", SetLastError = true)]
     private static extern int LibcOpen(string path, int flags);
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int LibcFsync(int fd);
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "close", SetLastError = true)]
+    private static extern int LibcClose(int fd);
+
+    /// <summary>fsync of a directory (O_RDONLY|O_CLOEXEC) so a rename inside it is durable; true off Linux.</summary>
+    internal static bool SyncDirectory(string path)
+    {
+        if (!OperatingSystem.IsLinux()) return true;
+        try
+        {
+            var fd = LibcOpen(path, 0x80000);
+            if (fd < 0) return false;
+            var synced = LibcFsync(fd) == 0;
+            LibcClose(fd);
+            return synced;
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return false; }
+    }
 
     /// <summary>
     /// Regular-file proof without following or blocking: Linux opens O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, so a

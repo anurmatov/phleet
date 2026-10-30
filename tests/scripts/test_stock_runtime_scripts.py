@@ -55,16 +55,18 @@ class RolloutGuardTests(unittest.TestCase):
         result = self.run_guard("--dockerfile", str(ROOT / "src/Fleet.Orchestrator/Dockerfile"))
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_only_the_opt_in_cli_install_brings_and_checks_ssh(self):
-        # #503 W6: the pinned `sandbox upload` spawns external ssh. The image build is the dynamic check
-        # (scripts/test-stock-upload-transport.sh); this keeps the install inside the opt-in branch.
+    def test_only_the_opt_in_cli_install_brings_and_checks_ssh_and_git(self):
+        # #503 W6/W7: the pinned `sandbox upload` spawns external ssh and, filtering by default, external git.
+        # The image build is the dynamic check (scripts/test-stock-upload-transport.sh); this keeps both
+        # installs inside the opt-in branch.
         text = (ROOT / "src/Fleet.Orchestrator/Dockerfile").read_text()
         start = text.index('RUN if [ -n "$OPENSHELL_CLI_URL$OPENSHELL_CLI_SHA256" ]; then')
         branch = text[start:text.index("\n    fi", start)]
-        self.assertIn("apt-get install -y --no-install-recommends openssh-client", branch)
-        self.assertIn("command -v ssh >/dev/null && ssh -V", branch)
+        self.assertIn("apt-get install -y --no-install-recommends openssh-client git", branch)
+        self.assertIn("command -v ssh >/dev/null && ssh -V && command -v git >/dev/null && git --version", branch)
         code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        self.assertEqual(code.count("openssh-client"), branch.count("openssh-client"))
+        for package in ("openssh-client", " git"):
+            self.assertEqual(code.count(package), branch.count(package), package)
 
     def test_incapable_target_needs_zero_counts(self):
         zero = '{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0,"subscriptionBindings":0}'

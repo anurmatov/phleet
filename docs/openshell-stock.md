@@ -549,8 +549,10 @@ combined with `AuthorityDirectory`: that combination refuses at startup. Without
 nothing changes. The orchestrator image carries
 `LABEL org.phleet.managed-stock-runtime=1`; the stock CLI is installed only with the
 `OPENSHELL_CLI_URL` and `OPENSHELL_CLI_SHA256` build args (digest and version checked). Those builds also install
-`openssh-client`, because the pinned CLI's `sandbox upload` spawns the external `ssh`; the default image has no ssh.
-`scripts/test-stock-upload-transport.sh` (CI) checks both images and a pinned-option subsystem upload.
+`openssh-client` and `git`: the pinned CLI's `sandbox upload` keeps its default `.gitignore` filtering, so it runs
+`git rev-parse` before it spawns `ssh`, even for a source outside any repository. The default image has neither.
+`scripts/test-stock-upload-transport.sh` (CI) checks both images, the real pinned CLI's default upload planning for
+a directory and a file, and a pinned-option subsystem upload.
 
 **First-party MCP routes.** Besides memory, managed apply routes the existing `fleet-temporal` and
 `fleet-telegram` HTTP MCP endpoints when `managed-authority.json` names a `ServiceHosts` entry for

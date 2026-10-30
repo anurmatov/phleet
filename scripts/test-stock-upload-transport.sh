@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# #503 W6: the opt-in orchestrator image carries the external `ssh` that the pinned stock CLI spawns for
-# `sandbox upload`, and that ssh carries a subsystem upload with the pinned option set
-# (OpenShell bdb956f2: openshell-cli ssh.rs ssh_upload_command, openshell-core forward.rs sandbox_ssh_args).
+# #503 W6/W7: the opt-in orchestrator image carries the external tools the pinned stock CLI spawns for
+# `sandbox upload`: `git rev-parse` for its default .gitignore filtering (openshell-cli run.rs
+# discover_git_repo_root, run even outside a repository) and `ssh` for the transport (ssh.rs
+# ssh_upload_command, openshell-core forward.rs sandbox_ssh_args; OpenShell bdb956f2).
 #
-# Synthetic only: a stub CLI served on loopback for the build, a throwaway sshd container on a private
-# network and local image tags. The stub stands in for the real CLI, so this proves the image's transport
-# prerequisite, not a gateway session, an ssh-proxy or a native upload.
+# The build uses the real pinned CLI from the public v0.1.5 release (archive and binary digests checked),
+# served on loopback. The planning check runs that CLI's default upload (filtering on, no --no-git-ignore) for
+# the adapter's source shapes (a regular directory and a single file) against an unreachable gateway.
+# The transport check runs the pinned ssh invocation into a throwaway sshd on a private network.
+# Local image tags only; no gateway session, ssh-proxy, credential or native upload is exercised.
 #
 #   test-stock-upload-transport.sh [DEFAULT_IMAGE]   # DEFAULT_IMAGE: the image built without the opt-in args
 set -euo pipefail
@@ -29,11 +32,18 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
+# The pinned stock CLI 0.1.5: release archive and the binary inside it.
+CLI_ARCHIVE_URL="https://github.com/NVIDIA/OpenShell/releases/download/v0.1.5/openshell-x86_64-unknown-linux-musl.tar.gz"
+CLI_ARCHIVE_SHA="ca1ad6e6fbb4a6cd407e95763391b8ecff02912e7d9c467e7ca22696fe80af69"
+CLI_SHA="446f766842d2bf03abc37b56a3f5a3e46b96140b5b6c305d3f168d67921fd271"
+
 # 1. Build the opt-in image. The Dockerfile itself checks the CLI digest and version, then installs
-#    openssh-client and fails the build without a working ssh.
+#    openssh-client and git and fails the build without either.
 mkdir -p "$WORK/cli"
-printf '#!/bin/sh\necho "openshell 0.1.5"\n' > "$WORK/cli/openshell"
-CLI_SHA="$(sha256sum "$WORK/cli/openshell" | cut -d' ' -f1)"
+curl -fsSL "$CLI_ARCHIVE_URL" -o "$WORK/cli.tar.gz"
+echo "$CLI_ARCHIVE_SHA  $WORK/cli.tar.gz" | sha256sum -c - >/dev/null || fail "CLI archive digest mismatch"
+tar -xzf "$WORK/cli.tar.gz" -C "$WORK/cli" openshell
+echo "$CLI_SHA  $WORK/cli/openshell" | sha256sum -c - >/dev/null || fail "CLI binary digest mismatch"
 PORT=$((20000 + RANDOM % 20000))
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$WORK/cli" >/dev/null 2>&1 &
 HTTP_PID=$!
@@ -41,17 +51,40 @@ for _ in $(seq 1 50); do curl -fsS -o /dev/null "http://127.0.0.1:$PORT/openshel
 docker build --network host -f "$ROOT/src/Fleet.Orchestrator/Dockerfile" \
   --build-arg "OPENSHELL_CLI_URL=http://127.0.0.1:$PORT/openshell" --build-arg "OPENSHELL_CLI_SHA256=$CLI_SHA" \
   -t "$OPTIN_IMAGE" "$ROOT"
-pass "opt-in image builds with the verified CLI and openssh-client"
+pass "opt-in image builds with the pinned CLI, openssh-client and git"
 
-# 2. Dependency: ssh only in the opt-in image.
-docker run --rm --entrypoint sh "$OPTIN_IMAGE" -c 'command -v ssh && ssh -V' || fail "opt-in image has no working ssh"
-pass "opt-in image has ssh"
-if docker run --rm --entrypoint sh "$DEFAULT_IMAGE" -c 'command -v ssh' >/dev/null 2>&1; then
-  fail "default image unexpectedly has ssh"
-fi
-pass "default image has no ssh (opt-in only)"
+# 2. Dependency: ssh and git only in the opt-in image.
+docker run --rm --entrypoint sh "$OPTIN_IMAGE" -c 'command -v ssh && ssh -V && command -v git && git --version' \
+  || fail "opt-in image lacks a working ssh or git"
+pass "opt-in image has ssh and git"
+for tool in ssh git; do
+  if docker run --rm --entrypoint sh "$DEFAULT_IMAGE" -c "command -v $tool" >/dev/null 2>&1; then
+    fail "default image unexpectedly has $tool"
+  fi
+done
+pass "default image has neither ssh nor git (opt-in only)"
 
-# 3. Supported upload: the pinned upload invocation from the opt-in image, through a ProxyCommand,
+# 3. Real CLI default local planning (Git filtering on, as the adapter calls it) for a regular directory
+#    and a single file. Planning succeeds when the CLI warns that the source is outside a Git work tree
+#    and starts the upload; only then does the unreachable gateway end the command. The control without
+#    git on PATH must stop at planning.
+plan() { # $1: an environment prefix applied to the CLI invocation only
+  printf '%s\n' 'mkdir -p /tmp/bundle/app/sub && echo synthetic > /tmp/bundle/app/sub/file && echo {} > /tmp/bundle/enrollment.json' \
+    "for source in /tmp/bundle/app /tmp/bundle/enrollment.json; do $1 openshell --gateway-endpoint http://127.0.0.1:9 sandbox upload probe \"\$source\" /sandbox/dst 2>&1 || true; done"
+}
+planned="$(docker run --rm --entrypoint sh "$OPTIN_IMAGE" -c "$(plan '')")"
+for source in /tmp/bundle/app /tmp/bundle/enrollment.json; do
+  grep -qF "Warning: $source is outside a Git work tree; uploading without Git filtering" <<<"$planned" \
+    || fail "real CLI planning did not resolve $source as outside a Git work tree: $planned"
+  grep -qF "Uploading $source -> sandbox:/sandbox/dst" <<<"$planned" || fail "real CLI did not start uploading $source: $planned"
+done
+! grep -qF "Git filtering failed" <<<"$planned" || fail "real CLI Git filtering failed in the opt-in image: $planned"
+pass "real CLI default planning passes for a regular directory and a single file"
+control="$(docker run --rm --entrypoint sh "$OPTIN_IMAGE" -c "$(plan 'env PATH=/usr/local/bin')")"
+grep -qF "failed to run git rev-parse" <<<"$control" || fail "control without git did not stop at planning: $control"
+pass "control: without git the real CLI stops at planning (failed to run git rev-parse)"
+
+# 4. Supported upload: the pinned upload invocation from the opt-in image, through a ProxyCommand,
 #    into a throwaway sshd whose openshell-upload-v1 subsystem stores stdin.
 mkdir -p "$WORK/keys" "$WORK/client"
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/client/id" >/dev/null

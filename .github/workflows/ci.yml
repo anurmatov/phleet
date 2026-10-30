@@ -95,8 +95,9 @@ jobs:
           docker build -f src/Fleet.Orchestrator/Dockerfile -t orchestrator-test:pr .
           env -u ORCHESTRATOR_AUTH_TOKEN bash scripts/check-stock-runtime-rollout.sh --image orchestrator-test:pr
 
-      # #503 W6: the opt-in image (stub CLI) carries the external ssh that the pinned `sandbox upload` spawns,
-      # the default image does not, and that ssh carries a pinned-option subsystem upload into a throwaway sshd.
+      # #503 W6/W7: the opt-in image (real pinned CLI, digests checked) carries the git and ssh that the pinned
+      # `sandbox upload` spawns, the default image does not, the CLI's default upload planning passes for the
+      # adapter's source shapes, and ssh carries a pinned-option subsystem upload into a throwaway sshd.
       # Local tags and a private network only; no gateway, credential or native upload.
       - name: Opt-in orchestrator image upload transport
         run: bash scripts/test-stock-upload-transport.sh orchestrator-test:pr

@@ -119,4 +119,97 @@ public sealed class ManagedSandboxNameTests : IDisposable
         Assert.Contains(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "list"])); // absence proven, not assumed
         Assert.DoesNotContain(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "stop"]) || c.Args.Contains("delete"));
     }
+
+    // ── #503 W4: post-create adoption needs the candidate's own agent and epoch labels ──
+
+    private bool Touches(ManagedStockRuntimeAdapterTests.Call call, string name) =>
+        call.Args.Contains(name) && (call.Args.Take(2).SequenceEqual(["sandbox", "stop"]) || call.Args.Take(2).SequenceEqual(["sandbox", "delete"])
+            || call.Args.Take(2).SequenceEqual(["sandbox", "start"]) || call.Args.Take(2).SequenceEqual(["sandbox", "exec"])
+            || call.Args.Take(2).SequenceEqual(["sandbox", "upload"]) || call.Args.Contains("detach") || call.Args.Contains("attach"));
+
+    [Theory]
+    [InlineData("foreign_labels")]
+    [InlineData("no_labels")]
+    public async Task A_foreign_sandbox_appearing_between_the_absence_proof_and_create_is_never_adopted_or_cleaned(string kind)
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = ["exited"];
+        var foreignId = Guid.NewGuid().ToString();
+        string? raced = null;
+        _t._cli.BeforeCreate = name =>
+        {
+            // Absent at the proof, then another owner takes the name; the pinned server refuses our duplicate create.
+            raced = name;
+            _t._cli.Sandboxes[name] = (foreignId, "Ready");
+            if (kind == "foreign_labels") _t._cli.Labels[name] = new() { ["fleet.agent"] = "intruder", ["fleet.epoch"] = new string('0', 32) };
+        };
+        var runtime = _t.Runtime();
+
+        var apply = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal("sandbox_owner_unverified", apply.Code);
+        var held = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", held.State);
+        Assert.Equal(raced, held.Candidate!.SandboxName);
+        Assert.True(string.IsNullOrEmpty(held.Candidate.SandboxId)); // the foreign UUID is never recorded
+        Assert.Contains("sandbox_create_unknown", held.Errors);
+        Assert.Empty(_t._broker.Puts);
+
+        // The supported revoke cannot prove the name absent and stays held; it still never touches the foreign sandbox.
+        var revoke = await runtime.RevokeAsync("agent1", default);
+
+        Assert.False(revoke.Ok);
+        Assert.Equal("needs_attention", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.DoesNotContain(_t._cli.Calls, c => Touches(c, raced!));
+        Assert.Equal((foreignId, "Ready"), _t._cli.Sandboxes[raced!]);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("other_agent")]
+    [InlineData("other_epoch")]
+    [InlineData("agent_only")]
+    public async Task A_created_sandbox_without_this_epochs_exact_identity_is_held_untouched(string labels)
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = ["exited"];
+        _t._cli.LabelsOverride = labels switch
+        {
+            "missing" => new(),
+            "other_agent" => new() { ["fleet.agent"] = "agent2", ["fleet.epoch"] = new string('1', 32) },
+            "other_epoch" => new() { ["fleet.agent"] = "agent1", ["fleet.epoch"] = new string('0', 32) },
+            _ => new() { ["fleet.agent"] = "agent1" },
+        };
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal((502, "sandbox_owner_unverified"), (apply.Status, apply.Code));
+        var held = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.True(string.IsNullOrEmpty(held.Candidate!.SandboxId));
+        Assert.DoesNotContain(_t._cli.Calls, c => Touches(c, held.Candidate.SandboxName));
+        Assert.Equal("Ready", _t._cli.Sandboxes[held.Candidate.SandboxName].Phase);
+    }
+
+    [Fact]
+    public async Task A_genuinely_owned_sandbox_after_a_failed_create_is_recorded_stopped_and_revocable()
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = ["exited"];
+        _t._cli.CreateFailsAfterAllocating = true;
+        var runtime = _t.Runtime();
+
+        var apply = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal("sandbox_create_unknown", apply.Code);
+        var held = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        var name = held.Candidate!.SandboxName;
+        Assert.Equal(_t._cli.Sandboxes[name].Id, held.Candidate.SandboxId); // its own labels: recorded for cleanup
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", name]));
+        Assert.Equal("Stopped", _t._cli.Sandboxes[name].Phase);
+
+        var revoke = await runtime.RevokeAsync("agent1", default);
+
+        Assert.True(revoke.Ok, revoke.Message);
+        Assert.Equal("revoked", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
 }

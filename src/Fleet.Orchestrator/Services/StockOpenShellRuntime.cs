@@ -1415,13 +1415,21 @@ public sealed class StockOpenShellRuntime(
                 "--no-auto-providers",
                 "--restart-policy", "never", "--label", "fleet.agent=" + agent.Name, "--label", "fleet.epoch=" + epoch.ToString("N"),
                 "--env", "FLEET_STOCK_STAGED=1", "--detach", "--", Entrypoint]), null, TimeSpan.FromMinutes(5), ct);
-            // Whatever create reported, record any sandbox that now exists so cleanup keeps its identity.
+            // Whatever create reported, record the sandbox that now exists so cleanup keeps its identity, but only once it
+            // carries exactly this candidate's agent and epoch labels. #503 W4: the pre-create absence proof is a snapshot,
+            // so a same-name foreign sandbox can appear before create; its UUID is never recorded, stopped or detached.
             using (var observe = new CancellationTokenSource(FanoutTimeout))
-                if (await GetAsync(candidate, observe.Token) is { } made)
+                switch (await CreatedSandboxAsync(candidate, agent.Name, observe.Token))
                 {
-                    candidate = candidate with { SandboxId = made.Id };
-                    applying = applying with { Candidate = candidate };
-                    await checkpoint(applying);
+                    case ({ } owned, _):
+                        candidate = candidate with { SandboxId = owned.Id };
+                        applying = applying with { Candidate = candidate };
+                        await checkpoint(applying);
+                        break;
+                    case (null, true):
+                        logger.LogWarning("Managed apply for {Agent}: a sandbox named {Sandbox} exists without this epoch's identity; held, untouched",
+                            agent.Name, candidate.SandboxName);
+                        return Hold(applying, 502, "sandbox_owner_unverified", create.ExitCode == 0 && !create.TimedOut ? [] : ["sandbox_create_unknown"]);
                 }
             if (Expired()) return await CutAsync(applying);
             if (create.ExitCode != 0 || create.TimedOut || string.IsNullOrEmpty(candidate.SandboxId))
@@ -1497,9 +1505,10 @@ public sealed class StockOpenShellRuntime(
 
     /// <summary>
     /// #503 W3: the stock-valid sandbox name of one agent epoch: <c>fl-</c> plus 16 lowercase hex of SHA-256 over the full
-    /// agent name and the full epoch (domain separated), 19 characters for every supported agent name. Never a truncation:
-    /// distinct agents or epochs, including shared long prefixes, get distinct names, and ownership stays in the persisted
-    /// binding (name and UUID) and the <c>fleet.agent</c>/<c>fleet.epoch</c> labels.
+    /// agent name and the full epoch (domain separated), 19 characters for every supported agent name and never a
+    /// truncation. A 64-bit prefix is not a uniqueness guarantee, so the name is never identity on its own: apply proves it
+    /// absent before create and adopts the created sandbox only with this epoch's labels (<see cref="CreatedSandboxAsync"/>);
+    /// ownership stays in the persisted binding (name and UUID) and the <c>fleet.agent</c>/<c>fleet.epoch</c> labels.
     /// </summary>
     internal static string SandboxNameFor(string agentName, Guid epoch)
     {
@@ -2309,6 +2318,30 @@ public sealed class StockOpenShellRuntime(
             return string.IsNullOrEmpty(id) || document.RootElement.GetProperty("name").GetString() != name ? null : (id, phase ?? "Unknown");
         }
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return null; }
+    }
+
+    /// <summary>
+    /// #503 W4: the sandbox found under a fresh candidate's name after create, adopted only when its stock labels are exactly
+    /// <c>fleet.agent=&lt;agent&gt;</c> and <c>fleet.epoch=&lt;candidate epoch&gt;</c> as create set them. Foreign is true when a
+    /// same-name sandbox exists without that identity (missing, other or unreadable labels): never recorded or cleaned up.
+    /// </summary>
+    private async Task<((string Id, string Phase)? Owned, bool Foreign)> CreatedSandboxAsync(ManagedBinding candidate, string agentName, CancellationToken ct)
+    {
+        if (ScopeFault(candidate) is not null) return (null, false);
+        var run = await cli.RunAsync(Scoped(candidate, ["sandbox", "get", candidate.SandboxName, "-o", "json"]), null, LegTimeout, ct);
+        if (run.ExitCode != 0 || run.TimedOut) return (null, false);
+        try
+        {
+            using var document = JsonDocument.Parse(run.Stdout);
+            var root = document.RootElement;
+            var id = root.GetProperty("id").GetString();
+            if (string.IsNullOrEmpty(id) || root.GetProperty("name").GetString() != candidate.SandboxName) return (null, true);
+            string? Label(string key) => root.TryGetProperty("labels", out var labels) && labels.ValueKind == JsonValueKind.Object
+                && labels.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            return Label("fleet.agent") == agentName && Label("fleet.epoch") == candidate.Epoch.ToString("N")
+                ? ((id, root.GetProperty("phase").GetString() ?? "Unknown"), false) : (null, true);
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return (null, true); }
     }
 
     /// <summary>Bounded, best-effort label read of the binding's containers; never fails the operation.</summary>

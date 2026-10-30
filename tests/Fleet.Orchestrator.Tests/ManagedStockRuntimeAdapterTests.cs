@@ -1150,7 +1150,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("logs", _) => SwapOnLogs ? Swap(Name(1)) : new(0, "line\n"),
                 ("sandbox", "create") => Create(args),
                 ("sandbox", "get") => Sandboxes.TryGetValue(Name(2), out var s)
-                    ? new(0, JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase }))
+                    ? new(0, Labels.TryGetValue(Name(2), out var labels)
+                        ? JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase, labels })
+                        : JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase }))
                     : NameTaken ? new(0, JsonSerializer.Serialize(new { id = Guid.NewGuid().ToString(), name = Name(2), phase = "Ready" })) : new(1, ""),
                 ("sandbox", "start") => Phase(Name(2), "Ready"),
                 ("sandbox", "stop") => Phase(Name(2), "Stopped"),
@@ -1169,9 +1171,14 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             if (args.Contains("--upload") && args.Contains("--")) return new(2, "");
             OnCreate?.Invoke();
             var name = args[args.ToList().IndexOf("--name") + 1];
-            // #503 W3: the pinned server's first spec validation (InvalidArgument, nothing allocated).
-            if (CreateRejects || !StockSandboxName(name)) return new(1, "");
+            BeforeCreate?.Invoke(name);
+            // #503 W3: the pinned server's first spec validation (InvalidArgument, nothing allocated); a taken name refuses too.
+            if (CreateRejects || !StockSandboxName(name) || Sandboxes.ContainsKey(name)) return new(1, "");
             Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready"); // the explicit launcher waits, staged, without a daemon
+            // #503 W4: the stock labels create set, as `sandbox get -o json` reports them.
+            Labels[name] = LabelsOverride ?? args.Select((a, i) => (a, i)).Where(p => p.a == "--label").Select(p => args[p.i + 1].Split('=', 2))
+                .ToDictionary(kv => kv[0], kv => kv[1]);
+            if (CreateFailsAfterAllocating) return new(1, "");
             return CreateTimesOut ? new(-1, "", TimedOut: true) : new(0, "");
         }
 
@@ -1180,6 +1187,14 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public bool CreateRejects;
         /// <summary>Every name is already taken by a foreign sandbox (a name collision).</summary>
         public bool NameTaken;
+        /// <summary>Labels per sandbox name as the pinned <c>sandbox get -o json</c> reports them (absent: no labels key).</summary>
+        public readonly Dictionary<string, Dictionary<string, string>> Labels = new();
+        /// <summary>Labels the next created sandbox carries instead of the requested ones (a mismatched identity).</summary>
+        public Dictionary<string, string>? LabelsOverride;
+        /// <summary>Runs with the requested name just before create validates it (a list/create race).</summary>
+        public Action<string>? BeforeCreate;
+        /// <summary>Create allocates the requested, labelled sandbox and then reports failure (a genuine owned failure).</summary>
+        public bool CreateFailsAfterAllocating;
 
         /// <summary>Pinned openshell-server validate_sandbox_name: 1–19 chars, a DNS-1123 label without consecutive hyphens.</summary>
         internal static bool StockSandboxName(string name) =>

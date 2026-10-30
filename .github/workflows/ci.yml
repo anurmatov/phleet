@@ -95,6 +95,11 @@ jobs:
           docker build -f src/Fleet.Orchestrator/Dockerfile -t orchestrator-test:pr .
           env -u ORCHESTRATOR_AUTH_TOKEN bash scripts/check-stock-runtime-rollout.sh --image orchestrator-test:pr
 
+      # #502: focused inert subscription rollback guard and snapshot regressions (stub preflight, synthetic
+      # files only; no runtime, deployment or credential authority).
+      - name: Subscription rollout guard and snapshot regressions
+        run: bash scripts/test-stock-subscription-rollout.sh
+
   # `npm test` is `node --test` over TypeScript sources, which needs Node >= 22.18 (type stripping
   # on by default) — the image build uses node:20 and only type-checks the tests.
   dashboard-tests:

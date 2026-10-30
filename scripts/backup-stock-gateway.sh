@@ -3,6 +3,16 @@
 # daily host backup job and before any gateway configuration change or upgrade.
 #
 #   backup-stock-gateway.sh BACKUP_DIR CONFIG_FILE [STATE_DIR]   # STATE_DIR defaults to /var/lib/openshell
+#   backup-stock-gateway.sh BACKUP_DIR CONFIG_FILE [STATE_DIR] \
+#     --subscription-source FILE --managed-binding FILE --refresh-observation FILE   # #502 subscription
+#
+# #502: a managed subscription fixture additionally supplies, all three or none, the outside
+# subscription.json, the operator-exported byte copy of the owned agent's applied-runtime-binding JSON
+# (the CAS value) and the independently retained refresh observation. They are copied as EVIDENCE ONLY
+# to control/ with control/MANIFEST.json (capture time, identities, source/binding digests, native
+# epochs, refresh times); restore never imports them. A missing, foreign-owned, group/other-accessible,
+# symlinked, inconsistent or changed control input fails without COMPLETE. No live DB query or
+# credential read is added; API/manual positional invocation is unchanged.
 #
 # Coverage is complete or the run fails: gateway.db, the gateway TOML and every trust file it uses
 # (TLS server cert/key, the gateway CA guest_tls_ca names, client CA, JWT signing/public key and kid
@@ -21,10 +31,25 @@
 set -euo pipefail
 umask 077
 
-[[ $# -ge 2 && $# -le 3 ]] || { echo "usage: $0 BACKUP_DIR CONFIG_FILE [STATE_DIR]" >&2; exit 2; }
-BACKUP_DIR=$1
-CONFIG_FILE=$2
-STATE_DIR=${3:-/var/lib/openshell}
+usage() { echo "usage: $0 BACKUP_DIR CONFIG_FILE [STATE_DIR] [--subscription-source FILE --managed-binding FILE --refresh-observation FILE]" >&2; exit 2; }
+positional=()
+SUB_SOURCE="" SUB_BINDING="" SUB_REFRESH=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --subscription-source) [[ $# -ge 2 ]] || usage; SUB_SOURCE=$2; shift 2 ;;
+    --managed-binding) [[ $# -ge 2 ]] || usage; SUB_BINDING=$2; shift 2 ;;
+    --refresh-observation) [[ $# -ge 2 ]] || usage; SUB_REFRESH=$2; shift 2 ;;
+    --*) usage ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+[[ ${#positional[@]} -ge 2 && ${#positional[@]} -le 3 ]] || usage
+if [[ -n "$SUB_SOURCE$SUB_BINDING$SUB_REFRESH" && ( -z "$SUB_SOURCE" || -z "$SUB_BINDING" || -z "$SUB_REFRESH" ) ]]; then
+  echo "usage: --subscription-source, --managed-binding and --refresh-observation go together" >&2; exit 2
+fi
+BACKUP_DIR=${positional[0]}
+CONFIG_FILE=${positional[1]}
+STATE_DIR=${positional[2]:-/var/lib/openshell}
 KEEP=7
 
 mkdir -p "$BACKUP_DIR"
@@ -57,14 +82,15 @@ trap 'on_signal 143' TERM
 partial=$(mktemp -d "$BACKUP_DIR/.partial-$name.XXXXXX")
 created=true
 
-python3 - "$STATE_DIR" "$CONFIG_FILE" "$partial" <<'PY' || { echo "backup_failed: partial snapshot deleted" >&2; exit 1; }
-import hashlib, os, shutil, sqlite3, stat, sys
+python3 - "$STATE_DIR" "$CONFIG_FILE" "$partial" "$SUB_SOURCE" "$SUB_BINDING" "$SUB_REFRESH" <<'PY' || { echo "backup_failed: partial snapshot deleted" >&2; exit 1; }
+import datetime, hashlib, json, os, re, shutil, sqlite3, stat, sys
 def anchored(path):
     """Resolve OS-level links above the leaf (macOS /var -> /private/var) but keep the leaf itself."""
     path = os.path.abspath(path)
     return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
 
 state, config, out = anchored(sys.argv[1]), anchored(sys.argv[2]), sys.argv[3]
+control = [anchored(p) for p in sys.argv[4:7]] if sys.argv[4] else []
 REQUIRED = ["tls/gateway.pem", "tls/gateway-key.pem", "tls/ca.pem", "tls/client-ca.pem",
             "tls/jwt/signing.pem", "tls/jwt/public.pem", "tls/jwt/kid"]
 
@@ -87,6 +113,61 @@ if not regular(config) or linked(config):
     missing.append("CONFIG_FILE")
 if missing:
     sys.exit("coverage_incomplete: " + ", ".join(missing))
+
+# #502 control inputs: evidence-only copies, never restored or imported.
+CONTROL_NAMES = ["subscription.json", "applied-runtime-binding.json", "refresh-observation.json"]
+def strict(raw):
+    def pairs(items):
+        keys = [k for k, _ in items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate key")
+        return dict(items)
+    return json.loads(raw, object_pairs_hook=pairs)
+def utc(value, nullable=False):
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?Z", value):
+        raise ValueError("timestamp")
+    return value
+def control_manifest(paths):
+    for path in paths:
+        st = os.lstat(path) if os.path.lexists(path) else None
+        if st is None or not stat.S_ISREG(st.st_mode) or linked(path):
+            sys.exit("control_input_invalid: missing or not a regular non-linked file")
+        if st.st_uid != os.geteuid() or st.st_mode & 0o077:
+            sys.exit("control_input_invalid: foreign owner or group/other access")
+    raw = [open(p, "rb").read() for p in paths]
+    try:
+        source, binding, refresh = (strict(r.decode("utf-8")) for r in raw)
+        if set(refresh) != {"providerId", "ownerGeneration", "statusObservedAtUtc", "providerLastRefreshAtUtc", "nextRefreshAtUtc"}:
+            raise ValueError("refresh fields")
+        utc(refresh["statusObservedAtUtc"]); utc(refresh["nextRefreshAtUtc"]); utc(refresh["providerLastRefreshAtUtc"], nullable=True)
+        if source.get("version") != 1 or source.get("purpose") != "compatibility_only":
+            raise ValueError("source")
+        identity = (source["providerId"], source["ownerGeneration"])
+        if (refresh["providerId"], refresh["ownerGeneration"]) != identity:
+            raise ValueError("refresh observation names another provider/owner generation")
+        tuples = [b for b in (binding.get("applied"), binding.get("candidate"), *(binding.get("superseded") or [])) if b]
+        if not any((t.get("subscription") or {}).get("providerId") == source["providerId"]
+                   and (t.get("subscription") or {}).get("ownerGeneration") == source["ownerGeneration"]
+                   and t.get("sandboxWorkspace") == source["sandboxWorkspace"] for t in tuples):
+            raise ValueError("binding row does not hold the source identity")
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError, AttributeError) as error:
+        sys.exit(f"control_input_invalid: {error}")
+    epoch = lambda b: (binding.get(b) or {}).get("epoch")
+    return raw, {
+        "snapshotCapturedAtUtc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "gatewayGeneration": source["gatewayGeneration"], "providerId": source["providerId"],
+        "providerWorkspace": source["providerWorkspace"], "sandboxWorkspace": source["sandboxWorkspace"],
+        "ownerGeneration": source["ownerGeneration"], "sourceSha256": hashlib.sha256(raw[0]).hexdigest(),
+        "bindingSha256": hashlib.sha256(raw[1]).hexdigest(), "bindingState": binding.get("state"),
+        "retiredSubscriptions": len(binding.get("retiredSubscriptions") or []),
+        "nativeAppliedEpoch": epoch("applied"), "nativeCandidateEpoch": epoch("candidate"),
+        "statusObservedAtUtc": refresh["statusObservedAtUtc"], "providerLastRefreshAtUtc": refresh["providerLastRefreshAtUtc"],
+        "nextRefreshAtUtc": refresh["nextRefreshAtUtc"],
+    }
+control_before = {p: (os.lstat(p).st_ino, os.lstat(p).st_mtime_ns, os.lstat(p).st_size) for p in control}
+control_raw, manifest = control_manifest(control) if control else (None, None)
 
 def trust_files():
     files = [config]
@@ -118,6 +199,16 @@ for path in before:
     shutil.copy2(path, dest)
 if fingerprint(trust_files()) != before:
     sys.exit("trust_files_changed_during_backup")
+if control:
+    if {p: (os.lstat(p).st_ino, os.lstat(p).st_mtime_ns, os.lstat(p).st_size) for p in control} != control_before \
+            or [open(p, "rb").read() for p in control] != control_raw:
+        sys.exit("control_inputs_changed_during_backup")
+    os.makedirs(os.path.join(out, "control"), mode=0o700)
+    for name, data in zip(CONTROL_NAMES, control_raw):
+        with open(os.path.join(out, "control", name), "wb") as handle:
+            handle.write(data)
+    with open(os.path.join(out, "control", "MANIFEST.json"), "w") as handle:
+        json.dump(manifest, handle, indent=1, sort_keys=True)
 for required in REQUIRED:
     if not os.path.isfile(os.path.join(out, "state", required)):
         sys.exit("coverage_incomplete_in_snapshot: " + required)

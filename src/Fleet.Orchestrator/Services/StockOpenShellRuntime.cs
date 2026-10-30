@@ -2205,7 +2205,8 @@ public sealed class StockOpenShellRuntime(
                 return unresolved ? "provider_detach_unknown" : null;
             }));
             if (stop) legs.Add(Leg("stop:" + target.SandboxName, async token =>
-                await LifecycleAsync("stop", target, token) is { } fault ? await DeletedOrAsync(fault, target, token) : await QuiescentAsync(target, token)));
+                await LifecycleAsync("stop", target, token) is { } fault ? await DeletedOrAsync(await FailedMainOrAsync(fault, target, token), target, token)
+                    : await QuiescentAsync(target, token)));
         }
         // #502: retained superseded subscription sandboxes not already covered: verified detach (only providers still
         // attached), then verified stop/quiescence, each in its own persisted workspace; a missing scope never runs.
@@ -2219,7 +2220,7 @@ public sealed class StockOpenShellRuntime(
             legs.Add(Leg("detach:" + history.SandboxName, async token =>
                 await VerifiedDetachAsync(history, providers, token) is { } detach ? await DeletedOrAsync(detach, history, token) : null));
             if (stop) legs.Add(Leg("stop:" + history.SandboxName, async token =>
-                await StopVerifiedAsync(history, token) is { } fault ? await DeletedOrAsync(fault, history, token) : null));
+                await StopVerifiedAsync(history, token) is { } fault ? await DeletedOrAsync(await FailedMainOrAsync(fault, history, token), history, token) : null));
         }
         foreach (var leg in await Task.WhenAll(legs))
             if (leg is not null) errors.Add(leg);
@@ -2245,6 +2246,41 @@ public sealed class StockOpenShellRuntime(
             catch (OperationCanceledException) when (deadline.IsCancellationRequested) { return label + ":timeout"; }
             catch (Exception ex) when (ex is not OutOfMemoryException) { return label + ":" + ex.GetType().Name; }
         }
+    }
+
+    /// <summary>
+    /// #503 W8: pinned stock Stop returns a failed-main sandbox unchanged (openshell-server compute/mod.rs:1814–1822,
+    /// is_failed_main_process_result at :6216) and the CLI then fails waiting for Stopped (openshell-cli run.rs:4154–4160),
+    /// so a revoke of an already-terminal owned sandbox would otherwise hold forever. Only <c>stop_unknown</c> (a failed or
+    /// timed-out stop) is reconciled, and only for the exact owned UUID in that pinned state, which the server never
+    /// changes on Stop, with no container running under it and the same state observed again afterwards. Any other fault, phase, owner or unreadable observation keeps the fault; the other
+    /// revocation and detach legs are unaffected and must still succeed.
+    /// </summary>
+    private async Task<string?> FailedMainOrAsync(string fault, ManagedBinding target, CancellationToken ct) =>
+        fault == "stop_unknown" && await FailedMainAsync(target, ct) && await QuiescentAsync(target, ct) is null && await FailedMainAsync(target, ct)
+            ? null : fault;
+
+    /// <summary>The exact binding (name, UUID, persisted scope) reads Error with an exit code and Ready=False/MainProcessFailed.</summary>
+    private async Task<bool> FailedMainAsync(ManagedBinding binding, CancellationToken ct)
+    {
+        if (ScopeFault(binding) is not null) return false;
+        var run = await cli.RunAsync(Scoped(binding, ["sandbox", "get", binding.SandboxName, "-o", "json"]), null, LegTimeout, ct);
+        if (run.Missing || run.TimedOut || run.ExitCode != 0) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(run.Stdout);
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && Text(root, "id") == binding.SandboxId && Text(root, "name") == binding.SandboxName && Text(root, "phase") == "Error"
+                && root.TryGetProperty("exit_code", out var exit) && exit.ValueKind == JsonValueKind.Number
+                && root.TryGetProperty("conditions", out var conditions) && conditions.ValueKind == JsonValueKind.Array
+                && conditions.EnumerateArray().Any(c => c.ValueKind == JsonValueKind.Object && Text(c, "type") == "Ready"
+                    && string.Equals(Text(c, "status"), "false", StringComparison.OrdinalIgnoreCase) && Text(c, "reason") == "MainProcessFailed");
+        }
+        catch (JsonException) { return false; }
+
+        static string? Text(JsonElement e, string key) =>
+            e.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     }
 
     /// <summary>

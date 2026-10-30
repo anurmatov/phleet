@@ -1742,6 +1742,46 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.All(_cli.Calls.Where(c => c.Args[0] != "--version"), c => Assert.Equal("ws-a", c.Ws));
     }
 
+    // ── #503 W8: an owned, quiescent failed-main candidate is reconciled by revoke; subscription custody is unchanged ──
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Revoke_reconciles_an_owned_quiescent_failed_main_candidate_keeping_subscription_custody(bool running)
+    {
+        WriteSource();
+        var history = SubBinding("fleet-agent1-f9f9f9f0", phase: "Stopped", attached: false);
+        var candidate = SubBinding("fleet-agent1-f9f9f9f9", phase: "Error");
+        var scoped = _cli.Cli("ws-a");
+        scoped.Status[candidate.SandboxName] = ManagedStockRuntimeAdapterTests.FakeCli.FailedMain();
+        scoped.StopKeepsPhase.Add(candidate.SandboxName);
+        if (running) _t._host.RunningContainers = ["workload"];
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker",
+            new ManagedRecord { State = "needs_attention", Candidate = candidate, Superseded = [history], Errors = ["stop_unknown"] }));
+        var tuples = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).SubscriptionTuples().Count();
+
+        var revoke = await Runtime().RevokeAsync("agent1", default);
+
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "stop", candidate.SandboxName]));
+        Assert.Empty(_cli.Attached[("ws-a", candidate.SandboxName)]); // the verified detach still ran
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+        Assert.Equal(tuples, record.SubscriptionTuples().Count()); // custody stays countable either way
+        Assert.Equal((candidate.SandboxId, "Error"), scoped.Sandboxes[candidate.SandboxName]); // observed, never rewritten
+        if (running)
+        {
+            Assert.False(revoke.Ok);
+            Assert.Equal("needs_attention", record.State);
+            Assert.Contains($"stop:{candidate.SandboxName}:stop_unknown", revoke.Errors);
+            return;
+        }
+        Assert.True(revoke.Ok, revoke.Code + ":" + string.Join(",", revoke.Errors));
+        Assert.Equal(("revoked", 0), (record.State, record.Errors.Count));
+        Assert.Null(record.Candidate);
+        Assert.Contains(record.Superseded, h => h.Epoch == candidate.Epoch && h.SandboxWorkspace == "ws-a");
+        Assert.Contains(record.Superseded, h => h.Epoch == history.Epoch);
+    }
+
     internal sealed class MutableClock : TimeProvider
     {
         public DateTimeOffset Now;

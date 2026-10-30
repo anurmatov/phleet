@@ -145,6 +145,61 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
     }
 
+    // #503 W8: pinned stock Stop returns an exact failed-main sandbox unchanged and its CLI exits nonzero waiting for
+    // Stopped. Only that owned, already-quiescent terminal state reconciles the stop; every other hold stays.
+    [Theory]
+    [InlineData("owned_failed_main", null)]
+    [InlineData("running", "stop:")]
+    [InlineData("containers_unobservable", "stop:")]
+    [InlineData("foreign_after_stop", "stop:")]
+    [InlineData("status_unreadable", "stop:")]
+    [InlineData("ready_true", "stop:")]
+    [InlineData("other_reason", "stop:")]
+    [InlineData("no_exit_code", "stop:")]
+    [InlineData("stopping_phase", "stop:")]
+    [InlineData("restarted_during_check", "stop:")]
+    [InlineData("broker_fails", "broker:")]
+    [InlineData("detach_hangs", "detach:")]
+    public async Task Revoke_reconciles_only_an_exact_owned_already_quiescent_failed_main_sandbox(string variant, string? heldBy)
+    {
+        var binding = Binding("fleet-agent1-f8f8f8f8", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, variant == "stopping_phase" ? "Stopping" : "Error");
+        _cli.Status[binding.SandboxName] = variant switch
+        {
+            "ready_true" => FakeCli.FailedMain(readyStatus: "True"),
+            "other_reason" => FakeCli.FailedMain(reason: "ConfigurationInvalid"),
+            "no_exit_code" => FakeCli.FailedMain(exitCode: false),
+            "status_unreadable" => new JsonObject { ["exit_code"] = 1, ["conditions"] = "unreadable" },
+            _ => FakeCli.FailedMain(),
+        };
+        _cli.StopKeepsPhase.Add(binding.SandboxName);
+        if (variant == "running") _host.RunningContainers = ["workload"];
+        if (variant == "containers_unobservable") _host.RunningContainers = null;
+        if (variant == "foreign_after_stop") _cli.OnStop = name => _cli.Sandboxes[name] = (Guid.NewGuid().ToString(), "Error");
+        if (variant == "restarted_during_check") _host.OnRunningRead = () => _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Starting");
+        if (variant == "broker_fails") _broker.FailDeletes = true;
+        if (variant == "detach_hangs") _cli.Hang.Add("detach");
+        _store.Add(ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = "needs_attention", Applied = binding, Errors = ["stop_unknown"] }));
+
+        var revoke = await Runtime().RevokeAsync("agent1", default);
+
+        Assert.Contains(_cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        var record = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding);
+        if (heldBy is null)
+        {
+            Assert.True(revoke.Ok, revoke.Code + ":" + string.Join(",", revoke.Errors));
+            Assert.Equal(("revoked", 0), (record.State, record.Errors.Count));
+            Assert.Equal((binding.SandboxId, "Error"), _cli.Sandboxes[binding.SandboxName]); // observed, never rewritten or deleted
+            return;
+        }
+        Assert.False(revoke.Ok);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains(revoke.Errors, e => e.StartsWith(heldBy, StringComparison.Ordinal));
+        if (heldBy == "stop:") Assert.Contains($"stop:{binding.SandboxName}:stop_unknown", revoke.Errors);
+        else Assert.DoesNotContain(revoke.Errors, e => e.StartsWith("stop:", StringComparison.Ordinal)); // the stop itself reconciled
+    }
+
     [Fact]
     public async Task Concurrent_writer_gets_409_before_any_external_action()
     {
@@ -1150,12 +1205,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("logs", _) => SwapOnLogs ? Swap(Name(1)) : new(0, "line\n"),
                 ("sandbox", "create") => Create(args),
                 ("sandbox", "get") => Sandboxes.TryGetValue(Name(2), out var s)
-                    ? new(0, Labels.TryGetValue(Name(2), out var labels)
-                        ? JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase, labels })
-                        : JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase }))
+                    ? new(0, Get(Name(2), s))
                     : NameTaken ? new(0, JsonSerializer.Serialize(new { id = Guid.NewGuid().ToString(), name = Name(2), phase = "Ready" })) : new(1, ""),
                 ("sandbox", "start") => Phase(Name(2), "Ready"),
-                ("sandbox", "stop") => Phase(Name(2), "Stopped"),
+                ("sandbox", "stop") => Stop(Name(2)),
                 ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
                 ("sandbox", "upload") => Transfer(Name(2), () => Upload(args[3], args[4])),
                 ("sandbox", "exec") => Transfer(args[3], () => new(OnExec?.Invoke(args[^1]) ?? 0, "")),
@@ -1262,6 +1315,39 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             return new(0, "line\n");
         }
 
+        /// <summary>#503 W8: extra `sandbox get -o json` fields per name (the pinned exit_code and conditions).</summary>
+        public readonly Dictionary<string, JsonObject> Status = new();
+        /// <summary>
+        /// Names whose stop answers like the pinned failed-main shortcut: the server returns the Error sandbox unchanged and
+        /// the CLI exits nonzero waiting for Stopped. <see cref="OnStop"/> runs first (for example, a racing replacement).
+        /// </summary>
+        public readonly HashSet<string> StopKeepsPhase = [];
+        public Action<string>? OnStop;
+
+        /// <summary>The pinned failed-main status: Error, exit code 1, Ready=False/MainProcessFailed.</summary>
+        internal static JsonObject FailedMain(string readyStatus = "False", string reason = "MainProcessFailed", bool exitCode = true) => new()
+        {
+            ["exit_code"] = exitCode ? 1 : null,
+            ["conditions"] = new JsonArray(
+                new JsonObject { ["type"] = "Ready", ["status"] = readyStatus, ["reason"] = reason, ["message"] = "synthetic" },
+                new JsonObject { ["type"] = "ConfigurationReady", ["status"] = "True", ["reason"] = "ConfigurationAccepted", ["message"] = "" }),
+        };
+
+        private string Get(string name, (string Id, string Phase) s)
+        {
+            var json = new JsonObject { ["id"] = s.Id, ["name"] = name, ["phase"] = s.Phase };
+            if (Labels.TryGetValue(name, out var labels)) json["labels"] = JsonSerializer.SerializeToNode(labels);
+            if (Status.TryGetValue(name, out var status))
+                foreach (var (key, value) in status) json[key] = value?.DeepClone();
+            return json.ToJsonString();
+        }
+
+        private StockCliResult Stop(string name)
+        {
+            OnStop?.Invoke(name);
+            return StopKeepsPhase.Contains(name) ? new(1, "") : Phase(name, "Stopped");
+        }
+
         private StockCliResult Phase(string name, string phase)
         {
             if (!Sandboxes.TryGetValue(name, out var s)) return new(1, "");
@@ -1338,8 +1424,13 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     {
         public string Generation = "gateway-1@start";
         public Task<string?> GatewayGenerationAsync(CancellationToken ct) => Task.FromResult<string?>(Generation);
-        public Task<IReadOnlyList<string>?> RunningSandboxContainersAsync(string sandboxId, CancellationToken ct) =>
-            Task.FromResult(RunningContainers);
+        public Task<IReadOnlyList<string>?> RunningSandboxContainersAsync(string sandboxId, CancellationToken ct)
+        {
+            OnRunningRead?.Invoke();
+            return Task.FromResult(RunningContainers);
+        }
+        /// <summary>Runs on each running-container read (for example, a restart racing the observation).</summary>
+        public Action? OnRunningRead;
         /// <summary>Containers running under a sandbox UUID; null is an unobservable read.</summary>
         public IReadOnlyList<string>? RunningContainers = [];
         public IReadOnlyList<string>? DockerStates = [];

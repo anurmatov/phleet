@@ -1710,6 +1710,38 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
     private static int Count(object preflight, string key) =>
         System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(preflight)).RootElement.GetProperty(key).GetInt32();
 
+    // ── #503 W3: a create the pinned server rejects allocates nothing; the supported revoke clears it, keeping custody ──
+
+    [Fact]
+    public async Task Rejected_create_holds_without_a_uuid_and_revoke_clears_it_keeping_the_subscription_tuple()
+    {
+        WriteSource();
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = ["exited"];
+        _cli.Cli("ws-a").CreateRejects = true;
+        var runtime = Runtime();
+
+        var apply = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal("sandbox_create_unknown", apply.Code);
+        var held = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", held.State);
+        Assert.True(string.IsNullOrEmpty(held.Candidate!.SandboxId)); // nothing was allocated, so no UUID is guessed
+        Assert.True(StockOpenShellRuntime.MaxSandboxNameLength >= held.Candidate.SandboxName.Length);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "stop"]) || c.Args.Contains("detach"));
+
+        var revoke = await runtime.RevokeAsync("agent1", default);
+
+        Assert.True(revoke.Ok, revoke.Message);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("revoked", 0), (record.State, record.Errors.Count));
+        Assert.Null(record.Candidate);
+        var custody = Assert.Single(record.Superseded); // the cut subscription tuple stays countable custody
+        Assert.Equal((held.Candidate.Epoch, "ws-a"), (custody.Epoch, custody.SandboxWorkspace));
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.Take(2).SequenceEqual(["sandbox", "list"]));
+        Assert.All(_cli.Calls.Where(c => c.Args[0] != "--version"), c => Assert.Equal("ws-a", c.Ws));
+    }
+
     internal sealed class MutableClock : TimeProvider
     {
         public DateTimeOffset Now;

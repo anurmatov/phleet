@@ -431,7 +431,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Equal("needs_attention", record.State);
         Assert.NotNull(record.Candidate);
         Assert.NotEqual(Guid.Empty, record.Candidate!.Epoch);
-        Assert.StartsWith("fleet-agent1-", record.Candidate.SandboxName);
+        Assert.Equal(StockOpenShellRuntime.SandboxNameFor("agent1", record.Candidate.Epoch), record.Candidate.SandboxName);
         Assert.Contains(_store.History, h => ManagedRecord.Parse(h) is { Operation: not null, Candidate: not null });
         Assert.Equal("needs_attention", (await Runtime().ApplyAsync("agent1", default)).Code); // held, never replayed
     }
@@ -1150,7 +1150,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("logs", _) => SwapOnLogs ? Swap(Name(1)) : new(0, "line\n"),
                 ("sandbox", "create") => Create(args),
                 ("sandbox", "get") => Sandboxes.TryGetValue(Name(2), out var s)
-                    ? new(0, JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase })) : new(1, ""),
+                    ? new(0, JsonSerializer.Serialize(new { id = s.Id, name = Name(2), phase = s.Phase }))
+                    : NameTaken ? new(0, JsonSerializer.Serialize(new { id = Guid.NewGuid().ToString(), name = Name(2), phase = "Ready" })) : new(1, ""),
                 ("sandbox", "start") => Phase(Name(2), "Ready"),
                 ("sandbox", "stop") => Phase(Name(2), "Stopped"),
                 ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
@@ -1168,11 +1169,22 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             if (args.Contains("--upload") && args.Contains("--")) return new(2, "");
             OnCreate?.Invoke();
             var name = args[args.ToList().IndexOf("--name") + 1];
+            // #503 W3: the pinned server's first spec validation (InvalidArgument, nothing allocated).
+            if (CreateRejects || !StockSandboxName(name)) return new(1, "");
             Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready"); // the explicit launcher waits, staged, without a daemon
             return CreateTimesOut ? new(-1, "", TimedOut: true) : new(0, "");
         }
 
         public bool ListFails;
+        /// <summary>Create fails like the pinned server's InvalidArgument: nonzero, nothing allocated.</summary>
+        public bool CreateRejects;
+        /// <summary>Every name is already taken by a foreign sandbox (a name collision).</summary>
+        public bool NameTaken;
+
+        /// <summary>Pinned openshell-server validate_sandbox_name: 1–19 chars, a DNS-1123 label without consecutive hyphens.</summary>
+        internal static bool StockSandboxName(string name) =>
+            name.Length is >= 1 and <= StockOpenShellRuntime.MaxSandboxNameLength
+            && System.Text.RegularExpressions.Regex.IsMatch(name, @"\A[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*\z");
 
         /// <summary>Listed names per page (page i is served for <c>--page-token p{i}</c>); default one page of Sandboxes.</summary>
         public List<string[]>? ListPages;

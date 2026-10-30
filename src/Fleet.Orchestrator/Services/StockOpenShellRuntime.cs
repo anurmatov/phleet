@@ -1308,7 +1308,7 @@ public sealed class StockOpenShellRuntime(
                 GatewayGeneration = generation, ServiceProviders = serviceProviders, Subscription = tuple,
                 Provider = subscription ? source!.ProviderName : record.Applied!.Provider,
             }
-            : new ManagedBinding($"fleet-{agent.Name}-{epoch.ToString("N")[..8]}", "", epoch, image, policy.Id, policy.Sha256, mode,
+            : new ManagedBinding(SandboxNameFor(agent.Name, epoch), "", epoch, image, policy.Id, policy.Sha256, mode,
                 agent.ProviderApiKeyEnvRef ?? "", subscription ? source!.ProviderName : $"fleet-{agent.Name}-openai", generation)
             {
                 ServiceProviders = serviceProviders, SandboxWorkspace = source?.SandboxWorkspace, Subscription = tuple,
@@ -1316,6 +1316,10 @@ public sealed class StockOpenShellRuntime(
         // #502: a reused sandbox rebound to a new outside identity keeps the old tuple as custody history.
         var history = reuse && record.Applied!.IsSubscription && subscription && !SameIdentity(record.Applied, source!)
             ? [.. record.Superseded, record.Applied] : record.Superseded;
+        // #503 W3: a fresh name is created only once proven absent in its scope (every list page), so a collision can
+        // never make a foreign sandbox this candidate; nothing is recorded, stopped or created before that proof.
+        if (!reuse && !await SandboxDeletedAsync(candidate, ct))
+            return (record, null, null, Result.Refused(409, "sandbox_name_not_proven_absent"));
         var applying = record with { State = "applying", Candidate = candidate, Errors = [], Superseded = history };
         await checkpoint(applying);
 
@@ -1486,6 +1490,21 @@ public sealed class StockOpenShellRuntime(
             applied = Retire(applied, retiring, refs!);
         }
         return (applied, "openshell", policy.Id, Result.Done("applied_openshell"));
+    }
+
+    /// <summary>Pinned stock routable-name limit for a sandbox (openshell-server grpc/mod.rs MAX_ROUTABLE_NAME_LEN).</summary>
+    internal const int MaxSandboxNameLength = 19;
+
+    /// <summary>
+    /// #503 W3: the stock-valid sandbox name of one agent epoch: <c>fl-</c> plus 16 lowercase hex of SHA-256 over the full
+    /// agent name and the full epoch (domain separated), 19 characters for every supported agent name. Never a truncation:
+    /// distinct agents or epochs, including shared long prefixes, get distinct names, and ownership stays in the persisted
+    /// binding (name and UUID) and the <c>fleet.agent</c>/<c>fleet.epoch</c> labels.
+    /// </summary>
+    internal static string SandboxNameFor(string agentName, Guid epoch)
+    {
+        var digest = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("phleet/managed-sandbox/v1\n" + agentName + "\n" + epoch.ToString("N")));
+        return "fl-" + Convert.ToHexStringLower(digest)[..16];
     }
 
     private TimeSpan Remaining(DateTimeOffset expiresAt)

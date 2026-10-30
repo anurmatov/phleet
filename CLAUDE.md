@@ -479,3 +479,6 @@ Provider profile pins (`providerProfileHashes`, subscription.json `profileSha256
 canonical full-document digests of `profile export NAME -o json`. Operators compute them with
 `scripts/stock-profile-digest.sh`, and both sides are kept equal by a shared fixture. Never use a raw-output hash: the
 stock CLI's map order varies between identical exports.
+Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
+full agent name and epoch, within the pinned 19-character stock limit; never truncate an agent name into one. A
+fresh name must be proven absent before apply records or creates anything (`sandbox_name_not_proven_absent`).

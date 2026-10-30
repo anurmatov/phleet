@@ -237,6 +237,7 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         var binding = _t.Binding("fleet-agent1-e5e5e5e5", Guid.NewGuid());
         _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
         using var client = new CancellationTokenSource();
         var probes = 0;
         // The client disconnects (RequestAborted) during staging; the next poll still runs on Start's own deadline.

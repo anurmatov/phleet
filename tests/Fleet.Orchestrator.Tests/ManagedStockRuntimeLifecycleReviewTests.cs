@@ -27,6 +27,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         // A running daemon consumed its staged marker long ago.
         _t._cli.OnExec = script => script.Contains("-f \"$HOME/.fleet-staged\"") && !script.Contains('!') ? 1 : 0;
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        _t.Enroll(binding);
 
         var result = await _t.Runtime().StartAsync("agent1", default);
 
@@ -44,6 +45,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         // Activation consumed (no staged marker) but preparation failed: no ready marker, no daemon.
         _t._cli.OnExec = script => script.Contains(".fleet-ready") ? 1 : 0;
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
 
         var result = await _t.Runtime().StartAsync("agent1", default);
 
@@ -73,6 +75,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         // Review F4: PID/cmdline and Ready pass, but the daemon's GET /health never answers 200.
         _t._cli.OnExec = script => script == StockOpenShellRuntime.DaemonHealthScript ? 1 : 0;
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
 
         var result = await _t.Runtime().StartAsync("agent1", default);
 
@@ -136,6 +139,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         var binding = _t.Binding("fleet-agent1-66666666", Guid.NewGuid());
         _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
         var runtime = _t.Runtime();
         _t._host.Generation = "gateway-2@planned";
 
@@ -199,6 +203,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
             return 0;
         };
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
 
         var result = await _t.Runtime().StartAsync("agent1", default);
 
@@ -215,6 +220,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         agent.Name = name;
         agent.ShortName = name;
         agent.ContainerName = name;
+        _t.Enroll(binding, name);
         return _t._store.Add(agent);
     }
 
@@ -353,6 +359,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         var binding = _t.Binding("fleet-agent1-ffffffff", Guid.NewGuid());
         _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
         using var disconnected = new CancellationTokenSource();
         disconnected.Cancel();
 
@@ -874,6 +881,7 @@ public sealed class ManagedStockRuntimeLifecycleReviewTests : IDisposable
         var binding = _t.Binding("fleet-agent1-a4a4a4a4", Guid.NewGuid());
         _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
         var runtime = _t.Runtime();
         _t._host.Generation = "gateway-2@planned";
 
@@ -1189,7 +1197,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
             _cli.Cli(workspace).Sandboxes[name] = (id, phase);
             if (attached) _cli.Attached[(workspace, name)] = [Provider];
         }
-        return new ManagedBinding(name, id, Guid.NewGuid(), "stock-agent:synthetic", 1, new string('b', 64), "subscription", "", Provider, _t._host.Generation)
+        return new ManagedBinding(name, id, Guid.NewGuid(), "stock-agent:synthetic", 1, Fleet.Orchestrator.Endpoints.SandboxPolicyValidation.Hash(_t._store.PolicyYaml), "subscription", "", Provider, _t._host.Generation)
         {
             SandboxWorkspace = workspace,
             Subscription = new ManagedSubscription("ws-a", ProviderId, "synthetic-account_01", Guid.Parse(StockSubscriptionBindingTests.Owner),
@@ -1404,6 +1412,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         // Desired selection already saved as Docker/API key: save is desired-only, dispatch follows the applied binding.
         var agent = _t.ManagedAgent(desired: "docker", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding });
         _t._store.Add(agent);
+        _t.Enroll(binding);
         WriteSourceMatching(binding);
 
         var tool = await Runtime().DispatchToolAsync("agent1", "start");
@@ -1431,6 +1440,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         WriteSource();
         var binding = SubBinding("fleet-agent1-51515151", phase: "Stopped");
         _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
         WriteSourceMatching(binding);
         _cli.ProfileYaml = "profile: changed-after-apply\n";
 
@@ -1453,7 +1463,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         var binding = SubBinding("fleet-agent1-52525252", phase: "Stopped", expires: _clock.Now.AddMinutes(5));
         _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding }));
         WriteSourceMatching(binding);
-        _t.WriteAuthority("active");
+        _t.Enroll(binding);
         _cli.Cli("ws-a").OnExec = script =>
         {
             if (script.Contains(".fleet-activate")) _clock.Now = _clock.Now.AddMinutes(6);
@@ -1964,4 +1974,210 @@ public sealed class ManagedStockRouteAndDeleteTests : IDisposable
 
     private static int SubscriptionCount(object preflight) =>
         System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(preflight)).RootElement.GetProperty("subscriptionBindings").GetInt32();
+}
+
+/// <summary>
+/// #503 C4/C5: Start/restart and pre-activation admission against the persisted applied policy and its outside enrollment,
+/// legacy unbound refusal and the supported repair, with cleanup never gated on the positive validator.
+/// </summary>
+public sealed class ManagedSignerLifecycleTests : IDisposable
+{
+    private readonly ManagedStockRuntimeAdapterTests _t = new();
+
+    public void Dispose() => _t.Dispose();
+
+    private static bool Verb(ManagedStockRuntimeAdapterTests.Call c, string verb) => c.Args.Take(2).SequenceEqual(["sandbox", verb]);
+    private static bool Activation(ManagedStockRuntimeAdapterTests.Call c) => c.Args.Any(a => a.Contains(".fleet-activate"));
+
+    private void EditEnrollment(Action<System.Text.Json.Nodes.JsonObject> edit)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!.AsObject();
+        edit(node);
+        File.WriteAllText(_t.AuthorityPath(), node.ToJsonString());
+    }
+
+    private string EnrollmentState() => System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!["State"]!.GetValue<string>();
+
+    private (Agent Agent, ManagedBinding Binding) Stopped(string sandbox, string phase = "Stopped", string state = "stopped")
+    {
+        var binding = _t.Binding(sandbox, Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, phase);
+        var agent = _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = state, Applied = binding }));
+        _t.Enroll(binding);
+        return (agent, binding);
+    }
+
+    [Fact]
+    public async Task Start_uses_the_applied_policy_and_enrollment_not_a_newer_desired_selection_or_template()
+    {
+        var (agent, binding) = Stopped("fleet-agent1-c4000001");
+        // After the valid apply: an unbound version is selected as desired and the template's memory host moves.
+        _t._store.PolicyYaml2 = ManagedStockRuntimeTests.PolicyYaml;
+        agent.SandboxPolicyVersionId = 2;
+        var runtime = _t.Runtime();
+        var template = Path.Combine(_t._dir, "managed-authority.json");
+        File.WriteAllText(template, File.ReadAllText(template).Replace("memory.example.test", "moved.example.test"));
+
+        var start = await runtime.StartAsync("agent1", default);
+
+        Assert.True(start.Ok, start.Message);
+        Assert.Equal(1, ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!.PolicyVersionId);
+        Assert.Contains(_t._cli.Calls, Activation);
+    }
+
+    [Theory]
+    [InlineData("policy_row", StockManagedSignerPolicy.Missing)]
+    [InlineData("hash", StockManagedSignerPolicy.Mismatch)]
+    [InlineData("other_agent", StockManagedSignerPolicy.AuthorityUnavailable)]
+    [InlineData("uuid", StockManagedSignerPolicy.AuthorityUnavailable)]
+    [InlineData("epoch", StockManagedSignerPolicy.AuthorityUnavailable)]
+    [InlineData("stock_commit", StockManagedSignerPolicy.AuthorityUnavailable)]
+    [InlineData("revoked_enrollment", StockManagedSignerPolicy.AuthorityUnavailable)]
+    [InlineData("absent_enrollment", StockManagedSignerPolicy.AuthorityUnavailable)]
+    [InlineData("unknown_service", StockManagedSignerPolicy.AuthorityUnavailable)]
+    [InlineData("enrollment_host", StockManagedSignerPolicy.Mismatch)]
+    [InlineData("enrollment_extra_route", StockManagedSignerPolicy.Missing)]
+    public async Task Start_refuses_an_unusable_applied_artifact_or_enrollment_before_staging(string fault, string code)
+    {
+        var binding = _t.Binding("fleet-agent1-c4000002", Guid.NewGuid());
+        binding = fault switch
+        {
+            "policy_row" => binding with { PolicyVersionId = 99 },
+            "hash" => binding with { PolicySha256 = new string('c', 64) },
+            _ => binding,
+        };
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        if (fault != "absent_enrollment") _t.Enroll(binding);
+        switch (fault)
+        {
+            case "other_agent": EditEnrollment(e => e["Agent"] = "agent2"); break;
+            case "uuid": EditEnrollment(e => e["SandboxId"] = Guid.NewGuid().ToString()); break;
+            case "epoch": EditEnrollment(e => e["Epoch"] = Guid.NewGuid().ToString()); break;
+            case "stock_commit": EditEnrollment(e => e["StockCommit"] = new string('0', 40)); break;
+            case "revoked_enrollment": EditEnrollment(e => e["State"] = "revoked"); break;
+            case "unknown_service": EditEnrollment(e => e["Services"] = new System.Text.Json.Nodes.JsonObject { ["journal"] = new System.Text.Json.Nodes.JsonObject { ["Host"] = "journal.example.test" } }); break;
+            case "enrollment_host": EditEnrollment(e => e["MemoryHost"] = "other.example.test"); break;
+            case "enrollment_extra_route": EditEnrollment(e => e["Services"] = new System.Text.Json.Nodes.JsonObject { ["temporal"] = new System.Text.Json.Nodes.JsonObject { ["Host"] = "temporal.example.test" } }); break;
+        }
+
+        var start = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.Equal((409, code), (start.Status, start.Code));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "start") || Verb(c, "exec") || Verb(c, "upload"));
+        Assert.Equal("stopped", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
+    [Theory]
+    [InlineData("enrollment")]
+    [InlineData("artifact")]
+    public async Task Start_drift_while_staging_is_the_bounded_revoke_and_stop_hold(string drift)
+    {
+        var (_, binding) = Stopped("fleet-agent1-c4000003");
+        var drifted = false;
+        _t._cli.OnExec = script =>
+        {
+            if (!drifted && script.Contains("-f \"$HOME/.fleet-staged\"") && !script.Contains('!'))
+            {
+                drifted = true;
+                if (drift == "enrollment") EditEnrollment(e => e["MemoryHost"] = "drifted.example.test");
+                else _t._store.PolicyYaml = SignedPolicy.Yaml(SignedPolicy.Memory) + "# drifted artifact\n";
+            }
+            return 0;
+        };
+
+        var start = await _t.Runtime().StartAsync("agent1", default);
+
+        Assert.Equal((409, StockManagedSignerPolicy.Mismatch), (start.Status, start.Code));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains(StockManagedSignerPolicy.Mismatch, record.Errors);
+        Assert.DoesNotContain(_t._cli.Calls, Activation);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        Assert.Equal("revoked", EnrollmentState());
+    }
+
+    [Fact]
+    public async Task Apply_drift_of_the_written_enrollment_before_activation_holds_and_cleans_up()
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._host.DockerStates = ["exited"];
+        var cli = new HookCli(_t._cli, args =>
+        {
+            // The outside record was just written active; drift it while the guest copy uploads.
+            if (args.Count > 4 && args[1] == "upload" && args[4] == "/home/agent/trust/enrollment.json")
+                EditEnrollment(e => e["MemoryHost"] = "drifted.example.test");
+        });
+
+        var apply = await _t.Runtime(cli: cli).ApplyAsync("agent1", default);
+
+        Assert.Equal((409, StockManagedSignerPolicy.Mismatch), (apply.Status, apply.Code));
+        var stored = _t._store.Get("agent1");
+        var record = ManagedRecord.Parse(stored.AppliedRuntimeBinding);
+        Assert.Equal(("needs_attention", "docker"), (record.State, stored.AppliedRuntimeKind));
+        Assert.NotNull(record.Candidate);
+        Assert.DoesNotContain(_t._cli.Calls, Activation);
+        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "stop", record.Candidate!.SandboxName]));
+        Assert.Equal("revoked", EnrollmentState());
+    }
+
+    [Fact]
+    public async Task Legacy_unbound_binding_refuses_start_and_restart_while_stop_revoke_and_the_repair_still_work()
+    {
+        // Applied before #503 from an unbound artifact; the binding and enrollment carry that artifact's real hash.
+        _t._store.PolicyYaml = ManagedStockRuntimeTests.PolicyYaml;
+        var (agent, binding) = Stopped("fleet-agent1-c5000001", phase: "Ready", state: "applied");
+        var runtime = _t.Runtime();
+
+        var restart = await runtime.RestartAsync("agent1", default);
+        Assert.Equal((409, StockManagedSignerPolicy.Missing), (restart.Status, restart.Code));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "stop")); // a refused restart never stops it first
+
+        Assert.True((await runtime.StopAsync("agent1", default)).Ok);
+        var start = await runtime.StartAsync("agent1", default);
+        Assert.Equal((409, StockManagedSignerPolicy.Missing), (start.Status, start.Code));
+        Assert.DoesNotContain(_t._cli.Calls, c => Verb(c, "start") || Activation(c));
+        var revoke = await runtime.RevokeAsync("agent1", default);
+        Assert.True(revoke.Ok, revoke.Message);
+
+        // Supported repair: append a reviewed bound version, select it, then a normal apply after the clean revoke.
+        _t._store.PolicyYaml2 = SignedPolicy.MemoryOnly;
+        agent.SandboxPolicyVersionId = 2;
+        var apply = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Message);
+        var applied = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!;
+        Assert.Equal((2, Fleet.Orchestrator.Endpoints.SandboxPolicyValidation.Hash(SignedPolicy.MemoryOnly)), (applied.PolicyVersionId, applied.PolicySha256));
+        Assert.Equal(binding.SandboxId, applied.SandboxId);
+        Assert.Contains(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["policy", "set"]));
+        Assert.True((await runtime.StopAsync("agent1", default)).Ok);
+        Assert.True((await runtime.StartAsync("agent1", default)).Ok);
+    }
+
+    [Fact]
+    public async Task Cleanup_never_needs_the_positive_validator()
+    {
+        // An enrollment that would refuse Start (wrong host) still lets Stop and revoke run every leg.
+        var (_, binding) = Stopped("fleet-agent1-c5000002", phase: "Ready", state: "applied");
+        EditEnrollment(e => e["MemoryHost"] = "other.example.test");
+        var runtime = _t.Runtime();
+
+        Assert.True((await runtime.StopAsync("agent1", default)).Ok);
+        var revoke = await runtime.RevokeAsync("agent1", default);
+
+        Assert.True(revoke.Ok, revoke.Message);
+        Assert.Contains(_t._cli.Calls, c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"]));
+        Assert.Equal("revoked", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+        Assert.Equal("revoked", EnrollmentState());
+        Assert.Equal("Stopped", _t._cli.Sandboxes[binding.SandboxName].Phase);
+    }
+
+    private sealed class HookCli(IStockCli inner, Action<IReadOnlyList<string>> before) : IStockCli
+    {
+        public Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv, TimeSpan timeout, CancellationToken ct)
+        {
+            before(args);
+            return inner.RunAsync(args, secretEnv, timeout, ct);
+        }
+    }
 }

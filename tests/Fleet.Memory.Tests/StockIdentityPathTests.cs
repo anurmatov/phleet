@@ -263,6 +263,38 @@ public sealed class StockIdentityPathTests
         Assert.Equal(0, fixture.Executions);
     }
 
+    // #503 C19: the gateway registration's audience must equal the outside GatewayAudience exactly; there is no default.
+    [Theory]
+    [InlineData("synthetic-hook", true)]
+    [InlineData("Synthetic-Hook", false)]
+    [InlineData("synthetic-hook ", false)]
+    [InlineData("urn:openshell:extension:middleware:stock-memory", false)]
+    public async Task GatewayNegotiation_AcceptsOnlyTheExactOutsideAudience(string audience, bool accepted)
+    {
+        await using var fixture = new Fixture();
+        if (accepted)
+        {
+            Assert.Equal("synthetic-hook", (await fixture.Describe("aud:" + audience)).ExpectedAudience);
+            Assert.True((await fixture.ValidateConfig("aud:" + audience)).Valid);
+        }
+        else
+        {
+            Assert.Equal(StatusCode.Unauthenticated, (await Assert.ThrowsAsync<RpcException>(() => fixture.Describe("aud:" + audience))).StatusCode);
+            Assert.Equal(StatusCode.Unauthenticated, (await Assert.ThrowsAsync<RpcException>(() => fixture.ValidateConfig("aud:" + audience))).StatusCode);
+        }
+        Assert.Equal(0, fixture.Executions);
+    }
+
+    [Fact]
+    public async Task GatewayNegotiation_StockDefaultAudienceWorksOnlyWhenItIsTheOutsideAudience()
+    {
+        const string stockDefault = "urn:openshell:extension:middleware:stock-memory";
+        await using var fixture = new Fixture();
+        fixture.Save(fixture.Record with { GatewayAudience = stockDefault });
+        Assert.Equal(stockDefault, (await fixture.Describe("aud:" + stockDefault)).ExpectedAudience);
+        Assert.Equal(StatusCode.Unauthenticated, (await Assert.ThrowsAsync<RpcException>(() => fixture.Describe("aud:synthetic-hook"))).StatusCode);
+    }
+
     [Fact]
     public async Task GatewayBootstrap_UnsupportedProtocol_StillRefuses()
     {
@@ -365,7 +397,7 @@ public sealed class StockIdentityPathTests
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var claims = new Dictionary<string, object> {
                 ["iss"] = fault == "wrong_issuer" ? "foreign" : Record.GatewayIssuer,
-                ["aud"] = fault == "wrong_audience" ? "foreign" : Record.GatewayAudience,
+                ["aud"] = fault == "wrong_audience" ? "foreign" : fault?.StartsWith("aud:", StringComparison.Ordinal) == true ? fault[4..] : Record.GatewayAudience,
                 ["sub"] = "synthetic-gateway", ["iat"] = now - 2,
                 ["exp"] = fault == "expired_gateway" ? now - 1 : now + 60,
                 ["jti"] = Guid.NewGuid().ToString("N"), ["caller_kind"] = supervisor ? "supervisor" : "gateway" };

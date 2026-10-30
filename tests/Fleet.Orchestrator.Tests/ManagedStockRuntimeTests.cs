@@ -306,6 +306,26 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Signer_bound_create_and_append_keep_exact_bytes_and_invalid_bindings_write_nothing()
+    {
+        // #503: create/append parity for the fixed signer subset; the stored hash is of the exact submitted bytes.
+        var created = await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Signed", yaml = SignedPolicy.MemoryOnly });
+        Assert.Equal(System.Net.HttpStatusCode.Created, created.StatusCode);
+        var id = (await created.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("id").GetInt32();
+        var url = $"/api/sandbox-policies/{id}/versions";
+        var three = SignedPolicy.Yaml(SignedPolicy.Memory, SignedPolicy.Temporal, SignedPolicy.Telegram);
+        Assert.Equal(System.Net.HttpStatusCode.Created, (await Client.PostAsJsonAsync(url, new { version = 2, yaml = three })).StatusCode);
+        var first = await Client.GetFromJsonAsync<System.Text.Json.JsonElement>(url + "/1");
+        Assert.Equal(SignedPolicy.MemoryOnly, first.GetProperty("yaml").GetString());
+        Assert.Equal(SandboxPolicyValidation.Hash(SignedPolicy.MemoryOnly), first.GetProperty("sha256").GetString());
+        var openFail = SignedPolicy.MemoryOnly.Replace("on_error: fail_closed", "on_error: fail_open");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync(url, new { version = 3, yaml = openFail })).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Open", yaml = openFail })).StatusCode);
+        Assert.Equal(1, await WithDb(db => db.SandboxPolicies.CountAsync()));
+        Assert.Equal(2, await WithDb(db => db.SandboxPolicyVersions.CountAsync()));
+    }
+
+    [Fact]
     public async Task Invalid_policy_leaves_no_partial_policy_or_version()
     {
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Bad", yaml = "version: 1\nunknown: true" })).StatusCode);

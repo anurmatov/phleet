@@ -151,22 +151,7 @@ internal static class SandboxPolicyValidation
             return "Provider profile bindings require names and lowercase SHA256 content hashes, never credentials.";
         try
         {
-            // Reject aliases, anchors and tags before constructing a graph (no expansion or cycles).
-            var parser = new Parser(new StringReader(text));
-            var count = 0;
-            var depth = 0;
-            while (parser.MoveNext())
-            {
-                if (parser.Current is YamlDotNet.Core.Events.MappingStart or YamlDotNet.Core.Events.SequenceStart) depth++;
-                if (parser.Current is YamlDotNet.Core.Events.MappingEnd or YamlDotNet.Core.Events.SequenceEnd) depth--;
-                if (++count > 8192 || depth > 32 || parser.Current is YamlDotNet.Core.Events.AnchorAlias
-                    || parser.Current is YamlDotNet.Core.Events.NodeEvent n && (!n.Anchor.IsEmpty || !n.Tag.IsEmpty))
-                    return "YAML aliases, anchors, tags or oversized structures are unsupported.";
-            }
-            var yaml = new YamlStream();
-            yaml.Load(new StringReader(text));
-            Require(yaml.Documents.Count == 1, "Use one policy document.");
-            var root = Map(yaml.Documents[0].RootNode, "version", "filesystem_policy", "process", "landlock", "network_policies");
+            if (ParseRoot(text, out var structureFault) is not { } root) return structureFault;
             Require(PlainScalar(root, "version") == "1", "Only policy version 1 is supported.");
             if (Get(root, "filesystem_policy") is { } fs)
             {
@@ -216,34 +201,63 @@ internal static class SandboxPolicyValidation
                     }
                 }
             }
+            // #503: only the fixed stock-memory signer subset; managed apply separately requires it to match the agent's routes.
+            if (Get(root, "network_middlewares") is { } middlewares) StockManagedSignerPolicy.ValidateShape(middlewares);
             return null;
         }
         catch (Exception ex) when (ex is YamlException or ArgumentException or InvalidOperationException)
         { return "Invalid or unsupported stock YAML. " + (ex is ArgumentException ? ex.Message : "Check mapping keys, duplicates and value types."); }
     }
 
+    /// <summary>
+    /// The one bounded parse shared by save and managed admission (#503): byte/event/depth limits, alias/anchor/tag refusal
+    /// before any graph is built, one document and the supported root fields. Null with <paramref name="fault"/> for a
+    /// size or structure refusal; malformed YAML or unsupported fields throw.
+    /// </summary>
+    internal static YamlMappingNode? ParseRoot(string text, out string? fault)
+    {
+        fault = null;
+        if (string.IsNullOrWhiteSpace(text) || Encoding.UTF8.GetByteCount(text) > 65536) { fault = "YAML must be 1–65536 UTF-8 bytes."; return null; }
+        // Reject aliases, anchors and tags before constructing a graph (no expansion or cycles).
+        var parser = new Parser(new StringReader(text));
+        var count = 0;
+        var depth = 0;
+        while (parser.MoveNext())
+        {
+            if (parser.Current is YamlDotNet.Core.Events.MappingStart or YamlDotNet.Core.Events.SequenceStart) depth++;
+            if (parser.Current is YamlDotNet.Core.Events.MappingEnd or YamlDotNet.Core.Events.SequenceEnd) depth--;
+            if (++count > 8192 || depth > 32 || parser.Current is YamlDotNet.Core.Events.AnchorAlias
+                || parser.Current is YamlDotNet.Core.Events.NodeEvent n && (!n.Anchor.IsEmpty || !n.Tag.IsEmpty))
+            { fault = "YAML aliases, anchors, tags or oversized structures are unsupported."; return null; }
+        }
+        var yaml = new YamlStream();
+        yaml.Load(new StringReader(text));
+        Require(yaml.Documents.Count == 1, "Use one policy document.");
+        return Map(yaml.Documents[0].RootNode, "version", "filesystem_policy", "process", "landlock", "network_policies", "network_middlewares");
+    }
+
     private static void Option(YamlMappingNode map, string key, params string[] choices)
     { if (Get(map, key) is { } value) Require(choices.Contains(Value(value)), $"Unsupported {key}."); }
-    private static YamlMappingNode Map(YamlNode node, params string[] keys)
+    internal static YamlMappingNode Map(YamlNode node, params string[] keys)
     {
         Require(node is YamlMappingNode, "Expected a mapping.");
         var map = (YamlMappingNode)node;
         foreach (var key in map.Children.Keys) Require(keys.Length == 0 || keys.Contains(Value(key)), "Unsupported policy field.");
         return map;
     }
-    private static IEnumerable<YamlNode> List(YamlNode node)
+    internal static IEnumerable<YamlNode> List(YamlNode node)
     { Require(node is YamlSequenceNode, "Expected a list."); return ((YamlSequenceNode)node).Children; }
-    private static string Value(YamlNode node)
+    internal static string Value(YamlNode node)
     { Require(node is YamlScalarNode { Value: not null }, "Expected a scalar."); return ((YamlScalarNode)node).Value!; }
-    private static YamlNode? Get(YamlMappingNode map, string key) => map.Children.TryGetValue(new YamlScalarNode(key), out var value) ? value : null;
+    internal static YamlNode? Get(YamlMappingNode map, string key) => map.Children.TryGetValue(new YamlScalarNode(key), out var value) ? value : null;
     // YamlScalarNode.Value is text even for quoted strings. Preserve the parsed scalar style
     // at numeric/boolean fields so strings cannot masquerade as stock integer/bool values.
-    private static string PlainScalar(YamlMappingNode map, string key)
+    internal static string PlainScalar(YamlMappingNode map, string key)
     {
         var node = Get(map, key);
         Require(node is YamlScalarNode { Style: ScalarStyle.Plain }, $"{key} must be an unquoted typed scalar.");
         return Value(node!);
     }
-    private static string Scalar(YamlMappingNode map, string key) => Get(map, key) is { } node ? Value(node) : "";
+    internal static string Scalar(YamlMappingNode map, string key) => Get(map, key) is { } node ? Value(node) : "";
     private static void Require(bool condition, string message) { if (!condition) throw new ArgumentException(message); }
 }

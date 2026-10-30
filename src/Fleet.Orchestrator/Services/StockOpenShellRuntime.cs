@@ -492,8 +492,23 @@ public sealed class StockOpenShellRuntime(
 
     public async Task<Result> RestartAsync(string name, CancellationToken ct)
     {
+        // #503: a Start-eligible binding whose applied signer policy Start would refuse is not stopped first. Read-only;
+        // an unreadable state is left to Stop's own envelope to report.
+        if (Enabled && await StartEligibleBindingAsync(name, ct) is { } binding && await AppliedSignerFaultAsync(name, binding, ct) is { } signer)
+            return Result.Refused(409, signer);
         var stopped = await StopAsync(name, ct);
         return stopped.Ok ? await StartAsync(name, ct) : stopped;
+    }
+
+    private async Task<ManagedBinding?> StartEligibleBindingAsync(string name, CancellationToken ct)
+    {
+        try
+        {
+            return await store.LoadAsync(name, ct) is { AppliedRuntimeKind: "openshell" } agent
+                && ManagedRecord.Parse(agent.AppliedRuntimeBinding) is { Operation: null, Candidate: null, State: "applied" or "stopped", Applied: { } binding }
+                ? binding : null;
+        }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException or JsonException) { return null; }
     }
 
     /// <summary>
@@ -688,6 +703,8 @@ public sealed class StockOpenShellRuntime(
         // The read MCP targets the same journal listener host, at the ordinary endpoint's path.
         if (JournalRead(agent) && (JournalHost(template) is null || JournalReadPath(agent) is null))
             return "managed_route_unsupported:mcp:" + StockJournalReadRoute.McpName;
+        // #503: the saved artifact must bind the fixed signer to exactly this agent's selected receiving hosts.
+        if (SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return signerFault;
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
         if (await broker.VerifyAccessAsync(ct) is { } accessFault) return accessFault;
         var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
@@ -718,7 +735,9 @@ public sealed class StockOpenShellRuntime(
         if (!agent.Tools.Any(t => t.IsEnabled && t.ToolName == "mcp__memory__memory_get")) return ("managed_memory_grant_missing", null);
         if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return ("managed_agent_image_missing", null);
         if (DescribeConfigDirFault() is { } dirFault) return (dirFault, null);
-        if (LoadTemplate() is null) return ("managed_authority_template_invalid", null);
+        if (LoadTemplate() is not { } template) return ("managed_authority_template_invalid", null);
+        // #503: the same signer admission as API-key apply, here for the native memory route alone.
+        if (SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return (signerFault, null);
         var (source, sourceFault) = ReadSource(agent.Name);
         if (sourceFault is not null) return (sourceFault, null);
         if (broker.DescribePreflightFault() is { } brokerFault) return (brokerFault, null);
@@ -851,6 +870,68 @@ public sealed class StockOpenShellRuntime(
         if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
         var actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(export.Stdout)));
         return actual == hash ? null : "provider_profile_hash_mismatch:" + profile;
+    }
+
+    /// <summary>
+    /// #503: service → exact receiving host the saved signer bindings must equal for the agent's current selection: memory
+    /// from the outside template, plus each selected first-party route with a configured host. No journal listener, issuer
+    /// or model host and no other MCP endpoint is a receiving service.
+    /// </summary>
+    private static Dictionary<string, string> ExpectedSignerHosts(JsonObject template, Agent agent)
+    {
+        var hosts = new Dictionary<string, string>(StringComparer.Ordinal) { [StockServices.Memory] = template["MemoryHost"]!.GetValue<string>() };
+        foreach (var (service, route) in ServiceRoutes(template, agent)) hosts[service] = route!["Host"]!.GetValue<string>();
+        return hosts;
+    }
+
+    /// <summary>#503: the stored hash recomputed from the exact saved bytes, then the signer bindings and receiver endpoints.</summary>
+    private static string? SignerPolicyFault(SandboxPolicyVersion policy, IReadOnlyDictionary<string, string> hosts) =>
+        Fleet.Orchestrator.Endpoints.SandboxPolicyValidation.Hash(policy.Yaml) != policy.Sha256 ? StockManagedSignerPolicy.Mismatch
+            : StockManagedSignerPolicy.DescribeBindingFault(policy.Yaml, hosts);
+
+    /// <summary>
+    /// #503 Start/restart and pre-activation: the recorded binding's own saved policy version (same stored hash, same bytes)
+    /// checked against the receiving hosts of its outside enrollment for exactly this agent, UUID, epoch, stock commit and
+    /// policy hash. Never the desired selection or the current template; anything missing or ambiguous refuses.
+    /// </summary>
+    private async Task<string?> AppliedSignerFaultAsync(string agentName, ManagedBinding binding, CancellationToken ct)
+    {
+        SandboxPolicyVersion? policy;
+        try { policy = await store.LoadPolicyAsync(binding.PolicyVersionId, ct); }
+        catch (Exception ex) when (ex is DbException or InvalidOperationException) { return "runtime_state_unavailable"; }
+        if (policy is null) return StockManagedSignerPolicy.Missing;
+        if (policy.Sha256 != binding.PolicySha256) return StockManagedSignerPolicy.Mismatch;
+        if (EnrollmentHosts(agentName, binding) is not { } hosts) return StockManagedSignerPolicy.AuthorityUnavailable;
+        var fault = SignerPolicyFault(policy, hosts);
+        if (fault is not null)
+            logger.LogWarning("Managed signer admission for {Agent}: {Category} (policy version {PolicyVersionId}, sha256 {PolicySha256})",
+                agentName, fault, binding.PolicyVersionId, binding.PolicySha256);
+        return fault;
+    }
+
+    /// <summary>The receiving-host map of the agent's active outside enrollment for exactly this binding; null when unusable.</summary>
+    private Dictionary<string, string>? EnrollmentHosts(string agentName, ManagedBinding binding)
+    {
+        try
+        {
+            var path = AuthorityPath(agentName);
+            if (AuthorityEntry(path) != true || JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path)) is not JsonObject record) return null;
+            static string? Text(JsonObject o, string key) => o[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+            if (Text(record, "State") != "active" || Text(record, "Agent") != agentName || Text(record, "SandboxId") != binding.SandboxId
+                || !Guid.TryParse(Text(record, "Epoch"), out var epoch) || epoch != binding.Epoch || Text(record, "StockCommit") != StockCommit
+                || Text(record, "PolicySha256") != binding.PolicySha256 || Text(record, "MemoryHost") is not { Length: > 0 } memory) return null;
+            var hosts = new Dictionary<string, string>(StringComparer.Ordinal) { [StockServices.Memory] = memory };
+            if (record["Services"] is { } services)
+            {
+                if (services is not JsonObject routes) return null;
+                foreach (var (service, route) in routes)
+                    if (!StockServices.McpNames.ContainsKey(service) || route is not JsonObject r || Text(r, "Host") is not { Length: > 0 } host
+                        || !hosts.TryAdd(service, host)) return null;
+            }
+            return hosts.Values.Distinct(StringComparer.OrdinalIgnoreCase).Count() == hosts.Count ? hosts : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException
+            or FormatException or StockIdentityDenied) { return null; }
     }
 
     /// <summary>The stock provider profiles this agent's apply attaches: the native key, then each outside service.</summary>
@@ -1161,7 +1242,13 @@ public sealed class StockOpenShellRuntime(
     {
         // Every prerequisite, including gateway client trust and generated inputs, precedes any old-runtime action.
         var (preflight, source) = await PreflightAsync(agent, ct);
-        if (preflight is not null) return (record, null, null, Result.Refused(409, preflight));
+        if (preflight is not null)
+        {
+            if (preflight.StartsWith("managed_signer_", StringComparison.Ordinal))
+                logger.LogWarning("Managed signer admission for {Agent}: {Category} (policy version {PolicyVersionId})",
+                    agent.Name, preflight, agent.SandboxPolicyVersionId);
+            return (record, null, null, Result.Refused(409, preflight));
+        }
         var subscription = source is not null;
         string generated;
         try { generated = await GeneratedInputsAsync(agent, ct); }
@@ -1370,6 +1457,10 @@ public sealed class StockOpenShellRuntime(
         // #502: source, provider and refresh window revalidated immediately before activation; expiry cuts instead.
         if (subscription && await RevalidateAsync(agent.Name, candidate, ct) is { } drift)
             return drift == StockSubscriptionBinding.Expired || Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, drift, [], ct);
+        // #503: the candidate's saved artifact and the just-written outside enrollment, rechecked right before activation;
+        // concurrent drift is the bounded revoke/Stop hold, never an applied success.
+        if (await AppliedSignerFaultAsync(agent.Name, candidate, ct) is { } signerDrift)
+            return Expired() ? await CutAsync(applying) : Hold(applying, 409, signerDrift, [.. await RevokeFanoutAsync(agent.Name, applying, ct)]);
         if (await ActivateAsync(candidate, ct) is { } activate) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, activate, [], ct);
         if (Expired()) return await CutAsync(applying);
         // An image-change re-apply keeps the replaced, revoked and stopped sandbox tracked instead of dropping it.
@@ -1644,6 +1735,10 @@ public sealed class StockOpenShellRuntime(
             if (drift is not null) return Hold(record, 409, drift, [.. await RevokeFanoutAsync(agent.Name, record, ct)]);
             if (await RevalidateAsync(agent.Name, binding, ct) is { } unverified) return (record, null, null, Result.Refused(409, unverified));
         }
+        // #503: positive admission of the persisted applied policy and its outside enrollment, never a newer desired
+        // selection; an old unbound policy is refused here (repair: append a bound version, select it, revoke, apply).
+        // The generation hold/fanout and subscription expiry/drift cleanup above never depend on it.
+        if (await AppliedSignerFaultAsync(agent.Name, binding, ct) is { } signer) return (record, null, null, Result.Refused(409, signer));
         // A repeat Start on an applied, running binding never re-stages or stops it: success when
         // Ready, otherwise a mutation-free refusal.
         if (record.State == "applied" && await GetAsync(binding, ct) is { } live && live.Id == binding.SandboxId
@@ -1655,6 +1750,9 @@ public sealed class StockOpenShellRuntime(
         // #502: the subscription tuple is revalidated immediately before activation; expiry cuts instead.
         if (binding.IsSubscription && await RevalidateAsync(agent.Name, binding, ct) is { } changed)
             return changed == StockSubscriptionBinding.Expired || Expired() ? await ExpireAsync(agent.Name, record) : await HoldStoppedAsync(record, binding, changed, [], ct);
+        // #503: drift of the applied artifact or enrollment while staging is the bounded revoke/Stop hold.
+        if (await AppliedSignerFaultAsync(agent.Name, binding, ct) is { } signerDrift)
+            return Expired() ? await ExpireAsync(agent.Name, record) : Hold(record, 409, signerDrift, [.. await RevokeFanoutAsync(agent.Name, record, ct)]);
         if (await ActivateAsync(binding, ct) is { } fault)
             return Expired() ? await ExpireAsync(agent.Name, record) : await HoldStoppedAsync(record, binding, fault, [], ct);
         if (Expired()) return await ExpireAsync(agent.Name, record);
@@ -2456,7 +2554,11 @@ public sealed class StockOpenShellRuntime(
         PrivateDirectory(Path.Combine(bundle, "app"));
         PrivateDirectory(Path.Combine(bundle, "trust"));
         PrivateDirectory(Path.Combine(bundle, "workspace"));
-        WriteText(Path.Combine(epochDir, "policy.yaml"), policy.Yaml);
+        // #503: the exact saved bytes, read back against the stored hash before any CLI call uses the file.
+        var policyFile = Path.Combine(epochDir, "policy.yaml");
+        WriteText(policyFile, policy.Yaml);
+        if (Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(policyFile))) != policy.Sha256)
+            throw new IOException("policy_readback_mismatch");
 
         var settings = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(generated, "appsettings.json")))!.AsObject();
         settings["StockOpenShell"] = new JsonObject

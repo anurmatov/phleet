@@ -4,6 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -93,6 +94,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         var binding = Binding("fleet-agent1-aaaaaaaa", Guid.NewGuid());
         _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
         _store.Add(ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        Enroll(binding);
 
         var tool = await Runtime().DispatchToolAsync("agent1", "start");
 
@@ -239,6 +241,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-telegram__send_message" });
         agent.FormattingMode = Fleet.Shared.FormattingMode.Rich;
         _store.Add(agent);
+        // #503: the saved policy signs exactly the three selected receiving hosts.
+        _store.PolicyYaml = SignedPolicy.Yaml(SignedPolicy.Memory, SignedPolicy.Temporal, SignedPolicy.Telegram);
         var runtime = Runtime();
 
         var result = await runtime.ApplyAsync("agent1", default);
@@ -259,9 +263,14 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             + "\"fleet-telegram\":{\"url\":\"https://telegram.example.test/mcp\"},\"fleet-temporal\":{\"url\":\"https://temporal.example.test/mcp\"}}}",
             File.ReadAllText(Path.Combine(staged, ".mcp.json")));
 
-        // Reprovision keeps the workspace but refreshes its routes from the current grants.
+        // Reprovision keeps the workspace but refreshes its routes from the current grants. #503: the old artifact still
+        // signs the dropped route, so it is refused; an appended version signing exactly memory and temporal applies.
         agent.McpEndpoints.RemoveAll(e => e.McpName == "fleet-telegram");
+        Assert.Equal((409, StockManagedSignerPolicy.Scope), ((await runtime.ApplyAsync("agent1", default)) is var refused ? (refused.Status, refused.Code) : default));
+        _store.PolicyYaml2 = SignedPolicy.Yaml(SignedPolicy.Memory, SignedPolicy.Temporal);
+        agent.SandboxPolicyVersionId = 2;
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        Assert.Contains(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["policy", "set"]));
         Assert.DoesNotContain("fleet-telegram", _cli.Uploads.Last(u => u.Remote == "/workspace/.mcp.json").Content!);
         Assert.Equal(["temporal"], JsonNode.Parse(File.ReadAllText(AuthorityPath()))!["Services"]!.AsObject().Select(p => p.Key));
     }
@@ -1011,7 +1020,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     internal string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
 
     internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, AgentRegistry? registry = null,
-        IStockCli? cli = null, TimeProvider? clock = null, Func<string, bool>? directorySync = null)
+        IStockCli? cli = null, TimeProvider? clock = null, Func<string, bool>? directorySync = null, IManagedBindingStore? store = null)
     {
         Directory.CreateDirectory(_dir);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -1029,7 +1038,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         File.WriteAllText(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), "model = \"synthetic\"\n");
         var services = new ServiceCollection();
         if (registry is not null) services.AddSingleton(registry);
-        return new StockOpenShellRuntime(Config(), cli ?? _cli, Provisioner(), _store, _host, _broker.Credentials,
+        return new StockOpenShellRuntime(Config(), cli ?? _cli, Provisioner(), store ?? _store, _host, _broker.Credentials,
             services.BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)
         {
             LegTimeout = TimeSpan.FromMilliseconds(400),
@@ -1084,8 +1093,26 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     }
 
     internal ManagedBinding Binding(string name, Guid epoch) =>
-        new(name, Guid.NewGuid().ToString(), epoch, "stock-agent:synthetic", 1, new string('b', 64), "api_key",
+        new(name, Guid.NewGuid().ToString(), epoch, "stock-agent:synthetic", 1, SandboxPolicyValidation.Hash(_store.PolicyYaml), "api_key",
             "SYNTHETIC_API_KEY", "fleet-agent1-openai", _host.Generation);
+
+    /// <summary>
+    /// #503: the active outside enrollment an applied binding of this agent carries after a verified apply: exact agent,
+    /// UUID, epoch, stock commit and policy hash plus its receiving hosts (memory and any routed services).
+    /// </summary>
+    internal void Enroll(ManagedBinding binding, string agent = "agent1", JsonObject? services = null)
+    {
+        var path = Path.Combine(_dir, "managed", "authority", agent + ".json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var record = new JsonObject
+        {
+            ["State"] = "active", ["Agent"] = agent, ["SandboxId"] = binding.SandboxId, ["Epoch"] = binding.Epoch.ToString(),
+            ["ExpiresAt"] = DateTimeOffset.UtcNow.AddDays(1).ToString("O"), ["MemoryHost"] = SignedPolicy.Memory.Host,
+            ["BrokerHost"] = "broker.example.test", ["StockCommit"] = StockOpenShellRuntime.StockCommit, ["PolicySha256"] = binding.PolicySha256,
+        };
+        if (services is not null) record["Services"] = services;
+        File.WriteAllText(path, record.ToJsonString());
+    }
 
     internal string AuthorityPath() => Path.Combine(_dir, "managed", "authority", "agent1.json");
 
@@ -1231,8 +1258,16 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             : Task.FromResult(_agents.FirstOrDefault(a => a.Name == name));
         public Task<IReadOnlyList<Agent>> ListAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<Agent>>(_agents);
         public string ProfileHashes = PinnedProfiles;
-        public Task<SandboxPolicyVersion?> LoadPolicyAsync(int id, CancellationToken ct) => Task.FromResult<SandboxPolicyVersion?>(
-            id is 1 or 2 ? new SandboxPolicyVersion { Id = id, Version = id, Yaml = ManagedStockRuntimeTests.PolicyYaml, Sha256 = new string('b', 64), ProviderProfileHashes = ProfileHashes } : null);
+        /// <summary>#503: the saved artifact (a valid signer-bound policy); its stored hash is the actual content hash.</summary>
+        public string PolicyYaml = SignedPolicy.MemoryOnly;
+        /// <summary>Version 2's own saved bytes when a test appends a different artifact; otherwise the same as version 1.</summary>
+        public string? PolicyYaml2;
+        public Task<SandboxPolicyVersion?> LoadPolicyAsync(int id, CancellationToken ct)
+        {
+            var yaml = id == 2 && PolicyYaml2 is { } second ? second : PolicyYaml;
+            return Task.FromResult<SandboxPolicyVersion?>(id is 1 or 2
+                ? new SandboxPolicyVersion { Id = id, Version = id, Yaml = yaml, Sha256 = SandboxPolicyValidation.Hash(yaml), ProviderProfileHashes = ProfileHashes } : null);
+        }
 
         /// <summary>Interceptor awaited inside every swap before it commits (applied kind, next binding).</summary>
         public Func<string?, string, Task>? OnSwap;
@@ -1347,5 +1382,38 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             _ => Extra.GetValueOrDefault(key),
         };
         public void InvalidateCache() { }
+    }
+}
+
+/// <summary>
+/// #503 shared fixture: a valid saved policy whose <c>network_middlewares</c> bind the fixed <c>stock-memory</c> signer to
+/// exactly the given receiving hosts, each with its one inspected, enforced <c>host:443</c> MCP endpoint.
+/// </summary>
+internal static class SignedPolicy
+{
+    internal static readonly (string Service, string Host) Memory = ("memory", "memory.example.test");
+    internal static readonly (string Service, string Host) Temporal = ("temporal", "temporal.example.test");
+    internal static readonly (string Service, string Host) Telegram = ("telegram", "telegram.example.test");
+    internal static readonly string MemoryOnly = Yaml(Memory);
+
+    internal static string Yaml(params (string Service, string Host)[] routes) => Yaml(routes, routes);
+
+    /// <summary>Endpoints for <paramref name="endpoints"/>, signer bindings for <paramref name="signed"/> (negative cases).</summary>
+    internal static string Yaml(IEnumerable<(string Service, string Host)> endpoints, IEnumerable<(string Service, string Host)> signed)
+    {
+        var text = new System.Text.StringBuilder("version: 1\nfilesystem_policy:\n  include_workdir: true\n  read_only: [/usr]\n  read_write: [/workspace]\n"
+            + "process:\n  run_as_user: sandbox\n  run_as_group: sandbox\nlandlock:\n  compatibility: hard_requirement\n");
+        text.Append(endpoints.Any() ? "network_policies:\n" : "network_policies: {}\n");
+        foreach (var (service, host) in endpoints)
+            text.Append($"  fleet-{service}:\n    endpoints:\n      - host: {host}\n        port: 443\n        protocol: mcp\n        enforcement: enforce\n"
+                + $"        access: {(service == "memory" ? "read-only" : "read-write")}\n    binaries:\n      - path: /usr/bin/codex\n");
+        if (signed.Any()) text.Append("network_middlewares:\n");
+        foreach (var (service, host) in signed)
+        {
+            var (_, order) = StockManagedSignerPolicy.Entries["stock-" + service];
+            text.Append($"  stock-{service}:\n    middleware: stock-memory\n    order: {order}\n    on_error: fail_closed\n"
+                + $"    config:\n      service: {service}\n    endpoints:\n      include:\n        - {host}\n");
+        }
+        return text.ToString();
     }
 }

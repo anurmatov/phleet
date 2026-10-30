@@ -68,7 +68,8 @@ if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") 
     builder.WebHost.ConfigureKestrel(options => options.ListenAnyIP(8080));
 
 var stockMode = builder.Configuration.GetValue<bool>("StockOpenShell:Enabled");
-var managedStock = stockMode && builder.Configuration["Agent:NativeAuthMode"] == "api_key";
+// #492/#502: both explicit managed auth modes (API key, subscription) share the managed control guard.
+var managedStock = stockMode && StockOpenShellEnrollment.IsManaged(builder.Configuration);
 var app = builder.Build();
 // Stock profiles use the authenticated broker for control, never legacy HTTP control routes.
 app.UseControlGuard(stockMode, managedStock);

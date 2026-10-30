@@ -488,6 +488,159 @@ public sealed class ManagedStockAgentTests
         Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(f.Config(), f.Home, () => 10001, f.Root, ReadEnvironment()));
     }
 
+    // ── #502 subscription native preparation (synthetic handles and account only) ─────────────
+
+    private const string Handle = "openshell:resolve:env:v3_CODEX_AUTH_ACCESS_TOKEN";
+    private const string Account = "synthetic-account_01";
+
+    private static Fixture SubscriptionFixture()
+    {
+        var f = new Fixture();
+        f.Settings["Agent:NativeAuthMode"] = "subscription";
+        f.Settings["Agent:ProviderApiKeyEnvRef"] = null;
+        f.Settings["StockOpenShell:SubscriptionAccountId"] = Account;
+        f.Settings["StockOpenShell:SubscriptionProvider"] = "agent1-codex-sub";
+        f.Settings["StockOpenShell:SubscriptionOwnerGeneration"] = "4f0c6c8e-6f39-4f5b-9d50-6b1b4b7e2a11";
+        return f;
+    }
+
+    private static string? SubscriptionEnv(string name) => name == "CODEX_AUTH_ACCESS_TOKEN" ? Handle : null;
+
+    [Fact]
+    public void Subscription_prepares_placeholder_only_cache_and_exact_native_config()
+    {
+        using var f = SubscriptionFixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, SubscriptionEnv)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv);
+
+        using var auth = JsonDocument.Parse(File.ReadAllText(Path.Combine(f.Home, ".codex", "auth.json")));
+        var root = auth.RootElement;
+        Assert.Equal("chatgptAuthTokens", root.GetProperty("auth_mode").GetString());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("OPENAI_API_KEY").ValueKind);
+        var tokens = root.GetProperty("tokens");
+        Assert.Equal(Handle, tokens.GetProperty("access_token").GetString());
+        Assert.Equal("", tokens.GetProperty("refresh_token").GetString());
+        Assert.Equal(Account, tokens.GetProperty("account_id").GetString());
+        Assert.EndsWith(".placeholder", tokens.GetProperty("id_token").GetString());
+
+        // Forced root keys first, generated defaults unchanged (one [analytics]), the exact descriptor, one [features]
+        // block and exactly one native memory table narrowed to memory_get.
+        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        var defaults = File.ReadAllText(f.Root);
+        Assert.Equal("forced_login_method = \"chatgpt\"\nforced_chatgpt_workspace_id = \"" + Account + "\"\nmodel_provider = \"openai-http\"\n"
+            + defaults
+            + "\n[model_providers.openai-http]\nname = \"OpenAI\"\nrequires_openai_auth = true\nsupports_websockets = false\n"
+            + "supports_standalone_web_search = true\nhttp_headers = { version = \"0.164.0\" }\n"
+            + "\n[features]\nplugins = false\napps = false\n"
+            + "\n[mcp_servers.memory]\nurl = \"https://memory.example.test/mcp\"\nenabled_tools = [\"memory_get\"]\n", config);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(config, @"^\[analytics\]$", System.Text.RegularExpressions.RegexOptions.Multiline));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(config, @"^\[mcp_servers\.", System.Text.RegularExpressions.RegexOptions.Multiline));
+        foreach (var absent in new[] { "base_url", "env_key", "experimental_bearer_token", "aws", "Authorization", "\nauth =" })
+            Assert.DoesNotContain(absent, config);
+        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex-host")));
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(Path.Combine(f.Home, ".codex")));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.Home, ".codex", "auth.json")));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.Home, ".codex", "config.toml")));
+        }
+        Assert.True(StockOpenShellEnrollment.IsManaged(c));
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("literal")]
+    [InlineData("foreign")]
+    [InlineData("api_env")]
+    [InlineData("api_ref")]
+    [InlineData("host_cache")]
+    [InlineData("account")]
+    [InlineData("provider")]
+    [InlineData("extra_route")]
+    [InlineData("no_memory_get")]
+    public void Subscription_wrong_input_exits_before_registration_and_writes(string fault)
+    {
+        using var f = SubscriptionFixture();
+        Func<string, string?> env = SubscriptionEnv;
+        switch (fault)
+        {
+            case "missing": env = _ => null; break;
+            case "literal": env = n => n == "CODEX_AUTH_ACCESS_TOKEN" ? "synthetic-literal-access-value" : null; break;
+            case "foreign": env = n => n == "CODEX_AUTH_ACCESS_TOKEN" ? "openshell:resolve:env:OPENAI_API_KEY" : null; break;
+            case "api_env": env = n => n == "OPENAI_API_KEY" ? "openshell:resolve:env:OPENAI_API_KEY" : SubscriptionEnv(n); break;
+            case "api_ref": f.Settings["Agent:ProviderApiKeyEnvRef"] = "EXTERNAL_KEY_REF"; break;
+            case "host_cache": Directory.CreateDirectory(Path.Combine(f.Home, ".codex-host")); break;
+            case "account": f.Settings["StockOpenShell:SubscriptionAccountId"] = "bad account"; break;
+            case "provider": f.Settings["StockOpenShell:SubscriptionProvider"] = "other-codex-sub"; break;
+            case "extra_route": f.Settings["StockOpenShell:TelegramBotId"] = "424242"; break;
+            case "no_memory_get": f.Settings["Agent:AllowedTools:0"] = "mcp__memory__memory_search"; break;
+        }
+        var c = f.Config();
+        var error = Assert.Throws<InvalidOperationException>(() =>
+        {
+            var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, env);
+        });
+        Assert.StartsWith("stock_enrollment_", error.Message);
+        Assert.DoesNotContain("synthetic-literal", error.Message);
+        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
+    }
+
+    [Fact]
+    public void Subscription_registration_refuses_drifted_cache_config_or_stub()
+    {
+        using var f = SubscriptionFixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, SubscriptionEnv)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
+        var authPath = Path.Combine(f.Home, ".codex", "auth.json");
+        var configPath = Path.Combine(f.Home, ".codex", "config.toml");
+        var good = File.ReadAllText(authPath);
+        var goodConfig = File.ReadAllText(configPath);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(good)!;
+        foreach (var mutate in new Action<System.Text.Json.Nodes.JsonNode>[]
+        {
+            n => n["tokens"]!["refresh_token"] = "synthetic-refresh",
+            n => n["tokens"]!["access_token"] = "openshell:resolve:env:v4_CODEX_AUTH_ACCESS_TOKEN",
+            n => n["tokens"]!["account_id"] = "other-account",
+            n => n["tokens"]!["id_token"] = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln",
+            n => n["OPENAI_API_KEY"] = "openshell:resolve:env:OPENAI_API_KEY",
+            n => n["extra"] = true,
+        })
+        {
+            var copy = node.DeepClone();
+            mutate(copy);
+            File.WriteAllText(authPath, copy.ToJsonString());
+            Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv));
+        }
+        File.WriteAllText(authPath, good);
+        foreach (var drift in new[] { goodConfig + "\n[mcp_servers.other]\nurl = \"https://other.example.test/mcp\"\n",
+                     goodConfig.Replace("supports_websockets = false", "supports_websockets = true"),
+                     goodConfig.Replace("enabled_tools = [\"memory_get\"]", "enabled_tools = [\"memory_get\", \"memory_search\"]") })
+        {
+            File.WriteAllText(configPath, drift);
+            Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv));
+        }
+        File.WriteAllText(configPath, goodConfig);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv);
+    }
+
+    [Fact]
+    public void Subscription_metadata_without_stock_mode_and_api_profile_with_it_both_refuse()
+    {
+        using var api = new Fixture();
+        api.Settings["StockOpenShell:SubscriptionAccountId"] = Account;
+        Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(api.Config(), api.Home, () => 10001, api.Root, _ => Placeholder));
+        using var off = new Fixture();
+        foreach (var key in off.Settings.Keys.Where(k => k.StartsWith("StockOpenShell:", StringComparison.Ordinal)).ToList()) off.Settings.Remove(key);
+        off.Settings["Agent:NativeAuthMode"] = null;
+        off.Settings["Agent:ProviderApiKeyEnvRef"] = null;
+        off.Settings["StockOpenShell:SubscriptionAccountId"] = Account;
+        Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(off.Config(), off.Home, () => 10001, off.Root, _ => null));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _dir = Path.Combine(Path.GetTempPath(), "managed-agent-" + Guid.NewGuid().ToString("N"));

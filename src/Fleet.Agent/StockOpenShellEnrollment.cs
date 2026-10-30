@@ -190,7 +190,10 @@ public static class StockOpenShellEnrollment
             // placeholders from the child environment (the final start's overlay), never a literal or
             // another value. The manual profile, files/send/cross-chat and other routes stay refused.
             var slots = configuration["Agent:NativeAuthMode"] == "api_key" ? ManagedCredentialSlots(configuration, environment) : null;
-            if ((slots is null && ManagedRouteKeys.Any(key => !string.IsNullOrEmpty(configuration[key])))
+            var subscription = configuration["Agent:NativeAuthMode"] == SubscriptionMode;
+            if ((slots is null && ManagedRouteKeys.Any(key => !string.IsNullOrEmpty(configuration[key])
+                    && !(subscription && SubscriptionKeys.Contains(key))))
+                || !subscription && SubscriptionKeys.Any(key => !string.IsNullOrEmpty(configuration[key]))
                 || !SlotHolds(configuration, slots, TelegramTokenKey) || !SlotHolds(configuration, slots, JournalTokenKey)
                 || !SlotHolds(configuration, slots, JournalStockKey)
                 || !SlotHolds(configuration, slots, JournalReadKey) || !SlotHolds(configuration, slots, JournalCrossChatKey)
@@ -219,9 +222,10 @@ public static class StockOpenShellEnrollment
             if (!configuration.GetSection("Agent:AllowedTools").GetChildren().Any(c => c.Value is
                 "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list"))
                 Deny("stock_enrollment_memory_tools_missing");
-            var placeholder = ApiPlaceholder(configuration, home, environment);
-            var api = placeholder is not null;
-            if ((!api && !File.Exists(Path.Combine(home, ".codex-host", "auth.json"))) || !File.Exists(rootFile))
+            var auth = NativeAuthFor(configuration, home, environment);
+            // #502: the compatibility-only subscription path has exactly the native memory route, nothing else.
+            if (auth.Subscription is not null && routes.Count != 1) Deny("stock_enrollment_extra_route_unsupported");
+            if ((auth.Manual && !File.Exists(Path.Combine(home, ".codex-host", "auth.json"))) || !File.Exists(rootFile))
                 Deny("stock_enrollment_native_inputs_missing");
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
             var expectedRoot = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
@@ -246,20 +250,20 @@ public static class StockOpenShellEnrollment
             binding.RequireBinding(authority);
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
-            var placeholder = ApiPlaceholder(configuration, home, environment ?? Environment.GetEnvironmentVariable);
-            var api = placeholder is not null;
-            var expected = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority, environment ?? Environment.GetEnvironmentVariable);
+            var auth = NativeAuthFor(configuration, home, environment ?? Environment.GetEnvironmentVariable);
+            var expected = NativeConfig(configuration, authority, environment ?? Environment.GetEnvironmentVariable, root!, auth);
             var directory = Path.Combine(home, ".codex");
-            if (api)
+            if (!auth.Manual)
             {
                 RequirePrivateDirectory(directory);
                 RequirePrivateFile(Path.Combine(directory, "auth.json"));
                 RequirePrivateFile(Path.Combine(directory, "config.toml"));
             }
             var actualAuth = StockEnrollmentAuthority.ReadBounded(Path.Combine(directory, "auth.json"));
-            if (api) RequireApiAuth(actualAuth, placeholder!);
+            if (auth.ApiPlaceholder is { } placeholder) RequireApiAuth(actualAuth, placeholder);
+            if (auth.Subscription is { } subscription) RequireSubscriptionAuth(actualAuth, subscription);
             if (StockEnrollmentAuthority.ReadText(Path.Combine(directory, "config.toml")) != expected
-                || !api && !CryptographicOperations.FixedTimeEquals(SHA256.HashData(actualAuth),
+                || auth.Manual && !CryptographicOperations.FixedTimeEquals(SHA256.HashData(actualAuth),
                     SHA256.HashData(StockEnrollmentAuthority.ReadBounded(Path.Combine(home, ".codex-host", "auth.json")))))
                 throw new InvalidOperationException("stock_enrollment_native_not_prepared");
         }
@@ -269,6 +273,97 @@ public static class StockOpenShellEnrollment
     }
 
     private const string ApiLogin = "forced_login_method = \"api\"\n";
+
+    /// <summary>The exact #498 stock HTTP descriptor table (no base_url/env_key/bearer/auth/aws, wire_api default).</summary>
+    internal const string SubscriptionDescriptor =
+        "\n[model_providers.openai-http]\nname = \"OpenAI\"\nrequires_openai_auth = true\nsupports_websockets = false\n"
+        + "supports_standalone_web_search = true\nhttp_headers = { version = \"" + CodexVersion + "\" }\n";
+
+    /// <summary>The one #498 suppression block; analytics stays the generated defaults' own <c>[analytics]</c> table.</summary>
+    internal const string SubscriptionFeatures = "\n[features]\nplugins = false\napps = false\n";
+
+    private static readonly string[] SubscriptionRootKeys = ["forced_login_method", "forced_chatgpt_workspace_id", "model_provider"];
+
+    /// <summary>
+    /// The one deterministic native config builder shared by preparation and registration checks. Subscription (#502):
+    /// forced ChatGPT/account/provider root keys first, then the generated defaults unchanged (their own
+    /// <c>[analytics] enabled=false</c> and <c>[history]</c>), then the exact descriptor, one <c>[features]</c> block and the
+    /// native memory table. Duplicate or shadowing keys/tables in the defaults refuse.
+    /// </summary>
+    internal static string NativeConfig(IConfiguration configuration, StockEnrollmentAuthority authority, Func<string, string?> environment,
+        string root, NativeAuth auth)
+    {
+        var mcp = NativeMcp(configuration, authority, environment);
+        if (auth.ApiPlaceholder is not null) return ApiLogin + root + mcp;
+        if (auth.Subscription is not { } subscription) return root + mcp;
+        var lines = root.Split('\n');
+        if (lines.Any(l => SubscriptionRootKeys.Any(k => l.StartsWith(k + " ", StringComparison.Ordinal) || l.StartsWith(k + "=", StringComparison.Ordinal))
+                || l.StartsWith("[features", StringComparison.Ordinal) || l.StartsWith("[model_providers", StringComparison.Ordinal)
+                || l.StartsWith("[mcp_servers", StringComparison.Ordinal))
+            || !lines.Contains("[analytics]") || !lines.Contains("enabled = false"))
+            Deny("stock_enrollment_native_config_mismatch");
+        return "forced_login_method = \"chatgpt\"\nforced_chatgpt_workspace_id = " + JsonSerializer.Serialize(subscription.AccountId)
+            + "\nmodel_provider = \"openai-http\"\n" + root + SubscriptionDescriptor + SubscriptionFeatures + mcp;
+    }
+
+    /// <summary>
+    /// The stock example's cache shape: <c>chatgptAuthTokens</c>, null API key, the issued handle as access token, an empty
+    /// refresh token, a nonsecret parsing-only ID-token stub and the selected account, with a bounded local timestamp.
+    /// </summary>
+    internal static byte[] SubscriptionCache(SubscriptionInputs inputs, DateTimeOffset now)
+    {
+        var seconds = now.ToUnixTimeSeconds();
+        static string B64(object value) => Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(value)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var idToken = string.Join('.', B64(new { alg = "none", typ = "JWT" }),
+            B64(new { iss = "https://auth.openai.com", aud = "codex", sub = "openshell-app-server", email = "app-server@openshell.local", iat = seconds, exp = seconds + 3600 }),
+            "placeholder");
+        return JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+        {
+            ["auth_mode"] = "chatgptAuthTokens",
+            ["OPENAI_API_KEY"] = null,
+            ["tokens"] = new Dictionary<string, string>
+            {
+                ["id_token"] = idToken, ["access_token"] = inputs.Handle, ["refresh_token"] = "", ["account_id"] = inputs.AccountId,
+            },
+            ["last_refresh"] = now.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture),
+        });
+    }
+
+    /// <summary>Exact cache semantics: the current handle, empty refresh token, selected account, the parsing-only stub.</summary>
+    private static void RequireSubscriptionAuth(byte[] bytes, SubscriptionInputs inputs)
+    {
+        using var json = JsonDocument.Parse(bytes);
+        var root = json.RootElement;
+        StockRequestProof.Unique(root);
+        if (root.EnumerateObject().Count() != 4 || root.GetProperty("auth_mode").GetString() != "chatgptAuthTokens"
+            || root.GetProperty("OPENAI_API_KEY").ValueKind != JsonValueKind.Null
+            || !DateTimeOffset.TryParse(root.GetProperty("last_refresh").GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal, out _))
+            Deny("stock_enrollment_native_not_prepared");
+        var tokens = root.GetProperty("tokens");
+        StockRequestProof.Unique(tokens);
+        if (tokens.EnumerateObject().Count() != 4 || tokens.GetProperty("access_token").GetString() != inputs.Handle
+            || tokens.GetProperty("refresh_token").GetString() != "" || tokens.GetProperty("account_id").GetString() != inputs.AccountId
+            || tokens.GetProperty("id_token").GetString() is not { } stub || !IsParsingStub(stub))
+            Deny("stock_enrollment_native_not_prepared");
+    }
+
+    /// <summary>Only the nonsecret <c>alg=none</c> stub with the fixed example identity and a placeholder signature.</summary>
+    private static bool IsParsingStub(string token)
+    {
+        var parts = token.Split('.');
+        if (parts.Length != 3 || parts[2] != "placeholder") return false;
+        static byte[] Decode(string part) => Convert.FromBase64String(part.Replace('-', '+').Replace('_', '/').PadRight(part.Length + (4 - part.Length % 4) % 4, '='));
+        using var header = JsonDocument.Parse(Decode(parts[0]));
+        using var payload = JsonDocument.Parse(Decode(parts[1]));
+        var p = payload.RootElement;
+        return header.RootElement.EnumerateObject().Count() == 2 && header.RootElement.GetProperty("alg").GetString() == "none"
+            && header.RootElement.GetProperty("typ").GetString() == "JWT"
+            && p.EnumerateObject().Count() == 6 && p.GetProperty("iss").GetString() == "https://auth.openai.com"
+            && p.GetProperty("aud").GetString() == "codex" && p.GetProperty("sub").GetString() == "openshell-app-server"
+            && p.GetProperty("email").GetString() == "app-server@openshell.local"
+            && p.GetProperty("iat").TryGetInt64(out var iat) && p.GetProperty("exp").TryGetInt64(out var exp) && exp == iat + 3600;
+    }
 
     /// <summary>
     /// Memory, then each first-party service route of the outside record, then the comms-journal read
@@ -300,6 +395,12 @@ public static class StockOpenShellEnrollment
             var prefix = "mcp__" + name + "__";
             var enabled = allowed.Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])
                 .Where(t => tools.Contains(t, StringComparer.Ordinal)).ToArray();
+            // #502: the compatibility-only subscription path registers exactly memory_get on the native memory route.
+            if (configuration["Agent:NativeAuthMode"] == SubscriptionMode)
+            {
+                if (name != "memory" || !enabled.Contains("memory_get")) Deny("stock_enrollment_mcp_route_invalid");
+                enabled = ["memory_get"];
+            }
             text.Append("\n[mcp_servers.").Append(name).Append("]\nurl = ").Append(JsonSerializer.Serialize(url))
                 .Append("\nenabled_tools = ").Append(JsonSerializer.Serialize(enabled)).Append('\n');
             // #492: the comms-journal read MCP authenticates with the derived read token, which stays
@@ -313,6 +414,50 @@ public static class StockOpenShellEnrollment
             }
         }
         return text.ToString();
+    }
+
+    internal const string SubscriptionMode = "subscription";
+    internal const string SubscriptionHandleKey = "CODEX_AUTH_ACCESS_TOKEN";
+    private const string SubscriptionAccountKey = "StockOpenShell:SubscriptionAccountId";
+    private const string SubscriptionProviderKey = "StockOpenShell:SubscriptionProvider";
+    private const string SubscriptionOwnerKey = "StockOpenShell:SubscriptionOwnerGeneration";
+    private static readonly string[] SubscriptionKeys = [SubscriptionAccountKey, SubscriptionProviderKey, SubscriptionOwnerKey];
+    /// <summary>Pinned Codex version for the stock <c>openai-http</c> descriptor's public version header (#498).</summary>
+    internal const string CodexVersion = "0.164.0";
+
+    /// <summary>#502 selected subscription inputs: the stock-issued access handle and the outside-selected account.</summary>
+    internal sealed record SubscriptionInputs(string Handle, string AccountId);
+
+    /// <summary>The selected native auth branch: manual host cache, API-key placeholder or subscription placeholder.</summary>
+    internal sealed record NativeAuth(string? ApiPlaceholder, SubscriptionInputs? Subscription)
+    {
+        public bool Manual => ApiPlaceholder is null && Subscription is null;
+    }
+
+    internal static NativeAuth NativeAuthFor(IConfiguration configuration, string home, Func<string, string?> environment) =>
+        configuration["Agent:NativeAuthMode"] == SubscriptionMode
+            ? new(null, SubscriptionInputsFor(configuration, home, environment))
+            : new(ApiPlaceholder(configuration, home, environment), null);
+
+    /// <summary>
+    /// #502: subscription mode reads only the stock-issued <c>CODEX_AUTH_ACCESS_TOKEN</c> handle from the child environment
+    /// (exact placeholder syntax; outside provider attachment is the issuance proof, syntax alone is not) and the
+    /// outside-selected nonsecret account/provider/owner-generation metadata. No API reference or key, no host cache.
+    /// </summary>
+    private static SubscriptionInputs SubscriptionInputsFor(IConfiguration configuration, string home, Func<string, string?> environment)
+    {
+        if (!string.IsNullOrEmpty(configuration["Agent:ProviderApiKeyEnvRef"])
+            || !string.IsNullOrEmpty(environment("OPENAI_API_KEY")) || !string.IsNullOrEmpty(environment("CODEX_API_KEY")))
+            Deny("stock_enrollment_native_auth_invalid");
+        var handle = environment(SubscriptionHandleKey);
+        if (!StockCredentials.IsPlaceholder(handle, SubscriptionHandleKey)) Deny("stock_enrollment_native_auth_invalid");
+        var account = configuration[SubscriptionAccountKey];
+        if (account is null || !System.Text.RegularExpressions.Regex.IsMatch(account, @"\A[A-Za-z0-9_-]{1,256}\z")
+            || configuration[SubscriptionProviderKey] != configuration["Agent:Name"] + "-codex-sub"
+            || !Guid.TryParseExact(configuration[SubscriptionOwnerKey], "D", out var owner) || owner == Guid.Empty)
+            Deny("stock_enrollment_subscription_metadata_invalid");
+        if (Path.Exists(Path.Combine(home, ".codex-host"))) Deny("stock_enrollment_native_cache_forbidden");
+        return new(handle!, account);
     }
 
     // Syntax is a refusal check, NOT proof of stock issuance or secret isolation. Outside
@@ -344,7 +489,8 @@ public static class StockOpenShellEnrollment
         configuration.GetValue<bool>("Journal:FilesEnabled") || configuration.GetValue<bool>("Journal:SendEnabled");
 
     /// <summary>Managed-only route selectors (nonsecret, written by the orchestrator) and the overlay's flag.</summary>
-    private static readonly string[] ManagedRouteKeys = ["StockOpenShell:TelegramBotId", "StockOpenShell:JournalCapture", JournalStockKey];
+    private static readonly string[] ManagedRouteKeys = ["StockOpenShell:TelegramBotId", "StockOpenShell:JournalCapture", JournalStockKey,
+        SubscriptionAccountKey, SubscriptionProviderKey, SubscriptionOwnerKey];
 
     private static bool SlotHolds(IConfiguration configuration, IReadOnlyDictionary<string, string?>? slots, string key) =>
         string.IsNullOrEmpty(configuration[key]) || slots is not null && slots.TryGetValue(key, out var expected) && configuration[key] == expected;
@@ -396,9 +542,16 @@ public static class StockOpenShellEnrollment
     /// sees the placeholder-only slots. Empty outside managed mode; the startup gate still validates it.
     /// </summary>
     public static IReadOnlyDictionary<string, string?> ManagedCredentialOverlay(IConfiguration configuration, Func<string, string?>? environment = null) =>
-        bool.TryParse(configuration["StockOpenShell:Enabled"], out var enabled) && enabled && configuration["Agent:NativeAuthMode"] == "api_key"
-            ? ManagedCredentialSlots(configuration, environment ?? Environment.GetEnvironmentVariable)
+        IsManaged(configuration) ? ManagedCredentialSlots(configuration, environment ?? Environment.GetEnvironmentVariable)
             : new Dictionary<string, string?>();
+
+    /// <summary>
+    /// Shared managed-mode classification (#492, #502): stock enabled with an explicit managed auth selection, API key or
+    /// subscription. The manual profile (no selection) is not managed.
+    /// </summary>
+    public static bool IsManaged(IConfiguration configuration) =>
+        bool.TryParse(configuration["StockOpenShell:Enabled"], out var enabled) && enabled
+        && configuration["Agent:NativeAuthMode"] is "api_key" or SubscriptionMode;
 
     private static void RequireApiAuth(byte[] bytes, string placeholder)
     {
@@ -419,29 +572,33 @@ public static class StockOpenShellEnrollment
             // Recheck admission before any writes, including direct invocation of the preparation mode.
             var authority = StockEnrollmentAuthority.Load(configuration["StockOpenShell:AuthorityFile"]!);
             binding.RequireBinding(authority);
-            var placeholder = ApiPlaceholder(configuration, home, environment);
-            var api = placeholder is not null;
+            var native = NativeAuthFor(configuration, home, environment);
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
             if (StockEnrollmentAuthority.ReadText(rootFile) != root) Deny("stock_enrollment_native_config_mismatch");
-            var config = (api ? ApiLogin : "") + root + NativeMcp(configuration, authority, environment);
+            var config = NativeConfig(configuration, authority, environment, root!, native);
             var directory = Path.Combine(home, ".codex");
             RequireDirectoryAncestors(directory);
-            if (api)
+            if (!native.Manual)
             {
                 if (Path.Exists(directory)) RequirePrivateDirectory(directory);
                 else Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
                 foreach (var leaf in new[] { "auth.json", "config.toml" })
                     if (Path.Exists(Path.Combine(directory, leaf))) RequirePrivateFile(Path.Combine(directory, leaf));
+                // Never overwrite a foreign existing cache: only this branch's own earlier placeholder cache is replaced.
                 var authPath = Path.Combine(directory, "auth.json");
-                if (File.Exists(authPath)) RequireApiAuth(StockEnrollmentAuthority.ReadBounded(authPath), placeholder!);
+                if (File.Exists(authPath) && native.ApiPlaceholder is { } existingApi) RequireApiAuth(StockEnrollmentAuthority.ReadBounded(authPath), existingApi);
+                if (File.Exists(authPath) && native.Subscription is { } existingSubscription)
+                    RequireSubscriptionAuth(StockEnrollmentAuthority.ReadBounded(authPath), existingSubscription);
             }
             else Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            var auth = api ? JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string?> { ["OPENAI_API_KEY"] = placeholder })
+            var auth = native.ApiPlaceholder is { } placeholder
+                ? JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string?> { ["OPENAI_API_KEY"] = placeholder })
+                : native.Subscription is { } subscription ? SubscriptionCache(subscription, DateTimeOffset.UtcNow)
                 : StockEnrollmentAuthority.ReadBounded(Path.Combine(home, ".codex-host", "auth.json"));
             PrivateWrite(Path.Combine(directory, "auth.json"), auth);
             PrivateWrite(Path.Combine(directory, "config.toml"), System.Text.Encoding.UTF8.GetBytes(config));
-            RequirePrepared(configuration, binding, home, key => key == "OPENAI_API_KEY" ? placeholder : environment(key));
+            RequirePrepared(configuration, binding, home, environment);
         }
         catch (Exception ex) when (ex is StockIdentityDenied or IOException or UnauthorizedAccessException or JsonException
             or ArgumentException or KeyNotFoundException or FormatException || ex is InvalidOperationException

@@ -150,7 +150,7 @@ login, and no new environment key or tool. API-key and manual paths are unchange
 
 | OpenShell capability | Status |
 |---|---|
-| Isolated Codex subscriptions | **UNQUALIFIED** at stock 0.1.5 / Codex 0.164.0; [separate docs/profile qualification](docs/openshell-subscription-auth.md), no migration or managed subscription support |
+| Isolated Codex subscriptions | **UNQUALIFIED** at stock 0.1.5 / Codex 0.164.0; [separate docs/profile qualification](docs/openshell-subscription-auth.md), no migration; the managed subscription branch (#502) is compatibility-only and unqualified |
 
 ## Platform support
 

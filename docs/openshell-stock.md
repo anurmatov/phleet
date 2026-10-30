@@ -22,7 +22,8 @@ candidate and an operator-imported profile at stock 0.1.5 / Codex 0.164.0.
 It does not change this manual profile, API-key policy selection, setup or auth owners.
 Source/profile checks do not establish isolated subscriptions, authorize runtime
 actions or satisfy [#493](https://github.com/anurmatov/phleet/issues/493) whole-agent acceptance.
-All subscription A0–A9 live evidence remains UNRUN; no managed migration is added.
+All subscription A0–A9 live evidence remains UNRUN; no managed migration is added. The later managed subscription
+compatibility branch (#502) is described in [its own section](#managed-codex-subscription-branch-502-unqualified-compatibility-only).
 
 ## Implemented source paths
 

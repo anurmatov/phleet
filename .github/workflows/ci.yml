@@ -95,6 +95,12 @@ jobs:
           docker build -f src/Fleet.Orchestrator/Dockerfile -t orchestrator-test:pr .
           env -u ORCHESTRATOR_AUTH_TOKEN bash scripts/check-stock-runtime-rollout.sh --image orchestrator-test:pr
 
+      # #503 W6: the opt-in image (stub CLI) carries the external ssh that the pinned `sandbox upload` spawns,
+      # the default image does not, and that ssh carries a pinned-option subsystem upload into a throwaway sshd.
+      # Local tags and a private network only; no gateway, credential or native upload.
+      - name: Opt-in orchestrator image upload transport
+        run: bash scripts/test-stock-upload-transport.sh orchestrator-test:pr
+
       # #502: focused inert subscription rollback guard and snapshot regressions (stub preflight, synthetic
       # files only; no runtime, deployment or credential authority).
       - name: Subscription rollout guard and snapshot regressions

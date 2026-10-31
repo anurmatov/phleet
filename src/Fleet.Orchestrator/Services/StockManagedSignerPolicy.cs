@@ -129,8 +129,10 @@ internal static class StockManagedSignerPolicy
             if (SandboxPolicyValidation.Scalar(endpoint, "protocol") != "mcp" || SandboxPolicyValidation.Scalar(endpoint, "enforcement") != "enforce"
                 || SandboxPolicyValidation.Scalar(endpoint, "tls") != "") return Mismatch;
             // #503 W5: exact MCP rules, never an access preset (pinned stock rejects them) or a stock field outside the saved
-            // subset such as mcp.allow_all_known_mcp_methods; memory stays read-only as memory_get alone.
-            SandboxPolicyValidation.Map(endpoint, "host", "port", "protocol", "tls", "enforcement", "rules");
+            // subset such as mcp.allow_all_known_mcp_methods; memory stays read-only as memory_get alone. W13: the only
+            // mcp field is the bounded versions list.
+            SandboxPolicyValidation.Map(endpoint, "host", "port", "protocol", "tls", "enforcement", "rules", "mcp");
+            SandboxPolicyValidation.McpVersions(endpoint);
             var tools = SandboxPolicyValidation.McpRules(endpoint);
             if (service == StockServices.Memory && !tools.SetEquals([MemoryTool])) return Mismatch;
             if (SandboxPolicyValidation.Get(rule, "binaries") is not { } binaries || !SandboxPolicyValidation.List(binaries).Any()) return Mismatch;

@@ -183,7 +183,7 @@ internal static class SandboxPolicyValidation
                     }
                     if (Get(rule, "endpoints") is { } endpoints) foreach (var e in List(endpoints))
                     {
-                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding", "rules");
+                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding", "rules", "mcp");
                         Require(Regex.IsMatch(Scalar(endpoint, "host"), @"^[A-Za-z0-9*_.:-]{1,253}\z"), "Invalid endpoint host.");
                         Require(int.TryParse(PlainScalar(endpoint, "port"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) && port is >= 1 and <= 65535, "Invalid endpoint port.");
                         Option(endpoint, "protocol", "tcp", "rest", "mcp", "json-rpc", "websocket", "graphql", "sql");
@@ -198,8 +198,10 @@ internal static class SandboxPolicyValidation
                             // #503 W5: pinned stock rejects every MCP access preset (l7_validate.rs:273–281).
                             Require(Get(endpoint, "access") is null, "protocol mcp does not support access presets; use the exact MCP rules.");
                             McpRules(endpoint);
+                            McpVersions(endpoint);
                         }
-                        else Require(Get(endpoint, "rules") is null, "Rules are supported only on protocol: mcp endpoints.");
+                        else Require(Get(endpoint, "rules") is null && Get(endpoint, "mcp") is null,
+                            "Rules and the mcp block are supported only on protocol: mcp endpoints.");
                         if (Get(endpoint, "credential_binding") is { } binding)
                         {
                             var profile = Scalar(Map(binding, "provider"), "provider");
@@ -281,6 +283,32 @@ internal static class SandboxPolicyValidation
         }
         Require(methods.Count == McpControlMethods.Length && tools.Count > 0, form);
         return tools;
+    }
+
+    /// <summary>
+    /// #503 W13: the MCP revisions a saved endpoint may name in <c>mcp.versions</c>. Pinned Codex 0.164.0 negotiates
+    /// 2025-06-18 and sends it as <c>MCP-Protocol-Version</c>; 2025-11-25 is the pinned stock default
+    /// (openshell-policy-schema lib.rs:43), which an omitted list keeps.
+    /// </summary>
+    internal static readonly string[] McpVersionChoices = ["2025-06-18", "2025-11-25"];
+
+    /// <summary>
+    /// #503 W13: the optional <c>mcp</c> block of a <c>protocol: mcp</c> endpoint, in the pinned stock shape
+    /// (openshell-policy-schema lib.rs:346–370): exactly <c>versions</c>, a nonempty list of distinct exact revisions from
+    /// <see cref="McpVersionChoices"/>. No other <c>mcp</c> field (so no <c>allow_all_known_mcp_methods</c> or
+    /// <c>strict_tool_names</c>); stock rejects empty lists, duplicates and unknown or moving names the same way
+    /// (lib.rs:145–160). Returns the named revisions, empty when the block is omitted.
+    /// </summary>
+    internal static IReadOnlySet<string> McpVersions(YamlMappingNode endpoint)
+    {
+        var versions = new HashSet<string>(StringComparer.Ordinal);
+        if (Get(endpoint, "mcp") is not { } block) return versions;
+        const string form = "mcp holds exactly versions: a nonempty list of distinct revisions from 2025-06-18 and 2025-11-25.";
+        var mcp = Map(block, "versions");
+        Require(Get(mcp, "versions") is not null && mcp.Children.Count == 1, form);
+        foreach (var item in List(Get(mcp, "versions")!)) Require(McpVersionChoices.Contains(Value(item)) && versions.Add(Value(item)), form);
+        Require(versions.Count > 0, form);
+        return versions;
     }
 
     private static void Option(YamlMappingNode map, string key, params string[] choices)

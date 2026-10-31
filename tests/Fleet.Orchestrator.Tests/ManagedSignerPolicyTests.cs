@@ -115,6 +115,51 @@ public sealed class ManagedSignerPolicyTests
     public void Access_presets_wildcards_and_any_other_mcp_rule_form_are_refused_at_save(string from, string to) =>
         Assert.NotNull(SandboxPolicyValidation.DescribeFault(Memory(from, to), new()));
 
+    // #503 W13: the revision pinned Codex 0.164.0 negotiates and then sends as MCP-Protocol-Version, in the pinned stock block.
+    private const string NativeVersions = "        mcp:\n          versions:\n            - '2025-06-18'\n";
+
+    [Fact]
+    public void The_native_revision_saves_and_admits_in_the_bounded_mcp_versions_list()
+    {
+        var native = Memory("        enforcement: enforce\n", "        enforcement: enforce\n" + NativeVersions);
+        Assert.Null(SandboxPolicyValidation.DescribeFault(native, new()));
+        Assert.Null(StockManagedSignerPolicy.DescribeBindingFault(native, MemoryHosts));
+        // Plain and flow scalars are the same stock strings; the pinned default may be listed beside it.
+        Assert.Null(SandboxPolicyValidation.DescribeFault(Memory("        enforcement: enforce\n",
+            "        enforcement: enforce\n        mcp: {versions: [2025-11-25, 2025-06-18]}\n"), new()));
+        // The exact method and tool rules still decide: versions never widen them.
+        Assert.Equal(StockManagedSignerPolicy.Mismatch, StockManagedSignerPolicy.DescribeBindingFault(
+            native.Replace("tool: memory_get", "tool: memory_search"), MemoryHosts));
+        Assert.NotNull(SandboxPolicyValidation.DescribeFault(native.Replace("method: tools/list", "method: '*'"), new()));
+        // A stored version without the block keeps its meaning (the stock default revision only).
+        Assert.Null(StockManagedSignerPolicy.DescribeBindingFault(SignedPolicy.MemoryOnly, MemoryHosts));
+    }
+
+    [Theory]
+    [InlineData("        mcp: {versions: ['2026-07-28']}\n")]
+    [InlineData("        mcp: {versions: ['2025-03-26']}\n")]
+    [InlineData("        mcp: {versions: [latest]}\n")]
+    [InlineData("        mcp: {versions: ['2025-06-18 ']}\n")]
+    [InlineData("        mcp: {versions: []}\n")]
+    [InlineData("        mcp: {versions: ['2025-06-18', '2025-06-18']}\n")]
+    [InlineData("        mcp: {versions: '2025-06-18'}\n")]
+    [InlineData("        mcp: {versions: null}\n")]
+    [InlineData("        mcp: {}\n")]
+    [InlineData("        mcp: {versions: ['2025-06-18'], allow_all_known_mcp_methods: true}\n")]
+    [InlineData("        mcp: {versions: ['2025-06-18'], strict_tool_names: false}\n")]
+    [InlineData("        mcp: {versions: ['2025-06-18'], max_body_bytes: 1024}\n")]
+    public void Any_other_mcp_block_is_refused_at_save_and_admission(string block)
+    {
+        var yaml = Memory("        enforcement: enforce\n", "        enforcement: enforce\n" + block);
+        Assert.NotNull(SandboxPolicyValidation.DescribeFault(yaml, new()));
+        Assert.Equal(StockManagedSignerPolicy.Mismatch, StockManagedSignerPolicy.DescribeBindingFault(yaml, MemoryHosts));
+    }
+
+    [Fact]
+    public void The_mcp_block_is_refused_on_any_other_protocol() =>
+        Assert.NotNull(SandboxPolicyValidation.DescribeFault("version: 1\nnetwork_policies: {api: {endpoints: [{host: api.example.com, port: 443, "
+            + "protocol: rest, enforcement: enforce, access: read-only, mcp: {versions: ['2025-06-18']}}]}}", new()));
+
     [Fact]
     public void An_mcp_endpoint_needs_rules_and_rules_need_mcp()
     {

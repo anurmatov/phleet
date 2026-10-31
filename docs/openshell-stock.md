@@ -975,6 +975,9 @@ network_policies:
         port: 443
         protocol: mcp
         enforcement: enforce
+        mcp:
+          versions:
+            - '2025-06-18'
         rules:
           - allow:
               method: initialize
@@ -1015,7 +1018,16 @@ form, in the pinned shape
 |---|---|
 | control | exactly `initialize`, `notifications/initialized` and `tools/list`, each once, as `allow.method` (slash-separated wire names) |
 | tools | `allow.method: tools/call` with one plain `allow.tool` name (lowercase letters, digits, underscore), at least one, each once |
-| refused | any `access` preset on MCP, `rules` on any other protocol, wildcards or globs, `any` lists, `params`, `path`, `deny_rules`, the `mcp` block (so no `allow_all_known_mcp_methods`), other methods, duplicates |
+| revisions (W13) | optional `mcp` block holding exactly `versions`: a nonempty list of distinct exact revisions from `2025-06-18` and `2025-11-25` |
+| refused | any `access` preset on MCP, `rules` or `mcp` on any other protocol, wildcards or globs, `any` lists, `params`, `path`, `deny_rules`, any other `mcp` field (so no `allow_all_known_mcp_methods` or `strict_tool_names`), other revisions or moving names, empty or duplicate version lists, other methods, duplicates |
+
+**MCP revisions (W13).** Pinned stock allows only `2025-11-25` on an MCP endpoint whose policy omits `mcp.versions`
+([`openshell-policy-schema lib.rs:43`](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy-schema/src/lib.rs#L43)).
+Pinned Codex 0.164.0 negotiates `2025-06-18` and sends it as `MCP-Protocol-Version` on every request after
+`initialize`, so stock refuses those requests with `mcp_protocol_version_not_allowed`. A native endpoint lists
+`versions: ['2025-06-18']`, as in the example above. The list only selects the revision; the method and tool rules
+are unchanged. A version saved without the block keeps its meaning. To use the revision, append a new version with the
+block and select it, as described for old bindings below; an existing version is never edited.
 
 **Literal design mismatch, disclosed.** The approved #503 design table says memory uses `access: read-only` and other
 receivers keep "their existing accepted access preset". Pinned stock rejects both for MCP, so the read-only intent is

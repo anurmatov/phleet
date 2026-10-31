@@ -152,6 +152,9 @@ first-party receiving hosts. It is one restricted subset, with no arbitrary midd
 hash stay the effective policy. Registering that signer in the gateway makes it a startup dependency of every
 sandbox on that gateway. This adds no runtime qualification; see the
 [signer binding runbook](docs/openshell-stock.md#managed-signer-policy-binding-503).
+Managed workloads (#507) keep their user tree in HOME's `workspace` child, inside the stock CLI's copy root; older
+`/workspace` bindings are carried there only after proof, through a filtered in-sandbox snapshot, and never rewritten in
+place. See the [workspace layout runbook](docs/openshell-stock.md#managed-workspace-layout-507).
 
 | OpenShell capability | Status |
 |---|---|

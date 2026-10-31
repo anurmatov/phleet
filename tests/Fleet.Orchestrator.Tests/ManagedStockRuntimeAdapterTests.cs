@@ -33,7 +33,11 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     internal readonly FakeHost _host = new();
     internal readonly FakeBroker _broker = new();
 
-    public void Dispose() => Directory.Delete(_dir, recursive: true);
+    public void Dispose()
+    {
+        _cli.Dispose();
+        Directory.Delete(_dir, recursive: true);
+    }
 
     // ── apply ──────────────────────────────────────────────────────────────
 
@@ -557,7 +561,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         agent.SandboxPolicyVersionId = 2;
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
         Assert.Contains(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["policy", "set"]));
-        Assert.DoesNotContain("fleet-telegram", _cli.Uploads.Last(u => u.Remote == "/workspace/.mcp.json").Content!);
+        Assert.DoesNotContain("fleet-telegram", _cli.Uploads.Last(u => u.Remote == "/home/agent/workspace/.mcp.json").Content!);
         Assert.Equal(["temporal"], JsonNode.Parse(File.ReadAllText(AuthorityPath()))!["Services"]!.AsObject().Select(p => p.Key));
     }
 
@@ -811,6 +815,11 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Contains("FLEET_STOCK_STAGED=1", create.Args);
         Assert.DoesNotContain("--upload", create.Args);
         Assert.False(Directory.Exists(Path.Combine(staged, "codex")));
+        // #507: the user then works in W, HOME's workspace child, inside the sandbox.
+        var sandbox = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).Applied!.SandboxName;
+        Assert.Equal("keep", File.ReadAllText(_cli.Fs(sandbox, "/home/agent/workspace/marker.txt")));
+        File.WriteAllText(_cli.Fs(sandbox, "/home/agent/workspace/marker-back.txt"), "from sandbox");
+        Directory.CreateDirectory(_cli.Fs(sandbox, "/home/agent/workspace/only-dir"));
 
         _store.Get("agent1").RuntimeKind = "docker";
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
@@ -1295,6 +1304,56 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.Null(JsonNode.Parse(File.ReadAllText(Path.Combine(app, "appsettings.json")))!["StockOpenShell"]!["JournalCapture"]);
     }
 
+    // ── #507: persisted workspace layout ───────────────────────────────────
+
+    [Fact]
+    public void Workspace_path_is_an_additive_field_of_the_existing_binding_json()
+    {
+        var legacy = Binding("fl-0123456789abcdef", Guid.NewGuid()) with { WorkloadWorkspacePath = null };
+        var legacyJson = new ManagedRecord { State = "applied", Applied = legacy }.Serialize();
+        // A record written before #507 keeps its shape (no key) and reads back as "no persisted path", never a default.
+        Assert.DoesNotContain("workloadWorkspacePath", legacyJson);
+        Assert.Null(ManagedRecord.Parse(legacyJson).Applied!.WorkloadWorkspacePath);
+        var current = new ManagedRecord { State = "applied", Applied = Binding("fl-0123456789abcdef", Guid.NewGuid()) }.Serialize();
+        Assert.Contains("\"workloadWorkspacePath\":\"/home/agent/workspace\"", current);
+        Assert.Equal("/home/agent/workspace", ManagedRecord.Parse(current).Applied!.WorkloadWorkspacePath);
+        Assert.Equal(JsonSerializer.Serialize(ManagedRecord.Parse(current).Applied),
+            JsonSerializer.Serialize(ManagedRecord.Parse(ManagedRecord.Parse(current).Serialize()).Applied));
+    }
+
+    [Fact]
+    public void Helper_manifest_matches_the_adapter_recomputation_for_odd_names_modes_and_empty_directories()
+    {
+        var root = Path.Combine(_dir, "manifest-root");
+        var source = Path.Combine(root, "workspace");
+        var operation = Path.Combine(root, ".phleet-workspace-transfer", "op");
+        Directory.CreateDirectory(Path.Combine(source, "empty"));
+        Directory.CreateDirectory(operation);
+        foreach (var name in new[] { "with space", "-dash", "new\nline", "юникод", "a-b", "a" }) File.WriteAllText(Path.Combine(source, name), name);
+        Directory.CreateDirectory(Path.Combine(source, "a.d"));
+        File.WriteAllBytes(Path.Combine(source, "a.d", "bin"), [0, 1, 2]);
+        File.SetUnixFileMode(Path.Combine(source, "a.d", "bin"), (UnixFileMode)0b111_101_101);
+        var psi = new System.Diagnostics.ProcessStartInfo("python3") { RedirectStandardOutput = true, WorkingDirectory = root };
+        foreach (var arg in new[] { CopyHelper, "--root", root, "--source", source, "--dest", Path.Combine(operation, "data") }) psi.ArgumentList.Add(arg);
+        psi.Environment["HOME"] = root;
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+
+        Assert.Equal(0, process.ExitCode);
+        var reported = StockOpenShellRuntime.ParseManifest(stdout);
+        Assert.NotNull(reported);
+        Assert.Equal(reported, StockOpenShellRuntime.SnapshotManifest(Path.Combine(operation, "data")));
+        Assert.Equal(9, reported!.Value.Entries);
+        // A changed byte, mode or entry is a different manifest; a link is no manifest at all.
+        File.SetUnixFileMode(Path.Combine(operation, "data", "a.d", "bin"), (UnixFileMode)0b110_100_100);
+        Assert.NotEqual(reported, StockOpenShellRuntime.SnapshotManifest(Path.Combine(operation, "data")));
+        File.CreateSymbolicLink(Path.Combine(operation, "data", "link"), "/etc");
+        Assert.Null(StockOpenShellRuntime.SnapshotManifest(Path.Combine(operation, "data")));
+        Assert.Null(StockOpenShellRuntime.ParseManifest("{\"entries\":1}"));
+        Assert.Null(StockOpenShellRuntime.ParseManifest("not json"));
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────
 
     internal readonly List<string> _dockerProvisions = [];
@@ -1304,6 +1363,19 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     private string? _generatedMcp;
     private string _generatedSettings = "{\"Agent\":{\"Name\":\"agent1\"}}";
     internal string DockerWorkspaceDir => Path.Combine(_dir, "docker-workspace");
+
+    /// <summary>#507: the repository's public copy helper, uploaded and run for real by the layout-aware fake.</summary>
+    internal static readonly string CopyHelper = FindCopyHelper();
+
+    /// <summary>The helper file <see cref="Runtime"/> configures (a test may point it at a missing path).</summary>
+    internal string HelperFile = CopyHelper;
+
+    private static string FindCopyHelper()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "Fleet.sln"))) return Path.Combine(dir.FullName, "scripts", StockOpenShellRuntime.CopyHelperName);
+        throw new InvalidOperationException("Fleet.sln not found above the test output");
+    }
 
     internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, AgentRegistry? registry = null,
         IStockCli? cli = null, TimeProvider? clock = null, Func<string, bool>? directorySync = null, IManagedBindingStore? store = null)
@@ -1324,7 +1396,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         File.WriteAllText(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), "model = \"synthetic\"\n");
         var services = new ServiceCollection();
         if (registry is not null) services.AddSingleton(registry);
-        return new StockOpenShellRuntime(Config(), cli ?? _cli, Provisioner(), store ?? _store, _host, _broker.Credentials,
+        return new StockOpenShellRuntime(Config(ConfigOverrides), cli ?? _cli, Provisioner(), store ?? _store, _host, _broker.Credentials,
             services.BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)
         {
             LegTimeout = TimeSpan.FromMilliseconds(400),
@@ -1339,6 +1411,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 return Task.FromResult(_dockerResult);
             },
             DockerWorkspace = _ => DockerWorkspaceDir,
+            CopyHelperFile = HelperFile,
             Clock = clock ?? TimeProvider.System,
             DirectorySync = directorySync,
         };
@@ -1348,6 +1421,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     /// <summary>The recorded host-operator owner (<c>StockOpenShell:ConfigDirOwnerUid</c>); unset by default.</summary>
     internal string? ConfigDirOwnerUid;
+
+    /// <summary>Further configuration for <see cref="Runtime"/> (for example, a changed <c>StockOpenShell:WorkloadHome</c>).</summary>
+    internal Dictionary<string, string?>? ConfigOverrides;
 
     private IConfiguration Config(Dictionary<string, string?>? overrides = null)
     {
@@ -1383,9 +1459,10 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         return agent;
     }
 
+    /// <summary>An applied binding in the current #507 layout (W under the stock HOME); legacy tests clear the path.</summary>
     internal ManagedBinding Binding(string name, Guid epoch) =>
         new(name, Guid.NewGuid().ToString(), epoch, "stock-agent:synthetic", 1, SandboxPolicyValidation.Hash(_store.PolicyYaml), "api_key",
-            "SYNTHETIC_API_KEY", "fleet-agent1-openai", _host.Generation);
+            "SYNTHETIC_API_KEY", "fleet-agent1-openai", _host.Generation) { WorkloadWorkspacePath = "/home/agent/workspace" };
 
     /// <summary>
     /// #503: the active outside enrollment an applied binding of this agent carries after a verified apply: exact agent,
@@ -1415,7 +1492,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     internal sealed record Call(List<string> Args, IReadOnlyDictionary<string, string>? SecretEnv);
 
-    internal sealed class FakeCli : IStockCli
+    internal sealed class FakeCli : IStockCli, IDisposable
     {
         public readonly List<Call> Calls = [];
         /// <summary>The bound each call was given (review A7: transfer vs ordinary leg).</summary>
@@ -1446,9 +1523,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("sandbox", "start") => Start(Name(2)),
                 ("sandbox", "stop") => Stop(Name(2)),
                 ("sandbox", "provider") => Attachment(args),
-                ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
-                ("sandbox", "upload") => Transfer(Name(2), () => Upload(args[3], args[4])),
-                ("sandbox", "exec") => Transfer(args[3], () => new(OnExec?.Invoke(args[^1]) ?? 0, "")),
+                ("sandbox", "download") => Transfer(Name(2), () => Download(Name(2), args[3], args[4])),
+                ("sandbox", "upload") => Transfer(Name(2), () => Upload(Name(2), args[3], args[4])),
+                ("sandbox", "exec") => Transfer(args[3], () => Exec(args[3], [.. args.Skip(args.ToList().IndexOf("--") + 1)])),
                 ("sandbox", "list") => ListFails ? new(1, "") : List(args),
                 ("profile", "export") => new(0, Interlocked.Increment(ref _exports) % 2 == 0 ? SyntheticProfile.Reordered(ProfileExport) : ProfileExport),
                 _ => new(0, ""),
@@ -1465,6 +1542,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             // #503 W3: the pinned server's first spec validation (InvalidArgument, nothing allocated); a taken name refuses too.
             if (CreateRejects || !StockSandboxName(name) || Sandboxes.ContainsKey(name)) return new(1, "");
             Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready"); // the explicit launcher waits, staged, without a daemon
+            NewFilesystem(name, image: true); // a fresh sandbox from the current stock image
             Attached[name] = [.. args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => args[p.i + 1])];
             Booted[name] = [.. Attached[name]];
             // #503 W4: the stock labels create set, as `sandbox get -o json` reports them.
@@ -1516,36 +1594,133 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         private StockCliResult Transfer(string name, Func<StockCliResult> action) =>
             Sandboxes.TryGetValue(name, out var s) && s.Phase == "Ready" ? action() : new(1, "");
 
-        /// <summary>Remote directories created by uploads (the stock image's own dirs are not modelled).</summary>
-        public readonly HashSet<string> RemoteDirs = [];
+        // ── #507 layout-aware sandbox filesystems ──
+        // Each sandbox has a host directory standing in for its filesystem. Uploads land there, downloads read from
+        // there, and the adapter's workspace scripts and copy helper run for real against it with every absolute path
+        // argument (and cwd/HOME) mapped inside, so the stock root, W and the legacy /workspace are actual directories.
+
+        /// <summary>The stock image's OCI working directory and HOME: the pinned CLI's discovered <c>pwd -P</c>.</summary>
+        public string StockRoot = "/home/agent";
+        private string? _fsBase;
+        private readonly HashSet<string> _filesystems = [];
+
+        /// <summary>
+        /// A sandbox that existed before the test (registered directly in <see cref="Sandboxes"/>) holds a current-layout
+        /// W with the synthetic <c>marker-back.txt</c> and empty <c>only-dir/</c>; one created by <c>sandbox create</c> has
+        /// the current stock image's empty W. Tests that need another layout write the tree with <see cref="Fs"/>.
+        /// </summary>
+        public string Fs(string sandbox, string remote)
+        {
+            if (_filesystems.Add(sandbox)) NewFilesystem(sandbox, image: false, registered: true);
+            return Mapped(sandbox, remote);
+        }
+
+        private string Mapped(string sandbox, string remote) =>
+            Path.Combine(_fsBase ??= Directory.CreateTempSubdirectory("fake-sandbox-fs-").FullName, sandbox, remote.TrimStart('/'));
+
+        internal void NewFilesystem(string sandbox, bool image, bool registered = false)
+        {
+            _filesystems.Add(sandbox);
+            var root = Mapped(sandbox, "/");
+            if (!registered && Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            Directory.CreateDirectory(Mapped(sandbox, StockRoot + "/workspace"));
+            if (image) return;
+            File.WriteAllText(Mapped(sandbox, StockRoot + "/workspace/marker-back.txt"), "from sandbox");
+            Directory.CreateDirectory(Mapped(sandbox, StockRoot + "/workspace/only-dir"));
+        }
+
+        public void Dispose()
+        {
+            if (_fsBase is not null && Directory.Exists(_fsBase)) Directory.Delete(_fsBase, recursive: true);
+        }
+
+        /// <summary>Exit code for a workspace operation ("layout", "transfer", "copy", "cleanup") instead of running it; null runs it.</summary>
+        public Func<string, int?>? OnWorkspaceExec;
+        /// <summary>Runs on the sandbox-side source directory just before a download reads it (for example, a racing change).</summary>
+        public Action<string>? BeforeDownload;
+        /// <summary>Every download source path, accepted or refused.</summary>
+        public readonly List<string> Downloads = [];
+
+        private StockCliResult Exec(string sandbox, IReadOnlyList<string> command)
+        {
+            var script = command.Count > 2 && command[0] == "sh" && command[1] == "-c" ? command[2] : null;
+            var label = script is StockOpenShellRuntime.WorkspaceProbeScript or StockOpenShellRuntime.TransferDirectoryScript
+                or StockOpenShellRuntime.TransferCleanupScript ? command[3]
+                : command.Count > 1 && command[0] == "python3" && command[1].EndsWith("/" + StockOpenShellRuntime.CopyHelperName, StringComparison.Ordinal) ? "copy"
+                : null;
+            if (label is null) return new(OnExec?.Invoke(command[^1]) ?? 0, "");
+            if (OnWorkspaceExec?.Invoke(label) is { } code) return new(code, "");
+            var psi = new System.Diagnostics.ProcessStartInfo(command[0])
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, WorkingDirectory = Fs(sandbox, StockRoot),
+            };
+            foreach (var arg in command.Skip(1)) psi.ArgumentList.Add(arg.StartsWith('/') ? Fs(sandbox, arg) : arg);
+            psi.Environment["HOME"] = Fs(sandbox, StockRoot);
+            using var process = System.Diagnostics.Process.Start(psi)!;
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            _ = process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            return new(process.ExitCode, stdout.Result);
+        }
 
         // Pinned 0.1.5 (openshell-cli ssh.rs sandbox_sync_up/ssh_tar_upload): a directory is archived under its
         // basename and extracted at DEST, landing at DEST/basename/...; a file lands at DEST/basename when DEST is
-        // a directory, top-level or ends in '/', else at DEST itself. Uploads records each resolved remote file.
-        private StockCliResult Upload(string local, string dest)
+        // a directory, top-level or ends in '/', else at DEST itself. Uploads records each resolved remote file and
+        // the sandbox filesystem receives it (extraction merges into existing directories and overwrites files).
+        private StockCliResult Upload(string sandbox, string local, string dest)
         {
             if (Directory.Exists(local))
             {
                 var root = dest.TrimEnd('/') + "/" + Path.GetFileName(local.TrimEnd('/'));
-                RemoteDirs.Add(root);
+                Directory.CreateDirectory(Fs(sandbox, root));
                 foreach (var dir in Directory.GetDirectories(local, "*", SearchOption.AllDirectories))
-                    RemoteDirs.Add(root + "/" + Path.GetRelativePath(local, dir).Replace('\\', '/'));
+                    Directory.CreateDirectory(Fs(sandbox, root + "/" + Path.GetRelativePath(local, dir).Replace('\\', '/')));
                 foreach (var file in Directory.GetFiles(local, "*", SearchOption.AllDirectories))
-                    Uploads.Add((root + "/" + Path.GetRelativePath(local, file).Replace('\\', '/'), File.ReadAllText(file)));
+                {
+                    var remote = root + "/" + Path.GetRelativePath(local, file).Replace('\\', '/');
+                    Uploads.Add((remote, File.ReadAllText(file)));
+                    File.Copy(file, Fs(sandbox, remote), overwrite: true);
+                }
                 return new(0, "");
             }
-            var target = dest.EndsWith('/') || dest.LastIndexOf('/') == 0 || RemoteDirs.Contains(dest)
+            var target = dest.EndsWith('/') || dest.LastIndexOf('/') == 0 || Directory.Exists(Fs(sandbox, dest))
                 ? dest.TrimEnd('/') + "/" + Path.GetFileName(local) : dest;
             Uploads.Add((target, File.Exists(local) ? File.ReadAllText(local) : null));
+            if (File.Exists(local))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Fs(sandbox, target))!);
+                File.Copy(local, Fs(sandbox, target), overwrite: true);
+            }
             return new(0, "");
         }
 
-        // The pinned CLI extracts the directory's contents directly into the destination.
-        private static StockCliResult Download(string staging)
+        // Pinned 0.1.5 (openshell-cli ssh.rs resolve_sandbox_source_path): the source must lie inside the discovered
+        // `pwd -P` (the stock root) lexically and once resolved; a directory's contents are extracted into DEST.
+        private StockCliResult Download(string sandbox, string source, string dest)
         {
-            File.WriteAllText(Path.Combine(staging, "marker-back.txt"), "from sandbox");
-            Directory.CreateDirectory(Path.Combine(staging, "only-dir"));
+            Downloads.Add(source);
+            if (!source.StartsWith(StockRoot + "/", StringComparison.Ordinal) || source.Split('/').Contains("..")) return new(1, "");
+            var mapped = Fs(sandbox, source);
+            var root = Fs(sandbox, StockRoot);
+            if (!Directory.Exists(mapped) && !File.Exists(mapped)) return new(1, "");
+            var resolved = new DirectoryInfo(mapped).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? mapped;
+            if (!resolved.StartsWith(root + "/", StringComparison.Ordinal)) return new(1, "");
+            BeforeDownload?.Invoke(mapped);
+            if (File.Exists(mapped)) { File.Copy(mapped, Path.Combine(dest, Path.GetFileName(mapped)), overwrite: true); return new(0, ""); }
+            CopyLikeTar(mapped, dest);
             return new(0, "");
+        }
+
+        private static void CopyLikeTar(string from, string to)
+        {
+            Directory.CreateDirectory(to);
+            foreach (var entry in new DirectoryInfo(from).EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0 }))
+            {
+                var target = Path.Combine(to, entry.Name);
+                if (entry.LinkTarget is { } link) File.CreateSymbolicLink(target, link);
+                else if (entry is DirectoryInfo) CopyLikeTar(entry.FullName, target);
+                else File.Copy(entry.FullName, target, overwrite: true);
+            }
         }
 
         private StockCliResult Swap(string name)

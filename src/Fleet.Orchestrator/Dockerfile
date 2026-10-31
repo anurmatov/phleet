@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/* \
 LABEL org.phleet.managed-stock-runtime=1
 # #502: this image understands managed subscription bindings (persisted workspaces, retirement, four-key preflight).
 LABEL org.phleet.managed-stock-subscription=1
+# #507: this image understands the persisted HOME/workspace layout and migrates proven legacy /workspace bindings.
+LABEL org.phleet.managed-stock-workspace=1
 # Opt-in exact stock CLI. Both build args or neither: the binary must match the SHA-256 and report
 # the pinned version. Without them no CLI is installed and managed apply reports stock_cli_missing.
 # #503 W6/W7: the pinned CLI's `sandbox upload` spawns the external `ssh` client (openshell-cli ssh.rs
@@ -42,6 +44,10 @@ RUN if [ -n "$OPENSHELL_CLI_URL$OPENSHELL_CLI_SHA256" ]; then \
 COPY --from=build /app .
 COPY src/Fleet.Orchestrator/projects /app/projects
 COPY src/Fleet.Orchestrator/roles /app/roles
+# #507: the public in-sandbox workspace copy helper the managed adapter uploads (StockOpenShellRuntime.CopyHelperFile).
+COPY scripts/stock-workspace-copy.py /app/stock-workspace-copy.py
+RUN chmod 0644 /app/stock-workspace-copy.py && test -f /app/stock-workspace-copy.py && test ! -L /app/stock-workspace-copy.py \
+  && test -r /app/stock-workspace-copy.py && head -n 1 /app/stock-workspace-copy.py | grep -qx '#!/usr/bin/env python3'
 
 EXPOSE 3600
 

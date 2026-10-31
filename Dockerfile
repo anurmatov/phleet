@@ -117,6 +117,12 @@ RUN groupadd --gid 10001 stockworker && \
 ENV HOME=/home/agent
 USER 10001:10001
 WORKDIR /home/agent
+# #507: the managed user tree is HOME's real workspace child, inside the stock CLI's copy root (the OCI working
+# directory); HOME, the working directory and /workspace stay as they were.
+RUN mkdir -m 0755 /home/agent/workspace && \
+    test -d /home/agent/workspace && test ! -L /home/agent/workspace && \
+    test "$(stat -c %u:%g /home/agent/workspace)" = 10001:10001 && test -w /home/agent/workspace && \
+    test "$(cd /home/agent/workspace && pwd -P)" = /home/agent/workspace && test -z "$(ls -A /home/agent/workspace)"
 RUN test "$(id -u)" = 10001 && test "$(id -g)" = 10001 && \
     test -w "$PWD" && test -w /workspace && \
     test -r /app/Fleet.Agent.dll && test ! -w /app && \

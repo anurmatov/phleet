@@ -63,6 +63,12 @@ for tool in ssh git; do
   fi
 done
 pass "default image has neither ssh nor git (opt-in only)"
+# #507: both orchestrator images carry the exact public workspace copy helper (no extra dependency).
+for image in "$DEFAULT_IMAGE" "$OPTIN_IMAGE"; do
+  docker run --rm --entrypoint sh "$image" -c 'test -f /app/stock-workspace-copy.py && test ! -L /app/stock-workspace-copy.py && cat /app/stock-workspace-copy.py' \
+    | cmp -s - "$ROOT/scripts/stock-workspace-copy.py" || fail "$image lacks the exact workspace copy helper"
+done
+pass "both orchestrator images carry the workspace copy helper"
 
 # 3. Real CLI default local planning (Git filtering on, as the adapter calls it) for a regular directory
 #    and a single file. Planning succeeds when the CLI warns that the source is outside a Git work tree

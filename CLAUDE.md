@@ -480,6 +480,13 @@ Provider profile pins (`providerProfileHashes`, subscription.json `profileSha256
 canonical full-document digests of `profile export NAME -o json`. Operators compute them with
 `scripts/stock-profile-digest.sh`, and both sides are kept equal by a shared fixture. Never use a raw-output hash: the
 stock CLI's map order varies between identical exports.
+Managed workspace layout (#507): the user tree is `W = WorkloadHome/workspace` (generated `Agent:WorkDir`, persisted
+`ManagedBinding.workloadWorkspacePath`), because the pinned CLI downloads only inside the stock root. A binding without the
+field is legacy `/workspace` only after proof; anything else refuses `workspace_layout_unverified`. Every carry-out uploads
+`scripts/stock-workspace-copy.py` (image `/app/stock-workspace-copy.py`), copies one filtered tree into
+`HOME/.phleet-workspace-transfer/<op>/data`, downloads that and checks its manifest; `PrivateWorkspaceEntries` is the one
+exclusion list. Pre-#507 managed images need `appliedOpenShell=0` in the rollout guard (`org.phleet.managed-stock-workspace=1`).
+Operator regression: `scripts/test-stock-workspace-transfer.sh`. Runbook: `docs/openshell-stock.md` (workspace layout).
 Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
 full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate
 an agent name into one. A fresh name must be proven absent before apply records or creates anything

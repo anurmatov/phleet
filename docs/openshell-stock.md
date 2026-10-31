@@ -511,8 +511,9 @@ The adapter writes per-agent records and `<agent>.control.password` under `manag
 directory 0700). The outside signer and receivers read those records as the host operator recorded in
 `StockOpenShell:ConfigDirOwnerUid`. When that uid is not the orchestrator's own (the root container), each per-agent
 record is handed to it before its atomic rename and stays 0600. An active record that cannot be handed over holds the
-apply as `managed_files_failed`. Pending, revoked and retired records are still published, writer-owned. Control and
-observer passwords always stay writer-owned.
+apply as `managed_files_failed`. Pending, revoked and retired records attempt the same reader-uid handoff;
+if that handoff raises an I/O error, they are still published writer-owned so revocation never depends on it.
+Control and observer passwords always stay writer-owned.
 The reader must also be able to open the directory. Before the first managed apply, create it as that operator:
 `install -d -m 700 "$FLEET_BASE_DIR/openshell-client/managed" "$FLEET_BASE_DIR/openshell-client/managed/authority"`. If the root orchestrator creates it instead,
 the directory is root-owned 0700, so every active publication holds as `managed_files_failed` until the operator owns it

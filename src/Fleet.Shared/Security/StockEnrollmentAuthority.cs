@@ -18,6 +18,18 @@ public static class StockServices
     public const string Memory = "memory";
     public static readonly IReadOnlyList<string> MemoryTools = ["memory_get", "memory_search", "memory_list"];
 
+    /// <summary>The ordinary name of the memory MCP endpoint, which managed mode accepts as well as <see cref="Memory"/> (#505).</summary>
+    public const string OrdinaryMemoryMcpName = "fleet-memory";
+
+    /// <summary>
+    /// #505: the memory endpoint keeps its existing name, exactly <c>memory</c> or <c>fleet-memory</c> (ordinal, no case
+    /// variant or other alias). The name selects grants only; the receiving service stays <see cref="Memory"/>.
+    /// </summary>
+    public static bool IsMemoryMcpName(string? name) => name is Memory or OrdinaryMemoryMcpName;
+
+    /// <summary>The existing grant name of <paramref name="tool"/> on the MCP endpoint <paramref name="mcpName"/>.</summary>
+    public static string ToolGrant(string mcpName, string tool) => "mcp__" + mcpName + "__" + tool;
+
     /// <summary>Receiving service → the ordinary MCP endpoint name whose existing tool grants it serves.</summary>
     public static readonly IReadOnlyDictionary<string, string> McpNames = new Dictionary<string, string>(StringComparer.Ordinal)
     {

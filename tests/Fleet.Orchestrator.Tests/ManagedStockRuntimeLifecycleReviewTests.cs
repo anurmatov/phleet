@@ -1178,9 +1178,9 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         return source;
     }
 
-    private Agent SubscriptionAgent(string desired, string applied, ManagedRecord? record = null)
+    private Agent SubscriptionAgent(string desired, string applied, ManagedRecord? record = null, string memoryName = "memory")
     {
-        var agent = _t.ManagedAgent(desired, applied, record);
+        var agent = _t.ManagedAgent(desired, applied, record, memoryName);
         agent.NativeAuthMode = "subscription";
         agent.ProviderApiKeyEnvRef = null;
         return agent;
@@ -1312,6 +1312,74 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         var agent = SubscriptionAgent(desired: "openshell", applied: "docker");
         if (fault == "api_ref") agent.ProviderApiKeyEnvRef = "SYNTHETIC_API_KEY";
         if (fault == "extra_route") agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "other", Url = "https://other.example.test/mcp", TransportType = "http" });
+        _t._store.Add(agent);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal((409, code), (result.Status, result.Code));
+        Assert.Empty(_cli.Calls.Where(ResourceCall));
+        var unchanged = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("none", null, null, "docker"), (unchanged.State, unchanged.Candidate, unchanged.Applied, _t._store.Get("agent1").AppliedRuntimeKind));
+    }
+
+    // ── #505: the native memory route under either accepted endpoint name ──
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("fleet-memory")]
+    public async Task Either_memory_name_applies_with_its_memory_get_grant_and_unchanged_inputs(string name)
+    {
+        WriteSource();
+        var agent = _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker", memoryName: name));
+        var before = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Endpoints = agent.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
+            Tools = agent.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
+        });
+        _t._host.DockerStates = ["exited"];
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        Assert.Equal("{\"mcpServers\":{\"" + name + "\":{\"url\":\"https://memory.example.test/mcp\"}}}",
+            _cli.Cli("ws-a").Uploads.Last(u => u.Remote == "/workspace/.mcp.json").Content);
+        var after = _t._store.Get("agent1");
+        Assert.Equal(before, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Endpoints = after.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
+            Tools = after.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
+        }));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(_t._store.PolicyYaml, File.ReadAllText(create.Args[create.Args.IndexOf("--policy") + 1]));
+    }
+
+    [Theory]
+    [InlineData("missing", "managed_memory_route_missing")]
+    [InlineData("duplicate", "managed_memory_route_ambiguous")]
+    [InlineData("both", "managed_memory_route_ambiguous")]
+    [InlineData("case_variant", "managed_route_unsupported:mcp:MEMORY")]
+    [InlineData("ordinary_url", "managed_route_unsupported:mcp:fleet-memory")]
+    [InlineData("transport", "managed_route_unsupported:mcp:fleet-memory")]
+    [InlineData("disabled_grant", "managed_memory_grant_missing")]
+    [InlineData("opposite_grant", "managed_memory_grant_missing")]
+    [InlineData("search_only_grant", "managed_memory_grant_missing")]
+    public async Task Memory_name_destination_and_grant_faults_refuse_before_effects(string fault, string code)
+    {
+        WriteSource();
+        var agent = SubscriptionAgent(desired: "openshell", applied: "docker", memoryName: "fleet-memory");
+        var endpoint = agent.McpEndpoints.Single();
+        switch (fault)
+        {
+            case "missing": agent.McpEndpoints.Clear(); break;
+            case "duplicate": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-memory", Url = endpoint.Url, TransportType = "http" }); break;
+            case "both": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "memory", Url = endpoint.Url, TransportType = "http" }); break;
+            case "case_variant": endpoint.McpName = "MEMORY"; break;
+            case "ordinary_url": endpoint.Url = "http://fleet-memory:3100"; break;
+            case "transport": endpoint.TransportType = "sse"; break;
+            case "disabled_grant": agent.Tools.Single().IsEnabled = false; break;
+            case "opposite_grant": agent.Tools.Single().ToolName = "mcp__memory__memory_get"; break;
+            case "search_only_grant": agent.Tools.Single().ToolName = "mcp__fleet-memory__memory_search"; break;
+        }
         _t._store.Add(agent);
 
         var result = await Runtime().ApplyAsync("agent1", default);

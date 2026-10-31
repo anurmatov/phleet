@@ -691,13 +691,18 @@ public sealed class StockOpenShellRuntime(
         if ((JournalCapture(agent) || JournalRead(agent)) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
         // Only first-party HTTP MCP receivers that verify the outside assertion, and the comms-journal read
         // MCP (Comms verifies the derived read token resolved outside), are routed; others refuse.
-        if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory" && e.McpName != StockJournalReadRoute.McpName
+        if (agent.McpEndpoints.FirstOrDefault(e => !StockServices.IsMemoryMcpName(e.McpName) && e.McpName != StockJournalReadRoute.McpName
             && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)
             return "managed_route_unsupported:mcp:" + extra.McpName;
-        if (!agent.Tools.Any(t => t.IsEnabled && MemoryTools.Any(m => t.ToolName == "mcp__memory__" + m))) return "managed_memory_grant_missing";
+        var (memory, memoryFault) = MemoryEndpoint(agent);
+        if (memoryFault is not null) return memoryFault;
+        // #505: only the selected endpoint's own grants count, never the other accepted name's.
+        if (!agent.Tools.Any(t => t.IsEnabled && MemoryTools.Any(m => t.ToolName == StockServices.ToolGrant(memory!.McpName, m))))
+            return "managed_memory_grant_missing";
         if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return "managed_agent_image_missing";
         if (DescribeConfigDirFault() is { } dirFault) return dirFault;
         if (LoadTemplate() is not { } template) return "managed_authority_template_invalid";
+        if (!MemoryDestinationMatches(template, memory!)) return "managed_route_unsupported:mcp:" + memory!.McpName;
         // A supported service without an operator-configured receiving host has no route in this installation.
         if (agent.McpEndpoints.FirstOrDefault(e => ServiceByMcpName.TryGetValue(e.McpName, out var service) && TemplateHost(template, service) is null) is { } unrouted)
             return "managed_route_unsupported:mcp:" + unrouted.McpName;
@@ -734,12 +739,15 @@ public sealed class StockOpenShellRuntime(
     {
         if (ContainerProvisioningService.HasTelegramBot(agent)) return ("managed_route_unsupported:telegram", null);
         if (agent.JournalEnabled) return ("managed_route_unsupported:journal", null);
-        if (agent.McpEndpoints.FirstOrDefault(e => e.McpName != "memory") is { } extra) return ("managed_route_unsupported:mcp:" + extra.McpName, null);
-        if (agent.McpEndpoints.Count(e => e.McpName == "memory") != 1) return ("managed_memory_route_missing", null);
-        if (!agent.Tools.Any(t => t.IsEnabled && t.ToolName == "mcp__memory__memory_get")) return ("managed_memory_grant_missing", null);
+        if (agent.McpEndpoints.FirstOrDefault(e => !StockServices.IsMemoryMcpName(e.McpName)) is { } extra) return ("managed_route_unsupported:mcp:" + extra.McpName, null);
+        var (memory, memoryFault) = MemoryEndpoint(agent);
+        if (memoryFault is not null) return (memoryFault, null);
+        if (!agent.Tools.Any(t => t.IsEnabled && t.ToolName == StockServices.ToolGrant(memory!.McpName, "memory_get")))
+            return ("managed_memory_grant_missing", null);
         if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return ("managed_agent_image_missing", null);
         if (DescribeConfigDirFault() is { } dirFault) return (dirFault, null);
         if (LoadTemplate() is not { } template) return ("managed_authority_template_invalid", null);
+        if (!MemoryDestinationMatches(template, memory!)) return ("managed_route_unsupported:mcp:" + memory!.McpName, null);
         // #503: the same signer admission as API-key apply, here for the native memory route alone.
         if (signerAdmission && SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return (signerFault, null);
         var (source, sourceFault) = ReadSource(agent.Name);
@@ -876,6 +884,26 @@ public sealed class StockOpenShellRuntime(
         if (StockProfileDigest.Compute(export.Stdout) is not { } actual) return "provider_profile_unverifiable:" + profile;
         return actual == hash ? null : "provider_profile_hash_mismatch:" + profile;
     }
+
+    /// <summary>
+    /// #505: the agent's one memory endpoint under its existing name, <c>memory</c> or the ordinary <c>fleet-memory</c>.
+    /// None refuses as missing; several (a duplicate or both names) refuse as ambiguous, never picking one.
+    /// </summary>
+    private static (AgentMcpEndpoint? Endpoint, string? Fault) MemoryEndpoint(Agent agent) =>
+        agent.McpEndpoints.Where(e => StockServices.IsMemoryMcpName(e.McpName)).ToList() switch
+        {
+            [] => (null, "managed_memory_route_missing"),
+            [var endpoint] => (endpoint, null),
+            _ => (null, "managed_memory_route_ambiguous"),
+        };
+
+    /// <summary>
+    /// #505: the memory endpoint is HTTP at byte-exactly the operator's <c>https://{MemoryHost}/mcp</c>, the URL the memory
+    /// receiver matches. The ordinary plaintext template URL and any other host, port, path, userinfo, query or fragment refuse.
+    /// </summary>
+    private static bool MemoryDestinationMatches(JsonObject template, AgentMcpEndpoint endpoint) =>
+        endpoint.TransportType == "http"
+        && string.Equals(endpoint.Url, $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp", StringComparison.Ordinal);
 
     /// <summary>
     /// #503: service → exact receiving host the saved signer bindings must equal for the agent's current selection: memory
@@ -1407,7 +1435,7 @@ public sealed class StockOpenShellRuntime(
             {
                 if (await StopDockerAsync(agent) is { } dockerFault) return Hold(applying, 409, dockerFault);
                 try { StageWorkspace(agent, Path.Combine(bundle, "workspace")); }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Hold(applying, 500, "workspace_stage_failed"); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException) { return Hold(applying, 500, "workspace_stage_failed"); }
             }
             else if (retired is not null)
             {
@@ -2627,10 +2655,14 @@ public sealed class StockOpenShellRuntime(
         return routes;
     }
 
-    /// <summary>The workload's MCP servers: memory plus each routed service under its ordinary endpoint name.</summary>
+    /// <summary>
+    /// The workload's MCP servers: memory under the agent's own endpoint name (#505), plus each routed service under its
+    /// ordinary endpoint name.
+    /// </summary>
     private static string WorkloadMcp(JsonObject template, Agent agent)
     {
-        var servers = new JsonObject { ["memory"] = new JsonObject { ["url"] = $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp" } };
+        var memory = MemoryEndpoint(agent).Endpoint ?? throw new InvalidOperationException("managed_memory_route_missing");
+        var servers = new JsonObject { [memory.McpName] = new JsonObject { ["url"] = $"https://{template["MemoryHost"]!.GetValue<string>()}/mcp" } };
         foreach (var (service, route) in ServiceRoutes(template, agent))
             servers[StockServices.McpNames[service]] = new JsonObject { ["url"] = $"https://{route!["Host"]!.GetValue<string>()}/mcp" };
         // No header here: the agent adds only the stock placeholder from its environment to its native config.

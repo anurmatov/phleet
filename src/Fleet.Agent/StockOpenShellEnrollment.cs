@@ -210,7 +210,8 @@ public static class StockOpenShellEnrollment
             StockRequestProof.Unique(mcp.RootElement);
             var servers = mcp.RootElement.GetProperty("mcpServers"); StockRequestProof.Unique(servers);
             // Exactly memory plus each first-party service route in the outside record, each at its exact host.
-            var routes = McpRoutes(authority, configuration);
+            var memoryName = MemoryMcpName(servers);
+            var routes = McpRoutes(authority, configuration, memoryName);
             if (mcp.RootElement.EnumerateObject().Count() != 1 || servers.EnumerateObject().Count() != routes.Count)
                 Deny("stock_enrollment_mcp_route_invalid");
             foreach (var (name, url, _) in routes)
@@ -219,8 +220,9 @@ public static class StockOpenShellEnrollment
                 if (server.EnumerateObject().Count() != 1 || server.GetProperty("url").GetString() != url)
                     Deny("stock_enrollment_mcp_route_invalid");
             }
-            if (!configuration.GetSection("Agent:AllowedTools").GetChildren().Any(c => c.Value is
-                "mcp__memory__memory_get" or "mcp__memory__memory_search" or "mcp__memory__memory_list"))
+            // #505: only grants under the workload's own memory name count, never the other accepted name's.
+            if (!configuration.GetSection("Agent:AllowedTools").GetChildren().Any(c =>
+                    StockServices.MemoryTools.Any(tool => c.Value == StockServices.ToolGrant(memoryName, tool))))
                 Deny("stock_enrollment_memory_tools_missing");
             var auth = NativeAuthFor(configuration, home, environment);
             // #502: the compatibility-only subscription path has exactly the native memory route, nothing else.
@@ -366,12 +368,36 @@ public static class StockOpenShellEnrollment
     }
 
     /// <summary>
-    /// Memory, then each first-party service route of the outside record, then the comms-journal read
-    /// route (#492), as (MCP name, exact URL, callable tools).
+    /// #505: the workload's memory endpoint name, exactly one of <c>memory</c> and the ordinary <c>fleet-memory</c> among the
+    /// bounded, duplicate-checked <c>.mcp.json</c> servers. None, both or another spelling refuses; nothing picks a default.
+    /// Its URL and shape are checked with the other routes.
     /// </summary>
-    private static List<(string Name, string Url, IReadOnlyList<string> Tools)> McpRoutes(StockEnrollmentAuthority authority, IConfiguration configuration)
+    private static string MemoryMcpName(JsonElement servers)
     {
-        var routes = new List<(string, string, IReadOnlyList<string>)> { ("memory", $"https://{authority.MemoryHost}/mcp", StockServices.MemoryTools) };
+        if (servers.EnumerateObject().Select(p => p.Name).Where(StockServices.IsMemoryMcpName).ToList() is not [var name])
+            throw new InvalidOperationException("stock_enrollment_mcp_route_invalid");
+        return name;
+    }
+
+    /// <summary>The memory endpoint name from the workload's <c>.mcp.json</c>, re-read for preparation and registration.</summary>
+    private static string MemoryMcpName(IConfiguration configuration)
+    {
+        var work = configuration["Agent:WorkDir"];
+        if (string.IsNullOrEmpty(work) || !Path.IsPathFullyQualified(work)) Deny("stock_enrollment_workspace_invalid");
+        using var mcp = JsonDocument.Parse(StockEnrollmentAuthority.ReadBounded(Path.Combine(work, ".mcp.json")));
+        StockRequestProof.Unique(mcp.RootElement);
+        var servers = mcp.RootElement.GetProperty("mcpServers"); StockRequestProof.Unique(servers);
+        return MemoryMcpName(servers);
+    }
+
+    /// <summary>
+    /// Memory under the workload's own endpoint name, then each first-party service route of the outside record, then
+    /// the comms-journal read route (#492), as (MCP name, exact URL, callable tools).
+    /// </summary>
+    private static List<(string Name, string Url, IReadOnlyList<string> Tools)> McpRoutes(StockEnrollmentAuthority authority, IConfiguration configuration,
+        string memoryName)
+    {
+        var routes = new List<(string, string, IReadOnlyList<string>)> { (memoryName, $"https://{authority.MemoryHost}/mcp", StockServices.MemoryTools) };
         foreach (var (service, route) in (authority.Services ?? new Dictionary<string, StockServiceRoute>()).OrderBy(p => p.Key, StringComparer.Ordinal))
             routes.Add((StockServices.McpNames[service], $"https://{route.Host}/mcp", route.Tools));
         if (authority.JournalRead is { } journal)
@@ -390,7 +416,8 @@ public static class StockOpenShellEnrollment
     {
         var allowed = configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value).OfType<string>().ToArray();
         var text = new System.Text.StringBuilder();
-        foreach (var (name, url, tools) in McpRoutes(authority, configuration))
+        var memoryName = MemoryMcpName(configuration);
+        foreach (var (name, url, tools) in McpRoutes(authority, configuration, memoryName))
         {
             var prefix = "mcp__" + name + "__";
             var enabled = allowed.Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])
@@ -398,7 +425,7 @@ public static class StockOpenShellEnrollment
             // #502: the compatibility-only subscription path registers exactly memory_get on the native memory route.
             if (configuration["Agent:NativeAuthMode"] == SubscriptionMode)
             {
-                if (name != "memory" || !enabled.Contains("memory_get")) Deny("stock_enrollment_mcp_route_invalid");
+                if (name != memoryName || !enabled.Contains("memory_get")) Deny("stock_enrollment_mcp_route_invalid");
                 enabled = ["memory_get"];
             }
             text.Append("\n[mcp_servers.").Append(name).Append("]\nurl = ").Append(JsonSerializer.Serialize(url))

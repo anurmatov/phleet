@@ -542,6 +542,13 @@ session/epoch on every call. This native registration is not the cloud Apps endp
 stays denied and suppressed at zero requests, and all six suppressed families plus the bounded settings denial
 above still apply. No callback, dynamic-tool bridge or custom model client is added.
 
+**Selected-name amendment ([#505](https://github.com/anurmatov/phleet/issues/505)).** The table is named after the
+workload's one memory endpoint, `memory` or the ordinary `fleet-memory`, taken from the same `.mcp.json`; for
+`fleet-memory` the table above reads `[mcp_servers.fleet-memory]` with the same URL and `enabled_tools = ["memory_get"]`.
+Apply requires that name's own `memory_get` grant; a grant under the other name never counts. Both names, neither or
+another spelling refuse. Nothing else in this amendment changes, the path stays **UNQUALIFIED**, and no A0–A9 or #501
+result is claimed.
+
 **Approved native config composition.** One deterministic builder, shared by preparation and registration
 checks, writes, in order: `forced_login_method = "chatgpt"`, `forced_chatgpt_workspace_id = "<selected-account-id>"`
 and `model_provider = "openai-http"`; then the generated defaults unchanged, including their own

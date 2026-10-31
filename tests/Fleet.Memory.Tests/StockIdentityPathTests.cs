@@ -205,6 +205,44 @@ public sealed class StockIdentityPathTests
         Assert.Equal(4, fixture.AclFetches);
     }
 
+    // #505: the receiver resolves whichever accepted name the agent's one exact HTTPS endpoint carries; production unchanged.
+    [Theory]
+    [InlineData("memory", "fleet-memory")]
+    [InlineData("fleet-memory", "memory")]
+    public async Task NativeCodex_ReachesMemoryGet_UnderEitherEndpointName_WithOnlyThatNamesGrant(string name, string other)
+    {
+        await using var fixture = new Fixture(actualMcp: true) { EndpointName = name };
+        var initialized = await fixture.Native(NativeInitialize, null);
+        var session = initialized.Headers.GetValues("Mcp-Session-Id").Single();
+        Assert.Equal(HttpStatusCode.Accepted, (await fixture.Native(NativeInitialized, session)).StatusCode);
+        Assert.Contains("memory_get", await (await fixture.Native(NativeToolsList, session)).Content.ReadAsStringAsync());
+        Assert.Contains("synthetic-visible-memory", await (await fixture.Native(NativeCall("memory_get"), session)).Content.ReadAsStringAsync());
+        // A grant under the other accepted name does not authorize this endpoint.
+        fixture.GrantName = other;
+        Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Native(NativeCall("memory_get"), session)).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("plaintext")]
+    [InlineData("non_http")]
+    [InlineData("duplicate")]
+    public async Task EndpointNotExactlyOneHttpsHttpRoute_RefusesBeforeExecution(string variant)
+    {
+        await using var fixture = new Fixture { EndpointVariant = variant };
+        Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Send("initialize")).StatusCode);
+        Assert.Equal(0, fixture.Executions);
+    }
+
+    [Theory]
+    [InlineData("unavailable")]
+    [InlineData("malformed")]
+    public async Task UnavailableOrMalformedAgentConfig_Returns503BeforeExecution(string variant)
+    {
+        await using var fixture = new Fixture { ConfigVariant = variant };
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await fixture.Send("initialize")).StatusCode);
+        Assert.Equal(0, fixture.Executions);
+    }
+
     [Fact]
     public async Task UnsupportedWrite_DeniesAtHook()
     {
@@ -358,6 +396,11 @@ public sealed class StockIdentityPathTests
         public StockEnrollmentAuthority Record { get; private set; }
         public int Executions, AclFetches, GrantFetches;
         public bool ProjectAllowed = true, ToolAllowed = true, EndpointAllowed = true, AclUnavailable, InjectStaleAclOnGrantFetch;
+        /// <summary>#505: the configured memory endpoint name; the grant uses <see cref="GrantName"/> when set, else this name.</summary>
+        public string EndpointName = "fleet-memory";
+        public string? GrantName;
+        /// <summary>#505: plaintext, non_http or duplicate endpoint rows; unavailable or malformed agent config.</summary>
+        public string? EndpointVariant, ConfigVariant;
         private string FilePath => Path.Combine(_directory, "enrollment.json");
         public Fixture(bool actualMcp = false)
         {
@@ -566,11 +609,18 @@ public sealed class StockIdentityPathTests
                     fixture.GrantFetches++;
                     if (fixture.InjectStaleAclOnGrantFetch)
                         fixture._acl.InjectAclForTesting(new() { ["agent1"] = ["alpha"] });
+                    if (fixture.ConfigVariant == "unavailable") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+                    if (fixture.ConfigVariant == "malformed")
+                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"name\":\"agent1\"}") });
+                    var url = !fixture.EndpointAllowed ? "https://foreign.example.test/mcp"
+                        : fixture.EndpointVariant == "plaintext" ? "http://memory.example.test/mcp" : "https://memory.example.test/mcp";
+                    var endpoint = new { mcpName = fixture.EndpointName, url, transportType = fixture.EndpointVariant == "non_http" ? "sse" : "http" };
                     return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new {
                         name = "agent1", isEnabled = true,
-                        tools = new[] { new { toolName = "mcp__fleet-memory__memory_get", isEnabled = fixture.ToolAllowed } },
-                        mcpEndpoints = new[] { new { mcpName = "fleet-memory", url = fixture.EndpointAllowed
-                            ? "https://memory.example.test/mcp" : "https://foreign.example.test/mcp", transportType = "http" } }
+                        tools = new[] { new { toolName = $"mcp__{fixture.GrantName ?? fixture.EndpointName}__memory_get", isEnabled = fixture.ToolAllowed } },
+                        mcpEndpoints = fixture.EndpointVariant == "duplicate"
+                            ? new[] { endpoint, endpoint with { mcpName = fixture.EndpointName == "memory" ? "fleet-memory" : "memory" } }
+                            : new[] { endpoint }
                     }) });
                 }
                 fixture.AclFetches++;

@@ -400,6 +400,122 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.DoesNotContain(_cli.Calls, c => c.Args.Count > 1 && c.Args[0] == "sandbox");
     }
 
+    // ── #505: the memory endpoint keeps its existing name (`memory` or the ordinary `fleet-memory`) ──
+
+    private static string Snapshot(Agent agent) => JsonSerializer.Serialize(new
+    {
+        Endpoints = agent.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
+        Tools = agent.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
+    });
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("fleet-memory")]
+    public async Task Either_memory_name_applies_with_its_own_grant_and_unchanged_inputs(string name)
+    {
+        var agent = _store.Add(ManagedAgent(desired: "openshell", applied: "docker", memoryName: name));
+        var before = Snapshot(agent);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        // The workload's MCP config names memory exactly as the agent does, at the operator's exact HTTPS host.
+        var staged = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "upload"]) && Path.GetFileName(c.Args[3]) == "workspace").Args[3];
+        Assert.Equal("{\"mcpServers\":{\"" + name + "\":{\"url\":\"https://memory.example.test/mcp\"}}}", File.ReadAllText(Path.Combine(staged, ".mcp.json")));
+        // Endpoint and grant rows are neither renamed nor widened; the signed policy goes to stock as the exact saved bytes.
+        Assert.Equal(before, Snapshot(_store.Get("agent1")));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(_store.PolicyYaml, File.ReadAllText(create.Args[create.Args.IndexOf("--policy") + 1]));
+        // The outside record carries the receiving host, not an endpoint name.
+        var authority = JsonNode.Parse(File.ReadAllText(AuthorityPath()))!;
+        Assert.Equal("memory.example.test", authority["MemoryHost"]!.GetValue<string>());
+        Assert.DoesNotContain(name == "memory" ? "fleet-memory" : "\"memory\"", authority.ToJsonString());
+    }
+
+    [Theory]
+    [InlineData("missing", "managed_memory_route_missing")]
+    [InlineData("duplicate", "managed_memory_route_ambiguous")]
+    [InlineData("both", "managed_memory_route_ambiguous")]
+    [InlineData("case_variant", "managed_route_unsupported:mcp:Fleet-Memory")]
+    [InlineData("custom", "managed_route_unsupported:mcp:fleet-memory-2")]
+    [InlineData("disabled_grant", "managed_memory_grant_missing")]
+    [InlineData("opposite_grant", "managed_memory_grant_missing")]
+    [InlineData("wrong_prefix_grant", "managed_memory_grant_missing")]
+    public async Task Memory_name_selection_and_grant_faults_refuse_before_any_effect(string fault, string code)
+    {
+        var agent = ManagedAgent(desired: "openshell", applied: "docker", memoryName: "fleet-memory");
+        var endpoint = agent.McpEndpoints.Single();
+        switch (fault)
+        {
+            case "missing": agent.McpEndpoints.Clear(); break;
+            case "duplicate": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-memory", Url = endpoint.Url, TransportType = "http" }); break;
+            case "both": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "memory", Url = endpoint.Url, TransportType = "http" }); break;
+            case "case_variant": endpoint.McpName = "Fleet-Memory"; break;
+            case "custom": endpoint.McpName = "fleet-memory-2"; break;
+            case "disabled_grant": agent.Tools.Single().IsEnabled = false; break;
+            // Grants under the other accepted name, or a near-miss prefix, never count for this endpoint.
+            case "opposite_grant": agent.Tools.Single().ToolName = "mcp__memory__memory_get"; break;
+            case "wrong_prefix_grant": agent.Tools.Single().ToolName = "mcp__fleet_memory__memory_get"; break;
+        }
+        _store.Add(agent);
+        var dockerStops = 0;
+
+        var result = await Runtime(dockerStop: _ => { dockerStops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal((409, code), (result.Status, result.Code));
+        Assert.Equal(0, dockerStops);
+        Assert.Empty(_broker.Puts);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "sandbox" or "provider" or "policy");
+        Assert.Equal(("none", "docker"), (ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding).State, _store.Get("agent1").AppliedRuntimeKind));
+    }
+
+    [Theory]
+    [InlineData("fleet-memory", "http://fleet-memory:3100", "http")] // the ordinary template endpoint is not a managed route
+    [InlineData("fleet-memory", "http://memory.example.test/mcp", "http")]
+    [InlineData("memory", "https://other.example.test/mcp", "http")]
+    [InlineData("fleet-memory", "https://memory.example.test:8443/mcp", "http")]
+    [InlineData("fleet-memory", "https://memory.example.test/other", "http")]
+    [InlineData("fleet-memory", "https://memory.example.test/mcp/", "http")]
+    [InlineData("fleet-memory", "https://user@memory.example.test/mcp", "http")]
+    [InlineData("fleet-memory", "https://memory.example.test/mcp?agent=agent1", "http")]
+    [InlineData("fleet-memory", "https://memory.example.test/mcp#fragment", "http")]
+    [InlineData("memory", "https://MEMORY.example.test/mcp", "http")]
+    [InlineData("fleet-memory", "https://memory.example.test/mcp", "sse")]
+    [InlineData("memory", "https://memory.example.test/mcp", "stdio")]
+    public async Task Memory_endpoint_must_be_http_at_exactly_the_operator_memory_host(string name, string url, string transport)
+    {
+        var agent = ManagedAgent(desired: "openshell", applied: "docker", memoryName: name);
+        var endpoint = agent.McpEndpoints.Single();
+        endpoint.Url = url;
+        endpoint.TransportType = transport;
+        _store.Add(agent);
+        var dockerStops = 0;
+
+        var result = await Runtime(dockerStop: _ => { dockerStops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "managed_route_unsupported:mcp:" + name), (result.Status, result.Code));
+        Assert.Equal(0, dockerStops);
+        Assert.Empty(_broker.Puts);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "sandbox" or "provider" or "policy");
+    }
+
+    [Fact]
+    public async Task Ordinary_memory_name_keeps_the_get_only_signer_and_default_off_refusal()
+    {
+        // A version whose memory endpoint also allows memory_search is still refused under either name.
+        _store.Add(ManagedAgent(desired: "openshell", applied: "docker", memoryName: "fleet-memory"));
+        _store.PolicyYaml = SignedPolicy.MemoryOnly.Replace(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_get", "memory_search"));
+        Assert.NotEqual(SignedPolicy.MemoryOnly, _store.PolicyYaml);
+        var refused = await Runtime().ApplyAsync("agent1", default);
+        Assert.Equal((409, StockManagedSignerPolicy.Mismatch), (refused.Status, refused.Code));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "sandbox" or "provider" or "policy");
+
+        // Managed mode off: the ordinary name changes nothing, the runtime stays unavailable.
+        var off = new StockOpenShellRuntime(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build(),
+            _cli, Provisioner(), _store, _host, _broker.Credentials, new ServiceCollection().BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance);
+        Assert.Equal(StockOpenShellRuntime.Unavailable, (await off.ApplyAsync("agent1", default)).Code);
+    }
+
     [Fact]
     public async Task Supported_first_party_mcp_grants_apply_with_exactly_their_granted_tools()
     {
@@ -1250,7 +1366,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 
-    internal Agent ManagedAgent(string desired, string applied, ManagedRecord? record = null)
+    /// <param name="memoryName">#505: the memory endpoint's existing name and the prefix of its <c>memory_get</c> grant.</param>
+    internal Agent ManagedAgent(string desired, string applied, ManagedRecord? record = null, string memoryName = "memory")
     {
         var agent = ManagedStockRuntimeTests.Agent();
         agent.ShortName = "agent1";
@@ -1261,8 +1378,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         agent.SandboxPolicyVersionId = desired == "openshell" ? 1 : null;
         agent.AppliedSandboxPolicyVersionId = applied == "openshell" ? 1 : null;
         agent.AppliedRuntimeBinding = record?.Serialize();
-        agent.Tools.Add(new AgentTool { ToolName = "mcp__memory__memory_get" });
-        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "memory", Url = "https://memory.example.test/mcp", TransportType = "http" });
+        agent.Tools.Add(new AgentTool { ToolName = $"mcp__{memoryName}__memory_get" });
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = memoryName, Url = "https://memory.example.test/mcp", TransportType = "http" });
         return agent;
     }
 

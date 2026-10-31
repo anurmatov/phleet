@@ -175,8 +175,12 @@ that same `codex-root.toml`. Without `AppRoot` (the manual profile) the paths ab
 ```
 
 The configured URL must exactly match enrollment `MemoryHost`, with no headers,
-query attribution or extra MCP server. Existing orchestrator endpoint/tool grants
-must independently match the label `memory`; the receiver still fetches them fresh.
+query attribution or extra MCP server. The memory server key may be `memory` or the
+ordinary endpoint name `fleet-memory` (#505): exactly one of the two, spelled exactly; both,
+neither, a case variant or another name refuses with `stock_enrollment_mcp_route_invalid`
+before any native write. Existing orchestrator endpoint/tool grants must independently
+match that same name (`mcp__<name>__memory_*`; a grant under the other name never counts);
+the receiver still fetches them fresh.
 Startup checks the root artifact against the shared plan, not another set of mode
 defaults. The non-root entrypoint copies the existing credential into its own home,
 writes the memory-only native MCP table and executes the existing Fleet.Agent daemon;
@@ -586,6 +590,28 @@ refuses caller query or `X-Fleet-*` identity, and supplies `?agent=` from the ve
 services' existing caller checks and bot selection run unchanged. Without those settings nothing
 changes.
 
+**Memory endpoint name (#505).** Managed apply accepts the agent's memory endpoint under its existing name,
+`memory` or the ordinary `fleet-memory`, without renaming the endpoint row or its grants. Both auth modes check,
+before any old-runtime Stop or external mutation:
+
+| Check | Refusal |
+|---|---|
+| any MCP endpoint that is not one of these names (including case variants), a routed service or the journal read MCP | `managed_route_unsupported:mcp:<name>` |
+| no memory endpoint | `managed_memory_route_missing` |
+| more than one (a duplicate, or both names) | `managed_memory_route_ambiguous`, never a pick |
+| an enabled grant under the selected name: any of `memory_get`/`memory_search`/`memory_list` (API key), `memory_get` (subscription) | `managed_memory_grant_missing` |
+| transport `http` and URL byte-exactly `https://<MemoryHost>/mcp` from `managed-authority.json` | `managed_route_unsupported:mcp:<name>` |
+
+The ordinary template row (`http://fleet-memory:3100`) is not a managed route, and no plaintext, other host, port,
+path, userinfo, query or fragment is accepted. The workload `.mcp.json` and the native `[mcp_servers.<name>]` table
+keep the selected name; the agent reads it from the bounded, duplicate-checked `.mcp.json` for validation,
+preparation and registration. The receiving service, outside record, signer policy (memory endpoint allows
+`memory_get` only), MCP revisions and the receiver's fresh endpoint/tool/project checks are unchanged; the receiver
+already resolves the name of the one endpoint at the exact memory URL.
+Rollback: revert and rebuild; grants, policies, bindings and workspaces are retained. An older build refuses an
+agent applied under `fleet-memory` at its next apply, so take that agent through the ordered rollback below first
+(revoke, scoped Stop and quiescence, guarded rollback), never an automatic restart or downgrade.
+
 **Own Telegram bot and journal capture.** The real values stay outside, in stock providers attached
 to the sandbox; the workload holds only placeholders that stock issues and the gateway resolves on
 egress ([URL-path and header substitution](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/docs/how-it-works/providers/profiles.mdx#L140-L143)).
@@ -834,8 +860,9 @@ other write bits; otherwise `subscription_binding_invalid`. Bounded UTF-8 (16 Ki
 
 Unknown, duplicate or missing fields refuse. Examples in this repository use placeholders only.
 
-**Readiness before any mutation.** Apply requires: exactly one `memory` MCP endpoint with the existing
-`mcp__memory__memory_get` grant and no Telegram bot, journal or other route (`managed_route_unsupported:*`,
+**Readiness before any mutation.** Apply requires: exactly one memory MCP endpoint, named `memory` or
+`fleet-memory` at the exact HTTPS memory URL (#505, see [Managed runtime](#managed-runtime-492-default-off)), with that
+name's existing `memory_get` grant and no Telegram bot, journal or other route (`managed_route_unsupported:*`,
 never silently dropped); the binding file; pinned CLI and gateway client trust in the persisted scope; the
 profile hash; the current gateway generation; sole ownership (no other agent's live tuple names the provider
 UUID or workspace/name: `subscription_owner_conflict`); the existing provider found exactly once across every

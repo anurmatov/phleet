@@ -18,6 +18,8 @@ A source review, profile check or merge cannot qualify native credential isolati
 **Transport candidate: source-supported stock HTTP descriptor only.**
 Prospective loaded-configuration and native HTTP checks remain UNRUN here, with no
 credential/native action authorized by this documentation change.
+Later amendment: [#502 native-memory compatibility path](#502-native-memory-compatibility-amendment)
+adds a managed subscription branch; the history below is retained unchanged and still UNQUALIFIED.
 
 This is one native-cache candidate on unmodified OpenShell 0.1.5 and Codex 0.164.0.
 The alternative external-token RPC is not this handoff: it parses an access-token JWT.
@@ -516,3 +518,52 @@ F uses only deliberately synthetic non-grant values, including refresh token `qu
 In F, seed future expiry, configure refresh and retain H1, reconfigure once for the A5 epoch-refusal probe, obtain the supervisor-issued current H2 only after acknowledgement and prove H1 refused at stock before forwarding, then request one manual rotate and require the recorded failed-refresh/reauthorization outcome, not a success inferred from CLI exit 0
 Finally set `CODEX_AUTH_ACCESS_TOKEN` expiry to an explicit past RFC3339 timestamp with stock `provider update --credential-expires-at`, require current-generation H2 to be refused before forwarding rather than reusing already-revoked H1 as the expiry probe, then close F without repair/re-login/reuse
 No production/real grant is deliberately invalidated, P needs no re-login solely because F's synthetic test failed as expected, any real invalid_grant or ambiguous token rotation ends its fixture and requires a separately approved fresh human login for any new trial
+
+## #502 native-memory compatibility amendment
+
+**UNQUALIFIED — compatibility only, not production account isolation.** Refs
+[#502](https://github.com/anurmatov/phleet/issues/502) (approved body
+`fdfbae2d7361934bd8aadfbd24829d199c24086aa0639bd217288df6bea8d5b3`). The #498 history, A0–A9 ledger and every
+UNRUN/UNQUALIFIED label above are unchanged; this section does not retroactively qualify anything.
+
+**Explicit empty-MCP amendment, this path only.** #498 requires loaded `mcp_servers` absent, null or empty. For the
+managed subscription compatibility path only, that requirement is replaced by exactly one table:
+
+```toml
+[mcp_servers.memory]
+url = "https://<memory-host>/mcp"
+enabled_tools = ["memory_get"]
+```
+
+The URL is derived from the operator's enrollment authority, the workspace `.mcp.json` holds exactly the same
+memory route, and the table carries no bearer credential: the existing stock-authenticated signer and the
+dedicated memory receiver authenticate the request and re-check a fresh ACL, endpoint/tool/project grants and
+session/epoch on every call. This native registration is not the cloud Apps endpoint: `POST /backend-api/ps/mcp`
+stays denied and suppressed at zero requests, and all six suppressed families plus the bounded settings denial
+above still apply. No callback, dynamic-tool bridge or custom model client is added.
+
+**Approved native config composition.** One deterministic builder, shared by preparation and registration
+checks, writes, in order: `forced_login_method = "chatgpt"`, `forced_chatgpt_workspace_id = "<selected-account-id>"`
+and `model_provider = "openai-http"`; then the generated defaults unchanged, including their own
+`[analytics] enabled = false` and `[history]` tables; then the exact descriptor from
+[Native TOML / stock HTTP descriptor](#native-toml--stock-http-descriptor); then one
+`[features] plugins = false, apps = false` block; then the memory table above. No second analytics table, no root
+key below a table, and no duplicate or shadowing key. The cache keeps the stock example shape with the
+supervisor-issued `CODEX_AUTH_ACCESS_TOKEN` handle, an empty refresh token, the parsing-only ID-token stub and the
+selected account. The outside binding, scoped provider checks, expiry, cleanup and rollback contracts are in
+[the stock runbook](openshell-stock.md#managed-codex-subscription-branch-502-unqualified-compatibility-only).
+
+**Compatibility proof versus production isolation.** A later, separately authorized trial may run one positive
+synthetic subscription turn with exactly one `memory_get` for an approved non-sensitive record before issuer
+account proof: at most 120 seconds for the turn and 10 minutes for the owned task including cleanup, with current
+source, permissions and readiness verified first. Its private inputs (host, image, model, caller, enrollment
+UUID/epoch, policy/receiver endpoint, memory ID and expected output, login owner, refresh custody/window, receipt
+and rollback locations) are **ABSENT** here and must not be guessed from retained fixtures. Any unexpected denial,
+timeout, duplicate tool call, input drift, generation/custody uncertainty or missing receiver/native evidence stops
+without retry, remaining live checks UNRUN.
+
+**Remaining #501 gates.** Production account-isolation qualification still requires the #501 issuer
+route/header/refresh/refusal contract, a meaningful existing same-principal B and timely authenticated correlated
+receipts, plus the full applicable #493/#498 closure. Account metadata, cache/JWT and forced-workspace equality are
+workload-side input checks, not issuer singleton enforcement. No production subscription workload is permitted by
+this amendment.

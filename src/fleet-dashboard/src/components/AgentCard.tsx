@@ -1,3 +1,4 @@
+import { managedRuntimeView, managedStatusLines } from '../managedStock'
 import { useState, useRef, useEffect } from 'react'
 import type {
   AgentState,
@@ -43,6 +44,8 @@ interface AgentCardProps {
   onReprovisionCancel: () => void
   onStop: () => void
   onStart: () => void
+  onRevoke: () => void
+  revokeFeedback?: { ok: boolean; text: string; pending?: boolean }
   onCancel: () => void
   onCancelConfirm: () => void
   onCancelCancel: () => void
@@ -80,7 +83,7 @@ export default function AgentCard({
   workflows,
   onRestart, onRestartConfirm, onRestartCancel,
   onReprovision, onReprovisionConfirm, onReprovisionCancel,
-  onStop, onStart,
+  onStop, onStart, onRevoke, revokeFeedback,
   onCancel, onCancelConfirm, onCancelCancel,
   onDeleteClick, onDeleteConfirm, onDeleteCancel,
   onBgCancel,
@@ -91,6 +94,9 @@ export default function AgentCard({
   highlightedEntityId,
   onClearHighlight,
 }: AgentCardProps) {
+  const managed = managedRuntimeView(agent)
+  const revoking = !!revokeFeedback?.pending
+  const managedStatus = managedStatusLines(agent.managed, revoking)
   const [overflowOpen, setOverflowOpen] = useState(false)
   const [historyExpanded, setHistoryExpanded] = useState(false)
   const isDead = agent.effectiveStatus === 'dead'
@@ -120,6 +126,8 @@ export default function AgentCard({
           <span className="agent-row-dot">{statusDot(agent.effectiveStatus)}</span>
           <span className="agent-row-name">{agent.agentName}</span>
           {agent.runtimePending && <span className="agent-row-queue-badge" title={`Desired ${agent.runtimeKind}; applied ${agent.appliedRuntimeKind}`}>runtime pending</span>}
+          {managed.label && agent.managedState && <span className="agent-row-queue-badge" title={managed.title || undefined}>{managed.label}</span>}
+          {managed.label && managedStatus.pendingLabel && <span className="agent-row-queue-badge" role="status">{managedStatus.pendingLabel}</span>}
           {agent.model && <span className="agent-model agent-row-model">{agent.model}</span>}
           <span className="agent-row-task">
             {agent.currentTask
@@ -183,13 +191,16 @@ export default function AgentCard({
               {isEditingConfig ? 'close config' : 'edit config'}
             </button>
             {isDead
-              ? <button onClick={() => { onStart(); setOverflowOpen(false) }} disabled={sts === 'pending'}>
+              ? <button onClick={() => { onStart(); setOverflowOpen(false) }} disabled={sts === 'pending' || managed.startBlocked} title={managed.startBlocked ? 'Revoke or re-apply the managed runtime first' : undefined}>
                   {sts === 'pending' ? '…' : 'start'}
                 </button>
               : <button onClick={() => { onStop(); setOverflowOpen(false) }}>
                   {ss === 'confirming' ? 'confirm stop?' : 'stop'}
                 </button>
             }
+            {managed.canRevoke && (
+              <button onClick={() => { onRevoke(); setOverflowOpen(false) }} disabled={revoking}>{revoking ? 'Revoking…' : 'revoke runtime'}</button>
+            )}
             <button
               className="overflow-delete"
               onClick={() => { onDeleteClick(); setOverflowOpen(false) }}
@@ -251,6 +262,18 @@ export default function AgentCard({
       )}
       {(ss === 'success' || ss === 'error') && (
         <div className={`row-feedback row-feedback-${ss}`}>{ssmsg}</div>
+      )}
+      {revokeFeedback && (
+        <div className={`row-feedback row-feedback-${revokeFeedback.ok ? 'success' : 'error'}`} role="status">{revokeFeedback.text}</div>
+      )}
+      {managed.label && (managedStatus.admission || managedStatus.binding.length > 0) && (
+        <div className="row-feedback" title="Applied managed binding (persisted record)">
+          {managedStatus.admission && <>admission: {managedStatus.admission}</>}
+          {managedStatus.binding.length > 0 && <>{managedStatus.admission ? ' · ' : ''}{managedStatus.binding.join(' · ')}</>}
+        </div>
+      )}
+      {managed.label && managedStatus.errors.length > 0 && (
+        <div className="row-feedback row-feedback-error" role="alert">managed errors: {managedStatus.errors.join(', ')}</div>
       )}
       {(sts === 'success' || sts === 'error') && (
         <div className={`row-feedback row-feedback-${sts}`}>{stsmsg}</div>
@@ -385,6 +408,9 @@ export default function AgentCard({
 
           {/* Mobile-only action buttons (shown in drawer on mobile) */}
           <div className="agent-row-detail-actions">
+            {managed.canRevoke && (
+              <button className="row-btn" onClick={onRevoke} disabled={revoking} title="Revoke the managed runtime">{revoking ? 'Revoking…' : 'revoke runtime'}</button>
+            )}
             <button
               className={`row-btn${isDead ? ' row-btn-dim' : rs === 'confirming' ? ' confirming' : ''}`}
               title="Restart"
@@ -412,7 +438,7 @@ export default function AgentCard({
               {isEditingConfig ? '✎ close config' : '✎ edit config'}
             </button>
             {isDead
-              ? <button className="row-btn" onClick={onStart} disabled={sts === 'pending'}>
+              ? <button className="row-btn" onClick={onStart} disabled={sts === 'pending' || managed.startBlocked} title={managed.startBlocked ? 'Revoke or re-apply the managed runtime first' : undefined}>
                   {sts === 'pending' ? '…' : '▶ start'}
                 </button>
               : <button className="row-btn" onClick={onStop}>

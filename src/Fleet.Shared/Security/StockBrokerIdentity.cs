@@ -42,6 +42,8 @@ public sealed class StockBrokerIdentity
         ? VirtualHost + "-" + role : throw new StockIdentityDenied("broker_role");
     public string Agent => _agent;
     public string BrokerHost => _host;
+    public Guid Epoch => _epoch;
+    public string Sandbox => _sandbox;
 
     public void Current()
     {
@@ -57,6 +59,13 @@ public sealed class StockBrokerIdentity
         if (expected.Epoch != _epoch || expected.Agent != _agent || expected.SandboxId != _sandbox || expected.BrokerHost != _host
             || expected.PolicySha256 != _policy || expected.StockCommit != _stockCommit || expected.MemoryHost != _memoryHost)
             throw new StockIdentityDenied("broker_enrollment_changed");
+    }
+
+    /// <summary>True when the pinned context names this still-current enrollment (agent, sandbox, epoch).</summary>
+    public bool Pins(string agent, string sandbox, Guid epoch)
+    {
+        Current();
+        return agent == _agent && sandbox == _sandbox && epoch == _epoch;
     }
 
     public void Configure(ConnectionFactory factory)

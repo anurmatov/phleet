@@ -40,6 +40,30 @@ public sealed class StockUsableEnrollmentTests
         Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(configuration, binding, fixture.Home));
     }
 
+    [Fact]
+    public void FirstPartyServiceRoutes_MatchTheRecordExactly_AndEnableOnlyItsGrantedTools()
+    {
+        using var fixture = new Fixture();
+        fixture.Record = fixture.Record with { Services = new Dictionary<string, StockServiceRoute>
+            { ["temporal"] = new() { Host = "temporal.example.test", Tools = ["temporal_start_workflow"] } } };
+        fixture.Settings["Agent:AllowedTools:1"] = "mcp__fleet-temporal__temporal_start_workflow";
+        fixture.Settings["Agent:AllowedTools:2"] = "mcp__fleet-temporal__temporal_terminate_workflow"; // not in the record's grants
+        // A memory-only workspace config no longer matches the enrolled routes.
+        Assert.Equal("stock_enrollment_mcp_route_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.Validate(fixture.Configuration(), fixture.Home, () => 10001, fixture.RootFile)).Message);
+        File.WriteAllText(Path.Combine(fixture.Settings["Agent:WorkDir"]!, ".mcp.json"), JsonSerializer.Serialize(new { mcpServers = new Dictionary<string, object>
+            { ["memory"] = new { url = "https://memory.example.test/mcp" }, ["fleet-temporal"] = new { url = "https://temporal.example.test/mcp" } } }));
+        var configuration = fixture.Configuration();
+        var binding = StockOpenShellEnrollment.Validate(configuration, fixture.Home, () => 10001, fixture.RootFile)!;
+        var directory = Path.Combine(fixture.Home, ".codex");
+        Directory.CreateDirectory(directory);
+        File.Copy(Path.Combine(fixture.Home, ".codex-host", "auth.json"), Path.Combine(directory, "auth.json"));
+        File.WriteAllText(Path.Combine(directory, "config.toml"), File.ReadAllText(fixture.RootFile)
+            + "\n[mcp_servers.memory]\nurl = \"https://memory.example.test/mcp\"\nenabled_tools = [\"memory_get\"]\n"
+            + "\n[mcp_servers.fleet-temporal]\nurl = \"https://temporal.example.test/mcp\"\nenabled_tools = [\"temporal_start_workflow\"]\n");
+        StockOpenShellEnrollment.RequirePrepared(configuration, binding, fixture.Home);
+    }
+
     [Theory]
     [InlineData("root_config", "stock_enrollment_native_config_mismatch")]
     [InlineData("root", "stock_enrollment_nonroot_required")]

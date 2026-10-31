@@ -1,3 +1,4 @@
+import { revokeOutcome } from './managedStock'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import type {
   AgentState,
@@ -747,6 +748,19 @@ export default function App() {
 
   function handleReprovisionAllCancel() {
     setReprovisionAllState('idle')
+  }
+
+  const [revokeFeedback, setRevokeFeedback] = useState<Record<string, { ok: boolean; text: string; pending?: boolean }>>({})
+
+  function handleRevoke(agentName: string) {
+    if (revokeFeedback[agentName]?.pending) return
+    if (!window.confirm(`Revoke the managed runtime for ${agentName}? Its admission, provider, broker identity and sandbox are stopped; nothing is replaced.`)) return
+    // Pending while the request is in flight: the card disables revoke and shows "Revoking…".
+    setRevokeFeedback(prev => ({ ...prev, [agentName]: { ok: true, text: 'Revoking…', pending: true } }))
+    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/revoke`, { method: 'POST' })
+      .then(async r => { const body = await r.json().catch(() => null); setRevokeFeedback(prev => ({ ...prev, [agentName]: revokeOutcome(r.status, body) })) })
+      .catch(() => setRevokeFeedback(prev => ({ ...prev, [agentName]: { ok: false, text: 'Request failed' } })))
+      .finally(() => setTimeout(() => setRevokeFeedback(prev => { if (prev[agentName]?.pending) return prev; const next = { ...prev }; delete next[agentName]; return next }), 8000))
   }
 
   function handleStop(agentName: string) {
@@ -1817,6 +1831,7 @@ export default function App() {
             reprovisionMsg={reprovisionMsg}
             stopStates={stopStates}
             stopMsg={stopMsg}
+            revokeFeedback={revokeFeedback}
             startStates={startStates}
             startMsg={startMsg}
             cancelStates={cancelStates}
@@ -1852,6 +1867,7 @@ export default function App() {
             onReprovisionCancel={name => setAgentReprovisionState(name, 'idle')}
             onStop={handleStop}
             onStart={handleStart}
+            onRevoke={handleRevoke}
             onCancel={handleCancel}
             onCancelConfirm={handleCancelConfirm}
             onCancelCancel={name => setAgentCancelState(name, 'idle')}

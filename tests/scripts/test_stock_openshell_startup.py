@@ -12,6 +12,81 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class StockStartupTests(unittest.TestCase):
+    def test_native_preparation_refusal_never_starts_agent(self):
+        script = (ROOT / "stock-entrypoint.sh").read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "id").write_text("#!/bin/sh\nprintf 10001")
+            (root / "dotnet").write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$MARKER"\nexit 1\n')
+            (root / "id").chmod(0o700)
+            (root / "dotnet").chmod(0o700)
+            result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                env={"PATH": directory, "HOME": directory, "MARKER": str(root / "calls")},
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(1, result.returncode)
+            self.assertEqual(["/app/Fleet.Agent.dll --contentRoot /app --prepare-stock-native"],
+                (root / "calls").read_text().splitlines())
+            self.assertEqual("", result.stdout)
+
+    def _staged_boot(self, prepare_ok):
+        script = (ROOT / "stock-entrypoint.sh").read_text()
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        root = Path(directory)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "id").write_text("#!/bin/sh\nprintf 10001")
+        (bin_dir / "dotnet").write_text(
+            '#!/bin/sh\necho "$*" >> "$MARKER.args"\ncase "$*" in *--prepare-stock-native*)\n'
+            '  [ -f "$HOME/.fleet-ready" ] && echo early >> "$MARKER"\n'
+            + ('  printf "%s" "$HOME"; exit 0;;\n' if prepare_ok else '  exit 1;;\n') +
+            'esac\nstaged=no; [ -f "$HOME/.fleet-staged" ] && staged=yes\n'
+            'printf "daemon %s ready=%s staged=%s\\n" "$$" "$(cat "$HOME/.fleet-ready")" "$staged" >> "$MARKER"\n')
+        (bin_dir / "id").chmod(0o700)
+        (bin_dir / "dotnet").chmod(0o700)
+        (root / ".fleet-ready").write_text("stale")
+        process = subprocess.Popen(["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": directory, "MARKER": str(root / "calls"),
+                 "FLEET_STOCK_STAGED": "1", "FLEET_STOCK_STAGE_SECONDS": "5"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(100):
+            if (root / ".fleet-staged").exists() and not (root / ".fleet-ready").exists():
+                break
+            subprocess.run(["sleep", "0.05"])
+        (root / ".fleet-activate").write_text("1")
+        process.communicate(timeout=10)
+        return process.returncode, root
+
+    def test_staged_boot_acknowledges_readiness_only_after_preparation(self):
+        code, root = self._staged_boot(prepare_ok=True)
+        self.assertEqual(0, code)
+        lines = (root / "calls").read_text().splitlines()
+        self.assertEqual(1, len(lines))
+        pid = lines[0].split()[1]
+        self.assertEqual(f"daemon {pid} ready={pid} staged=no", lines[0])
+        # Managed inputs are uploaded under the non-root HOME (#492 review F2); /app is read-only there.
+        self.assertEqual([f"/app/Fleet.Agent.dll --contentRoot {root}/app --prepare-stock-native",
+                          f"/app/Fleet.Agent.dll --contentRoot {root}/app"], (root / "calls.args").read_text().splitlines())
+
+    def test_failed_staged_preparation_never_acknowledges_readiness(self):
+        code, root = self._staged_boot(prepare_ok=False)
+        self.assertNotEqual(0, code)
+        self.assertFalse((root / ".fleet-ready").exists())
+        self.assertTrue((root / ".fleet-staged").exists())
+        self.assertFalse((root / "calls").exists())
+
+    def test_actual_preparation_command_cannot_fall_back_to_ordinary_start(self):
+        assembly = ROOT / "src/Fleet.Agent/bin/Release/net10.0/Fleet.Agent.dll"
+        self.assertTrue(assembly.is_file(), "build Release Fleet.Agent first")
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(["dotnet", str(assembly), "--contentRoot", directory, "--prepare-stock-native"],
+                env={"PATH": "/usr/bin:/bin", "HOME": directory, "DOTNET_CLI_HOME": directory},
+                cwd=directory, capture_output=True, text=True, timeout=10)
+            self.assertEqual(1, result.returncode)
+            self.assertEqual("", result.stdout)
+            self.assertEqual("stock_enrollment_native_preparation_disabled", result.stderr.strip())
+            self.assertFalse((Path(directory) / ".codex").exists())
+
     def test_enrollment_refusal_precedes_all_existing_side_effects(self):
         text = (ROOT / "entrypoint.sh").read_text()
         guard = text.split("# Read provider", 1)[0]

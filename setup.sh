@@ -66,7 +66,7 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES \
       AUTHTOKENREFRESH__CLAUDECLIENTID AUTHTOKENREFRESH__CODEXCLIENTID \
       FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED \
-      FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS \
+      FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS FLEET_STOCK_MANAGED_ENABLED \
       FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED
 
 # ── Canonical paths ───────────────────────────────────────────────────────────
@@ -106,6 +106,7 @@ SEED_EXAMPLE="$SCRIPT_DIR/seed.example.json"
 COMPOSE_PROJECT="fleet"
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"
 COMMS_DRY_RUN=$DRY_RUN
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -703,7 +704,20 @@ fi
 
 # Epic grants (#436): a fresh .env already has these from .env.example. An older .env gets the
 # defaults (feature off) when a key is missing; a present value is never changed. No prompts.
-for _epic_default in FLEET_EPIC_WATCHER_ENABLED=false FLEET_EPIC_WATCHER_INTERVAL_SECONDS=300 FLEET_EPIC_GRANTS_ENABLED=false FLEET_EPIC_GRANTS_MAX_DAYS=14 FLEET_EPIC_GRANTS_DENIED_REPOS= FLEET_AUTONOMY_ENABLED=false FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false; do
+# #492: the private managed-runtime client directory always exists (0700), even while disabled,
+# so the orchestrator bind never creates a root-owned world-readable directory.
+$DRY_RUN || { mkdir -p "$FLEET_BASE_DIR/openshell-client" && chmod 700 "$FLEET_BASE_DIR/openshell-client"; }
+# Review A7: it is owned by this operator, not the orchestrator container's root; record the authorized owner
+# only when managed is enabled (review C1: default-off .env is unchanged).
+if [[ "$(stock_managed_state "$ENV_FILE")" == true ]]; then
+  write_env_var "$ENV_FILE" FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"
+fi
+# #492 W5: the read-only gateway backup bind source too, resolved like compose (a shell export, then
+# .env, then the default). Created only when absent; an existing path's owner and mode are never changed.
+STOCK_BACKUP_SRC=${FLEET_STOCK_BACKUP_DIR:-$(read_env_var "$ENV_FILE" FLEET_STOCK_BACKUP_DIR)}; STOCK_BACKUP_SRC=${STOCK_BACKUP_SRC:-$FLEET_BASE_DIR/openshell-backup}
+$DRY_RUN || [[ -e "$STOCK_BACKUP_SRC" || -L "$STOCK_BACKUP_SRC" ]] || mkdir -p -m 700 "$STOCK_BACKUP_SRC"
+
+for _epic_default in FLEET_EPIC_WATCHER_ENABLED=false FLEET_EPIC_WATCHER_INTERVAL_SECONDS=300 FLEET_EPIC_GRANTS_ENABLED=false FLEET_EPIC_GRANTS_MAX_DAYS=14 FLEET_EPIC_GRANTS_DENIED_REPOS= FLEET_AUTONOMY_ENABLED=false FLEET_STOCK_MANAGED_ENABLED=false FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false; do
   if ! grep -q "^${_epic_default%%=*}=" "$ENV_FILE" 2>/dev/null; then
     write_env_var "$ENV_FILE" "${_epic_default%%=*}" "${_epic_default#*=}"
   fi
@@ -1001,6 +1015,42 @@ fi
 section "[5/7] Building Docker images..."
 # ─────────────────────────────────────────────────────────────────────────────
 
+# #492: an enabled managed runtime needs HTTPS broker management with the operator CA, resolvable
+# credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
+stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
+  || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
+# #492 A3: an enabled managed runtime builds the orchestrator with the pinned stock CLI (.env
+# OPENSHELL_CLI_URL/OPENSHELL_CLI_SHA256, validated above). Default-off passes no build args.
+ORCH_CLI_ARGS=$(stock_cli_build_args "$ENV_FILE") \
+  || { fail "managed runtime needs the pinned stock CLI build args; see docs/openshell-stock.md"; exit 1; }
+# #492 §16: like upgrade, an enabled managed runtime needs a fresh, successful gateway backup first.
+stock_backup_freshness "$ENV_FILE" "$SCRIPT_DIR" \
+  || { fail "managed runtime gateway backup is missing, failed or stale; run scripts/backup-stock-gateway.sh first"; exit 1; }
+
+# #492: a re-run rebuilds or (with --skip-build) still replaces the orchestrator. Refuse while managed
+# bindings exist and the target cannot read them; an unavailable preflight refuses rather than meaning "none".
+# --skip-build starts the existing local fleet:orchestrator image, so the guard inspects that image;
+# a build checks the Dockerfile it is about to build.
+if $SKIP_BUILD; then
+  STOCK_ROLLOUT_TARGET=(--image fleet:orchestrator)
+else
+  STOCK_ROLLOUT_TARGET=(--dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile")
+fi
+if ! $DRY_RUN; then
+  # #492 A8: --skip-build starts the existing local image, so without one refuse before anything changes.
+  if $SKIP_BUILD && ! docker image inspect fleet:orchestrator >/dev/null 2>&1; then
+    fail "--skip-build needs an existing local fleet:orchestrator image; run setup.sh without --skip-build"; exit 1
+  fi
+  # #492 A3: that existing image must already carry the pinned stock CLI when managed is enabled.
+  if $SKIP_BUILD; then
+    stock_cli_image_check "$ENV_FILE" fleet:orchestrator \
+      || { fail "the local fleet:orchestrator image lacks the pinned stock CLI; run setup.sh without --skip-build"; exit 1; }
+  fi
+  ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
+    bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" "${STOCK_ROLLOUT_TARGET[@]}" \
+    || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
+fi
+
 if $SKIP_BUILD; then
   warn "Skipping image builds (--skip-build)"
 else
@@ -1046,7 +1096,10 @@ else
   }
 
   build_image "fleet:agent"           "$SCRIPT_DIR/Dockerfile"                        "$SCRIPT_DIR"
-  build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR"
+  build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR" "$ORCH_CLI_ARGS"
+  # #492 A3: never start a managed orchestrator without the pinned stock CLI. Default-off: no check.
+  $DRY_RUN || stock_cli_image_check "$ENV_FILE" fleet:orchestrator \
+    || { fail "the built fleet:orchestrator image lacks the pinned stock CLI"; exit 1; }
   build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
   build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"

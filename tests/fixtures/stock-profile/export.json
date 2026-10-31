@@ -1,0 +1,30 @@
+{
+  "id": "synthetic-codex-native",
+  "display_name": "Synthetic profile — trial ✓ 🚀",
+  "description": "Line one\nline \"two\"\ttabbed \\ backslash \u0001 control",
+  "category": "agent",
+  "inference_capable": true,
+  "annotations": {
+    "phleet.dev/status": "UNQUALIFIED",
+    "phleet.dev/openshell-source": "bdb956f2cd65a635f1294fccf1d138d263bf650f",
+    "phleet.dev/codex-source": "6aaac694803004a63c6f393d153c96d22521a6b9",
+    "z-last": "",
+    "a-first": "null"
+  },
+  "credentials": [
+    {
+      "name": "access_token",
+      "env_vars": ["SYNTHETIC_ACCESS_TOKEN"],
+      "required": true,
+      "auth_style": "bearer",
+      "header_name": "authorization",
+      "refresh": {"strategy": "oauth2_refresh_token", "token_url": "https://auth.example.test/oauth/token", "refresh_before_seconds": 300, "max_lifetime_seconds": 3600, "offset": -5}
+    }
+  ],
+  "endpoints": [
+    {"host": "api.example.test", "port": 443, "path": "/v1/models", "protocol": "rest", "enforcement": "enforce", "rules": [{"allow": {"method": "GET", "path": "/v1/models"}}]},
+    {"host": "api.example.test", "port": 443, "path": "/v1/responses", "protocol": "rest", "enforcement": "enforce", "rules": [{"allow": {"method": "POST", "path": "/v1/responses"}}]}
+  ],
+  "binaries": ["/usr/bin/codex", "/usr/lib/synthetic/bin/codex"],
+  "deprecated": null
+}

@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Fleet.Temporal.Configuration;
 using Fleet.Temporal.Models;
 using Fleet.Temporal.Services;
+using Fleet.Shared.Security;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
@@ -135,15 +136,19 @@ public sealed class DelegateToAgentActivity
         if (budgetIsExplicit)
             GuardTimerOrdering(ctx, timeout, agentName, taskId);
 
+        var managed = await GuardManagedTargetAsync(agentName, taskId, ctx.CancellationToken);
+
         // Register before publishing — avoids a race where response arrives before TCS is registered
-        var tcs = _registry.Register(taskId);
+        var tcs = _registry.Register(taskId, managed?.Correlation);
 
         try
         {
-            await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, repo, ctx.CancellationToken);
+            await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, repo, ctx.CancellationToken, managed);
         }
         catch (Exception ex)
         {
+            // A managed session is deliberately retained: the directive may have left before the failure was
+            // reported, and the retry must register for the same session to accept its reply (#492 R5).
             _registry.TryCancel(taskId, tcs);
             _logger.LogError(ex, "Failed to publish directive to agent {Agent}", agentName);
             throw;
@@ -153,10 +158,10 @@ public sealed class DelegateToAgentActivity
 
         try
         {
-            var result = await WaitForResponseAsync(agentName, tcs, taskId, ctx, timeout, instruction, repo);
+            var result = await WaitForResponseAsync(agentName, tcs, taskId, ctx, timeout, instruction, repo, managed);
 
             if (!retryOnIncomplete || !result.IsIncomplete)
-                return result;
+                return Released(result);
 
             var accumulatedText = result.Text;
 
@@ -172,11 +177,11 @@ public sealed class DelegateToAgentActivity
                     $"Resume and complete the task.";
 
                 var retryTaskId = $"{taskId}/incomplete-retry-{attempt}";
-                var retryTcs = _registry.Register(retryTaskId);
+                var retryTcs = _registry.Register(retryTaskId, managed?.Correlation);
 
                 try
                 {
-                    await PublishDirectiveAsync(agentName, continuationInstruction, retryTaskId, EffectiveGroupChatId, repo, ctx.CancellationToken);
+                    await PublishDirectiveAsync(agentName, continuationInstruction, retryTaskId, EffectiveGroupChatId, repo, ctx.CancellationToken, managed);
                 }
                 catch (Exception ex)
                 {
@@ -185,31 +190,52 @@ public sealed class DelegateToAgentActivity
                     throw;
                 }
 
-                result = await WaitForResponseAsync(agentName, retryTcs, retryTaskId, ctx, timeout, continuationInstruction, repo);
+                result = await WaitForResponseAsync(agentName, retryTcs, retryTaskId, ctx, timeout, continuationInstruction, repo, managed);
                 accumulatedText += "\n" + result.Text;
 
                 if (!result.IsIncomplete)
-                    return result with { Text = accumulatedText };
+                    return Released(result with { Text = accumulatedText });
             }
 
             _logger.LogWarning(
                 "Agent {Agent} still incomplete after {Max} retries, returning accumulated text. taskId={TaskId}",
                 agentName, maxIncompleteRetries, taskId);
-            return result with { Text = accumulatedText };
+            return Released(result with { Text = accumulatedText });
         }
         catch (OperationCanceledException) when (ctx.CancellationToken.IsCancellationRequested)
         {
+            ReleaseSession();
             _logger.LogWarning("Activity cancelled for taskId={TaskId}, sending /cancel to agent {Agent}", taskId, agentName);
-            await TrySendCancelAsync(agentName, taskId);
+            await TrySendCancelAsync(agentName, taskId, managed);
             throw;
         }
         catch (TimeoutException ex)
         {
+            ReleaseSession();
             // The message is built where the elapsed time is actually measured, so the number
             // reported is a measurement rather than a restatement of the configured budget.
             _logger.LogWarning("{Message}", ex.Message);
             await TryReportTimeoutToActoAsync(agentName, taskId, ex.Message);
             throw;
+        }
+        catch (ApplicationFailureException ex) when (managed is not null && IsManagedRefusal(ex))
+        {
+            // A refused resend (epoch changed or revoked) is final: the activity fails non-retryably.
+            ReleaseSession();
+            throw;
+        }
+
+        // Completion, cancellation, timeout and a refused resend end the managed session; compare-and-release leaves a session a
+        // later attempt re-selected for a different epoch alone.
+        void ReleaseSession()
+        {
+            if (managed is not null) _registry.ReleaseSession(taskId, managed.Correlation);
+        }
+
+        AgentTaskResult Released(AgentTaskResult final)
+        {
+            ReleaseSession();
+            return final;
         }
     }
 
@@ -266,6 +292,153 @@ public sealed class DelegateToAgentActivity
             nonRetryable: true);
     }
 
+    /// <summary>Named refusal when a managed agent's selected authority record is stale, revoked, foreign or unreadable.</summary>
+    public const string ManagedTargetDenied = "managed_route_denied:workflow_delegation";
+
+    /// <summary>Named refusal when the managed-runtime check cannot tell what the target runs on.</summary>
+    public const string ManagedTargetUnknown = "managed_route_unknown:workflow_delegation";
+
+    /// <summary>Named refusal when managed mode is enabled but Temporal has no usable authority directory (#492 W3).</summary>
+    public const string ManagedAuthorityUnconfigured = "managed_route_unconfigured:workflow_delegation";
+
+    /// <summary>The selected epoch control identity and expected reply correlation for a managed delegation (#492).</summary>
+    internal sealed record ManagedTarget(StockBrokerIdentity Identity, ManagedCorrelation Correlation);
+
+    /// <summary>Opens the producer-only epoch control connection; replaceable by tests.</summary>
+    internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> ControlConnect { get; set; } =
+        (factory, ct) => factory.CreateConnectionAsync(ct);
+
+    /// <summary>Heartbeat cadence while waiting for a reply; replaceable by tests.</summary>
+    internal TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long after the last publish the directive is re-sent; replaceable by tests.</summary>
+    internal TimeSpan ResendInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>True for the named non-retryable refusal of a managed control lane whose epoch changed or was revoked.</summary>
+    private static bool IsManagedRefusal(ApplicationFailureException ex) =>
+        ex.NonRetryable && ex.ErrorType == "ManagedAgentContextDenied";
+
+    /// <summary>
+    /// Selects the route for a workflow directive (#492). Managed mode is off unless
+    /// <c>StockOpenShell:ManagedEnabled</c> is true: then nothing here runs, the orchestrator is never
+    /// consulted and an orchestrator outage cannot fail an ordinary delegation. With managed mode on, a managed
+    /// target needs a usable <c>StockOpenShell:AuthorityDirectory</c>; without one the attempt is refused by name
+    /// (<see cref="ManagedAuthorityUnconfigured"/>), never published on the ordinary broker.
+    ///
+    /// With managed mode on the orchestrator's applied runtime decides, failing closed: an unreachable
+    /// orchestrator, a non-success status, an invalid body or an unknown runtime refuses this attempt
+    /// (retryably) instead of publishing on the ordinary broker. <c>docker</c> keeps the ordinary path.
+    /// <c>openshell</c> selects the agent's active authority record and its epoch <c>control</c> credential
+    /// (never admin or observer); the directive then goes over that epoch's existing control lane, and the
+    /// reply comes back through the Bridge's managed lane, the sole consumer of the epoch reply queue, to the
+    /// ordinary Temporal receiver, where only a reply carrying the registered agent, sandbox, epoch and
+    /// session completes the TaskId. A missing, revoked, ambiguous or unreadable record refuses
+    /// non-retryably, never falling back to the ordinary broker.
+    /// </summary>
+    private async Task<ManagedTarget?> GuardManagedTargetAsync(string agentName, string taskId, CancellationToken ct)
+    {
+        if (!_bridgeConfig.StockManagedEnabled) return null;
+        var directory = _bridgeConfig.StockAuthorityDirectory;
+        string? applied = null;
+        string? fault = null;
+        if (string.IsNullOrEmpty(_bridgeConfig.OrchestratorUrl)) fault = "no orchestrator";
+        else
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(10));
+                var client = _httpClientFactory.CreateClient("orchestrator-cancel");
+                using var request = new HttpRequestMessage(HttpMethod.Get,
+                    $"{_bridgeConfig.OrchestratorUrl.TrimEnd('/')}/api/agents/{Uri.EscapeDataString(agentName)}");
+                if (!string.IsNullOrEmpty(_bridgeConfig.OrchestratorAuthToken))
+                    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _bridgeConfig.OrchestratorAuthToken);
+                using var response = await client.SendAsync(request, cts.Token);
+                applied = response.IsSuccessStatusCode
+                    ? AppliedRuntime(await response.Content.ReadAsStringAsync(cts.Token))
+                    : null;
+                if (!response.IsSuccessStatusCode) fault = $"status {(int)response.StatusCode}";
+                else if (applied is null) fault = "invalid agent state";
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or OperationCanceledException)
+            {
+                applied = null;
+                fault = ex.GetType().Name;
+            }
+
+        if (applied == "docker") return null;
+        if (applied == "openshell")
+        {
+            if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathFullyQualified(directory) || !Directory.Exists(directory))
+            {
+                _logger.LogError("DelegateToAgent refused: managed mode is enabled but StockOpenShell:AuthorityDirectory is " +
+                    "missing or invalid ({Code}), agent={Agent}, taskId={TaskId}", ManagedAuthorityUnconfigured, agentName, taskId);
+                throw new ApplicationFailureException(
+                    $"{ManagedAuthorityUnconfigured}: agent {agentName} runs on the managed stock OpenShell runtime but this " +
+                    $"Temporal bridge has no usable StockOpenShell:AuthorityDirectory; the directive was not published. (taskId={taskId})",
+                    errorType: "ManagedAuthorityUnconfigured",
+                    nonRetryable: true);
+            }
+            return SelectManagedTarget(directory, agentName, taskId);
+        }
+
+        fault ??= $"applied runtime '{Truncate(applied, 16)}'";
+        _logger.LogError("DelegateToAgent refused: runtime of {Agent} could not be determined ({Fault}, {Code}), taskId={TaskId}",
+            agentName, fault, ManagedTargetUnknown, taskId);
+        // Retryable: an orchestrator outage is transient, and a retry repeats this check before any publish.
+        throw new ApplicationFailureException(
+            $"{ManagedTargetUnknown}: the runtime of agent {agentName} could not be determined ({fault}); the directive was " +
+            $"not published on the ordinary broker. (taskId={taskId})",
+            errorType: "ManagedAgentRuntimeUnknown");
+    }
+
+    private ManagedTarget SelectManagedTarget(string directory, string agentName, string taskId)
+    {
+        var agent = agentName.ToLowerInvariant();
+        try
+        {
+            if (!StockAuthoritySource.ValidAgent(agent)) throw new StockIdentityDenied("authority_mapping_invalid");
+            var record = StockAuthoritySource.Active(directory).GetValueOrDefault(agent)
+                ?? throw new StockIdentityDenied("authority_mapping_missing");
+            var identity = new StockBrokerIdentity(record.Path, StockAuthoritySource.RolePassword(directory, agent, "control"), "control");
+            if (identity.Agent != agent) throw new StockIdentityDenied("authority_mapping_invalid");
+            // A retry of this TaskId on the same epoch reuses the retained session (#492 R5).
+            return new(identity, _registry.SessionFor(taskId, identity.Agent, identity.Sandbox, identity.Epoch));
+        }
+        catch (StockIdentityDenied)
+        {
+            _logger.LogError("DelegateToAgent refused: no current managed authority for {Agent} ({Code}), taskId={TaskId}",
+                agentName, ManagedTargetDenied, taskId);
+            throw new ApplicationFailureException(
+                $"{ManagedTargetDenied}: agent {agentName} runs on the managed stock OpenShell runtime but has no current " +
+                $"authority record or control credential; the directive was not published. (taskId={taskId})",
+                errorType: "ManagedAgentContextDenied",
+                nonRetryable: true);
+        }
+    }
+
+    /// <summary><c>appliedRuntimeKind</c> of an orchestrator agent body, or null when the body is not a valid agent state.</summary>
+    private static string? AppliedRuntime(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
+            string? applied = null;
+            foreach (var property in document.RootElement.EnumerateObject())
+                if (string.Equals(property.Name, "appliedRuntimeKind", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (applied is not null || property.Value.ValueKind != JsonValueKind.String) return null; // duplicate or non-string
+                    applied = property.Value.GetString();
+                }
+            return applied;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static string Truncate(string? value, int max) =>
+        value is null ? "" : value.Length <= max ? value : value[..max];
+
     /// <summary>
     /// Waits for an agent response with heartbeating and periodic re-publication.
     /// Throws <see cref="TimeoutException"/> if the agent budget elapses, carrying the MEASURED
@@ -279,7 +452,8 @@ public sealed class DelegateToAgentActivity
         ActivityExecutionContext ctx,
         TimeSpan timeout,
         string instruction,
-        string? repo)
+        string? repo,
+        ManagedTarget? managed)
     {
         var started = Stopwatch.StartNew();
 
@@ -296,11 +470,11 @@ public sealed class DelegateToAgentActivity
         try
         {
             var lastPublished = DateTimeOffset.UtcNow;
-            var resendInterval = TimeSpan.FromMinutes(5);
+            var resendInterval = ResendInterval;
 
             while (true)
             {
-                var heartbeatDelay = Task.Delay(TimeSpan.FromSeconds(30), timeoutCts.Token);
+                var heartbeatDelay = Task.Delay(HeartbeatInterval, timeoutCts.Token);
                 var completed = await Task.WhenAny(tcs.Task, heartbeatDelay);
 
                 if (completed == tcs.Task)
@@ -333,11 +507,18 @@ public sealed class DelegateToAgentActivity
                         agentName, taskId);
                     try
                     {
-                        await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, repo, timeoutCts.Token);
+                        await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, repo, timeoutCts.Token, managed);
                         lastPublished = DateTimeOffset.UtcNow;
                     }
                     catch (OperationCanceledException)
                     {
+                        throw;
+                    }
+                    catch (ApplicationFailureException ex) when (managed is not null && IsManagedRefusal(ex))
+                    {
+                        // The record's epoch changed or was revoked: no reply can arrive on this lane, so the
+                        // named refusal fails the activity now instead of waiting silently for the timeout.
+                        _registry.TryCancel(taskId, tcs);
                         throw;
                     }
                     catch (Exception ex)
@@ -418,7 +599,7 @@ public sealed class DelegateToAgentActivity
     /// Uses a fresh CancellationToken since the activity's own token is already cancelled.
     /// Swallows exceptions — the agent will time out on its own if this fails.
     /// </summary>
-    private async Task TrySendCancelAsync(string agentName, string taskId)
+    private async Task TrySendCancelAsync(string agentName, string taskId, ManagedTarget? managed)
     {
         // Prefer targeted HTTP cancel via orchestrator if URL is configured
         if (!string.IsNullOrEmpty(_bridgeConfig.OrchestratorUrl))
@@ -443,6 +624,13 @@ public sealed class DelegateToAgentActivity
             }
         }
 
+        // A managed agent never reads the ordinary broker; its cancel is the orchestrator's managed loopback cancel.
+        if (managed is not null)
+        {
+            _logger.LogWarning("No ordinary cancel fallback for managed agent {Agent}, taskId={TaskId}", agentName, taskId);
+            return;
+        }
+
         // Fallback: broadcast /cancel via RabbitMQ (cancels all tasks on the agent)
         try
         {
@@ -461,7 +649,8 @@ public sealed class DelegateToAgentActivity
     /// it; the timeout report and the cancel fallback are not about the repository and pass null.
     /// </param>
     private async Task PublishDirectiveAsync(
-        string agentName, string instruction, string taskId, long chatId, string? repo, CancellationToken ct)
+        string agentName, string instruction, string taskId, long chatId, string? repo, CancellationToken ct,
+        ManagedTarget? managed = null)
     {
         // Prepend the workflow context tag so agents can verify this is a real Temporal delegation.
         // Applied here (rather than in DelegateToAgentAsync) so every publish — initial, re-send,
@@ -474,6 +663,12 @@ public sealed class DelegateToAgentActivity
             memoryHint = $"\n\nSearch fleet-memory for '{activityCtx.Info.WorkflowType}' to find any operational context before proceeding.";
         }
         instruction = workflowTag + instruction + memoryHint;
+
+        if (managed is not null)
+        {
+            await PublishManagedDirectiveAsync(managed, instruction, taskId, chatId, repo, ct);
+            return;
+        }
 
         await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
         await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
@@ -500,5 +695,63 @@ public sealed class DelegateToAgentActivity
             basicProperties: props, body: body, cancellationToken: ct);
 
         _logger.LogInformation("Published directive to {Agent} (taskId={TaskId})", agentName, taskId);
+    }
+
+    /// <summary>
+    /// Publishes a typed workflow directive on the selected epoch's control lane (#492): a producer-only
+    /// connection as the epoch <c>control</c> principal (validated user-id) to <c>fleet.group</c>, routed to the
+    /// agent, carrying agent (sender route), sandbox, epoch, TaskId and the session nonce. Declares nothing.
+    /// </summary>
+    private async Task PublishManagedDirectiveAsync(
+        ManagedTarget managed, string instruction, string taskId, long chatId, string? repo, CancellationToken ct)
+    {
+        var identity = managed.Identity;
+        var factory = new ConnectionFactory { HostName = identity.BrokerHost, ClientProvidedName = "fleet-temporal-control" };
+        BasicProperties props;
+        try
+        {
+            identity.Configure(factory); // rechecks the current record; a changed or revoked epoch refuses here
+            props = identity.Properties();
+        }
+        catch (StockIdentityDenied)
+        {
+            _logger.LogError("Managed workflow directive refused: control identity for {Agent} is not current ({Code}), taskId={TaskId}",
+                identity.Agent, ManagedTargetDenied, taskId);
+            throw new ApplicationFailureException(
+                $"{ManagedTargetDenied}: the control lane of agent {identity.Agent} is stale, revoked or has no usable control " +
+                $"credential; the directive was not published. (taskId={taskId})",
+                errorType: "ManagedAgentContextDenied",
+                nonRetryable: true);
+        }
+        await using var connection = await ControlConnect(factory, ct);
+        await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
+
+        // The activity's own StartToClose deadline (#492 X4): the agent keeps the reply session until then even
+        // when no resend can be published (a broker or publish outage), since only this activity's end makes
+        // the reply unwanted. Every publish (initial, resend, continuation) carries the same deadline.
+        DateTimeOffset? deadline = ActivityExecutionContext.HasCurrent
+            && ActivityExecutionContext.Current.Info.StartToCloseTimeout is { } startToClose
+            ? new DateTimeOffset(DateTime.SpecifyKind(ActivityExecutionContext.Current.Info.StartedTime, DateTimeKind.Utc)) + startToClose
+            : null;
+
+        var message = new RelayMessage(
+            ChatId: chatId,
+            Sender: BridgeSender,
+            Text: instruction,
+            Timestamp: DateTimeOffset.UtcNow,
+            Type: RelayMessageType.WorkflowDirective,
+            CorrelationId: managed.Correlation.Session,
+            TaskId: taskId,
+            Repo: repo,
+            Epoch: identity.Epoch,
+            Sandbox: identity.Sandbox,
+            Deadline: deadline);
+
+        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+        await channel.BasicPublishAsync(
+            _rabbitConfig.Exchange, routingKey: identity.Agent, mandatory: false,
+            basicProperties: props, body: body, cancellationToken: ct);
+
+        _logger.LogInformation("Published managed workflow directive to {Agent} (taskId={TaskId})", identity.Agent, taskId);
     }
 }

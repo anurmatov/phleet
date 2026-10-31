@@ -811,6 +811,10 @@ public sealed class CodexExecutor : IAgentExecutor
         // before exec; this is the belt to that brace.
         foreach (var keyEnvVar in HostedModelProviders.KeyEnvVars)
             psi.Environment.Remove(keyEnvVar);
+        // #492: the daemon's own bot/journal placeholders in managed stock mode are not the model's.
+        // Ordinary containers never carry these names, so this is a no-op there.
+        foreach (var keyEnvVar in Fleet.Shared.Security.StockCredentials.ServiceKeys)
+            psi.Environment.Remove(keyEnvVar);
 
         // #382: the orchestrator's URL replaces whatever the container inherited, so a stale Env Ref
         // cannot point the agent at another server. The legacy route leaves the environment as is.

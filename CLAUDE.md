@@ -452,3 +452,36 @@ from config or heartbeats, resolve a reference to a credential during save, or p
 fallback for unavailable managed apply. Existing manual stock profiles/grants remain separate.
 The focused tests are `ManagedStockRuntime` and real-MySQL `ManagedStockMySql` (missing DB fails).
 See `docs/openshell-stock.md` for the explicitly supported authored YAML subset and rollback limits.
+Managed apply/lifecycle (#492) is `StockOpenShellRuntime` behind the same entry points, default off
+(`FLEET_STOCK_MANAGED_ENABLED=false`): applied binding only for Start/Stop/cancel, CAS per agent,
+unknown outcomes held as `needs_attention`, never a Docker fallback. `upgrade.sh` runs
+`scripts/check-stock-runtime-rollout.sh` before stopping anything.
+The managed subscription branch (#502, `nativeAuthMode=subscription`, no API-key reference) is UNQUALIFIED and
+compatibility-only: outside-owned `<ConfigDir>/managed/<agent>/subscription.json`, existing stock provider only
+(never created/updated/imported), every resource call scoped to the persisted `--workspace`, expiry is
+revoke-and-stop (the 10 s monitor skips held records), retirement is archive-then-CAS, and the rollback preflight
+adds `subscriptionBindings` with the `org.phleet.managed-stock-subscription=1` label. Pins stay OpenShell 0.1.5
+`bdb956f2` / Codex 0.164.0 `6aaac694`; run the NEW guard before any checkout switch. Runbook:
+`docs/openshell-stock.md` (subscription section); native contract: `docs/openshell-subscription-auth.md`.
+Managed signer binding (#503, `StockManagedSignerPolicy`): saved YAML may carry only the fixed `network_middlewares`
+subset (`stock-memory`/`stock-temporal`/`stock-telegram` → registration `stock-memory`, orders 0/10/20,
+`fail_closed`, one exact lowercase host). Apply (both auth modes) refuses before any old-runtime Stop or provider/broker/
+create/policy-set effect with 409 `managed_signer_policy_missing`/`_mismatch`/`_scope`. It requires the stored hash
+to be the SHA-256 of the exact saved bytes, the entries to equal memory plus the selected routes, and one enforced
+`host:443` MCP endpoint per receiver with exact MCP rules, never an access preset (pinned stock rejects MCP presets;
+memory allows `tools/call` for `memory_get` only). Start/restart/pre-activation check the applied version
+and its outside enrollment (`managed_signer_authority_unavailable`), never desired. Never normalize or inject into
+saved YAML. Cleanup (Stop/revoke/expiry/retirement) never depends on this check. Backups require the registration's
+CA under STATE_DIR (`coverage_incomplete: signer_tls_ca`) and record `SNAPSHOT_MODE`. Eligibility is
+`--restore-eligibility` (control) or `--plain-restore-eligibility` (live zero-custody preflight), with no downgrade;
+`--require-subscription-recovery` always warns with exit 3. The signer registration is a gateway-wide startup
+dependency; real startup/negotiation stays operator-only (C11/C18 UNRUN).
+Provider profile pins (`providerProfileHashes`, subscription.json `profileSha256`) are `StockProfileDigest`
+canonical full-document digests of `profile export NAME -o json`. Operators compute them with
+`scripts/stock-profile-digest.sh`, and both sides are kept equal by a shared fixture. Never use a raw-output hash: the
+stock CLI's map order varies between identical exports.
+Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
+full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate
+an agent name into one. A fresh name must be proven absent before apply records or creates anything
+(`sandbox_name_not_proven_absent`). After create, the sandbox is adopted only with exactly that epoch's
+`fleet.agent`/`fleet.epoch` labels (`sandbox_owner_unverified` otherwise, with no cleanup of it).

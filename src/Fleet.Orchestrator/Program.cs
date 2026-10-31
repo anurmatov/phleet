@@ -37,6 +37,12 @@ builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<StockRuntimeMutationHold>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
+// #492 managed stock OpenShell: one thin adapter behind the existing lifecycle entry points.
+builder.Services.AddSingleton<IStockCli, ProcessStockCli>();
+builder.Services.AddSingleton<StockBrokerProvisioner>();
+builder.Services.AddSingleton<IManagedBindingStore, EfManagedBindingStore>();
+builder.Services.AddSingleton<IStockHostView, DockerStockHostView>();
+builder.Services.AddSingleton<StockOpenShellRuntime>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());
 builder.Services.AddSingleton<CommsJournalStatusProxy>();
@@ -587,11 +593,21 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
     if (agent is null)
         return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
 
-    // Best-effort deprovision — if container doesn't exist that's fine, proceed with DB delete
-    var deprovision = await provisioning.DeprovisionAsync(name);
+    // Review A2: managed state (applied openshell binding, unresolved candidate/held record) keeps the row until revoked.
+    var (keepRow, guard) = await provisioning.PrepareDeleteAsync(name);
+    if (keepRow is not null)
+        return Results.Conflict(new { error = keepRow, message = $"Agent '{name}' was not deleted: revoke its managed runtime first" });
 
-    db.Agents.Remove(agent);
-    await db.SaveChangesAsync();
+    // Review A2/D1/D2: in one transaction, lock the exact inspected binding, then deprovision the inspected runtime
+    // (best-effort Docker — a missing container is fine), then delete the row. A concurrent change is a 409 before
+    // any stop/remove and a DB outage a 503, both keeping the row and its binding unchanged.
+    if (guard is null)
+        return Results.Conflict(new { error = ManagedDeleteGuard.Changed, message = $"Agent '{name}' was not deleted: its managed state changed concurrently" });
+    var (deleteFault, deprovision) = await guard.DeleteAsync(db, agent);
+    if (deleteFault is not null)
+        return deleteFault == ManagedDeleteGuard.Unavailable
+            ? Results.Json(new { error = deleteFault, message = $"Agent '{name}' was not deleted: the database is unavailable" }, statusCode: 503)
+            : Results.Conflict(new { error = deleteFault, message = $"Agent '{name}' was not deleted: its managed state changed concurrently" });
 
     // agent_project_access is keyed by name, not by a foreign key, so deleting the agent leaves its
     // rows behind. Deleting an agent unassigns every project, so the same hook applies: the rows it
@@ -603,7 +619,7 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
 
     return Results.Ok(new
     {
-        message = deprovision.Success
+        message = deprovision is { Success: true }
             ? $"Agent '{name}' deleted and container removed"
             : $"Agent '{name}' deleted (container was not running)"
     });

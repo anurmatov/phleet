@@ -33,7 +33,19 @@ public sealed record ToolSendReceipt
     public required ToolSendChat Chat { get; init; }
 
     public required IReadOnlyList<ToolSendMessage> Messages { get; init; }
+
+    /// <summary>
+    /// Managed stock only (#492): the context pinned at verified Telegram MCP handling. Absent (and
+    /// not serialized) for ordinary agents, whose wire shape is unchanged.
+    /// </summary>
+    public ToolSendManagedContext? Managed { get; init; }
 }
+
+/// <summary>
+/// Receipt context pinned when fleet-telegram verified a managed request: never reassigned to a later
+/// epoch. <paramref name="Destination"/> is the chat the tool was asked to send to.
+/// </summary>
+public sealed record ToolSendManagedContext(string Sandbox, Guid Epoch, string Session, long Destination);
 
 /// <param name="Type">The Bot API chat type string (<c>private</c>, <c>group</c>, <c>supergroup</c>, …).</param>
 public sealed record ToolSendChat(long Id, string? Type, string? Title);
@@ -76,6 +88,12 @@ public static class ToolSendReceipts
     public const int QueueMessageTtlMs = 24 * 60 * 60 * 1000;
     public const int QueueMaxLength = 10_000;
     public const string QueueOverflow = "drop-head";
+
+    /// <summary>
+    /// AMQP <c>type</c> of a managed receipt carried on the existing per-epoch control lane
+    /// (<c>fleet.group</c>, routed to the agent's own queue) instead of <see cref="Exchange"/>.
+    /// </summary>
+    public const string ManagedMessageType = "fleet.journal.tool-send.v1";
 
     public static string RoutingKey(string agentName) => agentName.Trim().ToLowerInvariant();
 

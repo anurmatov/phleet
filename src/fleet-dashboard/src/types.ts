@@ -25,10 +25,40 @@ export interface JournalHeartbeat {
   bindingFailed?: number
 }
 
+/** #492 read-only applied-binding/lifecycle summary from the persisted managed record. */
+export interface ManagedStatus {
+  state: string
+  errors: string[]
+  admissionState: string
+  pending: boolean
+  operation: string | null
+  appliedSandboxId: string | null
+  appliedSandboxName: string | null
+  epoch: string | null
+  policyVersionId: number | null
+  policySha256: string | null
+  gatewayGeneration: string | null
+  providers: string[]
+  /** #492 §7/§11: last observed Docker IDs of the workload and native supervisor (absent on older servers). */
+  workloadContainerId?: string | null
+  supervisorContainerId?: string | null
+  /** running · stopped · removed · unobservable; null when never observed. */
+  containerStatus?: string | null
+  containersObservedAt?: string | null
+  /** Gateway backup last-success stamp; null when unconfigured or missing (unknown, never fresh). */
+  backupLastSuccessAt?: string | null
+  /** unknown · failed · recorded */
+  backupState?: string | null
+  backupAgeSeconds?: number | null
+}
+
 export interface AgentState {
   runtimeKind?: string
   appliedRuntimeKind?: string
   runtimePending?: boolean
+  managedState?: string | null
+  managedErrors?: string[] | null
+  managed?: ManagedStatus | null
   agentName: string
   displayName: string | null
   shortName: string | null

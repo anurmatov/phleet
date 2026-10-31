@@ -60,6 +60,57 @@ public class ManagedStockRuntimeTests
         Assert.Equal("managed_runtime_unavailable", AgentPatchHelpers.RuntimeApplyFault(a));
     }
 
+    [Theory]
+    // #502 C1: subscription accepts only a null/cleared API-key reference; API behavior unchanged; mixed/unknown refused.
+    [InlineData("openshell", "subscription", null, 0, null)]
+    [InlineData("openshell", "subscription", "", 0, null)]
+    [InlineData("openshell", "subscription", "TEST_API_KEY", 400, "subscription_rejects_provider_key_reference")]
+    [InlineData("openshell", "api_key", "TEST_API_KEY", 0, null)]
+    [InlineData("openshell", "api_key", "", 400, "openshell_requires_codex_api_key_policy_and_no_socket")]
+    [InlineData("openshell", "oauth", null, 400, "unsupported_native_auth_mode")]
+    [InlineData("openshell", "Subscription", null, 400, "unsupported_native_auth_mode")]
+    [InlineData("docker", "subscription", null, 0, null)]
+    public async Task Subscription_selection_is_atomic_and_needs_no_key_reference(string runtime, string auth, string? keyRef, int status, string? code)
+    {
+        using var db = Db();
+        db.SandboxPolicies.Add(new() { Name = "test", Versions = [new() { Version = 1, Yaml = PolicyYaml, Sha256 = SandboxPolicyValidation.Hash(PolicyYaml) }] });
+        await db.SaveChangesAsync();
+        var a = Agent();
+        a.AppliedRuntimeBinding = "previous-binding";
+        a.NativeAuthMode = "api_key";
+        a.ProviderApiKeyEnvRef = "OLD_KEY";
+        var fault = await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, a, runtime, 1, auth, keyRef ?? (auth == "subscription" ? "" : null));
+        if (status == 0)
+        {
+            Assert.Null(fault);
+            Assert.Equal(auth, a.NativeAuthMode);
+            if (auth == "subscription") Assert.Null(a.ProviderApiKeyEnvRef);
+        }
+        else
+        {
+            Assert.Equal((status, code), (fault!.Status, fault.Code));
+            // Nothing from a refused request reaches the agent: the earlier selection is intact.
+            Assert.Equal(("docker", "api_key", "OLD_KEY"), (a.RuntimeKind, a.NativeAuthMode, a.ProviderApiKeyEnvRef));
+        }
+        Assert.Equal("previous-binding", a.AppliedRuntimeBinding);
+        Assert.Equal("docker", a.AppliedRuntimeKind);
+    }
+
+    [Fact]
+    public async Task Subscription_keeping_an_old_key_reference_is_a_mixed_save()
+    {
+        using var db = Db();
+        db.SandboxPolicies.Add(new() { Name = "test", Versions = [new() { Version = 1, Yaml = PolicyYaml, Sha256 = SandboxPolicyValidation.Hash(PolicyYaml) }] });
+        await db.SaveChangesAsync();
+        var a = Agent();
+        a.NativeAuthMode = "api_key";
+        a.ProviderApiKeyEnvRef = "OLD_KEY";
+        // Not sending the reference keeps the stored one, which subscription refuses rather than silently clearing.
+        var fault = await AgentPatchHelpers.ApplyRuntimeSelectionAsync(db, a, "openshell", 1, "subscription", null);
+        Assert.Equal((400, "subscription_rejects_provider_key_reference"), (fault!.Status, fault.Code));
+        Assert.Equal("api_key", a.NativeAuthMode);
+    }
+
     [Fact]
     public async Task Missing_version_refuses_and_docker_defaults_are_unchanged()
     {
@@ -111,6 +162,13 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Fleet.Orchestrator.Services.AgentConfigPublisherService>.Instance));
         builder.Services.AddSingleton(sp => new Fleet.Orchestrator.Services.SetupService(builder.Configuration, null!, null!,
             sp.GetRequiredService<IServiceScopeFactory>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<Fleet.Orchestrator.Services.SetupService>.Instance, null!));
+        // The real managed adapter, disabled (no ManagedEnabled): routes exercise auth and the real DB store.
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.IStockCli, Fleet.Orchestrator.Services.ProcessStockCli>();
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.ICredentialsReader>(new NoCredentials());
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.StockBrokerProvisioner>();
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.IManagedBindingStore, Fleet.Orchestrator.Services.EfManagedBindingStore>();
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.IStockHostView>(new NoHost());
+        builder.Services.AddSingleton<Fleet.Orchestrator.Services.StockOpenShellRuntime>();
         App = builder.Build();
         App.MapSandboxPolicyEndpoints();
         App.MapAgentConfigEndpoints();
@@ -157,6 +215,36 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
         Assert.Equal("managed_runtime_unavailable", await new Fleet.Orchestrator.Tools.StartAgentTool(null!, null!, hold).StartAgentAsync("agent1"));
         Assert.Equal("managed_runtime_unavailable", await new Fleet.Orchestrator.Tools.StopAgentTool(null!, null!, hold).StopAgentAsync("agent1"));
         Assert.Throws<InvalidOperationException>(() => provisioning.GetAgentBaseUrl(new Agent { Name = "agent1", DisplayName = "Agent", Role = "test", Model = "sol", ContainerName = "agent1", AppliedRuntimeKind = "openshell" }));
+    }
+
+    [Fact]
+    public async Task Delete_ownership_keeps_a_concurrent_claim_out_until_the_row_is_gone()
+    {
+        // Review A2/D1: an apply/Start/revoke claim CAS issued while the delete guard owns the inspected binding never
+        // wins. On MySQL it waits on the row lock and then matches no row; the one shared SQLite test connection
+        // refuses it outright. Either way the deprovision ran under the inspected binding alone.
+        await WithDb(async db => { db.Agents.Add(ManagedStockRuntimeTests.Agent()); return await db.SaveChangesAsync(); });
+        var inspected = await WithDb(db => db.Agents.AsNoTracking().SingleAsync());
+        var store = App.Services.GetRequiredService<Fleet.Orchestrator.Services.IManagedBindingStore>();
+        var claimJson = new Fleet.Orchestrator.Services.ManagedRecord { State = "applying", Operation = "apply:other-process:synthetic" }.Serialize();
+        Task<bool>? claim = null;
+        var guard = new Fleet.Orchestrator.Services.ManagedDeleteGuard(inspected.Id, inspected.AppliedRuntimeBinding, inspected.AppliedRuntimeKind, async _ =>
+        {
+            claim = Task.Run(() => store.SwapAsync(inspected.Id, inspected.AppliedRuntimeBinding, claimJson, null, null, CancellationToken.None));
+            await Task.WhenAny(claim, Task.Delay(TimeSpan.FromSeconds(1)));
+            Assert.False(claim.IsCompletedSuccessfully && claim.Result, "a concurrent claim won while the delete owned the row");
+            return Fleet.Orchestrator.Services.ProvisionResult.Ok("agent1", "synthetic deprovision");
+        });
+
+        var (fault, deprovision) = await WithDb(async db => await guard.DeleteAsync(db, await db.Agents.SingleAsync()));
+
+        Assert.Null(fault);
+        Assert.True(deprovision!.Success);
+        var won = false;
+        try { won = await claim!; }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Data.Common.DbException) { }
+        Assert.False(won);
+        Assert.Equal(0, await WithDb(db => db.Agents.CountAsync()));
     }
 
     private sealed class NoopAcl : Fleet.Orchestrator.Services.IAclChangeNotifier
@@ -218,6 +306,26 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Signer_bound_create_and_append_keep_exact_bytes_and_invalid_bindings_write_nothing()
+    {
+        // #503: create/append parity for the fixed signer subset; the stored hash is of the exact submitted bytes.
+        var created = await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Signed", yaml = SignedPolicy.MemoryOnly });
+        Assert.Equal(System.Net.HttpStatusCode.Created, created.StatusCode);
+        var id = (await created.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("id").GetInt32();
+        var url = $"/api/sandbox-policies/{id}/versions";
+        var three = SignedPolicy.Yaml(SignedPolicy.Memory, SignedPolicy.Temporal, SignedPolicy.Telegram);
+        Assert.Equal(System.Net.HttpStatusCode.Created, (await Client.PostAsJsonAsync(url, new { version = 2, yaml = three })).StatusCode);
+        var first = await Client.GetFromJsonAsync<System.Text.Json.JsonElement>(url + "/1");
+        Assert.Equal(SignedPolicy.MemoryOnly, first.GetProperty("yaml").GetString());
+        Assert.Equal(SandboxPolicyValidation.Hash(SignedPolicy.MemoryOnly), first.GetProperty("sha256").GetString());
+        var openFail = SignedPolicy.MemoryOnly.Replace("on_error: fail_closed", "on_error: fail_open");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync(url, new { version = 3, yaml = openFail })).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Open", yaml = openFail })).StatusCode);
+        Assert.Equal(1, await WithDb(db => db.SandboxPolicies.CountAsync()));
+        Assert.Equal(2, await WithDb(db => db.SandboxPolicyVersions.CountAsync()));
+    }
+
+    [Fact]
     public async Task Invalid_policy_leaves_no_partial_policy_or_version()
     {
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Bad", yaml = "version: 1\nunknown: true" })).StatusCode);
@@ -254,11 +362,48 @@ public class ManagedStockRuntimeApiTests : IAsyncLifetime
         Assert.Equal("docker", await WithDb(db => db.Agents.Select(a => a.AppliedRuntimeKind).SingleAsync()));
     }
     [Fact]
+    public async Task Revoke_and_rollback_preflight_are_operator_only_and_read_the_real_store()
+    {
+        await WithDb(async db =>
+        {
+            var desired = ManagedStockRuntimeTests.Agent();
+            desired.RuntimeKind = "openshell";
+            db.Agents.Add(desired);
+            return await db.SaveChangesAsync();
+        });
+        using var anonymous = App.GetTestClient();
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, (await anonymous.PostAsync("/api/agents/agent1/revoke", null)).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/managed-runtime/rollback-preflight")).StatusCode);
+
+        var revoke = await Client.PostAsync("/api/agents/agent1/revoke", null);
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, revoke.StatusCode);
+        Assert.Contains("managed_runtime_unavailable", await revoke.Content.ReadAsStringAsync());
+        var preflight = await Client.GetAsync("/api/managed-runtime/rollback-preflight");
+        Assert.Equal(System.Net.HttpStatusCode.OK, preflight.StatusCode);
+        Assert.Equal("{\"desiredOpenShell\":1,\"appliedOpenShell\":0,\"unresolvedBindings\":0,\"subscriptionBindings\":0}", await preflight.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Missing_operator_auth_configuration_fails_closed()
     {
         App.Configuration["Orchestrator:AuthToken"] = "";
         Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.GetAsync("/api/sandbox-policies")).StatusCode);
         Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.PostAsync("/api/agents/agent1/runtime/apply", null)).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.PostAsync("/api/agents/agent1/revoke", null)).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, (await Client.GetAsync("/api/managed-runtime/rollback-preflight")).StatusCode);
+    }
+
+    private sealed class NoCredentials : Fleet.Orchestrator.Services.ICredentialsReader
+    {
+        public string? Get(string key) => null;
+        public void InvalidateCache() { }
+    }
+
+    private sealed class NoHost : Fleet.Orchestrator.Services.IStockHostView
+    {
+        public Task<string?> GatewayGenerationAsync(CancellationToken ct) => Task.FromResult<string?>(null);
+        public Task<IReadOnlyList<string>?> RunningSandboxContainersAsync(string sandboxId, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(null);
+        public Task<IReadOnlyList<string>?> DockerContainerStatesAsync(string containerName, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>?>(null);
     }
     [Fact]
     public async Task First_version_write_failure_rolls_back_policy_row()

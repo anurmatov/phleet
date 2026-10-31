@@ -19,7 +19,7 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
-unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
+unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS FLEET_STOCK_MANAGED_ENABLED
 unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED
 # The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
 # generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
@@ -38,6 +38,7 @@ unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACK
       FLEET_COMMS_MEDIA_STORE FLEET_COMMS_SEAWEEDFS_SIGNING_KEY
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -95,12 +96,23 @@ add_missing_env_var() {
   ok "Added ${key}=${value} to .env"
 }
 add_missing_env_var FLEET_EPIC_WATCHER_ENABLED false
+mkdir -p "$FLEET_BASE_DIR/openshell-client" && chmod 700 "$FLEET_BASE_DIR/openshell-client"
+# #492 W5: the read-only gateway backup bind source too, resolved like compose (a shell export, then
+# .env, then the default). Created only when absent; an existing path's owner and mode are never changed.
+STOCK_BACKUP_SRC=${FLEET_STOCK_BACKUP_DIR:-$(read_env_var "$ENV_FILE" FLEET_STOCK_BACKUP_DIR)}; STOCK_BACKUP_SRC=${STOCK_BACKUP_SRC:-$FLEET_BASE_DIR/openshell-backup}
+[[ -e "$STOCK_BACKUP_SRC" || -L "$STOCK_BACKUP_SRC" ]] || mkdir -p -m 700 "$STOCK_BACKUP_SRC"
 add_missing_env_var FLEET_EPIC_WATCHER_INTERVAL_SECONDS 300
 add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
 add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
+add_missing_env_var FLEET_STOCK_MANAGED_ENABLED false
+# Review A7: the authorized (host operator) owner of openshell-client; an existing value is kept. Only
+# when managed is enabled, so a default-off upgrade leaves .env byte-for-byte unchanged (review C1).
+if [[ "$(stock_managed_state "$ENV_FILE")" == true ]]; then
+  add_missing_env_var FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"
+fi
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."
@@ -135,6 +147,33 @@ case "$MEDIA_STORE" in
     fi
     ;;
 esac
+
+# #492: an enabled managed runtime needs a digest-pinned gateway image and a numeric docker group id
+# for the optional openshell profile; validated here instead of failing every default-off compose run.
+# Parsed like the services (case-insensitive, quotes stripped); an invalid value is not treated as off.
+if [[ "$(stock_managed_state "$ENV_FILE")" != false ]]; then
+  [[ "$(read_env_var "$ENV_FILE" FLEET_STOCK_GATEWAY_IMAGE)" == *@sha256:* ]] \
+    || { fail "FLEET_STOCK_GATEWAY_IMAGE must name the pinned stock gateway image by @sha256 digest"; exit 1; }
+  [[ "$(read_env_var "$ENV_FILE" FLEET_DOCKER_GID)" =~ ^[0-9]+$ ]] \
+    || { fail "FLEET_DOCKER_GID must be the host docker group id"; exit 1; }
+fi
+# #492: an enabled managed runtime also needs HTTPS broker management with the operator CA, resolvable
+# credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
+stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
+  || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
+# #492 §16: an enabled managed runtime also needs a fresh, successful gateway backup before any upgrade.
+stock_backup_freshness "$ENV_FILE" "$SCRIPT_DIR" \
+  || { fail "managed runtime gateway backup is missing, failed or stale; run scripts/backup-stock-gateway.sh first"; exit 1; }
+# #492 A3: an enabled managed runtime builds the orchestrator with the pinned stock CLI (.env
+# OPENSHELL_CLI_URL/OPENSHELL_CLI_SHA256, validated above). Default-off passes no build args.
+ORCH_CLI_ARGS=$(stock_cli_build_args "$ENV_FILE") \
+  || { fail "managed runtime needs the pinned stock CLI build args; see docs/openshell-stock.md"; exit 1; }
+
+# #492: after the other preflights and before anything is stopped or replaced, refuse an orchestrator that cannot read managed
+# bindings while any exist. An unavailable preflight refuses; it is never read as "none".
+ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
+  bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" --dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" \
+  || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
@@ -186,7 +225,10 @@ build_image() {
 }
 
 build_image "fleet:agent"           "$SCRIPT_DIR/Dockerfile"                        "$SCRIPT_DIR"
-build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR"
+build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR" "$ORCH_CLI_ARGS"
+# #492 A3: never start a managed orchestrator without the pinned stock CLI. Default-off: no check.
+stock_cli_image_check "$ENV_FILE" fleet:orchestrator \
+  || { fail "the built fleet:orchestrator image lacks the pinned stock CLI; services were not started"; exit 1; }
 build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"

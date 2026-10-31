@@ -279,21 +279,31 @@ public sealed partial class AcceptanceScenarioTests
         Assert.Equal(12, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300)); ValidWrites(run);
     }
 
-    [Fact]
-    public async Task Parent_OwnerFailureContinueWaitsForVerifiedCleanupBeforeAnotherAttempt()
+    // A decision that lands while the gate notice is still running resolves the wait before its
+    // timeout timer starts, so the gate leaves no timer behind. Wait for the cleanup wait's own
+    // sleep, never for a total timer count that only holds when the decision arrives later.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Parent_OwnerFailureContinueWaitsForVerifiedCleanupBeforeAnotherAttempt(bool decisionDuringGateNotice)
     {
         var actor = new Actor { ThrowOwner = true };
+        using var notice = new ManualResetEventSlim(!decisionDuringGateNotice);
+        actor.HoldGateNotice = notice;
         var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
         {
             await WaitPhase(handle, h, "acceptance-blocked"); Assert.Contains("block=owner_timeout;", h.LastUpsert(await handle.FetchHistoryAsync(), "Acceptance"));
             actor.ThrowOwner = false; actor.PriorClean = "no"; await Decision(handle, h, "continue");
-            await WaitTimers(handle, 2);
+            notice.Set();
+            await WaitSleep(handle, 1800);
             var history = await handle.FetchHistoryAsync();
             Assert.Single(history.Events.Where(e => e.EventType == EventType.StartChildWorkflowExecutionInitiated && e.StartChildWorkflowExecutionInitiatedEventAttributes.WorkflowType.Name == "UwePrAcceptanceWorkflow"));
             actor.PriorClean = "yes"; await h.AdvanceAsync(TimeSpan.FromSeconds(1801));
             await h.WaitForGateVisitAsync(handle, "merge-approval:1"); await h.SignalHumanApprovalAsync(handle);
         });
         Assert.Equal(2, run.ChildStarts("UwePrAcceptanceWorkflow").Count); Assert.Single(run.Calls, c => c.Step == "cleanup"); ValidWrites(run);
+        if (decisionDuringGateNotice)
+            Assert.Equal(1800, run.History.Events.First(e => e.EventType == EventType.TimerStarted).TimerStartedEventAttributes.StartToFireTimeout.Seconds);
     }
 
     [Fact]
@@ -483,6 +493,13 @@ public sealed partial class AcceptanceScenarioTests
         { if (DateTime.UtcNow > end) throw new TimeoutException("timer"); await Task.Delay(20); }
     }
 
+    private static async Task WaitSleep(WorkflowHandle handle, int seconds)
+    {
+        var end = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (!(await handle.FetchHistoryAsync()).Events.Any(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == seconds))
+        { if (DateTime.UtcNow > end) throw new TimeoutException($"sleep {seconds}s"); await Task.Delay(20); }
+    }
+
     private static async Task WaitGateRef(WorkflowHandle handle, SeedHarness h, string reference)
     {
         var end = DateTime.UtcNow + TimeSpan.FromSeconds(20);
@@ -516,8 +533,11 @@ public sealed partial class AcceptanceScenarioTests
         public string Ci = "success", PriorClean = "yes";
         public string StageResult = "done", Label = "product_defect", PlanStatus = "ok", PriorRounds = "ok", DesignApproval = "design", HarnessEvidence = "no";
         public bool DocOnly, PriorReceipts;
+        public ManualResetEventSlim? HoldGateNotice;
         public string Respond(Call call)
         {
+            if (call.Step == "notify_acceptance_gate" && HoldGateNotice is { } notice && !notice.Wait(TimeSpan.FromSeconds(30)))
+                throw new TimeoutException("gate notice held");
             if (call.Step == "phase1_implement" || call.Step.StartsWith("revise_", StringComparison.Ordinal))
             {
                 var old = Head; if (call.Step != "phase1_implement") _head++;

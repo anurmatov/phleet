@@ -41,17 +41,19 @@ public class DelegateToAgentActivityTests
     }
 
     /// <summary>Records the orchestrator calls the activity makes instead of sending them.</summary>
-    private sealed class RecordingHandler(List<string> requests) : HttpMessageHandler
+    private sealed class RecordingHandler(List<string> requests, string? agentJson = null) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
             lock (requests) requests.Add(request.RequestUri!.ToString());
-            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK));
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK);
+            if (agentJson is not null && request.Method == HttpMethod.Get) response.Content = new StringContent(agentJson);
+            return Task.FromResult(response);
         }
     }
 
-    private static Harness Build(int agentTimeoutSeconds = 30, string orchestratorUrl = "")
+    private static Harness Build(int agentTimeoutSeconds = 30, string orchestratorUrl = "", string? agentJson = null)
     {
         var publishedInstructions = new List<string>();
         var publishedTaskIds = new List<string>();
@@ -93,7 +95,7 @@ public class DelegateToAgentActivityTests
         var orchestratorRequests = new List<string>();
         var httpClientFactory = Substitute.For<IHttpClientFactory>();
         httpClientFactory.CreateClient(Arg.Any<string>())
-            .Returns(_ => new HttpClient(new RecordingHandler(orchestratorRequests)));
+            .Returns(_ => new HttpClient(new RecordingHandler(orchestratorRequests, agentJson)));
 
         var activity = new DelegateToAgentActivity(
             Options.Create(new RabbitMqOptions()),
@@ -212,7 +214,8 @@ public class DelegateToAgentActivityTests
         // The cancellation path is not what broke in #321 and must not be removed — cancelling a
         // genuinely hung agent is correct, and the fix only stops it firing on a healthy one. So
         // assert it still reaches the orchestrator, for THIS task rather than the whole agent.
-        var h = Build(orchestratorUrl: "http://orchestrator.invalid");
+        var h = Build(orchestratorUrl: "http://orchestrator.invalid",
+            agentJson: """{"agentName":"reviewer-one","appliedRuntimeKind":"docker"}""");
         using var cts = new CancellationTokenSource();
         var env = new ActivityEnvironment { CancellationTokenSource = cts };
 
@@ -226,13 +229,46 @@ public class DelegateToAgentActivityTests
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
 
-        var cancel = Assert.Single(h.OrchestratorRequests);
+        var cancel = Assert.Single(h.OrchestratorRequests, r => r.Contains("/cancel/"));
         Assert.Contains($"/api/agents/{Agent}/cancel/", cancel);
         Assert.Contains(Uri.EscapeDataString("wf/task-cancel-http"), cancel);
 
         // Targeted, not the blunt broadcast — the RabbitMQ fallback would have published a
         // "/cancel all" directive, which stops every other task on that agent too.
         Assert.DoesNotContain(h.PublishedInstructions, i => i.Contains("/cancel all"));
+    }
+
+    // ── Managed stock OpenShell target (#492 review F5, R1/F13) ───────────────
+
+    [Fact]
+    public async Task ManagedModeOff_NeverConsultsTheOrchestratorRuntime_AndDelegatesOrdinarily()
+    {
+        // Managed routing (ManagedStockDelegationTests) needs StockOpenShell:AuthorityDirectory; without it
+        // the orchestrator's runtime is not read at all, so its availability cannot fail a delegation.
+        var h = Build(orchestratorUrl: "http://orchestrator.invalid",
+            agentJson: """{"agentName":"agent1","runtimeKind":"openshell","appliedRuntimeKind":"openshell"}""");
+        var env = new ActivityEnvironment();
+
+        var run = env.RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-managed"));
+        await CompleteWhenRegisteredAsync(h, "wf/task-managed", new AgentTaskResult("all done", "completed"));
+
+        Assert.True((await run).IsCompleted);
+        Assert.Single(h.PublishedInstructions);
+        Assert.Empty(h.OrchestratorRequests);
+    }
+
+    [Fact]
+    public async Task DockerTarget_AfterManagedHandoff_IsStillDelegated()
+    {
+        var h = Build(orchestratorUrl: "http://orchestrator.invalid",
+            agentJson: """{"agentName":"agent1","runtimeKind":"docker","appliedRuntimeKind":"docker"}""");
+        var env = new ActivityEnvironment();
+
+        var run = env.RunAsync(() => h.Activity.DelegateToAgentAsync(Agent, "do the thing", "wf/task-docker"));
+        await CompleteWhenRegisteredAsync(h, "wf/task-docker", new AgentTaskResult("all done", "completed"));
+
+        Assert.True((await run).IsCompleted);
+        Assert.Single(h.PublishedInstructions);
     }
 
     // ── Timeout (issue #251) ──────────────────────────────────────────────────

@@ -6,6 +6,7 @@ using Fleet.Shared.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -227,6 +228,67 @@ public sealed class StockObserverIsolationTests
         connection.CreateChannelAsync(Arg.Any<CreateChannelOptions>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(channel));
         return connection;
+    }
+
+    private sealed class LevelLogger<T> : ILogger<T>
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<(LogLevel Level, string Text)> Lines { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Lines.Enqueue((logLevel, formatter(state, exception)));
+        public int Count(LogLevel level, string prefix) =>
+            Lines.Count(l => l.Level == level && l.Text.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StockObserver_DefaultOff_WarnsOnceAboutTheMissingManagedDirectory_NotEveryReconcile()
+    {
+        // Default-off install: only ConfigDir is set, so the derived <ConfigDir>/managed/authority does not exist.
+        var configDir = Path.Combine(Path.GetTempPath(), "stock-observer-off-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(configDir);
+        try
+        {
+            var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["StockOpenShell:ConfigDir"] = configDir
+            }).Build();
+            var options = Microsoft.Extensions.Options.Options.Create(
+                new RabbitMqOptions { Host = "broker.example.test", Exchange = "fleet.orchestrator" });
+            var registry = new AgentRegistry(new TaskHistoryStore(), NullLogger<AgentRegistry>.Instance);
+            var publisher = new AgentConfigPublisherService(options, NullLogger<AgentConfigPublisherService>.Instance)
+            { Connect = (_, _) => Task.FromResult(Connection(Substitute.For<IChannel>())) };
+            var logger = new LevelLogger<StockHeartbeatObserverService>();
+            var connects = 0;
+            using var observer = new StockHeartbeatObserverService(options, registry, publisher, config, new StockRuntimeMutationHold(config),
+                NullLogger<HeartbeatConsumerService>.Instance, logger)
+            {
+                Connect = (_, _) => { Interlocked.Increment(ref connects); throw new InvalidOperationException("no broker"); },
+                ReconcileInterval = TimeSpan.FromMilliseconds(5)
+            };
+            var managed = Path.Combine(configDir, "managed", "authority");
+            Assert.Equal(managed, observer.ManagedDirectory);
+
+            const string warning = "Stock observer directory unavailable";
+            await observer.StartAsync(CancellationToken.None);
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                while (logger.Count(LogLevel.Debug, "Stock observer directory still unavailable") < 5)
+                    await Task.Delay(5, timeout.Token);
+            await observer.StopAsync(CancellationToken.None);
+
+            // Several reconcile cycles, one warning; default-off otherwise unchanged: no lane, no connection.
+            Assert.Equal(1, logger.Count(LogLevel.Warning, warning));
+            Assert.Empty(observer.Lanes);
+            Assert.Equal(0, connects);
+
+            // A directory that becomes available and then disappears again is warned about afresh, once.
+            Directory.CreateDirectory(managed);
+            await observer.ReconcileAsync(managed, CancellationToken.None);
+            Directory.Delete(managed);
+            for (var i = 0; i < 3; i++) await observer.ReconcileAsync(managed, CancellationToken.None);
+            Assert.Equal(2, logger.Count(LogLevel.Warning, warning));
+        }
+        finally { Directory.Delete(configDir, true); }
     }
 
     private sealed class Fixture : IDisposable

@@ -7,7 +7,11 @@ DIR=$(mktemp -d)
 trap 'rm -rf "$DIR"' EXIT
 mkdir -p "$DIR/repo/scripts/lib" "$DIR/repo/fleet" "$DIR/bin"
 cp "$ROOT/setup.sh" "$ROOT/upgrade.sh" "$ROOT/docker-compose.example.yml" "$DIR/repo/"
-cp "$ROOT/scripts/lib/comms-profiles.sh" "$DIR/repo/scripts/lib/"
+cp "$ROOT/scripts/lib/comms-profiles.sh" "$ROOT/scripts/lib/stock-managed-preflight.sh" "$DIR/repo/scripts/lib/"
+# upgrade.sh runs the #492 managed-runtime rollout guard against the orchestrator Dockerfile.
+mkdir -p "$DIR/repo/src/Fleet.Orchestrator"
+cp "$ROOT/scripts/check-stock-runtime-rollout.sh" "$ROOT/scripts/check-stock-gateway-backup.sh" "$DIR/repo/scripts/"
+cp "$ROOT/src/Fleet.Orchestrator/Dockerfile" "$DIR/repo/src/Fleet.Orchestrator/"
 REAL_DOCKER=$(command -v docker)
 export REAL_DOCKER CALLS="$DIR/calls" CONFIG="$DIR/config.json"
 cat > "$DIR/bin/docker" <<'WRAPPER'

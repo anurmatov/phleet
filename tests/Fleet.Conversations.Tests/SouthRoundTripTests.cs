@@ -289,9 +289,16 @@ public sealed class SouthRoundTripTests(
             await WaitForKindAsync(conversation, ConversationEventKind.TurnStarted);
         }
 
-        // The terminal was never committed, so the message is still unacked and the lease is the
-        // only thing that resolves the attempt.
-        Assert.NotEqual(0u, await broker.DepthAsync(Queue));
+        // Channel/connection shutdown and visibility of the broker's requeue are not one
+        // observation. No consumer remains here: require the unacked delivery to become ready,
+        // rather than assuming the first passive declaration after shutdown has caught up.
+        var depth = await broker.DepthAsync(Queue);
+        for (var poll = 0; depth == 0 && poll < 20; poll++)
+        {
+            await Task.Delay(100);
+            depth = await broker.DepthAsync(Queue);
+        }
+        Assert.NotEqual(0u, depth);
 
         // The REAL maintenance loop resolves it, not a hand-driven Reconciler.
         //

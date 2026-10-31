@@ -297,8 +297,12 @@ internal sealed class LocalHarness
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            lock (requests) requests.Add(request.RequestUri!.ToString());
-            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK));
+            // Only cancels (POST); the managed-target lookup (GET, #492) is not a cancel.
+            if (request.Method == HttpMethod.Post) lock (requests) requests.Add(request.RequestUri!.ToString());
+            // The lookup fails closed on an unknown runtime, so it answers with an ordinary Docker agent.
+            return Task.FromResult(request.Method == HttpMethod.Get
+                ? new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"appliedRuntimeKind\":\"docker\"}") }
+                : new HttpResponseMessage(System.Net.HttpStatusCode.OK));
         }
     }
 }

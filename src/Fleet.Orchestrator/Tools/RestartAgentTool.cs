@@ -8,7 +8,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class RestartAgentTool(AgentRegistry registry, DockerService docker, IServiceScopeFactory scopeFactory, StockRuntimeMutationHold runtimeHold)
+public sealed class RestartAgentTool(AgentRegistry registry, DockerService docker, IServiceScopeFactory scopeFactory, StockRuntimeMutationHold runtimeHold, StockOpenShellRuntime? managed = null)
 {
     [McpServerTool(Name = "restart_agent")]
     [Description("Restart a fleet agent's Docker container. Use with caution — the agent will be briefly unavailable.")]
@@ -16,6 +16,7 @@ public sealed class RestartAgentTool(AgentRegistry registry, DockerService docke
         [Description("Agent name (e.g. my-agent)")] string name)
     {
         if (runtimeHold.Denies(name)) return StockRuntimeMutationHold.Reason;
+        if (managed is not null && await managed.DispatchToolAsync(name, "restart") is { } managedResult) return managedResult;
         if (await runtimeHold.DescribeAppliedFaultAsync(name) is { } appliedFault) return appliedFault;
 
         // Prefer registry (live state), fall back to DB for container name (handles stopped/crashed agents)

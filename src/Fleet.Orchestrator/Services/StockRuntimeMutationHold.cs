@@ -13,10 +13,16 @@ public sealed class StockRuntimeMutationHold
     public const string Reason = "stock_runtime_manual_control_required";
     private readonly string? _agent;
     private readonly IServiceScopeFactory? _scopeFactory;
+    private readonly string? _managedDirectory;
 
     public StockRuntimeMutationHold(IConfiguration configuration, IServiceScopeFactory? scopeFactory = null)
     {
         _scopeFactory = scopeFactory;
+        // Managed records (#492) live in the adapter's authority directory; the observer key names it explicitly.
+        var configDir = configuration["StockOpenShell:ConfigDir"];
+        var managed = configuration["StockOpenShell:AuthorityDirectory"]
+            ?? (string.IsNullOrEmpty(configDir) ? null : Path.Combine(configDir, "managed", "authority"));
+        _managedDirectory = managed is not null && Path.IsPathFullyQualified(managed) ? managed : null;
         var authority = configuration["StockOpenShell:AuthorityFile"];
         HasEnrollment = !string.IsNullOrEmpty(authority)
             || !string.IsNullOrEmpty(configuration["StockOpenShell:BrokerPasswordFile"]);
@@ -57,14 +63,31 @@ public sealed class StockRuntimeMutationHold
             var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name);
             return agent is null ? null : applying
                 ? AgentPatchHelpers.RuntimeApplyFault(agent)
-                : agent.AppliedRuntimeKind != "docker" ? "managed_runtime_unavailable" : null;
+                : agent.AppliedRuntimeKind != "docker" || UnresolvedManaged(agent.AppliedRuntimeBinding)
+                    ? "managed_runtime_unavailable" : null;
         }
         catch (Exception ex) when (ex is System.Data.Common.DbException or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException)
         { return "runtime_state_unavailable"; }
     }
 
+    // A Docker-applied agent with an in-flight candidate/operation or held managed record (e.g. an
+    // unresolved Docker→OpenShell apply) must not be started on Docker: two daemons would poll one bot.
+    private static bool UnresolvedManaged(string? binding)
+    {
+        try { return ManagedRecord.Parse(binding).Unresolved; }
+        catch (JsonException) { return true; } // unreadable is not absent
+    }
+
     public bool HasEnrollment { get; }
+    /// <summary>The managed authority directory: explicit <c>AuthorityDirectory</c>, else <c>&lt;ConfigDir&gt;/managed/authority</c>.</summary>
+    internal string? ManagedDirectory => _managedDirectory;
     internal bool IsEnrolledAgent(string agentName) =>
         _agent is not null && string.Equals(_agent, agentName, StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// Ordinary-broker telemetry and access requests never speak for an enrolled or managed agent. Any
+    /// managed record entry, active or not, holds them; an unreadable entry counts as present.
+    /// </summary>
+    internal bool HoldsOrdinaryTraffic(string agentName) => IsEnrolledAgent(agentName)
+        || _managedDirectory is not null && StockAuthoritySource.HasEntry(_managedDirectory, agentName);
     public bool Denies(string agentName) => HasEnrollment && (_agent is null || IsEnrolledAgent(agentName));
 }

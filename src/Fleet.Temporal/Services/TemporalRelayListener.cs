@@ -145,7 +145,11 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
             }
 
             var result = ParseAgentResult(message.Text, message.Type);
-            var matched = _registry.TryComplete(message.TaskId, result);
+            // A managed reply (#492) arrives only via the Bridge's managed lane and carries its context.
+            var context = message.Epoch is { } epoch
+                ? new ManagedCorrelation(message.Sender, message.Sandbox ?? "", epoch, message.CorrelationId ?? "")
+                : null;
+            var matched = _registry.TryComplete(message.TaskId, result, context);
 
             if (matched)
             {

@@ -98,7 +98,8 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         RichFallbackCounter? richFallbackCounter = null,
         SinkSuppressionCounter? sinkCounter = null,
         JournalCapture? journal = null,
-        TurnBindingPublisher? turnBindings = null)
+        TurnBindingPublisher? turnBindings = null,
+        Fleet.Shared.Security.StockBrokerIdentity? stockEnrollment = null)
     {
         _journal = journal;
         _turnBindings = turnBindings;
@@ -131,10 +132,22 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         {
             try
             {
-                _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
-                // The same credential, separate request policy: ordinary replies retain SDK retries.
-                if (journal?.SendEnabled == true)
-                    _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
+                // Stock enrollment is registered only by its startup gate, and only the managed profile
+                // admits a bot: its token is the wrapped stock placeholder, sent only through the handler.
+                if (stockEnrollment is not null)
+                {
+                    _bot = new TelegramBotClient(telegramConfig.Value.BotToken, StockTelegramHttpHandler.CreateClient(telegramConfig.Value.BotToken));
+                    // Managed sends keep the journal zero-retry contract, through the same placeholder handler.
+                    if (journal?.SendEnabled == true)
+                        _journalSendBot = ManagedJournalSendBot(telegramConfig.Value.BotToken);
+                }
+                else
+                {
+                    _bot = new TelegramBotClient(telegramConfig.Value.BotToken);
+                    // The same credential, separate request policy: ordinary replies retain SDK retries.
+                    if (journal?.SendEnabled == true)
+                        _journalSendBot = new TelegramBotClient(new TelegramBotClientOptions(telegramConfig.Value.BotToken) { RetryCount = 0 });
+                }
                 sinkCounter?.SetStartupTelegramState(SinkSuppressionCounter.TelegramConfigured);
             }
             catch (Exception ex)
@@ -1340,6 +1353,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         TelegramMediaKind.Sticker => message.Sticker?.FileId,
         _ => null,
     };
+
+    /// <summary>
+    /// #492: the managed journal-send client. Zero SDK retries (a 429 surfaces to the journal-send caller
+    /// instead of being retried inside the send, and an upload is never re-sent from disposed content),
+    /// wired with the stock placeholder handler like the managed reply client.
+    /// </summary>
+    internal static TelegramBotClient ManagedJournalSendBot(string sdkToken, HttpMessageHandler? inner = null) =>
+        new(new TelegramBotClientOptions(sdkToken) { RetryCount = 0 },
+            new HttpClient(new StockTelegramHttpHandler(sdkToken, inner ?? new SocketsHttpHandler())));
 
     public async Task<JournalMessage> SendFileIdAsync(long chatId, string kind, string fileId, CancellationToken ct)
     {

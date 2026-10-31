@@ -1,4 +1,5 @@
 using Fleet.Shared.Journal;
+using Microsoft.AspNetCore.Http;
 using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
@@ -21,7 +22,8 @@ namespace Fleet.Telegram.Services;
 /// existed, and nothing recorded here can fail or delay a send.
 /// </para>
 /// </remarks>
-public sealed class TelegramSender(ToolSendReceiptPublisher publisher, TimeProvider? time = null)
+public sealed class TelegramSender(
+    ToolSendReceiptPublisher publisher, TimeProvider? time = null, IHttpContextAccessor? http = null)
 {
     private readonly TimeProvider _time = time ?? TimeProvider.System;
 
@@ -36,7 +38,8 @@ public sealed class TelegramSender(ToolSendReceiptPublisher publisher, TimeProvi
     public ToolSendCall BeginCall(string tool, string? agentName, ITelegramBotClient client, bool isAgentBot) =>
         new(publisher, tool, agentName, client,
             recording: isAgentBot && publisher.Enabled && !string.IsNullOrWhiteSpace(agentName),
-            requestedAt: _time.GetUtcNow());
+            requestedAt: _time.GetUtcNow(),
+            pin: http?.HttpContext?.Items.TryGetValue(ManagedToolSendPin.ItemKey, out var pin) == true ? pin as ManagedToolSendPin : null);
 
     /// <summary><c>sendMessage</c> from the call's own bot. The accepted message is recorded.</summary>
     /// <remarks>
@@ -89,12 +92,15 @@ public sealed class ToolSendCall : IDisposable
     private readonly string? _agent;
     private readonly List<ToolSendMessage> _messages = [];
     private ToolSendChat? _chat;
+    private long? _destination;
+    private readonly ManagedToolSendPin? _pin;
     private int _ended;
 
     internal ToolSendCall(
         ToolSendReceiptPublisher publisher, string tool, string? agent, ITelegramBotClient client,
-        bool recording, DateTimeOffset requestedAt)
+        bool recording, DateTimeOffset requestedAt, ManagedToolSendPin? pin = null)
     {
+        _pin = pin;
         _publisher = publisher;
         _tool = tool;
         _agent = agent;
@@ -117,6 +123,7 @@ public sealed class ToolSendCall : IDisposable
 
         try
         {
+            _destination ??= chatId;
             _chat ??= new ToolSendChat(
                 sent.Chat?.Id is { } id && id != 0 ? id : chatId,
                 ChatTypeName(sent.Chat?.Type),
@@ -136,8 +143,17 @@ public sealed class ToolSendCall : IDisposable
 
         try
         {
+            // A managed call carries the context its verified request pinned; it never names
+            // another agent than the one that record attributed.
+            if (_pin is not null && _pin.Agent != ToolSendReceipts.RoutingKey(_agent!))
+            {
+                _publisher.Dropped("context");
+                return;
+            }
+
             _publisher.Enqueue(new ToolSendReceipt
             {
+                Managed = _pin is null ? null : new ToolSendManagedContext(_pin.Sandbox, _pin.Epoch, _pin.Session, _destination!.Value),
                 Agent = ToolSendReceipts.RoutingKey(_agent!),
                 Tool = _tool,
                 RequestedAt = RequestedAt.ToUniversalTime(),
@@ -161,4 +177,13 @@ public sealed class ToolSendCall : IDisposable
         ChatType.Channel => "channel",
         _ => null,
     };
+}
+
+/// <summary>
+/// The receipt context fleet-telegram pins when <c>StockServiceIdentityMiddleware</c> verified a
+/// managed request (#492): agent, sandbox, epoch and MCP session, from the verified record only.
+/// </summary>
+public sealed record ManagedToolSendPin(string Agent, string Sandbox, Guid Epoch, string Session)
+{
+    public const string ItemKey = "fleet.stock.tool-send-pin";
 }

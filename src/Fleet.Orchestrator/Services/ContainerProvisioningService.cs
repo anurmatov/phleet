@@ -25,7 +25,7 @@ public sealed class ContainerProvisioningService(
     internal const string JournalMcpServerName = "fleet-comms-journal";
     internal const string JournalFilesServerName = "fleet-journal-files";
     internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
-    private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
+    internal static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
     private static IEnumerable<string> SendWarnings(Agent agent)
     {
         if (JournalGrants.HasSendGrant(agent) && !JournalGrants.SendEffective(agent))
@@ -76,8 +76,12 @@ public sealed class ContainerProvisioningService(
             return ProvisionPreview.NotFound(agentName);
 
         if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } blocker)
+        {
+            if (StockOpenShellRuntime.Owns(agent) && Managed() is { Enabled: true } runtime)
+                blocker = await runtime.DescribePreflightFaultAsync(agent, ct) ?? "managed_apply_ready";
             return new ProvisionPreview(agentName, agent.ContainerName, "", new ContainerSpec("", 0, [], [], []), null,
                 [$"desired={agent.RuntimeKind}; applied={agent.AppliedRuntimeKind}; policy={agent.SandboxPolicyVersionId}; {blocker}"]);
+        }
 
         var envFile = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
         var envValues = LoadEnvFile(envFile);
@@ -376,6 +380,14 @@ public sealed class ContainerProvisioningService(
         string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
+        => await ProvisionCoreAsync(agentName, imageOverride, instructionVersionOverrides, managedTransition: false, ct);
+
+    private async Task<ProvisionResult> ProvisionCoreAsync(
+        string agentName,
+        string? imageOverride,
+        IReadOnlyDictionary<string, int>? instructionVersionOverrides,
+        bool managedTransition,
+        CancellationToken ct)
     {
         if (RuntimeHold.Denies(agentName))
             return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
@@ -402,7 +414,11 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
-        if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } runtimeFault)
+        // The managed adapter owns both runtime-switch directions; it calls back with managedTransition
+        // only while it still holds the agent, for the Docker leg of OpenShell→Docker.
+        if (!managedTransition && StockOpenShellRuntime.Owns(agent))
+            return await DispatchManagedApplyAsync(agentName, ct) ?? ProvisionResult.Fail(agentName, StockOpenShellRuntime.Unavailable);
+        if (!managedTransition && AgentPatchHelpers.RuntimeApplyFault(agent) is { } runtimeFault)
             return ProvisionResult.Fail(agentName, runtimeFault);
 
         if (DescribePrimaryHumanFault() is { } priorityFault)
@@ -540,7 +556,18 @@ public sealed class ContainerProvisioningService(
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
         if (agent.AppliedRuntimeKind != "docker")
-            return ProvisionResult.Fail(agentName, "managed_runtime_unavailable");
+        {
+            if (Managed() is not { Enabled: true } runtime) return ProvisionResult.Fail(agentName, StockOpenShellRuntime.Unavailable);
+            var managedStop = await runtime.StopAsync(agentName, ct);
+            return new ProvisionResult(agentName, managedStop.Ok, managedStop.Message);
+        }
+        return await DeprovisionContainerAsync(agent, ct);
+    }
+
+    /// <summary>Stops and removes <paramref name="agent"/>'s Docker container; no DB read.</summary>
+    private async Task<ProvisionResult> DeprovisionContainerAsync(Agent agent, CancellationToken ct)
+    {
+        var agentName = agent.Name;
         var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
         if (existing is null)
             return ProvisionResult.Fail(agentName,
@@ -562,6 +589,51 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
+    /// Review A2: the inspection behind <c>DELETE /api/agents/{name}</c>. <c>KeepRow</c> non-null means the agent
+    /// row must stay: an applied openshell binding or an unresolved candidate/held record exists and no clean revoke
+    /// has succeeded, or the runtime hold denies the Docker mutation. Otherwise the guard owns the rest: it locks the
+    /// exact inspected binding and only then deprovisions the inspected runtime (best-effort Docker; a cleanly revoked
+    /// managed binding was already stopped by its revoke, so nothing is stopped and no managed Stop result is ignored).
+    /// </summary>
+    public async Task<(string? KeepRow, ManagedDeleteGuard? Guard)> PrepareDeleteAsync(string agentName, CancellationToken ct = default)
+    {
+        Agent? agent;
+        using (var scope = scopeFactory.CreateScope())
+            agent = await scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents
+                .AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        if (agent is null) return (null, null);
+        if (DescribeManagedDeleteFault(agent) is { } managedFault) return (managedFault, null);
+        var isDocker = agent.AppliedRuntimeKind == "docker";
+        if (isDocker && RuntimeHold.Denies(agentName)) return (StockRuntimeMutationHold.Reason, null);
+        // Review A2/D1: nothing is persisted here, and nothing is deprovisioned until the guard holds the exact
+        // inspected binding. The runtime acted on is the inspected one, never a fresh lookup that could find a
+        // concurrently applied replacement.
+        return (null, new ManagedDeleteGuard(agent.Id, agent.AppliedRuntimeBinding, agent.AppliedRuntimeKind, async token =>
+        {
+            if (BeforeDeprovision is not null) await BeforeDeprovision();
+            return isDocker ? await DeprovisionContainerAsync(agent, token) : ProvisionResult.Ok(agentName, "managed binding revoked");
+        }));
+    }
+
+    /// <summary>Test seam: runs once the delete guard holds the inspected binding, before any deprovision (review A2/D1).</summary>
+    internal Func<Task>? BeforeDeprovision { get; set; }
+
+    /// <summary>Null only when no managed state would be dropped untracked with the agent row.</summary>
+    internal static string? DescribeManagedDeleteFault(Agent agent)
+    {
+        ManagedRecord record;
+        try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
+        catch (System.Text.Json.JsonException) { return "managed_binding_unreadable"; }
+        // #502 review F2: desired subscription or any nonretired subscription tuple keeps the row (and its rollback count
+        // and custody history) until a verified, archived retirement; a clean revoke alone is not retirement.
+        if (agent.NativeAuthMode == StockSubscriptionBinding.Mode || record.SubscriptionTuples().Any()) return "managed_subscription_not_retired";
+        // A clean, finished revoke (a retired Docker handoff is recorded the same way) leaves nothing live.
+        if (record is { State: "revoked", Operation: null, Candidate: null, Errors.Count: 0 }) return null;
+        if (record.Unresolved) return "managed_state_unresolved";
+        return agent.AppliedRuntimeKind == "docker" ? null : "managed_binding_not_revoked";
+    }
+
+    /// <summary>
     /// Deprovisions then re-provisions the container. Used when config has changed.
     /// An optional imageOverride overrides the DB-configured image (used by CI for PR-specific images).
     /// </summary>
@@ -577,6 +649,7 @@ public sealed class ContainerProvisioningService(
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
 
+        if (await DispatchManagedApplyAsync(agentName, ct) is { } managed) return managed;
         if (await DescribeManagedRuntimeFaultAsync(agentName, ct) is { } runtimeFault)
             return ProvisionResult.Fail(agentName, runtimeFault);
 
@@ -1562,7 +1635,7 @@ public sealed class ContainerProvisioningService(
         return id;
     }
 
-    private static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
+    internal static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
         e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
         && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
 
@@ -1779,6 +1852,71 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public static int GetEffectiveHostPort(Agent agent) => agent.HostPort ?? (8080 + agent.Id);
 
+    private StockOpenShellRuntime? Managed()
+    {
+        using var scope = scopeFactory.CreateScope();
+        return scope.ServiceProvider.GetService<StockOpenShellRuntime>();
+    }
+
+    /// <summary>
+    /// Null when the agent is not managed or OpenShell→Docker finished and the Docker path should
+    /// continue; otherwise the managed apply outcome. Never falls back to Docker on a managed failure.
+    /// </summary>
+    private async Task<ProvisionResult?> DispatchManagedApplyAsync(string name, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name, ct);
+        if (agent is null || !StockOpenShellRuntime.Owns(agent)) return null;
+        if (Managed() is not { Enabled: true } runtime) return ProvisionResult.Fail(name, StockOpenShellRuntime.Unavailable);
+        var result = await runtime.ApplyAsync(name, ct);
+        return new ProvisionResult(name, result.Ok, result.Message);
+    }
+
+    /// <summary>
+    /// The Docker leg of an OpenShell→Docker apply, called by the managed adapter while it still holds
+    /// the agent's operation. Removes a leftover stopped container of the exact name, then provisions.
+    /// </summary>
+    internal async Task<(bool Ok, string Message)> ProvisionDockerTransitionAsync(string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        if (agent is null) return (false, "agent not found in DB");
+        var existing = await docker.ListContainersByNameAsync(agent.ContainerName, ct);
+        if (existing is null) return (false, "docker_observation_failed");
+        if (existing.Any(c => c.State is not ("exited" or "created" or "dead"))) return (false, "docker_container_running");
+        if (existing.Count > 0 && !await docker.RemoveContainerAsync(agent.ContainerName, ct)) return (false, "docker_remove_failed");
+        var result = await ProvisionCoreAsync(agentName, null, null, managedTransition: true, ct);
+        return (result.Success, result.Message);
+    }
+
+    /// <summary>
+    /// The ordinary generated config, instructions and project contexts for a managed bundle, written
+    /// to the same <c>.generated</c> directory the Docker path uses. Returns that directory.
+    /// </summary>
+    internal async Task<string> GenerateManagedInputsAsync(string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents
+            .Include(a => a.Tools).Include(a => a.Projects).Include(a => a.McpEndpoints).Include(a => a.EnvRefs)
+            .Include(a => a.TelegramUsers).Include(a => a.TelegramGroups).Include(a => a.Networks)
+            .Include(a => a.Instructions).ThenInclude(ai => ai.Instruction).ThenInclude(i => i.Versions)
+            .Include(a => a.CredentialMounts).ThenInclude(m => m.CredentialFile)
+            .AsSplitQuery().AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Name == agentName, ct)
+            ?? throw new InvalidOperationException("agent_not_found");
+        var baseDir = config["Provisioning:BaseDir"] ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
+        var envValues = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+        envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
+        var projectContexts = await ResolveProjectContextsAsync(agent);
+        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
+        await GenerateInstructionFilesAsync(agent, baseDir, null);
+        await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
+        return Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
+    }
+
     private async Task<string?> DescribeManagedRuntimeFaultAsync(string name, CancellationToken ct)
     {
         using var scope = scopeFactory.CreateScope();
@@ -1860,4 +1998,57 @@ internal sealed record ProjectContextAssignment(string ProjectName, string Conte
 internal sealed record ProjectContextPlan(IReadOnlyList<ProjectContextAssignment> Assignments)
 {
     public static readonly ProjectContextPlan Empty = new([]);
+}
+
+/// <summary>
+/// Review A2/D1/D2: the inspected binding and runtime kind of an agent row about to be deleted, and the deprovision
+/// of that inspected runtime. One transaction first compare-and-sets that exact binding (taking the row lock), then
+/// deprovisions, then deletes the row. A concurrent apply/Start/revoke claim CAS either already changed the binding
+/// (conflict, before any stop/remove) or waits on the lock and then finds no row. Nothing is written outside the
+/// transaction: a failure or crash rolls back and leaves the binding as it was, so the delete stays retryable.
+/// </summary>
+public sealed record ManagedDeleteGuard(int AgentId, string? Binding, string? Kind, Func<CancellationToken, Task<ProvisionResult>> Deprovision)
+{
+    public const string Changed = "managed_state_changed_during_delete";
+    public const string Unavailable = "managed_delete_unavailable";
+
+    /// <summary>
+    /// Fault null when the row was deleted, with the deprovision result; otherwise <see cref="Changed"/> (409) or
+    /// <see cref="Unavailable"/> (503) and nothing was deprovisioned under a changed binding.
+    /// </summary>
+    public async Task<(string? Fault, ProvisionResult? Deprovision)> DeleteAsync(OrchestratorDbContext db, Agent tracked, CancellationToken ct = default)
+    {
+        if (tracked.Id != AgentId) return (Changed, null);
+        try
+        {
+            return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+            {
+                await using var tx = await db.Database.BeginTransactionAsync(ct);
+                var marker = (string.IsNullOrEmpty(Binding) ? new ManagedRecord() : ManagedRecord.Parse(Binding))
+                    with { Operation = "delete:" + Guid.NewGuid().ToString("N"), UpdatedAt = DateTimeOffset.UtcNow };
+                var locked = await db.Agents
+                    .Where(a => a.Id == AgentId && a.AppliedRuntimeBinding == Binding && a.AppliedRuntimeKind == Kind)
+                    .ExecuteUpdateAsync(u => u.SetProperty(a => a.AppliedRuntimeBinding, marker.Serialize()), ct);
+                if (locked != 1)
+                {
+                    await tx.RollbackAsync(ct);
+                    return ((string?)Changed, (ProvisionResult?)null);
+                }
+                // The row stays locked until commit or rollback, so the runtime is deprovisioned only under the
+                // inspected binding; an exception from it rolls the transaction back too.
+                var deprovision = await Deprovision(ct);
+                db.Agents.Remove(tracked);
+                await db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+                return (null, deprovision);
+            });
+        }
+        catch (Exception ex) when (ex is System.Data.Common.DbException or DbUpdateException or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException
+            or InvalidOperationException or TimeoutException)
+        {
+            // The transaction rolled back: the binding is unchanged and the row is kept. A DB outage is not a conflict.
+            db.ChangeTracker.Clear();
+            return (Unavailable, null);
+        }
+    }
 }

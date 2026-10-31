@@ -45,11 +45,10 @@ public static class AgentHostRegistration
     public static IServiceCollection AddAgentCoreServices(
         this IServiceCollection services, IConfiguration configuration)
     {
-        if (StockOpenShellEnrollment.Validate(configuration) is { } stockBroker)
-        {
-            StockOpenShellEnrollment.RequirePrepared(configuration, stockBroker, Environment.GetEnvironmentVariable("HOME") ?? "");
+        // #492 review F7: the same codex-root.toml staged preparation read (StockOpenShell:AppRoot when
+        // managed, /app for the manual profile), never a fixed /app path the managed launch never wrote.
+        if (StockOpenShellEnrollment.ValidateForRegistration(configuration) is { } stockBroker)
             services.AddSingleton(stockBroker);
-        }
 
         // Bind configuration sections
         services.Configure<AgentOptions>(configuration.GetSection(AgentOptions.Section));
@@ -61,7 +60,11 @@ public static class AgentHostRegistration
         services.Configure<ConversationsOptions>(configuration.GetSection(ConversationsOptions.Section));
 
         // Register services
-        services.AddSingleton<PromptBuilder>();
+        // Managed stock (#492): roles/projects are uploaded under the non-root HOME, not beside the binary.
+        if (configuration.GetValue<bool>("StockOpenShell:Enabled") && configuration["StockOpenShell:AppRoot"] is { Length: > 0 } stockAppRoot)
+            services.AddSingleton(sp => new PromptBuilder(sp.GetRequiredService<IOptions<AgentOptions>>(),
+                sp.GetRequiredService<ILogger<PromptBuilder>>(), sp.GetService<IOptions<TelegramOptions>>()) { ContentRoot = stockAppRoot });
+        else services.AddSingleton<PromptBuilder>();
         // #460: the harness plan, computed once; the executors apply it and heartbeats report its sha.
         services.AddSingleton<AgentHarness>();
         services.AddSingleton<ClaudeExecutor>();
@@ -459,18 +462,40 @@ public static class AgentHostRegistration
         // the drainer. The bot id is read from the transport lazily; the transport derives it from
         // Telegram:BotToken when it is constructed, before any hosted service starts, so receipts
         // queued across a restart never meet an unknown own bot.
-        services.AddSingleton(sp =>
+        // Stock profiles hold only an epoch-scoped broker identity without the receipt exchange/queue
+        // (#492): there the consumer attaches no queue of its own; managed receipts arrive typed on the
+        // existing control lane into the agent's own queue and the stock relay hands them over.
+        if (configuration.GetValue<bool>("StockOpenShell:Enabled"))
         {
-            long? botId = null;
-            return new ToolSendReceiptConsumer(
-                sp.GetRequiredService<IOptions<AgentOptions>>(),
-                sp.GetRequiredService<GroupRelayService>(),
-                sp.GetRequiredService<JournalCapture>(),
-                sp.GetRequiredService<JournalCounters>(),
-                () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,
-                sp.GetRequiredService<ILogger<ToolSendReceiptConsumer>>());
-        });
-        services.AddHostedService(sp => sp.GetRequiredService<ToolSendReceiptConsumer>());
+            services.AddSingleton(sp =>
+            {
+                long? botId = null;
+                var consumer = new ToolSendReceiptConsumer(
+                    sp.GetRequiredService<IOptions<AgentOptions>>(),
+                    sp.GetRequiredService<GroupRelayService>(),
+                    sp.GetRequiredService<JournalCapture>(),
+                    sp.GetRequiredService<JournalCounters>(),
+                    () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,
+                    sp.GetRequiredService<ILogger<ToolSendReceiptConsumer>>());
+                consumer.AttachManaged(sp.GetRequiredService<GroupRelayService>());
+                return consumer;
+            });
+        }
+        else
+        {
+            services.AddSingleton(sp =>
+            {
+                long? botId = null;
+                return new ToolSendReceiptConsumer(
+                    sp.GetRequiredService<IOptions<AgentOptions>>(),
+                    sp.GetRequiredService<GroupRelayService>(),
+                    sp.GetRequiredService<JournalCapture>(),
+                    sp.GetRequiredService<JournalCounters>(),
+                    () => botId ??= sp.GetServices<IHostedService>().OfType<AgentTransport>().FirstOrDefault()?.BotId,
+                    sp.GetRequiredService<ILogger<ToolSendReceiptConsumer>>());
+            });
+            services.AddHostedService(sp => sp.GetRequiredService<ToolSendReceiptConsumer>());
+        }
 
         services.AddHttpClient(JournalHttpClientName)
             // A recreated Comms container comes back on a new address; recycle pooled connections so

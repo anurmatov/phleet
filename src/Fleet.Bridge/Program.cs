@@ -27,6 +27,6 @@ await relay.InitializeAsync(CancellationToken.None);
 
 app.MapMcp();
 
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-bridge" }));
+app.MapGet("/health", async (CancellationToken ct) => Results.Ok(await relay.HealthAsync(ct)));
 
 app.Run();

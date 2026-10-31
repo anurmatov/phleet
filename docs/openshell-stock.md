@@ -22,7 +22,8 @@ candidate and an operator-imported profile at stock 0.1.5 / Codex 0.164.0.
 It does not change this manual profile, API-key policy selection, setup or auth owners.
 Source/profile checks do not establish isolated subscriptions, authorize runtime
 actions or satisfy [#493](https://github.com/anurmatov/phleet/issues/493) whole-agent acceptance.
-All subscription A0–A9 live evidence remains UNRUN; no managed migration is added.
+All subscription A0–A9 live evidence remains UNRUN; no managed migration is added. The later managed subscription
+compatibility branch (#502) is described in [its own section](#managed-codex-subscription-branch-502-unqualified-compatibility-only).
 
 ## Implemented source paths
 
@@ -163,7 +164,11 @@ intent record cannot self-attest a supported enrollment and continues to refuse.
 Provide the existing provider credential reference at
 `/home/agent/.codex-host/auth.json`, the exact normal `HarnessDefaults`-generated artifact
 at `/app/codex-root.toml`, normal generated read-only instruction/project inputs beside
-the binary (`roles/.../system.md`, `projects/.../context.md`), and one read-only `/workspace/.mcp.json`:
+the binary (`roles/.../system.md`, `projects/.../context.md`), and one read-only `/workspace/.mcp.json`.
+A managed staged launch instead uploads the artifact and instruction/project inputs under
+`StockOpenShell:AppRoot` (`$HOME/app`), which must equal the launcher's content root
+(`stock_enrollment_app_root_mismatch` otherwise); preparation and daemon registration both validate
+that same `codex-root.toml`. Without `AppRoot` (the manual profile) the paths above are unchanged:
 
 ```json
 {"mcpServers":{"memory":{"url":"https://memory.example.test/mcp"}}}
@@ -180,7 +185,8 @@ also require the exact prepared native MCP configuration and matching credential
 before registration; an alternate `CODEX_HOME` refuses rather than bypassing that check.
 
 Telegram, journal/files, conversation-client routes and other providers refuse in
-this bounded profile; they are not silently granted or runtime-qualified. Agent HTTP
+this bounded manual profile; they are not silently granted or runtime-qualified (the
+managed runtime below routes only the agent's own bot and journal capture). Agent HTTP
 control routes return 404 in this profile, leaving only health. Manual enrollment
 changes no ordinary provisioning/setup/Compose behavior and creates no runtime,
 credential, account, key, grant or lifecycle action.
@@ -385,17 +391,35 @@ than routed to a same-named Docker container. No managed binding can be created 
 
 All `/api/sandbox-policies` reads and writes require `Orchestrator:AuthToken`, including in dev
 mode. Create with `POST /api/sandbox-policies` (`name`, `yaml`, optional `providerProfileHashes`
-object mapping profile names to lowercase SHA256 content hashes). List with GET; append using
+object mapping profile names to lowercase [profile content digests](#profile-content-digest-503)). List with GET; append using
 `POST /api/sandbox-policies/{id}/versions` (`version`, `yaml`, `providerProfileHashes`). GET the
 versions list or `/versions/{version}`. Version IDs, not “latest”, are stored on agents.
 Supported YAML is a bounded subset of the pinned [stock authored schema](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy-schema/src/lib.rs):
 `version: 1`, `filesystem_policy` (absolute read-only/read-write paths and include_workdir),
 `process` (named user/group), `landlock`, and `network_policies` (binary paths, host/port,
-protocol, automatic TLS, enforcement/access presets and credential_binding).
-Advanced rules/middleware, aliases, anchors, tags and unknown fields return 400, never silently
+protocol, automatic TLS, enforcement/access presets and credential_binding), plus the one bounded
+`network_middlewares` signer subset described in [Managed signer policy binding](#managed-signer-policy-binding-503).
+Advanced rules, any other middleware, aliases, anchors, tags and unknown fields return 400, never silently
 lose fields. Each explicit credential binding requires its pinned profile content hash. These
 operator-supplied hashes are persisted immutably; this save-only release does not contact a gateway
 or establish that the installed profiles match. Future apply must independently verify them.
+
+<a id="profile-content-digest-503"></a>**Profile content digest (#503).** A profile pin is the canonical digest of the
+installed profile's full export. Compute it with
+`openshell [--workspace WS] profile export NAME -o json | scripts/stock-profile-digest.sh`, run in the workspace
+apply will check. The pinned CLI renders maps such as `annotations` from an unordered map, so two exports of one
+unchanged profile can differ byte for byte. A hash of raw CLI output, or of the file you imported, is therefore not a
+pin. The digest is the lowercase SHA-256 of the canonical UTF-8 form of the whole JSON object, with every field kept:
+- object keys are sorted by code point at every level, and a duplicate key refuses;
+- arrays keep their exported order;
+- there is no insignificant whitespace, and strings are escaped as Python `json.dumps(ensure_ascii=False)` does;
+- numbers must be signed 64-bit integers.
+
+Any other number, invalid text or nesting deeper than 64 refuses. Managed apply exports each pinned profile with
+`-o json` and computes the same digest (`StockProfileDigest`); a shared fixture test keeps the checker and the script
+equal. A different digest is `provider_profile_hash_mismatch:<profile>`. An export that cannot be canonicalized is
+`provider_profile_unverifiable:<profile>`, never a pass. Re-pin by appending a policy version, never by retrying until a
+hash matches. Pins taken from raw YAML output before #503 never match: append a version carrying the canonical digest.
 
 400 means invalid/unsupported input; 404 means missing policy/version; 409 means name/version
 conflict or unavailable apply; 503 means database/auth configuration unavailable, not an empty
@@ -408,3 +432,789 @@ Run `dotnet test tests/Fleet.Orchestrator.Tests --filter FullyQualifiedName~Mana
 with `FLEET_ORCHESTRATOR_MIGRATION_CONNECTION` pointing only to a disposable MySQL 8 server;
 the suite creates/drops uniquely owned databases and uses mysql/mysqldump for restore/query.
 Missing MySQL is a failure, not a skip. Runtime integration is a separate slice under [#489](https://github.com/anurmatov/phleet/issues/489).
+
+## Managed API-key bootstrap (partial #492)
+
+Explicit `Agent:NativeAuthMode=api_key` and `Agent:ProviderApiKeyEnvRef` prepare a private `auth.json` containing only the standard `OPENAI_API_KEY` placeholder and force Codex API login without a manual auth cache, using the [official OpenAI login-method setting](https://learn.chatgpt.com/docs/auth#enforce-a-login-method-or-workspace).
+The reference is never resolved inside the workload, and placeholder syntax is not proof of stock issuance, acknowledged provider attachment, or secret isolation.
+With `StockOpenShell:ManagedEnabled=true` the managed runtime below performs apply; the existing manual profile still requires its original auth input.
+
+## Managed runtime (#492, default off)
+
+`StockOpenShell:ManagedEnabled=false` (`FLEET_STOCK_MANAGED_ENABLED`) keeps every agent on Docker and
+returns `managed_runtime_unavailable` as before. Enabled, one adapter (`StockOpenShellRuntime`) sits
+behind the existing REST and MCP entry points. It drives the pinned stock CLI (`0.1.5`, argument
+arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back to Docker.
+
+| Operation | Behavior |
+|---|---|
+| Apply (`POST /api/agents/{name}/runtime/apply`, provision, reprovision) | Preflight first, with no external action: codex + API-key ref resolvable, exact policy version, private 0700 `ConfigDir`, authority template, HTTPS broker management with operator CA, CLI version, observable gateway. Then the old runtime is quiesced (Docker stop, or full revoke fanout of the old epoch), the broker epoch is created, a revoked allocation record is written, the provider is created/updated with the key only in the CLI's environment, and the sandbox is created once (`--restart-policy never`, `--no-auto-providers`). After the refused allocation settles, the record is bound to the actual UUID and activated, the active copy is uploaded, and one `sandbox start` runs. |
+| OpenShell→Docker | Revoke fanout for every verified binding, then `applied=docker`, and the ordinary Docker path continues. Any unresolved leg holds. |
+| Start/Stop/restart/cancel/logs | Act on the persisted applied binding only, with exact-UUID checks before and after each name-based stock call. A pending desired change never redirects them. Managed dispatch needs the exact route with `POST` and the operator bearer token (503 `operator_auth_unconfigured` without one); reads and other methods are 405 and malformed paths 404, before any action. |
+| `POST /api/agents/{name}/revoke` | Admission revoke, provider detach, broker revoke/connection close and Stop, as independent legs (30 s each, 120 s total). All unresolved errors are aggregated and the binding becomes `needs_attention`. |
+
+- **One writer per agent.** A compare-and-set on `agents.AppliedRuntimeBinding` admits one operation; a concurrent request gets 409.
+- **Provider attachment on reuse (#503 W9).** Pinned stock gives the main process only the provider environment captured when it spawns; an attach while it runs updates the spec and pushes config, but never the running launcher's environment. A fresh sandbox gets its providers through create's `--provider` flags. A reprovision or revoked reuse attaches exactly the current set while the sandbox is stopped, after the cut and before the staged boot, so preparation reads the stock-issued placeholder from its spawn environment. A policy change still runs `policy set --wait` after the boot, because it needs the running supervisor. A stopped restart keeps its attachments and never reattaches.
+- **Interrupted or unknown outcomes.** An operation left by an earlier orchestrator process becomes `needs_attention` and is never replayed. Unknown outcomes, a changed sandbox UUID, an unobservable quiescence check and a changed gateway generation (container ID plus StartedAt) all hold, with no Start or replacement, until an operator reconciles and revokes. A planned gateway restart is the one exception: when every owned managed record is durably stopped (or revoked) with the same sandbox UUID, Stopped and quiescent, Start or re-apply rebinds the recorded generation after the trust preflight; a changed generation under a running binding still holds and runs the revoke/Stop fanout.
+- **Failed-main sandboxes in the revoke fanout (#503 W8).** Pinned stock Stop returns a sandbox whose main process failed (`Error`, an exit code, `Ready=False/MainProcessFailed`) unchanged, and its CLI then exits nonzero waiting for `Stopped`. The revoke/Stop fanout reconciles that `stop_unknown` only when the exact owned UUID, in its persisted scope, reads that state with a settled driver operation (`provisioning` null, or `driver_operation_pending: false`), no container runs under it, and the same state reads again afterwards. Stock checks a pending operation before its failed-main shortcut, so a pending, missing or malformed operation field on either read keeps the hold, as does a running, foreign, unreadable or otherwise unknown sandbox. The broker revocation, provider detach and admission legs must still succeed, and subscription custody tuples are kept as before. Apply-time holds are unchanged; the supported recovery for them is still revoke.
+- **Reapply after a clean revoke of a failed-main sandbox (#503 W10).** That sandbox stays `Error`, because pinned Stop never changes it, and pinned Start accepts a failed-main `Error`. On reuse of a clean `revoked` record, the reuse Stop accepts the same proven terminal state as the revoke fanout. The planned gateway-restart check accepts it for the record's **own** sandbox only: exact owned UUID and scope, failed-main with a settled operation on two reads, and no container running between them. A `stopped` (not revoked) record, a running, foreign, pending or unreadable sandbox, and a peer that is not exactly `Stopped` still hold or refuse with `gateway_generation_changed`. No stored generation is ever rewritten by hand; the new binding records the current generation only through a completed apply.
+- **Sandbox names (#503).** The pinned server accepts a sandbox name of 1–19 characters: lowercase letters, digits
+  and single hyphens (`MAX_ROUTABLE_NAME_LEN`). The old `fleet-<agent>-<epoch8>` reached 20 characters at a
+  five-character agent name. Each new epoch's name is `fl-` plus the first 16 hex characters of SHA-256 over the full
+  agent name and the full epoch. That makes a bounded, hash-derived 19-character name for every supported agent name
+  (up to 41), not a truncation. It is not guaranteed unique (a 64-bit prefix), so it is never trusted as identity on
+  its own.
+  - Before anything is recorded, stopped or created, the name must be proven absent on every list page in its scope;
+    otherwise apply refuses with `sandbox_name_not_proven_absent`.
+  - That proof is only a snapshot, so after create the sandbox found under the name is adopted only if its stock labels
+    are exactly `fleet.agent=<agent>` and `fleet.epoch=<epoch>`. A missing or different identity holds
+    `sandbox_owner_unverified`, with no UUID recorded and no Stop, detach or delete.
+  - Ownership stays in the persisted binding (name plus UUID) and those labels.
+  - A create the server rejects allocates nothing: the hold keeps the UUID-less candidate, and the supported revoke
+    clears it once absence is proven. A subscription candidate is kept as Superseded custody.
+- **Cancel.** The adapter runs `sandbox exec` to POST the workload's loopback `/cancel` or `/cancel/{taskId}`. `POST /api/agents/{name}/cancel/{taskId}` (and `cancel_bg/{taskId}`) keeps the exact decoded task id; only the bare `cancel` route cancels every task. The agent admits only that route, and only when the actual connection address is loopback and a managed `Agent:NativeAuthMode` (`api_key` or `subscription`); forwarded headers are ignored.
+- **Broker.** Per epoch: vhost `stock-<epoch>`, then the `fleet.group` exchange (`PUT exchanges/<vhost>/fleet.group`), its existing bridge reply queue `fleet.agent.bridge` (`PUT queues/<vhost>/fleet.agent.bridge`) and the binding from `fleet.group` to it with route `bridge` (`POST bindings/<vhost>/e/fleet.group/q/fleet.agent.bridge`), all declared with exactly the properties the Bridge lane redeclares (durable direct exchange; durable, non-exclusive, non-auto-delete queue; no arguments), then `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. All of this precedes workload activation, and a failure holds the epoch. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost and its queues for custody.
+  The orchestrator writes no grant for its management user: the queue/exchange/binding writes inside the new vhost rely on RabbitMQ granting the creating management user `.*` configure/write/read on a vhost it creates (the internal auth backend's implicit creator grant on `PUT /api/vhosts`). Under a backend without that grant, those writes are refused and every apply holds the epoch. Revoke removes that grant last, with one exact DELETE of `permissions/<epoch vhost>/<management user>` (already absent counts as removed; a failure is reported as `permission:management`, never naming the user). The grant is owned because create refuses a pre-existing vhost, and removing it keeps custody: the vhost and its queues stay, and an administrator can re-grant itself to inspect them.
+
+Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
+into the orchestrator at `/var/lib/fleet-openshell-client`:
+- stock CLI client metadata/trust (`XDG_CONFIG_HOME`); with the example `--profile openshell` gateway the
+  client endpoint is `https://openshell-gateway:8443` on `fleet-net`, authenticated with the mTLS
+  client cert/key (the gateway cert needs that DNS SAN), never the host loopback, which the
+  orchestrator container cannot reach;
+- `managed-authority.json` (gateway issuer/audience/JWKS, assertion key paths, memory and broker hosts,
+  optional `ServiceHosts` such as `{"temporal": "temporal.example.test", "telegram": "telegram.example.test"}`
+  and optional `JournalHost` such as `"journal.example.test"`);
+- `broker-ca.pem`.
+
+Gateway reachability (the design's network row) with the example `--profile openshell` unit:
+
+| Caller | Network | Endpoint | Authentication |
+|---|---|---|---|
+| Orchestrator stock CLI | private `fleet-net` bridge | `https://openshell-gateway:8443` | mTLS client cert/key from `openshell-client`; server cert DNS SAN `openshell-gateway` |
+| Trusted native supervisor (`network_mode=host`) | host loopback | `https://127.0.0.1:8443`, the gateway's loopback-only host binding `127.0.0.1:8443:8443` | the stock supervisor TLS/JWT path, verifying the server cert (IP SAN `127.0.0.1`) against the gateway's `guest_tls_ca`, the CA that issued it, which the example sets in `[openshell.gateway]` |
+
+The binding is published on `127.0.0.1` only, never `0.0.0.0`, and only when the dormant
+`openshell` profile runs, so a default-off install publishes nothing. Host and container port stay
+equal so the supervisor's default loopback callback matches the listener; the gateway health
+listener (`127.0.0.1:8081`) stays inside the container. The outside signer, receivers and broker
+stay on private networks with no public listener. Whether the pinned images use exactly this
+callback is part of each deployment's qualification, not something these source checks prove.
+
+With `FLEET_STOCK_MANAGED_ENABLED=true`, `setup.sh` and `upgrade.sh` refuse before replacing anything
+unless `FLEET_STOCK_BROKER_MANAGEMENT_URL` is `https://`, `broker-ca.pem` is readable, both
+`FLEET_STOCK_BROKER_ADMIN_*_REF` keys name non-empty `.env` keys, the stock CLI's mTLS client
+`openshell/gateways/<name>/mtls/tls.crt` and `tls.key` are readable here, and `python3 -c 'import sqlite3'`
+succeeds (`scripts/lib/stock-managed-preflight.sh`). Default-off installs skip these checks.
+
+The adapter writes per-agent records and `<agent>.control.password` under `managed/authority/` (0600,
+directory 0700). The outside signer and receivers read those records as the host operator recorded in
+`StockOpenShell:ConfigDirOwnerUid`. When that uid is not the orchestrator's own (the root container), each per-agent
+record is handed to it before its atomic rename and stays 0600. An active record that cannot be handed over holds the
+apply as `managed_files_failed`. Pending, revoked and retired records are still published, writer-owned. Control and
+observer passwords always stay writer-owned.
+The reader must also be able to open the directory. Before the first managed apply, create it as that operator:
+`install -d -m 700 "$FLEET_BASE_DIR/openshell-client/managed" "$FLEET_BASE_DIR/openshell-client/managed/authority"`. If the root orchestrator creates it instead,
+the directory is root-owned 0700, so every active publication holds as `managed_files_failed` until the operator owns it
+(mode stays 0700). Observer broker passwords go only to the orchestrator-private sibling
+`managed/observer/<agent>.observer.password` (0600, directory 0700) and are never written to, or read from,
+the authority directory. Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
+`managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram, Bridge), keeping
+`AuthorityFile` for gateway trust. Mount only `managed/authority` into those services, read-only (see the
+commented mounts in `docker-compose.example.yml`); never mount `managed/` or `managed/observer`. An enrollment
+written before this split has its legacy `<agent>.observer.password` moved once, at orchestrator startup, into
+the private sibling as a 0600 file (links refused and left in place; a stale copy is removed when the sibling already
+holds a newer password); its next apply also rewrites the credentials and removes any legacy copy. Each entry is handled
+on its own and the directory is re-enumerated up to four times, so a concurrent apply, a vanished copy or a file created
+mid-move never skips the remaining entries, and a cross-device temp copy is always removed. The gateway-verified sandbox claim (hook) or the assertion's
+sandbox (receiver, still signature-verified against the selected record) is only an index hint:
+exactly one active, non-symlink record must claim it, else the request refuses.
+
+**Broker control and observer lanes.** Set the same startup-only `StockOpenShell:AuthorityDirectory` on the outside
+Fleet.Bridge and on the orchestrator to open one epoch-bound broker lane per managed agent instead of
+one per process:
+- **Bridge (control).** The ordinary connection, peer config and `ask_acto` behaviour stay as they are
+  for ordinary targets. When the target (`Bridge:TargetAgent` / `FLEET_CTO_AGENT`) has a record
+  `<agent>.json` in the directory, the request goes only through that agent's own lane: the record's
+  `BrokerHost`, vhost `stock-<epoch-N>`, principal `stock-<epoch-N>-control`, password
+  `<agent>.control.password`. The lane is opened on first use, with the single-file principal, route
+  and correlation checks. A managed target never falls back to the ordinary connection. These all
+  refuse: an inactive, expired, ambiguous or linked record; a record removed after use; an unreadable
+  directory. A lane is replaced when the agent's record binding changes, for example a new epoch. A
+  lane that fails to connect, or whose connection shuts down, is reopened only a bounded number of
+  times (see the workflow reply lanes below) and then stays refused until then; there is no stock
+  reconnect loop.
+  `check_acto_status` keeps its stock refusal for a managed target. To return an agent to the ordinary
+  connection, apply Docker: the verified OpenShell-to-Docker handoff marks the record `retired`, which
+  releases the lane and the ordinary-traffic hold. Never delete or edit authority records by hand; a
+  failed retirement stays `needs_attention` until an operator reconciles and revokes.
+- **Observer.** The orchestrator's stock observer keeps one `-observer` receiver for each active
+  record. It uses that record's `BrokerHost` and `managed/observer/<agent>.observer.password` (the
+  `observer` sibling of `AuthorityDirectory`; links refused) and reconciles every 30 s:
+  new or re-enrolled records get a receiver, and vanished, revoked or changed ones are closed. A failed
+  or dropped receiver is not retried until its record changes. One lane never affects other lanes or
+  the ordinary consumer, and warnings carry no exception text or credentials.
+
+The single-file `AuthorityFile`/`BrokerPasswordFile` mode is unchanged. On the Bridge it cannot be
+combined with `AuthorityDirectory`: that combination refuses at startup. Without the directory key
+nothing changes. The orchestrator image carries
+`LABEL org.phleet.managed-stock-runtime=1`; the stock CLI is installed only with the
+`OPENSHELL_CLI_URL` and `OPENSHELL_CLI_SHA256` build args (digest and version checked). Those builds also install
+`openssh-client` and `git`: the pinned CLI's `sandbox upload` keeps its default `.gitignore` filtering, so it runs
+`git rev-parse` before it spawns `ssh`, even for a source outside any repository. The default image has neither.
+`scripts/test-stock-upload-transport.sh` (CI) checks both images, the real pinned CLI's default upload planning for
+a directory and a file, and a pinned-option subsystem upload.
+
+**First-party MCP routes.** Besides memory, managed apply routes the existing `fleet-temporal` and
+`fleet-telegram` HTTP MCP endpoints when `managed-authority.json` names a `ServiceHosts` entry for
+that service. The per-agent record then carries `Services.<service>` with:
+- that host;
+- exactly the agent's enabled DB tool grants on the endpoint;
+- for Telegram, the agent's formatting mode.
+
+Implicit provisioning grants, such as the Codex `notify_cto` auto-grant, are not added: grant them
+explicitly. The workspace `.mcp.json` and native MCP tables list memory plus each routed endpoint
+under its ordinary name, with no query identity. Grant changes apply on the next apply/reprovision,
+which also refreshes `.mcp.json`. As with memory, the authored sandbox policy must list each
+receiving host as an exact destination; nothing is generated. The hook accepts
+`{"service":"memory"|"temporal"|"telegram"}` and signs a `tools/call` only for a name in that
+service's grants. Each proof binds its receiving service, so it fails at any other receiver. Set
+`StockOpenShell:AuthorityFile` (plus `AuthorityDirectory`) on a dedicated Fleet.Temporal or
+Fleet.Telegram receiver exactly as on the memory receiver. It then serves only `/mcp` and `/health`,
+refuses caller query or `X-Fleet-*` identity, and supplies `?agent=` from the verified record, so the
+services' existing caller checks and bot selection run unchanged. Without those settings nothing
+changes.
+
+**Own Telegram bot and journal capture.** The real values stay outside, in stock providers attached
+to the sandbox; the workload holds only placeholders that stock issues and the gateway resolves on
+egress ([URL-path and header substitution](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/docs/how-it-works/providers/profiles.mdx#L140-L143)).
+
+| Route | Outside (orchestrator) | Inside (workload) |
+|---|---|---|
+| Own bot (`TELEGRAM_*_BOT_TOKEN` env ref) | The token is read from the host `.env` by that reference. It is submitted as provider `fleet-<agent>-telegram` (`--type telegram --credential TELEGRAM_BOT_TOKEN`), with the value only in the CLI's environment. | `StockOpenShell:TelegramBotId`, the public numeric id before `:`, plus the placeholder stock issues in `TELEGRAM_BOT_TOKEN`. Telegram.Bot is built with `<botId>:<placeholder>`, which passes its token validation. `StockTelegramHttpHandler` strips only `<botId>:`, so requests leave as exactly `https://api.telegram.org/bot<placeholder>/<method>` or `/file/bot<placeholder>/<path>`. Any other scheme, host, port, query or shape is refused, with no fallback. |
+| Journal capture (journal on and own bot, exactly when ordinary provisioning mints an ingest token) | The same derived per-agent ingest token is submitted as provider `fleet-<agent>-journal` (`--type fleet-journal --credential FLEET_JOURNAL_INGEST_TOKEN`). | `StockOpenShell:JournalCapture=true` and `Journal:BaseUrl=https://<JournalHost>`. The existing bearer header carries the placeholder from `FLEET_JOURNAL_INGEST_TOKEN`. |
+| `fleet-comms-journal` read MCP (the agent has that endpoint) | The same derived per-agent read token ordinary provisioning writes into the generated MCP header is submitted as provider `fleet-<agent>-journal-read` (`--type fleet-journal-read --credential FLEET_JOURNAL_READ_TOKEN`). The outside record gains `JournalRead` (`Host` = `JournalHost`, `Path` = the ordinary endpoint's path, `Tools` = the agent's enabled existing grants). | `.mcp.json` names `https://<JournalHost><path>` with no header. The agent writes the native `[mcp_servers.fleet-comms-journal]` table with `http_headers = { Authorization = "Bearer <placeholder>" }`, taking only the placeholder stock issued in `FLEET_JOURNAL_READ_TOKEN`; a literal, foreign or missing value refuses with `stock_enrollment_journal_read_placeholder_invalid`. |
+| Journal files/send/cross-chat (capture on plus the files or send grant; cross-chat also needs the agent's cross-chat switch, exactly as ordinary provisioning) | The same derived read token goes to `fleet-<agent>-journal-read` (one value even when the read MCP also exists; a mismatch refuses). The derived cross-chat token goes to `fleet-<agent>-journal-cross-chat` (`--type fleet-journal-cross-chat --credential FLEET_JOURNAL_CROSS_CHAT_TOKEN`). | The nonsecret `Journal:FilesEnabled`/`SendEnabled`/`CrossChatEnabled` switches stay; `Journal:ReadToken`/`CrossChatToken` are filled only from the placeholders in `FLEET_JOURNAL_READ_TOKEN`/`FLEET_JOURNAL_CROSS_CHAT_TOKEN`. `.mcp.json` and the native config name the agent-local `fleet-journal-files` listener (`http://127.0.0.1:8091/journal-files/v1/mcp`). The agent's existing requester-only destination and cross-chat checks are unchanged. |
+
+Comms still verifies the same token subject, so receiver ownership and grants do not change. Journal
+off, or journal without a bot, stays capture-off. The existing spool, drainer and SDK retries are
+reused, with no extra poller. The agent's startup gate accepts only placeholders. It refuses a
+literal or foreign value, a missing variable, a `Journal:ReadToken`/`CrossChatToken` other than its
+placeholder, files/send without managed capture, and these selectors on the manual profile or an
+ordinary agent. The native Codex child does not inherit these variables. The workload appsettings carry no credential slot value. If a submitted value would
+still reach them, apply holds with `managed_files_failed` before any old-runtime action.
+
+Operator inputs (nothing is generated; the policy YAML is stored as supplied):
+- Import two custom stock profiles: `telegram` (credential `env_vars: [TELEGRAM_BOT_TOKEN]`, endpoint
+  `api.telegram.org:443`, `protocol: rest`) and `fleet-journal` (credential
+  `env_vars: [FLEET_JOURNAL_INGEST_TOKEN]`, endpoint your journal host on `443`). Name the agent's
+  `dotnet` host binary in `binaries`, then pin both profiles' [content digests](#profile-content-digest-503) in the policy version. An agent
+  with the `fleet-comms-journal` endpoint or files/send also needs `fleet-journal-read` (credential
+  `env_vars: [FLEET_JOURNAL_READ_TOKEN]`, the same journal host on `443`; `binaries`: the native
+  Codex binary for the read MCP, the `dotnet` host for files/send), and cross-chat needs
+  `fleet-journal-cross-chat` (`env_vars: [FLEET_JOURNAL_CROSS_CHAT_TOKEN]`, same host, `dotnet`),
+  pinned the same way.
+- Add `"JournalHost": "journal.example.test"` to `managed-authority.json`. This is a TLS front for the
+  Comms journal listener, an exact DNS name distinct from the memory and service hosts.
+- The authored sandbox policy must allow `api.telegram.org:443` and the journal host `:443` as
+  inspected REST endpoints for that binary only. `tls: skip` and raw tunnels disable substitution.
+
+Placeholders are not secret values, but anything that can read the daemon's environment can present
+them to those endpoints. Binary scoping and endpoint binding are the boundary.
+
+Refusal codes, all raised before the old runtime stops:
+- `telegram_bot_token_unresolved` and `telegram_bot_token_invalid`;
+- `journal_token_unresolved`, `journal_key_missing` and `journal_key_invalid`;
+- `managed_route_unsupported:journal`, when there is no `JournalHost`;
+- `journal_token_unresolved` also when the derived read or cross-chat token is missing.
+
+**Current limits, refused rather than dropped.** The agent's own bot, journal capture, the
+`fleet-comms-journal` read MCP and journal files/send/cross-chat (the agent-local
+`fleet-journal-files` listener) are routed as above. Every MCP endpoint other than memory, the
+first-party receivers and `fleet-comms-journal` refuses apply with `managed_route_unsupported:mcp:<name>`,
+as does a supported endpoint without a configured receiving host (for `fleet-comms-journal`, no
+`JournalHost`). Tool-send receipts (#394) use the epoch's existing control lane (#492 existing-role
+routing): when Fleet.Telegram verifies a managed request it pins the receipt context (agent, sandbox,
+epoch, MCP session, destination chat) from the verified record, re-reads the record before publishing,
+and publishes the typed receipt as that epoch's `control` principal to `fleet.group` with the agent's
+routing key. It reads only `<agent>.control.password` and the current record from
+`StockOpenShell:AuthorityDirectory`, never admin or observer credentials, declares nothing and closes
+the lane when the binding changes. A stale, revoked or foreign context is dropped and counted, never
+retargeted or sent to the ordinary `fleet.journal.tool-sends` exchange. The workload admits the receipt
+from its own queue only with the control user-id, exchange `fleet.group`, its own routing key and a
+pinned agent/sandbox/epoch that is its current enrollment, then applies the usual own-bot, privacy and
+capture rules, writes the spool before the ack and ignores a duplicate in the same life. Broker
+users, permissions, queues and consumers are unchanged.
+
+**Workflow delegation (existing-role routing).** Managed mode for Temporal is on only when
+`StockOpenShell:ManagedEnabled` is true on Fleet.Temporal (compose maps the orchestrator's
+`FLEET_STOCK_MANAGED_ENABLED`, default false). Off (the default), `DelegateToAgent` never reads the
+orchestrator for the target's runtime, so an orchestrator restart, 401, 404 or timeout cannot fail an
+ordinary delegation. On, a managed target also needs a usable `StockOpenShell:AuthorityDirectory`
+on Fleet.Temporal; a missing or invalid one refuses non-retryably with
+`managed_route_unconfigured:workflow_delegation` (error type `ManagedAuthorityUnconfigured`) and
+nothing is published. With managed mode on, the orchestrator's
+`appliedRuntimeKind` decides and the check fails closed: unreachable, non-success, invalid body or an
+unknown runtime fails the attempt retryably with `managed_route_unknown:workflow_delegation` (error
+type `ManagedAgentRuntimeUnknown`), and nothing is published on the ordinary broker. `docker` keeps
+the ordinary directive. For `openshell`, Temporal reads only the agent's current active record and its
+`<agent>.control.password` beside it (never admin or observer credentials) and publishes a typed
+`workflow-directive` producer-only, as the epoch `control` principal (validated user-id), to
+`fleet.group` routed to the agent. It carries the TaskId, the record's sandbox and epoch and a session
+nonce: fresh for a new TaskId, and reused by a retry of the same TaskId on the same epoch after a failed
+publication (bounded, released on completion, cancellation and timeout). The expected agent, sandbox,
+epoch and session are registered with the TaskId's waiter as one registration, and completion and
+cleanup compare-and-remove only that registration. A
+missing, revoked, ambiguous or unreadable record, or an unusable control credential, fails
+non-retryably with `managed_route_denied:workflow_delegation` (error type `ManagedAgentContextDenied`)
+and is never retargeted to the ordinary broker. Resends and continuation retries use the same lane and
+session. Cancellation goes through the orchestrator's targeted cancel (the managed loopback cancel),
+and a managed agent gets no ordinary `/cancel all` fallback. The agent admits the directive only
+from the control principal on `fleet.group` routed to itself, with its own sandbox and epoch, a TaskId
+and a session. The directive also carries the delegating activity's own StartToClose deadline. The
+agent keeps the TaskId's reply session until its final reply is published, the task is cancelled, or
+the session expires. Expiry is the later of 30 minutes after the last (re-)admitted directive and that
+deadline, capped at 7 days after admission, and at most 256 sessions are kept. A broker or publish
+outage that stops Temporal's five-minute resends therefore never drops the session of an activity that
+can still accept the reply. A directive without a deadline keeps the 30-minute idle bound. It then runs
+as an ordinary Temporal directive. The reply goes out as a typed
+`response`/`partial-response` on the existing bridge reply route (`bridge`, workload user-id), carrying
+agent, sandbox, epoch, session and TaskId. The Bridge's managed lane is the sole consumer of
+`fleet.agent.bridge` in that vhost. It admits the reply only with the workload principal and its own
+agent, sandbox and epoch, then forwards it on the ordinary connection to the existing
+`temporal-bridge` receiver route. The lane acknowledges a reply only after that mandatory forward is
+routed and publisher-confirmed; a forward not confirmed within 10 s fails. A failed forward stays
+unacknowledged and is requeued after a bounded backoff (1 s, doubling to 30 s) that runs off the lane's
+consumer callback, so the lane keeps settling its other deliveries meanwhile, the reply is retained and
+the agent never reruns finished work.
+Anything else is refused with a content-free log and rejected without requeue. The Temporal
+registry completes the TaskId only when agent, sandbox, epoch and session equal the registered
+expectation. An ordinary reply cannot complete a managed TaskId, and a reply claiming a managed
+context cannot complete an ordinary one. The Bridge opens the lanes of all active records when it
+starts and keeps them reconciled with the trusted authority directory through a local file watcher
+(not a broker poller). Opening a lane declares its epoch `fleet.agent.bridge` queue and attaches the
+sole consumer. Enrollment opens the agent's lane, a new epoch replaces it, and a removed, revoked or
+ambiguous record closes it, all without a bridge ask or a restart; a reconcile rereads the directory
+before closing anything, so a stale read never closes a lane just opened for a new enrollment. A record
+binding gets at most five consecutive failed lane opens: a lane that fails to open is retried up to four
+times with a doubling backoff (5 s, 10 s, 20 s, 40 s), and a successful open resets the count. A lane
+whose broker connection shuts down (for example a broker restart) is held and never used again; the next
+bridge ask or directory change replaces it, and that replacement counts as one open toward the same
+bound, so recovered restarts never use it up. Nothing reconnects on its own, and after the fifth
+consecutive failed open the binding stays refused until re-enrollment.
+
+**Lost lanes after a broker restart.** Temporal resends use their own connection and never replace a
+lane. If no bridge ask or directory change arrives after a broker restart, the agent's workflow replies
+stay queued and unconsumed in its epoch `fleet.agent.bridge` queue. The waiting activity can then time
+out, and a reply forwarded after that is dropped as "No pending task". The Bridge's existing `GET /health`
+reports this without content: with managed lanes it returns `status: degraded` (still HTTP 200, so no
+probe restarts the Bridge) and lists each lane that is not serving under `stockLanes`, with its agent
+name, the first 8 hex digits of its epoch, its `state` and its consecutive failed `attempts`. The states
+are `lost` (connection shut down, not yet replaced), `held` (a failed open waiting for its bounded retry)
+and `refused` (five consecutive failed opens; held until the binding changes). `stockLanes: "unknown"`
+means a lane open was still in progress, so check again. Manual recovery after a broker restart, once
+the broker is back:
+1. For a `lost` lane, send any bridge ask to that agent. This replaces the lane inside the bound, and
+   the queued replies are consumed when the lane opens. A `held` lane is retried by its bounded backoff.
+   Alternatively, restart the Bridge, which reopens the lanes of all active records at startup.
+2. For a `refused` lane, fix the broker or credential cause first. Then re-apply or re-enroll the agent
+   so that its record binding changes, or restart the Bridge, which starts a fresh bound.
+3. Confirm that `GET /health` is back to `status: healthy` with an empty `stockLanes`.
+A reply that is forwarded after its activity timed out is still dropped as described above.
+
+The orchestrator creates the epoch's
+`fleet.group` exchange, its `fleet.agent.bridge` queue and their `bridge` binding before activation, so a workflow reply sent before
+its lane opens, or while its lane is closed or held, is queued durably in that queue and consumed once
+the lane opens. No user, permission, consumer, poller or broker is added (the queue is the existing
+reply queue, prepared earlier), and `StockBrokerProvisioner.Permissions` is unchanged. Workflow signals
+from a managed agent remain unrouted.
+
+A dedicated Fleet.Temporal receiver
+(`StockOpenShell:AuthorityFile` set) is receiver-only: it serves the authenticated `/mcp` route but
+starts no namespace workers and no relay consumer on the fixed `fleet.agent.temporal-bridge` queue,
+so it never competes with the ordinary bridge for replies on a shared broker. None of the following is
+qualified:
+- that topology;
+- the stock gateway Compose unit;
+- the gateway's real bot/journal substitution and TLS path;
+- dashboard revoke/state controls;
+- the upload-into-stopped-sandbox step;
+- the real broker's implicit creator grant for the management user on a vhost it creates (which the
+  epoch's exchange, queue and binding writes rely on), and revoke's exact removal of that grant while the
+  vhost and its queues are kept.
+
+#493 owns the exact-build trial, with no installation or activation implied.
+
+**Agent deletion.** `DELETE /api/agents/{name}` keeps the row (409) until the managed record is cleanly
+revoked. With a desired subscription mode or any nonretired subscription tuple it stays (409
+`managed_subscription_not_retired`) until a verified, archived retirement, so a clean revoke alone never drops the
+rollback count or custody history. The row is then deleted in one database transaction that first compare-and-sets the exact
+binding and runtime kind it inspected, so a concurrent apply, Start or revoke either changed it first
+(`managed_state_changed_during_delete`, 409) or waits on the row lock and then finds no row. Nothing is
+written outside that transaction, so a crash or error mid-delete leaves the binding as it was; a
+database outage returns `managed_delete_unavailable` (503).
+
+**Rollout guard and rollback.** `scripts/check-stock-runtime-rollout.sh` runs in `upgrade.sh`
+before anything is stopped, and it is the operator rollback entrypoint (`--image IMAGE`). A target
+without the label needs the operator-authenticated `GET /api/managed-runtime/rollback-preflight` to
+report zero desired, applied and unresolved managed bindings. A nonzero, malformed or unavailable
+answer refuses. Ordered rollback:
+1. revoke;
+2. confirm quiescence and no unresolved errors;
+3. apply Docker;
+4. roll back the orchestrator image;
+5. Start if needed.
+
+`setup.sh` re-runs call the same guard before rebuilding the orchestrator; with `--skip-build` they
+check `--image fleet:orchestrator`, the existing local image they will start, instead of the Dockerfile. **CI jobs and any external
+deploy integration that replace the orchestrator must run
+`scripts/check-stock-runtime-rollout.sh --image <exact orchestrator image>` first and stop on a nonzero
+exit.** Administrator Docker commands that bypass this procedure are not protected.
+
+**Backup.** Run `scripts/backup-stock-gateway.sh BACKUP_DIR GATEWAY_TOML [/var/lib/openshell]` from the
+operator's daily host job and before gateway changes. It refuses incomplete coverage (database, gateway TOML, TLS cert/key, gateway CA `tls/ca.pem`, client CA, JWT keys and kid), then takes a stdlib SQLite online backup with
+an integrity check, copies config and trust files, and checks their inode/mtime before and after.
+Directories are 0700 and files 0600, and seven complete snapshots are kept. A failure, a
+changed trust file or an interruption (SIGTERM/SIGINT/SIGHUP) marks the partial snapshot `INVALID` and
+deletes it (it may already hold keys), stamps `BACKUP_DIR/last-failure` and exits nonzero; `last-success`
+is replaced atomically and only after the snapshot is `COMPLETE`. A run writes into
+`BACKUP_DIR/.partial-gateway-*` and renames it to `gateway-*` only once `COMPLETE`, so a SIGKILLed run
+leaves no `gateway-*` snapshot; the next run deletes such partial dirs older than an hour and any
+incomplete `gateway-*` dir. Linked OS ancestors above `STATE_DIR` (macOS `/var` -> `/private/var`) are resolved; a
+linked `STATE_DIR` or anything under it still refuses. Staleness is surfaced by
+`scripts/check-stock-gateway-backup.sh BACKUP_DIR [MAX_AGE_HOURS]` (default 26): it exits nonzero when
+`last-success` is missing, malformed, older than the limit or not newer than `last-failure`, or when no
+complete `gateway-*` snapshot exists (partial and incomplete dirs never count). Its pass reads
+`freshness only; restore eligibility not assessed`; it is never a restore or subscription-recovery check. Every
+snapshot records `SNAPSHOT_MODE` (`plain` or `subscription`), and a config carrying the signer registration needs its
+CA under STATE_DIR (see [Managed signer policy binding](#managed-signer-policy-binding-503)). With
+`FLEET_STOCK_MANAGED_ENABLED=true`, `setup.sh` and `upgrade.sh` run it against `FLEET_STOCK_BACKUP_DIR` (limit
+`FLEET_STOCK_BACKUP_MAX_AGE_HOURS`) before the rollout guard and refuses on a missing, failed or stale
+backup; wire the same check into host monitoring. The example compose mounts `FLEET_STOCK_BACKUP_DIR`
+read-only into the orchestrator for the status view, which re-reads the stamps at most every 30 s on
+status reads (a configured dir that is not mounted reports `unmounted`); the periodic status refresh
+likewise re-observes applied sandbox containers at most every 30 s per agent, display-only. Snapshots contain keys: keep
+them host-local unless an operator-approved encrypted transfer exists. To restore, stop the gateway
+and every owned workload first, verify integrity and bindings before any admission, and keep the
+unexpected-resume hold.
+
+## Managed Codex subscription branch (#502, unqualified compatibility only)
+
+**Status: source support only, UNQUALIFIED.** This is one compatibility path for a native memory lookup under a
+subscription-backed stock provider. It is not production account isolation: the issuer route/refusal contract
+in [#501](https://github.com/anurmatov/phleet/issues/501) and the full #493/#498 qualification remain open.
+A positive trial needs separate exact human/operator authority (host, image, model, caller, login owner,
+refresh custody and window, receipts); none of that is implied by merge. Pins are unchanged: OpenShell 0.1.5
+`bdb956f2cd65a635f1294fccf1d138d263bf650f`, Codex 0.164.0 `6aaac694803004a63c6f393d153c96d22521a6b9`.
+The restricted profile is [`deploy/openshell/codex-subscription.yaml`](../deploy/openshell/codex-subscription.yaml);
+the native configuration contract is in [the subscription qualification guide](openshell-subscription-auth.md).
+
+**Selection.** `nativeAuthMode=subscription` (REST, MCP `native_auth_mode`, dashboard *Subscription
+(unqualified compatibility only)*) takes no API-key reference: a save that keeps or sends one is
+`400 subscription_rejects_provider_key_reference`, and the dashboard clears it. Saving is desired-only and never
+starts, logs in or imports anything. API-key and manual behaviour is unchanged.
+
+**Outside binding file.** The operator creates `<ConfigDir>/managed/<agent>/subscription.json` (never mounted or
+uploaded into the workload). It must be a regular file owned by the orchestrator's effective uid, mode exactly
+0600, in a directory of mode exactly 0700, and every existing ancestor must be a non-symlink without group or
+other write bits; otherwise `subscription_binding_invalid`. Bounded UTF-8 (16 KiB) version-1 JSON with exactly:
+
+| field | rule |
+|---|---|
+| `version`, `purpose` | `1`, `"compatibility_only"` |
+| `agent`, `providerName` | the agent's canonical name, and exactly `<agent>-codex-sub` |
+| `providerId`, `providerWorkspace` | the existing stock provider's UUID and its named workspace |
+| `sandboxWorkspace` | named workspace for the sandbox, equal to `providerWorkspace` in this slice; no wildcard/all-workspaces |
+| `accountId` | 1–256 of `A-Z a-z 0-9 _ -`; local selection only, not issuer authorization |
+| `ownerGeneration` | nonzero trial-lineage UUID (a local generation, not a token-generation counter) |
+| `gatewayGeneration` | the exact current gateway observation (container ID `@` StartedAt) |
+| `profileSha256` | the [profile content digest](#profile-content-digest-503) of the scoped `--workspace <providerWorkspace>` export; must equal the policy's pinned `codex-subscription-native` digest |
+| `expiresAt` | UTC `…Z` |
+
+Unknown, duplicate or missing fields refuse. Examples in this repository use placeholders only.
+
+**Readiness before any mutation.** Apply requires: exactly one `memory` MCP endpoint with the existing
+`mcp__memory__memory_get` grant and no Telegram bot, journal or other route (`managed_route_unsupported:*`,
+never silently dropped); the binding file; pinned CLI and gateway client trust in the persisted scope; the
+profile hash; the current gateway generation; sole ownership (no other agent's live tuple names the provider
+UUID or workspace/name: `subscription_owner_conflict`); the existing provider found exactly once across every
+`--workspace <providerWorkspace> provider list -o json` page with that UUID, type `codex-subscription-native`
+and only the `CODEX_AUTH_ACCESS_TOKEN` key; and `provider refresh status` ready (`configured`/`refreshed`, no
+recovery action or failure code) with fresh UTC + 120 s strictly before both NEXT_REFRESH and access expiry.
+Any miss is `subscription_provider_unverified` before the old runtime stops. The adapter never creates,
+updates, imports, rotates or deletes a subscription provider; the stock gateway stays the sole refresh owner.
+
+**Persisted scopes and cleanup.** The candidate records `SandboxWorkspace` and the subscription tuple (provider
+workspace/UUID, account, owner generation, source SHA-256, expiry) before any effect; Applied/Superseded keep it.
+Every resource command for that binding carries `--workspace <persisted>` (create/get/list/start/stop/exec/
+upload/download, logs, policy set, provider attach/detach/list). Revoke, Stop and detach read only the persisted
+tuple, never `subscription.json`, the CLI default or `OPENSHELL_WORKSPACE`: a deleted or changed source never
+redirects or blocks cleanup. Detach is verified (scoped attachment list before and after, exact UUID before and
+after); a cleanly cut candidate moves to Superseded instead of being dropped. A subscription binding with a
+missing/invalid persisted scope is `subscription_binding_unrecoverable` and `needs_attention`, with no unscoped
+command at all. Start rechecks scope, expiry and the source (missing/changed → revoke/Stop hold), and the tuple,
+including the scoped profile rehash against the binding's pinned policy, is revalidated immediately before
+attachment and activation. Start runs against the expiry deadline: expiry during or right after activation is
+revoke-and-stop, never a committed applied state.
+
+**Expiry.** The enrollment record expires no later than `expiresAt`, so admission self-expires. Expiry at any
+stage is revoke-and-stop: a pending apply checks before/after each external leg and before activation, Start
+cuts instead of activating, and the existing 10-second state-monitor pass cuts applied/pending tuples. Clean
+cutoff → `revoked` with `subscription_binding_expired`; partial → `needs_attention` with every cleanup error.
+Records already `needs_attention` or `revoked` are skipped by the monitor, so a failed cleanup is reported once
+and never retried every pass. No renewal, extension or automatic login follows.
+
+**Native preparation.** The workload gets `NativeAuthMode=subscription` plus nonsecret
+`StockOpenShell:SubscriptionAccountId`, `SubscriptionProvider` and `SubscriptionOwnerGeneration`. It reads only
+the stock-issued `CODEX_AUTH_ACCESS_TOKEN` handle (exact placeholder syntax; attachment is the issuance proof)
+and writes the stock example cache shape with an empty refresh token and the parsing-only ID-token stub
+(0700/0600, no foreign cache overwrite, no host-cache fallback). The config is: forced ChatGPT login and
+workspace and `model_provider = "openai-http"`, the generated defaults unchanged, the exact #498 descriptor, one
+`[features] plugins = false, apps = false` block, then exactly `[mcp_servers.memory]` with
+`enabled_tools = ["memory_get"]`. Any drift exits with a secret-free `stock_enrollment_*` reason before intake.
+The memory receiver keeps its fresh ACL, endpoint/tool/project and session/epoch checks.
+
+**Snapshot custody.** Subscription backups add evidence-only control records:
+
+```sh
+scripts/backup-stock-gateway.sh DIR TOML STATE \
+  --subscription-source FILE \
+  --managed-binding FILE \
+  --refresh-observation FILE
+```
+
+Subscription backups also require the gateway's key-encryption key configured explicitly as
+`[openshell.gateway.credential_storage] key_encryption_key_path` under STATE_DIR (an env-only or default KEK cannot
+be covered and refuses); any configured KEK path must exist for every backup, and it is recorded in the manifest.
+`--managed-binding` is the operator's byte copy of the owned agent's `AppliedRuntimeBinding` row (exported under
+separately scoped single-agent read authority; no export helper is added). `--refresh-observation` is the
+independently retained latest observation: exactly `providerId`, `ownerGeneration`, `statusObservedAtUtc`,
+`providerLastRefreshAtUtc` (null only when no refresh has succeeded) and `nextRefreshAtUtc`, never a credential.
+They land in `control/` with `control/MANIFEST.json` (capture time, gateway generation, identities, source and
+binding digests, native epochs, state, retired count, refresh times, and since #503 `stateDirectory` plus the
+three signer fields) and the snapshot is marked `SNAPSHOT_MODE=subscription`. Before any restore, with every owned
+writer stopped, run `scripts/check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT --subscription-source …
+--managed-binding … --refresh-observation …` with a refresh observation taken after the snapshot. It refuses a
+snapshot whose checksum inventory is empty, incomplete or mismatched, that lacks the gateway DB/config/trust, the
+KEK its own config names, or the control records, or whose DB fails `integrity_check`; current control inputs that are not regular 0600 files owned
+by the operator; a binding row that differs from the recorded `bindingSha256` or any owner/epoch/workspace/provider
+tuple, state or retired reference; a changed source or identity; and a refresh at or after the (sub-second)
+capture time, compared as parsed UTC instants. Missing or malformed freshness fields are refusals. Capture and
+verify a new latest stopped checkpoint instead. Restore only gateway
+DB/KEK/config/trust while stopped. The control JSON copies are never restored or imported over live state; a
+mismatch holds for separately authorized reconciliation. No gateway/native restart follows without the separate
+due-refresh/resume authority.
+
+**Retirement and ordered rollback.** An old subscription tuple stays live and countable until admission is cut,
+its providers are verified detached in their persisted workspaces, its workload/supervisor is quiescent and an
+authorized Docker or API target handoff succeeds. Then each complete old binding, cleanup evidence and handoff
+receipt is written to immutable `<ConfigDir>/managed/<agent>/retired/<epoch>.json` (fsync, atomic rename,
+0700/0600, hash readback), and one compare-and-set publishes the target and moves the tuples to inert
+`RetiredSubscriptions` references (Docker: Applied cleared; API: the new verified API binding). A failed
+verification, archive, handoff or lost CAS keeps every tuple countable; archives written before a lost CAS are
+evidence only. Retirement never happens solely from expiry or while the desired mode is still subscription.
+
+`GET /api/managed-runtime/rollback-preflight` now has exactly `desiredOpenShell`, `appliedOpenShell`,
+`unresolvedBindings` and `subscriptionBindings`; the last counts agents with desired subscription or any
+nonretired applied/candidate/superseded subscription tuple (an unreadable record counts). The orchestrator image
+declares `LABEL org.phleet.managed-stock-subscription=1`. A target without it requires `subscriptionBindings=0`;
+a target without the managed label requires all four counts zero. Ordered rollback, all on the
+subscription-capable checkout:
+1. revoke;
+2. confirm scoped stop/detach and quiescence;
+3. apply the authorized Docker or API target, with the desired mode already changed away from subscription;
+4. confirm the archive and retirement commit (`subscriptionBindings` reaches 0);
+5. run THIS checkout's `scripts/check-stock-runtime-rollout.sh --image <target>` (or `--dockerfile`);
+6. only then switch checkout/image;
+7. separate, explicit Start if authorized.
+
+An older checkout's `upgrade.sh`/guard is unsupported and unprotected while `subscriptionBindings>0`: its
+three-key parser refuses this server's four-key answer, but its managed-label shortcut skips the query, so it is
+not a safety control. `bash scripts/test-stock-subscription-rollout.sh` exercises the guard, snapshot and
+refusal rules with synthetic inputs.
+
+**Evidence retention.** Native/cache/output/snapshot/retirement evidence stays under 0700 directories and 0600
+files until closure + 7 days. The operator named in the separately authorized trial scope deletes, at that UTC
+deadline, only that trial's exact owned paths after checking path, hash, owner generation and that nothing live
+references them, and records the deletion time and counts; compact `RetiredSubscriptions` references are kept.
+Unknown ownership or a live reference stops deletion and is handed to the coordinator. No background retention
+job exists. After an invalid grant or reauthorization result, stop safely; recovery is a separately approved fresh
+login with a new owner generation, never a stale restore or a retry.
+
+## Managed signer policy binding (#503)
+
+**Status: source support, UNQUALIFIED.** A managed sandbox signs first-party MCP requests only when its saved policy
+attaches the existing outside signer (`StockSupervisorMiddleware`, `Fleet.StockIdentity`) to each receiving host.
+This section covers that one supported binding form, managed admission, the gateway registration and its maintenance
+runbook. Source tests and CI are not exact-build qualification: real signer reachability from both caller contexts,
+TLS/JWT negotiation, a receiver-attributed native memory lookup and the startup cases below remain operator checks
+(C11/C18), UNRUN until separately authorized. Pins are unchanged.
+
+### Supported policy subset
+
+Saved YAML may add a top-level `network_middlewares` map, and only in this form. Anything else returns 400 and
+writes no row:
+
+| field | the only accepted form |
+|---|---|
+| entries | at most three, keyed exactly `stock-memory`, `stock-temporal`, `stock-telegram` |
+| per entry | exactly `middleware`, `order`, `on_error`, `config`, `endpoints` |
+| `middleware` | `stock-memory`, the one fixed gateway registration |
+| `config` | exactly `service: memory`, `temporal` or `telegram`, matching the key |
+| `order` | unquoted integer: memory `0`, temporal `10`, telegram `20` |
+| `on_error` | `fail_closed` |
+| `endpoints` | exactly `include` with one exact lowercase DNS name; no wildcard, IP, scheme, port, path, query, terminal dot or `exclude`; distinct hosts |
+
+A memory-only binding, added to an otherwise valid policy:
+
+```yaml
+network_policies:
+  fleet-memory:
+    endpoints:
+      - host: memory.example.test
+        port: 443
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          versions:
+            - '2025-06-18'
+        rules:
+          - allow:
+              method: initialize
+          - allow:
+              method: notifications/initialized
+          - allow:
+              method: tools/list
+          - allow:
+              method: tools/call
+              tool: memory_get
+    binaries:
+      - path: /usr/bin/codex
+network_middlewares:
+  stock-memory:
+    middleware: stock-memory
+    order: 0
+    on_error: fail_closed
+    config:
+      service: memory
+    endpoints:
+      include:
+        - memory.example.test
+```
+
+For selected Temporal or Telegram routes, add `stock-temporal` (order `10`, `service: temporal`) and `stock-telegram`
+(order `20`, `service: telegram`), each with its own `host:443` MCP endpoint and the same rules, with one `tools/call`
+rule per exact tool the agent uses there (for example `temporal_start_workflow`, `send_message`). The receivers still
+apply the agent's grants; the policy rules only narrow what reaches them.
+A policy without bindings still saves for storage or manual use; it can never activate a managed agent.
+
+**MCP endpoint rules (W5).** Pinned stock refuses every access preset on a `protocol: mcp` endpoint
+([`l7_validate.rs:273–281`](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy/src/l7_validate.rs#L273-L281))
+and requires explicit rules unless every known method is allowed. Saved MCP endpoints therefore use exactly this rule
+form, in the pinned shape
+([`lib.rs:4630–4678`](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy/src/lib.rs#L4630-L4678)):
+
+| rule | accepted form |
+|---|---|
+| control | exactly `initialize`, `notifications/initialized` and `tools/list`, each once, as `allow.method` (slash-separated wire names) |
+| tools | `allow.method: tools/call` with one plain `allow.tool` name (lowercase letters, digits, underscore), at least one, each once |
+| revisions (W13) | optional `mcp` block holding exactly `versions`: a nonempty list of distinct exact revisions from `2025-06-18` and `2025-11-25` |
+| refused | any `access` preset on MCP, `rules` or `mcp` on any other protocol, wildcards or globs, `any` lists, `params`, `path`, `deny_rules`, any other `mcp` field (so no `allow_all_known_mcp_methods` or `strict_tool_names`), other revisions or moving names, empty or duplicate version lists, other methods, duplicates |
+
+**MCP revisions (W13).** Pinned stock allows only `2025-11-25` on an MCP endpoint whose policy omits `mcp.versions`
+([`openshell-policy-schema lib.rs:43`](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy-schema/src/lib.rs#L43)).
+Pinned Codex 0.164.0 negotiates `2025-06-18` and sends it as `MCP-Protocol-Version` on every request after
+`initialize`, so stock refuses those requests with `mcp_protocol_version_not_allowed`. A native endpoint lists
+`versions: ['2025-06-18']`, as in the example above. The list only selects the revision; the method and tool rules
+are unchanged. A version saved without the block keeps its meaning. To use the revision, append a new version with the
+block and select it, as described for old bindings below; an existing version is never edited.
+
+**Literal design mismatch, disclosed.** The approved #503 design table says memory uses `access: read-only` and other
+receivers keep "their existing accepted access preset". Pinned stock rejects both for MCP, so the read-only intent is
+kept as the memory endpoint allowing `tools/call` for `memory_get` only; the approved issue text is not edited. A version
+saved with a preset on an MCP endpoint keeps its bytes and is refused at apply as `managed_signer_policy_mismatch`;
+append a new version with the rules above and select it (see **Old unbound bindings** below for the steps).
+
+### Managed admission
+
+The saved bytes are the effective policy. Nothing is inserted, normalized or rewritten, and an immutable version
+never changes meaning. Stock may reserialize the policy it stores, so compare it semantically, never byte for byte.
+
+| stage | check | refusal |
+|---|---|---|
+| save (create/append) | the subset above, with the existing size/event/depth/alias/tag limits | 400, no row |
+| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset; memory allows `tools/call` for `memory_get` only | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
+| bypass ambiguity | wildcard endpoint hosts, a duplicate, alternate-port, plaintext/TCP or case/trailing-dot variant of a receiving host, extra or unselected signer entries | `managed_signer_policy_scope` |
+| policy file | written from the saved bytes, then read back against the stored hash | `managed_files_failed` |
+| Start, restart, before activation | the persisted applied version and hash, and its outside enrollment (exact agent, UUID, epoch, stock commit, policy hash and receiving hosts), never the desired selection or the current template | 409 named fault before staging; `managed_signer_authority_unavailable` for a missing or ambiguous enrollment; drift while staging is the bounded revoke/Stop hold |
+
+The same `PolicySha256` is carried by the binding, the outside and guest enrollments and the bytes passed to
+`--policy`. Unrelated explicit destinations and provider profiles are unchanged. Refusals are logged with the
+category and policy version/hash only.
+
+**Old unbound bindings and pre-W5 access presets.** Start and restart refuse them by name; there is no unsigned
+grandfathering. Stop, revoke, expiry, retirement and Docker handoff never depend on this validator. To repair:
+1. append a reviewed bound version;
+2. select it;
+3. revoke cleanly;
+4. run a normal apply.
+Never edit a version in place.
+
+### Gateway registration
+
+The dormant block at the end of [`gateway.toml.example`](../deploy/openshell/gateway.toml.example) is the fixed
+registration. Its fields are `name = "stock-memory"`, `grpc_endpoint = "https://identity.example.test:5443"`,
+`audience`, `tls_ca_cert_path` under STATE_DIR, `max_payload_bytes = 262144`, `timeout = "2s"` and
+`allow_insecure_transport = false`.
+
+- **Gateway-wide startup dependency.** At every start the gateway negotiates with every registered service, used by a
+  policy or not ([pinned contract](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/docs/extensibility/supervisor-middleware/configure.mdx#L63)).
+  These failures keep the **entire gateway** from starting, for ALL its sandboxes, managed or manual:
+  - an unavailable or incompatible signer;
+  - an expired server certificate;
+  - a wrong CA;
+  - a rejected JWT.
+
+  Operator category: `signer_gateway_startup_blocked`. Do not restart in a loop or deregister automatically.
+- **Runtime denial is different.** If the signer fails after the gateway is up (timeout, TLS/JWT, oversized or
+  invalid response), only the affected bound request fails closed. Unrelated traffic is not claimed to stop. Do not
+  restart the gateway hoping it recovers without the signer.
+- **Order on host boot and every restart:** the outside JWT trust and verified signer HTTPS/HTTP2 readiness first,
+  then the gateway's authenticated Describe/negotiation and readiness, then managed admission. A running signer
+  process is not readiness.
+- **Exact audience.** `audience` must equal `GatewayAudience` in `managed-authority.json` exactly, case included;
+  set it explicitly. The stock default `urn:openshell:extension:middleware:stock-memory` works only when it is that
+  value. A mismatch is `signer_gateway_audience_mismatch`.
+- **Shared addressing.** One operator-supplied DNS name and port must resolve and reach the same signer from BOTH
+  the gateway container network and the host-network supervisors. Its server certificate carries that exact DNS SAN
+  and chains to the configured CA in both contexts. No container alias, loopback substitute, DNS override, new
+  network permission or listener publication is authorized here. Proof from one caller context only is
+  `signer_reachability_unverified`.
+- **Signer listener.** Use exactly these Kestrel keys:
+  - `Kestrel:Endpoints:Signer:Url = "https://<authorized-listen-address>:5443"`;
+  - `Kestrel:Endpoints:Signer:Protocols = "Http2"`;
+  - `Kestrel:Endpoints:Signer:Certificate:Path`;
+  - `Kestrel:Endpoints:Signer:Certificate:KeyPath`.
+
+  Do not add an HTTP/HTTP1 or development-certificate fallback. The private key is a 0600 file owned by the signer
+  uid, in a 0700 outside directory, never mounted into a workload or copied under STATE_DIR. Anything unverified is
+  `signer_listener_unverified` (an operator stop, not a ready state).
+- **Two trust hops.** The signer callback CA is not receiver TLS trust: each receiving HTTPS server keeps its own
+  supervisor trust. Never use a guessed Docker CA option or a plaintext workaround.
+
+### Registration maintenance (add, certificate/CA rotation, break-glass removal)
+
+Changing the registration affects every sandbox on that gateway. It needs a separately authorized maintenance
+window and gives no authority over unowned workloads. Follow this order:
+
+1. **Quiesce.** Run a normal Stop or clean revoke for EVERY owned managed record, including candidate and superseded
+   custody. Verify durable Stopped/quiescence or a clean revoke, with no live operation or unresolved cleanup.
+2. **Choose the checkpoint mode.** Take a fresh authenticated rollback preflight and review the owned records.
+   - Any desired or nonretired subscription custody, including clean-revoked or superseded tuples, means BOTH S0 and
+     S1 are control-bearing.
+   - Plain is allowed only with proved zero subscription custody and an explicit, covered KEK path.
+   - Unknown state is never plain.
+3. **Reserve the paths.** Use one recorded private maintenance root outside the daily `BACKUP_DIR`. Use canonical,
+   non-linked paths with 0700 directories and 0600 files. Create distinct, initially absent `<root>/<window-id>/S0`
+   and `<root>/<window-id>/S1` directories. Run one invocation per directory, and never reuse them for daily jobs or
+   later windows.
+4. **Seal S0.** Stop the owned gateway and all its state/refresh writers. Then take the mode-correct S0 into its
+   directory and record the exact snapshot path and hash.
+   - Absent controls, unknown freshness or a failed backup means no config change and no plain fallback.
+5. **Change while stopped.** Set the verified shared endpoint/SAN/HTTP2 settings and the exact audience.
+   - Add or rotation: put the public signer CA under STATE_DIR and update the registration.
+   - Rotation runs in a NEW window, never as a hot rotation and never reusing an old S1.
+   - Signer certificate and key updates stay in outside custody. Keep the old outside material and the old
+     config/CA for guarded rollback.
+   - **Break-glass removal** (the signer cannot be restored): remove ONLY the fixed registration. Keep the keys, CA
+     files and all custody.
+6. **Seal S1** into its own directory while stopped. Missing CA/control/freshness proof is fatal; S0 is never
+   overwritten or pruned.
+7. **Re-verify BOTH immediately before restart.** Run each checkpoint's eligibility command now.
+   - A missing, corrupt or stale S0 stops the window even when S1 is valid.
+   - Never rewrite S0 or reduce a check.
+8. **Signer first.** For any config that keeps the registration, start the owned signer first, then only the named
+   gateway, and require authenticated negotiation and readiness.
+   - A failed dependency is `signer_gateway_startup_blocked`. The gateway stays not-ready and managed activation
+     stays held.
+9. **Authenticate.** Record the new gateway generation, then check the authenticated `openshell gateway info` and a
+   scoped sandbox list; process existence is not enough. After removal, prove the registration is absent and keep
+   managed Start/apply held.
+10. **Resume only eligible records.** A clean stopped bound record uses the normal Start, through the existing
+    same-UUID/quiescence planned-restart checks. Clean-revoked or old unbound records need the reviewed bound version
+    and a normal apply. Rotation or re-adding the registration never releases a held or revoked record.
+
+A changed generation under a still-running binding takes the existing `needs_attention` hold plus an independent
+revoke/Stop fanout, with no automatic resume. A gateway that is already down does not waive quiescence, current
+custody or the S0/S1 checks. If cleanup cannot prove them, stop and seek separately authorized recovery, never
+direct record edits. Removal may restore gateway availability for eligible non-dependent users only after
+authenticated readiness. It never qualifies managed use: policies naming the missing signer stay refused, never
+stripped or resumed unsigned.
+
+### Checkpoints, eligibility and monitoring
+
+| snapshot | how it is taken | before any restore (all writers stopped) |
+|---|---|---|
+| control-bearing (`SNAPSHOT_MODE=subscription`) | positional args plus the three control inputs | `check-stock-gateway-backup.sh --restore-eligibility SNAPSHOT --subscription-source FILE --managed-binding FILE --refresh-observation FILE` |
+| plain (`SNAPSHOT_MODE=plain`) | positional args only | `check-stock-gateway-backup.sh --plain-restore-eligibility SNAPSHOT --state-dir STATE_DIR`, plus `ORCHESTRATOR_AUTH_TOKEN` and optional `FLEET_ORCHESTRATOR_URL` |
+
+- **Signer CA coverage.** Any backup of a config carrying the registration requires its `tls_ca_cert_path` as a
+  regular, non-empty file at exactly that configured path under STATE_DIR. The path is mapped lexically: only OS
+  links above STATE_DIR are resolved, and any linked component below it (for example `tls/alias -> tls/signer`)
+  refuses. Otherwise the backup fails with `coverage_incomplete: signer_tls_ca` and no COMPLETE. Malformed,
+  duplicate or ambiguous registration data fails the same way under both parsers. The Python < 3.11 fallback
+  refuses any header or key form it cannot parse (quoted, escaped or spaced keys, continuation lines) rather than
+  skipping it. It also refuses any assignment to, inside or above the relevant tables outside their own headers,
+  such as a root `openshell = { supervisor = { … } }` inline table. No CA is moved automatically, and configs without the registration are unchanged.
+- **Signer metadata.** Control manifests record `stateDirectory`, `signerRegistration`, `signerCaConfigPath` and
+  `signerCaEntry`. The three signer fields are explicit JSON nulls without a registration. Eligibility compares
+  them with the snapshot's own parsed config. A registered CA whose exact configured path is missing from the
+  verified inventory is `REFUSED: signer_tls_ca_not_covered`, even when the inventory itself is self-consistent or
+  a linked alias would reach a listed file. CA bytes are restored
+  with the rest of the trust; never borrow a CA or clear TLS.
+- **Plain branch.** It accepts only `plain`-marked snapshots without `control/`. It runs the same
+  inventory/integrity/config/trust checks. It requires an explicit `key_encryption_key_path` and maps that KEK and
+  the CA lexically against the explicit original STATE_DIR; both must be in the inventory at their configured paths.
+  An env-only or default KEK leaves no key in the snapshot, so it refuses
+  (`configured KEK is not covered by the snapshot inventory`). The legacy positional backup still runs for such
+  configs, but it is freshness evidence only. The branch also needs a fresh authenticated
+  `GET /api/managed-runtime/rollback-preflight`:
+  - a 10-second deadline, with the token through curl's stdin config;
+  - exactly the four counts, with `subscriptionBindings=0` and `unresolvedBindings=0`;
+  - anything else, including no token, is `REFUSED: subscription_state_unverified`.
+- **Read-only, repeatable checks.** Both eligibility branches open the sealed `gateway.db` as immutable, so SQLite
+  never adds `gateway.db-wal`/`-shm` next to it, even for a WAL-mode database. Running a check again, as the
+  pre-restart S0/S1 re-verification requires, sees the same files and hashes. A sealed DB must be one
+  self-contained file: the backup fails if a sidecar remains at seal, and eligibility refuses a listed sidecar. A
+  snapshot that already gained sidecars (an older checker's plain read-only open) is refused and kept as evidence;
+  never delete the sidecars, rewrite its inventory or bypass the check. Take a fresh checkpoint instead.
+- **No downgrade.** A missing or unknown marker refuses; legacy unmarked artifacts need a fresh checkpoint. The plain
+  branch refuses subscription-marked or control-bearing snapshots, even with the controls and their checksum lines
+  stripped. A control-branch refusal is never retried as plain, and a pre-enrollment plain S0 stops qualifying once
+  subscription custody exists.
+- **Scope limit.** A checkpoint covers one binding/source/refresh tuple. Custody it cannot represent is
+  `subscription_snapshot_scope_unverified`: stop for separately authorized reconciliation.
+- **Retention.** Pruning keeps seven complete snapshots inside the invoked `BACKUP_DIR` only. S0/S1 survive daily
+  rotation because they live in their own once-used directories, not through an exemption. The maintenance operator
+  keeps both through closure or rollback need, under the existing #502 closure + 7 days rule, with no automatic
+  cleanup or silent extension.
+- **Daily limit.** Daily positional backups are `plain`. While subscription custody exists they are NOT
+  subscription-recovery checkpoints, however fresh. This supplement adds no control export or automated recovery
+  guarantee. Recovery needs a separately authorized, explicitly supplied current control-bearing checkpoint.
+- **Monitoring while custody may exist:** `check-stock-gateway-backup.sh --require-subscription-recovery BACKUP_DIR
+  [MAX_AGE_HOURS]`. A stale or failed backup still exits 1. Otherwise only the newest complete snapshot in that
+  directory is classified, and it always warns with exit 3:
+  - plain or unmarked: `WARN: subscription_recovery_unqualified`;
+  - control-bearing: `WARN: subscription_recovery_unverified`.
+
+  Keep exit 3 as a warning, not "recovery healthy". The separately authorized eligibility run is the only recovery
+  check.
+
+**Rollback.** Drain every rollback-preflight count first: authorized Stop/revoke, verified quiescence, archived
+subscription retirement and target handoff. Then disable managed activation and run this checkout's guard before any
+image or checkout switch. For a registration rollback, stop all owned records and writers, then choose S0/S1 by
+current custody and re-run that mode's check now. Restore config/DB/KEK/complete trust (with the config's signer CA)
+with their original ownership and modes; control JSON is evidence and is never imported. Then require verified
+signer readiness first if the registration is present, then the gateway's authenticated readiness and generation
+reconciliation, before any separately authorized Start. A config without the registration never permits a
+signer-dependent managed Start.

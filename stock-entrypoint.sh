@@ -5,45 +5,40 @@ if [ "$(id -u)" = 0 ] || [ -z "${HOME:-}" ] || [ "$HOME" = /root ] || [[ "$HOME"
     echo stock_native_nonroot_home_required >&2
     exit 1
 fi
+# Managed staged launch (#492): create/start runs this as the explicit main process. Every boot
+# clears any earlier activation and marks itself staged; the orchestrator transfers inputs while
+# no daemon or writer runs, then writes a fresh activation for this boot. Without that activation
+# the daemon never starts. The manual profile (no FLEET_STOCK_STAGED) is unchanged.
+# Managed inputs are uploaded under the non-root HOME (/app is image-owned and read-only), so the
+# staged launch reads its configuration from $HOME/app; the manual profile keeps /app.
+APP_ROOT=/app
+if [ "${FLEET_STOCK_STAGED:-}" = 1 ]; then
+    APP_ROOT="$HOME/app"
+    rm -f "$HOME/.fleet-activate" "$HOME/.fleet-ready"
+    : > "$HOME/.fleet-staged"
+    waited=0
+    while [ ! -f "$HOME/.fleet-activate" ]; do
+        sleep 1
+        waited=$((waited + 1))
+        if [ "$waited" -ge "${FLEET_STOCK_STAGE_SECONDS:-1800}" ]; then
+            echo stock_activation_timeout >&2
+            exit 78
+        fi
+    done
+    rm -f "$HOME/.fleet-activate"
+fi
 # No environment discovery, provider substitution, account login or trust installation.
-WORKDIR=$(node <<'JS'
-const fs = require('fs');
-const path = require('path');
-try {
-    const app = JSON.parse(fs.readFileSync('/app/appsettings.json', 'utf8'));
-    const agent = app.Agent;
-    if (!agent || agent.Provider !== 'codex' || agent.HostedProvider === true || agent.HarnessExtra)
-        throw new Error();
-    const work = agent.WorkDir;
-    if (typeof work !== 'string' || !path.isAbsolute(work) || /[\r\n]/.test(work)) throw new Error();
-    const mcp = JSON.parse(fs.readFileSync(path.join(work, '.mcp.json'), 'utf8'));
-    if (Object.keys(mcp).join() !== 'mcpServers' || Object.keys(mcp.mcpServers).join() !== 'memory') throw new Error();
-    const memory = mcp.mcpServers.memory;
-    if (Object.keys(memory).join() !== 'url') throw new Error();
-    const url = new URL(memory.url);
-    if (url.protocol !== 'https:' || url.pathname !== '/mcp' || url.search || url.hash || url.username || url.password
-        || (url.port && url.port !== '443')) throw new Error();
-    const tools = (agent.AllowedTools || []).filter(t => ['mcp__memory__memory_get', 'mcp__memory__memory_search', 'mcp__memory__memory_list'].includes(t))
-        .map(t => t.slice('mcp__memory__'.length));
-    if (!tools.length) throw new Error();
-    // The managed gate compares this artifact to the shared HarnessDefaults plan.
-    // Copy that verified artifact; do not calculate another set of mode defaults here.
-    const root = fs.readFileSync('/app/codex-root.toml', 'utf8');
-    const auth = fs.readFileSync(path.join(process.env.HOME, '.codex-host', 'auth.json'));
-    const directory = path.join(process.env.HOME, '.codex');
-    fs.mkdirSync(directory, {recursive: true, mode: 0o700});
-    fs.writeFileSync(path.join(directory, 'auth.json'), auth, {mode: 0o600});
-    fs.chmodSync(path.join(directory, 'auth.json'), 0o600);
-    fs.writeFileSync(path.join(directory, 'config.toml'), root + '\n[mcp_servers.memory]\nurl = ' + JSON.stringify(memory.url)
-        + '\nenabled_tools = ' + JSON.stringify(tools) + '\n', {mode: 0o600});
-    console.log(work);
-} catch (_) {
-    console.error('stock_native_prerequisite_invalid');
-    process.exit(1);
-}
-JS
-)
+# The same validator is used by shell bootstrap and direct dotnet startup. It creates only
+# the native profile and returns the already-validated workspace, never credentials.
+WORKDIR=$(dotnet /app/Fleet.Agent.dll --contentRoot "$APP_ROOT" --prepare-stock-native)
 # Do not inherit an alternate native config root. The generated home is the only profile here.
 unset CODEX_HOME
 cd "$WORKDIR"
-exec dotnet /app/Fleet.Agent.dll --contentRoot /app
+# Readiness is acknowledged only after preparation succeeded: the staged marker goes and the ready
+# marker carries this shell's PID, which becomes the daemon's at exec. The orchestrator records
+# applied only once that PID runs the daemon; a failed preparation exits above with no marker.
+if [ "${FLEET_STOCK_STAGED:-}" = 1 ]; then
+    rm -f "$HOME/.fleet-staged"
+    printf '%s' "$$" > "$HOME/.fleet-ready"
+fi
+exec dotnet /app/Fleet.Agent.dll --contentRoot "$APP_ROOT"

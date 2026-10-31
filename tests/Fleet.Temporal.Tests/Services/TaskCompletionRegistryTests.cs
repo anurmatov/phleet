@@ -87,4 +87,82 @@ public class TaskCompletionRegistryTests
         Assert.False(registry.TryCancel("wf/never-registered", orphan));
         Assert.True(orphan.Task.IsCanceled);
     }
+
+    // ---- #492 R1/F14: waiter and managed correlation are one registration per TaskId ----
+
+    private static ManagedCorrelation Managed(string session, Guid? epoch = null) =>
+        new("worker-one", "sandbox-1", epoch ?? Guid.Parse("11111111-1111-1111-1111-111111111111"), session);
+
+    private static AgentTaskResult Done(string text = "done") => new(text, "completed");
+
+    [Fact]
+    public void ReRegistration_ReplacesTheExpectation_WithTheWaiter()
+    {
+        var registry = NewRegistry();
+        var first = registry.Register("wf/task", Managed("s1"));
+        var second = registry.Register("wf/task", Managed("s2"));
+
+        Assert.False(registry.TryComplete("wf/task", Done(), Managed("s1")));
+        Assert.False(second.Task.IsCompleted);
+        Assert.True(registry.TryComplete("wf/task", Done(), Managed("s2")));
+        Assert.True(second.Task.IsCompletedSuccessfully);
+        Assert.False(first.Task.IsCompleted);
+        Assert.Equal(0, registry.PendingCount);
+    }
+
+    [Fact]
+    public void LateReply_ForAReplacedRegistration_DoesNotCompleteTheReplacement()
+    {
+        var registry = NewRegistry();
+        registry.Register("wf/task");                      // ordinary first attempt
+        var replacement = registry.Register("wf/task", Managed("s2"));
+
+        Assert.False(registry.TryComplete("wf/task", Done("late"), null));          // old ordinary reply
+        Assert.False(registry.TryComplete("wf/task", Done("late"), Managed("s1"))); // stale session
+        Assert.False(replacement.Task.IsCompleted);
+        Assert.Equal(1, registry.PendingCount);
+
+        // And the reverse: a managed attempt replaced by an ordinary one refuses the managed straggler.
+        var plain = registry.Register("wf/task");
+        Assert.False(registry.TryComplete("wf/task", Done("late"), Managed("s2")));
+        Assert.True(registry.TryComplete("wf/task", Done()));
+        Assert.True(plain.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public void OldAttemptCleanup_LeavesTheReplacementsCorrelationIntact()
+    {
+        var registry = NewRegistry();
+        var old = registry.Register("wf/task", Managed("s1"));
+        registry.Register("wf/task", Managed("s2"));
+
+        Assert.False(registry.TryCancel("wf/task", old));
+        Assert.True(old.Task.IsCanceled);
+        Assert.False(registry.TryComplete("wf/task", Done(), null)); // an ordinary reply still cannot complete it
+        Assert.True(registry.TryComplete("wf/task", Done(), Managed("s2")));
+    }
+
+    [Fact]
+    public async Task OldAttemptCleanup_RacingReplacementRegistration_NeverAdmitsAnOrdinaryReply()
+    {
+        // F14 counterexample: the old attempt's cleanup ran between the replacement's correlation write and
+        // its waiter write, erased the new correlation, and an ordinary reply then completed a managed task.
+        var registry = NewRegistry();
+        for (var i = 0; i < 5000; i++)
+        {
+            var taskId = "wf/race-" + i;
+            var old = registry.Register(taskId, Managed("old"));
+            using var barrier = new Barrier(2);
+            TaskCompletionSource<AgentTaskResult>? replacement = null;
+            var register = Task.Run(() => { barrier.SignalAndWait(); replacement = registry.Register(taskId, Managed("new")); });
+            var cleanup = Task.Run(() => { barrier.SignalAndWait(); registry.TryCancel(taskId, old); });
+            await Task.WhenAll(register, cleanup);
+
+            Assert.False(registry.TryComplete(taskId, Done(), null));
+            Assert.False(registry.TryComplete(taskId, Done(), Managed("old")));
+            Assert.True(registry.TryComplete(taskId, Done(), Managed("new")));
+            Assert.True(replacement!.Task.IsCompletedSuccessfully);
+        }
+        Assert.Equal(0, registry.PendingCount);
+    }
 }

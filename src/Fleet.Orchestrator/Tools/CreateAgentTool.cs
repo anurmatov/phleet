@@ -26,7 +26,7 @@ public sealed class CreateAgentTool(IServiceScopeFactory scopeFactory, IConfigur
         [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line; checked against the same allowlist as update_agent_config before anything is written. Omit for none.")] string? harness_extra = null,
         [Description("Desired runtime: docker or openshell. Saves only; managed activation is unavailable.")] string? runtime_kind = null,
         [Description("Exact immutable policy version ID. 0 clears; omitted keeps current.")] int? sandbox_policy_version_id = null,
-        [Description("Native auth: api_key only. Empty clears; never send secret values.")] string? native_auth_mode = null,
+        [Description("Native auth: api_key, or subscription (unqualified compatibility only; requires an empty provider_api_key_env_ref). Empty clears; never send secret values.")] string? native_auth_mode = null,
         [Description("Existing credential environment reference NAME only, never its value. Empty clears.")] string? provider_api_key_env_ref = null)
     {
         using var scope = scopeFactory.CreateScope();

@@ -80,7 +80,8 @@ if (!string.IsNullOrEmpty(stockAuthorityFile))
     app.Use(next =>
     {
         var receiver = new StockMemoryIdentityMiddleware(stockAuthorityFile, next,
-            app.Services.GetRequiredService<ILogger<StockMemoryIdentityMiddleware>>());
+            app.Services.GetRequiredService<ILogger<StockMemoryIdentityMiddleware>>(),
+            builder.Configuration["StockOpenShell:AuthorityDirectory"]);
         return context => receiver.InvokeAsync(context, acl);
     });
 }

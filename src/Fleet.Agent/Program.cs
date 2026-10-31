@@ -17,11 +17,30 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Refuse stock enrollment before any registration. This catch must terminate direct dotnet
 // starts too, rather than relying on unhandled-exception behavior on a particular platform.
-var validateStockOnly = args.Contains("--validate-stock-enrollment", StringComparer.Ordinal);
+var prepareStockNative = args.Contains("--prepare-stock-native", StringComparer.Ordinal);
+var validateStockOnly = prepareStockNative || args.Contains("--validate-stock-enrollment", StringComparer.Ordinal);
 try
 {
-    if (validateStockOnly) StockOpenShellEnrollment.Validate(builder.Configuration);
-    else builder.Services.AddAgentCoreServices(builder.Configuration);
+    if (validateStockOnly)
+    {
+        // #492 review F7: managed preparation reads StockOpenShell:AppRoot (which must be this content
+        // root), exactly the file daemon registration validates; the manual profile keeps its content root.
+        var rootFile = StockOpenShellEnrollment.CodexRootFile(builder.Configuration, builder.Environment.ContentRootPath);
+        var binding = StockOpenShellEnrollment.Validate(builder.Configuration, rootFile);
+        if (prepareStockNative)
+        {
+            if (binding is null) throw new InvalidOperationException("stock_enrollment_native_preparation_disabled");
+            StockOpenShellEnrollment.PrepareNative(builder.Configuration, Environment.GetEnvironmentVariable("HOME") ?? "", binding, rootFile);
+        }
+    }
+    else
+    {
+        // Managed stock mode only (#492): the bot/journal slots carry stock-issued placeholders,
+        // never literals; the gate inside AddAgentCoreServices revalidates them. Empty otherwise.
+        if (StockOpenShellEnrollment.ManagedCredentialOverlay(builder.Configuration) is { Count: > 0 } slots)
+            builder.Configuration.AddInMemoryCollection(slots);
+        builder.Services.AddAgentCoreServices(builder.Configuration);
+    }
 }
 catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
 {
@@ -31,7 +50,8 @@ catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollme
 }
 if (validateStockOnly)
 {
-    if (builder.Configuration.GetValue<bool>("StockOpenShell:Enabled")) Console.WriteLine("stock");
+    if (prepareStockNative) Console.WriteLine(builder.Configuration["Agent:WorkDir"]);
+    else if (builder.Configuration.GetValue<bool>("StockOpenShell:Enabled")) Console.WriteLine("stock");
     return;
 }
 
@@ -48,15 +68,11 @@ if (!isCliMode && (builder.Configuration.GetValue<bool>("Journal:FilesEnabled") 
     builder.WebHost.ConfigureKestrel(options => options.ListenAnyIP(8080));
 
 var stockMode = builder.Configuration.GetValue<bool>("StockOpenShell:Enabled");
+// #492/#502: both explicit managed auth modes (API key, subscription) share the managed control guard.
+var managedStock = stockMode && StockOpenShellEnrollment.IsManaged(builder.Configuration);
 var app = builder.Build();
-app.Use(async (context, next) =>
-{
-    // This profile uses the authenticated broker for control, never legacy HTTP control routes.
-    if (stockMode && context.Request.Path != "/health")
-    { context.Response.StatusCode = 404; return; }
-    if (context.Request.Path.Value == JournalFilesListener.Path) { context.Response.StatusCode = 404; return; }
-    await next(context);
-});
+// Stock profiles use the authenticated broker for control, never legacy HTTP control routes.
+app.UseControlGuard(stockMode, managedStock);
 
 // Refuses to start a misconfigured agent, before /health can answer ok for it.
 //
@@ -117,20 +133,7 @@ if (!isCliMode)
 
     app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-    app.MapPost("/cancel", async (IServiceProvider sp) =>
-    {
-        var taskManager = sp.GetRequiredService<TaskManager>();
-        await taskManager.CancelAllAsync();
-        return Results.Ok(new { message = "All tasks cancelled and queue cleared" });
-    });
-
-    app.MapPost("/cancel/{**taskId}", async (string taskId, IServiceProvider sp) =>
-    {
-        var taskManager = sp.GetRequiredService<TaskManager>();
-        var decoded = Uri.UnescapeDataString(taskId);
-        var cancelled = await taskManager.CancelByBridgeTaskIdAsync(decoded);
-        return Results.Ok(new { cancelled, taskId = decoded });
-    });
+    app.MapCancelEndpoints();
 
     app.MapPost("/cancel_bg/{taskId}", async (string taskId, IServiceProvider sp) =>
     {

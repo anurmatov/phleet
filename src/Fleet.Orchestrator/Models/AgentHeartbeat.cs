@@ -62,6 +62,11 @@ public sealed class AgentState
     public string RuntimeKind { get; set; } = "docker";
     public string AppliedRuntimeKind { get; set; } = "docker";
     public bool RuntimePending { get; set; }
+    /// <summary>#492 managed binding state from the persisted record (never from a heartbeat).</summary>
+    public string? ManagedState { get; set; }
+    public IReadOnlyList<string>? ManagedErrors { get; set; }
+    /// <summary>#492 read-only applied-binding/lifecycle summary from the persisted record; never secrets.</summary>
+    public ManagedStatusView? Managed { get; set; }
     public required string AgentName     { get; init; }
     public string  ReportedStatus        { get; set; } = "unknown";
     public string? CurrentTask           { get; set; }
@@ -111,5 +116,65 @@ public sealed class AgentState
                  : age > StaleThreshold ? "stale"
                  : ReportedStatus;
         }
+    }
+}
+
+/// <summary>
+/// #492 compact, read-only view of the persisted managed record for the dashboard. Carries identifiers,
+/// hashes and generations only — never key material or key references.
+/// </summary>
+public sealed record ManagedStatusView(
+    string State,
+    IReadOnlyList<string> Errors,
+    string AdmissionState,
+    bool Pending,
+    string? Operation,
+    string? AppliedSandboxId,
+    string? AppliedSandboxName,
+    Guid? Epoch,
+    int? PolicyVersionId,
+    string? PolicySha256,
+    string? GatewayGeneration,
+    IReadOnlyList<string> Providers)
+{
+    /// <summary>Docker ID of the sandbox workload container, as last observed by the adapter.</summary>
+    public string? WorkloadContainerId { get; init; }
+    /// <summary>Docker ID of the sandbox's native supervisor container, as last observed by the adapter.</summary>
+    public string? SupervisorContainerId { get; init; }
+    /// <summary>running · stopped · removed · unobservable; null when never observed.</summary>
+    public string? ContainerStatus { get; init; }
+    public DateTimeOffset? ContainersObservedAt { get; init; }
+    /// <summary>Gateway backup <c>last-success</c> stamp; null when unconfigured, missing or malformed (unknown).</summary>
+    public DateTimeOffset? BackupLastSuccessAt { get; init; }
+    /// <summary>unknown · unmounted (BackupDir configured but not mounted) · failed (the latest run failed) · recorded. Never "fresh": freshness is the operator check.</summary>
+    public string BackupState { get; init; } = "unknown";
+    /// <summary>Whole seconds since the last successful gateway backup, computed at read time; null when unknown.</summary>
+    public long? BackupAgeSeconds => BackupLastSuccessAt is { } at ? Math.Max(0, (long)(DateTimeOffset.UtcNow - at).TotalSeconds) : null;
+}
+
+/// <summary>Reads the stock gateway backup stamps written by <c>backup-stock-gateway.sh</c>; absence is unknown.</summary>
+public static class ManagedBackupStamp
+{
+    public static (DateTimeOffset? LastSuccess, string State) Read(string? backupDir)
+    {
+        if (string.IsNullOrWhiteSpace(backupDir)) return (null, "unknown");
+        // Configured but not visible in this container (no read-only mount): distinct from "no backup yet".
+        if (!System.IO.Directory.Exists(backupDir)) return (null, "unmounted");
+        var success = Stamp(System.IO.Path.Combine(backupDir, "last-success"));
+        if (success is null) return (null, "unknown");
+        var failure = Stamp(System.IO.Path.Combine(backupDir, "last-failure"));
+        return (success, failure is { } f && f >= success ? "failed" : "recorded");
+    }
+
+    private static DateTimeOffset? Stamp(string path)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(path)) return null;
+            var text = System.IO.File.ReadAllText(path).Trim();
+            return DateTimeOffset.TryParseExact(text, "yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var at) ? at : null;
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { return null; }
     }
 }

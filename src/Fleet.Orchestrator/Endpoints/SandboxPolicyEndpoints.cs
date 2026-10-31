@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using MySqlConnector;
 using YamlDotNet.Core;
@@ -87,15 +88,38 @@ public static class SandboxPolicyEndpoints
         app.MapPost("/api/agents/{name}/runtime/apply", async (string name, HttpContext http, CancellationToken ct) =>
         {
             if (Authenticate(http, app.Configuration) is { } denied) return denied;
-            var db = http.RequestServices.GetService<OrchestratorDbContext>();
-            if (db is null) return Results.Json(new { error = "policy_database_unavailable" }, statusCode: 503);
+            var runtime = http.RequestServices.GetService<StockOpenShellRuntime>();
+            if (runtime is not { Enabled: true }) return Results.Conflict(new { error = StockOpenShellRuntime.Unavailable });
             try
             {
-                var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name, ct);
-                return agent is null ? Results.NotFound() : Results.Conflict(new { error = "managed_runtime_unavailable", message = "Selection is saved only; runtime apply is unavailable in this release." });
+                if (await runtime.KindsAsync(name, ct) is not { } kinds) return Results.NotFound();
+                if (kinds.Desired != "openshell" && kinds.Applied != "openshell")
+                    return Results.Conflict(new { error = "managed_apply_not_applicable" });
             }
-            catch (Exception ex) when (ex is DbException or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException)
-            { return Results.Json(new { error = "policy_database_unavailable" }, statusCode: 503); }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException)
+            { return Results.Json(new { error = "runtime_state_unavailable" }, statusCode: 503); }
+            // Reprovision runs the managed apply and, for OpenShell→Docker, the ordinary Docker path after it.
+            var result = await http.RequestServices.GetRequiredService<ContainerProvisioningService>().ReprovisionAsync(name, ct: ct);
+            return result.Success ? Results.Ok(new { message = result.Message }) : Results.Conflict(new { error = result.Message });
+        });
+        app.MapPost("/api/agents/{name}/revoke", async (string name, HttpContext http, CancellationToken ct) =>
+        {
+            if (Authenticate(http, app.Configuration) is { } denied) return denied;
+            var runtime = http.RequestServices.GetService<StockOpenShellRuntime>();
+            if (runtime is not { Enabled: true }) return Results.Conflict(new { error = StockOpenShellRuntime.Unavailable });
+            var result = await runtime.RevokeAsync(name, ct);
+            return result.Ok ? Results.Ok(new { message = result.Code })
+                : Results.Json(new { error = result.Code, errors = result.Errors }, statusCode: result.Status);
+        });
+        // The rollout guard's input: refuses replacement unless every count is zero. Never anonymous.
+        app.MapGet("/api/managed-runtime/rollback-preflight", async (HttpContext http, CancellationToken ct) =>
+        {
+            if (Authenticate(http, app.Configuration) is { } denied) return denied;
+            var runtime = http.RequestServices.GetService<StockOpenShellRuntime>();
+            if (runtime is null) return Results.Json(new { error = "runtime_state_unavailable" }, statusCode: 503);
+            try { return Results.Ok(await runtime.RollbackPreflightAsync(ct)); }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException)
+            { return Results.Json(new { error = "runtime_state_unavailable" }, statusCode: 503); }
         });
         return app;
     }
@@ -127,22 +151,7 @@ internal static class SandboxPolicyValidation
             return "Provider profile bindings require names and lowercase SHA256 content hashes, never credentials.";
         try
         {
-            // Reject aliases, anchors and tags before constructing a graph (no expansion or cycles).
-            var parser = new Parser(new StringReader(text));
-            var count = 0;
-            var depth = 0;
-            while (parser.MoveNext())
-            {
-                if (parser.Current is YamlDotNet.Core.Events.MappingStart or YamlDotNet.Core.Events.SequenceStart) depth++;
-                if (parser.Current is YamlDotNet.Core.Events.MappingEnd or YamlDotNet.Core.Events.SequenceEnd) depth--;
-                if (++count > 8192 || depth > 32 || parser.Current is YamlDotNet.Core.Events.AnchorAlias
-                    || parser.Current is YamlDotNet.Core.Events.NodeEvent n && (!n.Anchor.IsEmpty || !n.Tag.IsEmpty))
-                    return "YAML aliases, anchors, tags or oversized structures are unsupported.";
-            }
-            var yaml = new YamlStream();
-            yaml.Load(new StringReader(text));
-            Require(yaml.Documents.Count == 1, "Use one policy document.");
-            var root = Map(yaml.Documents[0].RootNode, "version", "filesystem_policy", "process", "landlock", "network_policies");
+            if (ParseRoot(text, out var structureFault) is not { } root) return structureFault;
             Require(PlainScalar(root, "version") == "1", "Only policy version 1 is supported.");
             if (Get(root, "filesystem_policy") is { } fs)
             {
@@ -174,7 +183,7 @@ internal static class SandboxPolicyValidation
                     }
                     if (Get(rule, "endpoints") is { } endpoints) foreach (var e in List(endpoints))
                     {
-                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding");
+                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding", "rules", "mcp");
                         Require(Regex.IsMatch(Scalar(endpoint, "host"), @"^[A-Za-z0-9*_.:-]{1,253}\z"), "Invalid endpoint host.");
                         Require(int.TryParse(PlainScalar(endpoint, "port"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) && port is >= 1 and <= 65535, "Invalid endpoint port.");
                         Option(endpoint, "protocol", "tcp", "rest", "mcp", "json-rpc", "websocket", "graphql", "sql");
@@ -184,6 +193,15 @@ internal static class SandboxPolicyValidation
                         if (Scalar(endpoint, "protocol") is "" or "tcp")
                             Require(Get(endpoint, "access") is null && Get(endpoint, "enforcement") is null,
                                 "L7 access/enforcement requires an explicit inspected protocol.");
+                        if (Scalar(endpoint, "protocol") == "mcp")
+                        {
+                            // #503 W5: pinned stock rejects every MCP access preset (l7_validate.rs:273–281).
+                            Require(Get(endpoint, "access") is null, "protocol mcp does not support access presets; use the exact MCP rules.");
+                            McpRules(endpoint);
+                            McpVersions(endpoint);
+                        }
+                        else Require(Get(endpoint, "rules") is null && Get(endpoint, "mcp") is null,
+                            "Rules and the mcp block are supported only on protocol: mcp endpoints.");
                         if (Get(endpoint, "credential_binding") is { } binding)
                         {
                             var profile = Scalar(Map(binding, "provider"), "provider");
@@ -192,34 +210,129 @@ internal static class SandboxPolicyValidation
                     }
                 }
             }
+            // #503: only the fixed stock-memory signer subset; managed apply separately requires it to match the agent's routes.
+            if (Get(root, "network_middlewares") is { } middlewares) StockManagedSignerPolicy.ValidateShape(middlewares);
             return null;
         }
         catch (Exception ex) when (ex is YamlException or ArgumentException or InvalidOperationException)
         { return "Invalid or unsupported stock YAML. " + (ex is ArgumentException ? ex.Message : "Check mapping keys, duplicates and value types."); }
     }
 
+    /// <summary>
+    /// The one bounded parse shared by save and managed admission (#503): byte/event/depth limits, alias/anchor/tag refusal
+    /// before any graph is built, one document and the supported root fields. Null with <paramref name="fault"/> for a
+    /// size or structure refusal; malformed YAML or unsupported fields throw.
+    /// </summary>
+    internal static YamlMappingNode? ParseRoot(string text, out string? fault)
+    {
+        fault = null;
+        if (string.IsNullOrWhiteSpace(text) || Encoding.UTF8.GetByteCount(text) > 65536) { fault = "YAML must be 1–65536 UTF-8 bytes."; return null; }
+        // Reject aliases, anchors and tags before constructing a graph (no expansion or cycles).
+        var parser = new Parser(new StringReader(text));
+        var count = 0;
+        var depth = 0;
+        while (parser.MoveNext())
+        {
+            if (parser.Current is YamlDotNet.Core.Events.MappingStart or YamlDotNet.Core.Events.SequenceStart) depth++;
+            if (parser.Current is YamlDotNet.Core.Events.MappingEnd or YamlDotNet.Core.Events.SequenceEnd) depth--;
+            if (++count > 8192 || depth > 32 || parser.Current is YamlDotNet.Core.Events.AnchorAlias
+                || parser.Current is YamlDotNet.Core.Events.NodeEvent n && (!n.Anchor.IsEmpty || !n.Tag.IsEmpty))
+            { fault = "YAML aliases, anchors, tags or oversized structures are unsupported."; return null; }
+        }
+        var yaml = new YamlStream();
+        yaml.Load(new StringReader(text));
+        Require(yaml.Documents.Count == 1, "Use one policy document.");
+        return Map(yaml.Documents[0].RootNode, "version", "filesystem_policy", "process", "landlock", "network_policies", "network_middlewares");
+    }
+
+    /// <summary>The only MCP methods a saved rule may allow besides <see cref="McpToolCall"/>, which names one exact tool.</summary>
+    internal static readonly string[] McpControlMethods = ["initialize", "notifications/initialized", "tools/list"];
+    internal const string McpToolCall = "tools/call";
+    // Plain lowercase names only, so no tool selector can carry a stock glob character.
+    private static readonly Regex McpToolName = new(@"\A[a-z][a-z0-9_]{0,63}\z", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// #503 W5: the one supported MCP rule form, in the pinned stock shape (openshell-policy lib.rs:4630–4678): every
+    /// control method in <see cref="McpControlMethods"/>, then <c>tools/call</c> once per exact tool. No wildcard,
+    /// <c>any</c> selector, parameter matcher, deny rule, access preset or <c>allow_all_known_mcp_methods</c>.
+    /// Returns the allowed tool names; throws <see cref="ArgumentException"/> for any other form.
+    /// </summary>
+    internal static IReadOnlySet<string> McpRules(YamlMappingNode endpoint)
+    {
+        const string form = "MCP rules allow exactly initialize, notifications/initialized and tools/list, plus tools/call once per exact tool name.";
+        var rules = List(Get(endpoint, "rules") ?? throw new ArgumentException("protocol mcp needs explicit rules. " + form)).ToList();
+        Require(rules.Count <= 32, form);
+        var methods = new HashSet<string>(StringComparer.Ordinal);
+        var tools = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in rules)
+        {
+            var rule = Map(item, "allow");
+            var allow = Map(Get(rule, "allow") ?? throw new ArgumentException(form), "method", "tool");
+            var method = Get(allow, "method") is { } m ? Value(m) : "";
+            if (method == McpToolCall)
+            {
+                var tool = Get(allow, "tool") is { } t ? Value(t) : "";
+                Require(McpToolName.IsMatch(tool), "tools/call names one exact tool (lowercase letters, digits, underscore; no wildcard or list).");
+                Require(tools.Add(tool), "Duplicate MCP rule.");
+            }
+            else
+            {
+                Require(McpControlMethods.Contains(method) && Get(allow, "tool") is null, form);
+                Require(methods.Add(method), "Duplicate MCP rule.");
+            }
+        }
+        Require(methods.Count == McpControlMethods.Length && tools.Count > 0, form);
+        return tools;
+    }
+
+    /// <summary>
+    /// #503 W13: the MCP revisions a saved endpoint may name in <c>mcp.versions</c>. Pinned Codex 0.164.0 negotiates
+    /// 2025-06-18 and sends it as <c>MCP-Protocol-Version</c>; 2025-11-25 is the pinned stock default
+    /// (openshell-policy-schema lib.rs:43), which an omitted list keeps.
+    /// </summary>
+    internal static readonly string[] McpVersionChoices = ["2025-06-18", "2025-11-25"];
+
+    /// <summary>
+    /// #503 W13: the optional <c>mcp</c> block of a <c>protocol: mcp</c> endpoint, in the pinned stock shape
+    /// (openshell-policy-schema lib.rs:346–370): exactly <c>versions</c>, a nonempty list of distinct exact revisions from
+    /// <see cref="McpVersionChoices"/>. No other <c>mcp</c> field (so no <c>allow_all_known_mcp_methods</c> or
+    /// <c>strict_tool_names</c>); stock rejects empty lists, duplicates and unknown or moving names the same way
+    /// (lib.rs:145–160). Returns the named revisions, empty when the block is omitted.
+    /// </summary>
+    internal static IReadOnlySet<string> McpVersions(YamlMappingNode endpoint)
+    {
+        var versions = new HashSet<string>(StringComparer.Ordinal);
+        if (Get(endpoint, "mcp") is not { } block) return versions;
+        const string form = "mcp holds exactly versions: a nonempty list of distinct revisions from 2025-06-18 and 2025-11-25.";
+        var mcp = Map(block, "versions");
+        Require(Get(mcp, "versions") is not null && mcp.Children.Count == 1, form);
+        foreach (var item in List(Get(mcp, "versions")!)) Require(McpVersionChoices.Contains(Value(item)) && versions.Add(Value(item)), form);
+        Require(versions.Count > 0, form);
+        return versions;
+    }
+
     private static void Option(YamlMappingNode map, string key, params string[] choices)
     { if (Get(map, key) is { } value) Require(choices.Contains(Value(value)), $"Unsupported {key}."); }
-    private static YamlMappingNode Map(YamlNode node, params string[] keys)
+    internal static YamlMappingNode Map(YamlNode node, params string[] keys)
     {
         Require(node is YamlMappingNode, "Expected a mapping.");
         var map = (YamlMappingNode)node;
         foreach (var key in map.Children.Keys) Require(keys.Length == 0 || keys.Contains(Value(key)), "Unsupported policy field.");
         return map;
     }
-    private static IEnumerable<YamlNode> List(YamlNode node)
+    internal static IEnumerable<YamlNode> List(YamlNode node)
     { Require(node is YamlSequenceNode, "Expected a list."); return ((YamlSequenceNode)node).Children; }
-    private static string Value(YamlNode node)
+    internal static string Value(YamlNode node)
     { Require(node is YamlScalarNode { Value: not null }, "Expected a scalar."); return ((YamlScalarNode)node).Value!; }
-    private static YamlNode? Get(YamlMappingNode map, string key) => map.Children.TryGetValue(new YamlScalarNode(key), out var value) ? value : null;
+    internal static YamlNode? Get(YamlMappingNode map, string key) => map.Children.TryGetValue(new YamlScalarNode(key), out var value) ? value : null;
     // YamlScalarNode.Value is text even for quoted strings. Preserve the parsed scalar style
     // at numeric/boolean fields so strings cannot masquerade as stock integer/bool values.
-    private static string PlainScalar(YamlMappingNode map, string key)
+    internal static string PlainScalar(YamlMappingNode map, string key)
     {
         var node = Get(map, key);
         Require(node is YamlScalarNode { Style: ScalarStyle.Plain }, $"{key} must be an unquoted typed scalar.");
         return Value(node!);
     }
-    private static string Scalar(YamlMappingNode map, string key) => Get(map, key) is { } node ? Value(node) : "";
+    internal static string Scalar(YamlMappingNode map, string key) => Get(map, key) is { } node ? Value(node) : "";
     private static void Require(bool condition, string message) { if (!condition) throw new ArgumentException(message); }
 }

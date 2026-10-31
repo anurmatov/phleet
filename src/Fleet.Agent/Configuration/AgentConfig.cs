@@ -52,6 +52,14 @@ public sealed class AgentOptions
     public int ToolArgsTruncateLength { get; set; } = 300;
     public string Provider { get; set; } = "claude";
     public string? CodexSandboxMode { get; set; }
+    /// <summary>
+    /// Explicit managed stock startup, absent for the existing manual profile: <c>api_key</c>, or <c>subscription</c>
+    /// (#502, unqualified compatibility only: a stock-issued access handle and nonsecret account metadata, no
+    /// secret-bearing field and no implicit API-key fallback).
+    /// </summary>
+    public string? NativeAuthMode { get; set; }
+    /// <summary>Outside credential reference only (API-key mode). Never resolved by the workload; absent for subscription.</summary>
+    public string? ProviderApiKeyEnvRef { get; set; }
 
     /// <summary>
     /// True when the orchestrator resolved this agent's model to a hosted provider (#335 D5).

@@ -75,6 +75,82 @@ public sealed class DockerService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Read-only label query over all containers, running or not. Null means the observation failed;
+    /// it is never reported as "no containers" (#492 quiescence checks depend on that distinction).
+    /// </summary>
+    public async Task<IReadOnlyList<(string Id, string State)>?> ListContainersByLabelAsync(string label, CancellationToken ct = default)
+    {
+        try
+        {
+            var filters = Uri.EscapeDataString(JsonSerializer.Serialize(new Dictionary<string, string[]> { ["label"] = [label] }));
+            using var response = await _http.GetAsync($"/{DockerApiVer}/containers/json?all=true&filters={filters}", ct);
+            if (!response.IsSuccessStatusCode) return null;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return document.RootElement.EnumerateArray()
+                .Select(c => (c.GetProperty("Id").GetString() ?? "", c.GetProperty("State").GetString() ?? ""))
+                .ToList();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException
+            or IOException or InvalidOperationException or KeyNotFoundException)
+        {
+            _logger.LogWarning("Docker label query unavailable");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Containers carrying <paramref name="label"/> (any state) with the value of <paramref name="labelKey"/>;
+    /// null means the observation failed and must never be read as absence.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Id, string State, string? LabelValue)>?> ListLabelledContainersAsync(string label, string labelKey, CancellationToken ct = default)
+    {
+        try
+        {
+            var filters = Uri.EscapeDataString(JsonSerializer.Serialize(new Dictionary<string, string[]> { ["label"] = [label] }));
+            using var response = await _http.GetAsync($"/{DockerApiVer}/containers/json?all=true&filters={filters}", ct);
+            if (!response.IsSuccessStatusCode) return null;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return document.RootElement.EnumerateArray()
+                .Select(c => (c.GetProperty("Id").GetString() ?? "", c.GetProperty("State").GetString() ?? "",
+                    c.TryGetProperty("Labels", out var labels) && labels.ValueKind == JsonValueKind.Object
+                        && labels.TryGetProperty(labelKey, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null))
+                .ToList();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException
+            or IOException or InvalidOperationException or KeyNotFoundException)
+        {
+            _logger.LogWarning("Docker label query unavailable");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Containers whose name is exactly <paramref name="containerName"/>, running or not. Empty means
+    /// absent; null means the observation failed and must never be read as absence.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Id, string State)>?> ListContainersByNameAsync(string containerName, CancellationToken ct = default)
+    {
+        try
+        {
+            var filter = "^/" + System.Text.RegularExpressions.Regex.Escape(containerName) + "$";
+            var filters = Uri.EscapeDataString(JsonSerializer.Serialize(new Dictionary<string, string[]> { ["name"] = [filter] }));
+            using var response = await _http.GetAsync($"/{DockerApiVer}/containers/json?all=true&filters={filters}", ct);
+            if (!response.IsSuccessStatusCode) return null;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return document.RootElement.EnumerateArray()
+                .Where(c => c.GetProperty("Names").EnumerateArray().Any(n => n.GetString() == "/" + containerName))
+                .Select(c => (c.GetProperty("Id").GetString() ?? "", c.GetProperty("State").GetString() ?? ""))
+                .ToList();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException
+            or IOException or InvalidOperationException or KeyNotFoundException)
+        {
+            _logger.LogWarning("Docker name query unavailable");
+            return null;
+        }
+    }
+
     /// <summary>Returns the time the container was last started (State.StartedAt), or null if not found / not running.</summary>
     public async Task<DateTimeOffset?> GetContainerStartedAtAsync(string containerName)
     {

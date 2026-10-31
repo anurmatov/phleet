@@ -1166,7 +1166,11 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
             + ",\"codex-subscription-native\":\"" + SyntheticProfileHash + "\"}";
     }
 
-    public void Dispose() => _t.Dispose();
+    public void Dispose()
+    {
+        _cli.Dispose();
+        _t.Dispose();
+    }
 
     private string WriteSource(string workspace = "ws-a", DateTimeOffset? expires = null) =>
         StockSubscriptionBindingTests.WriteSource(_t._dir, Source(workspace, expires));
@@ -1202,6 +1206,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
             SandboxWorkspace = workspace,
             Subscription = new ManagedSubscription("ws-a", ProviderId, "synthetic-account_01", Guid.Parse(StockSubscriptionBindingTests.Owner),
                 new string('d', 64), expires ?? _clock.Now.AddHours(2)),
+            WorkloadWorkspacePath = "/home/agent/workspace",
         };
     }
 
@@ -1342,7 +1347,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
 
         Assert.True(result.Ok, result.Message);
         Assert.Equal("{\"mcpServers\":{\"" + name + "\":{\"url\":\"https://memory.example.test/mcp\"}}}",
-            _cli.Cli("ws-a").Uploads.Last(u => u.Remote == "/workspace/.mcp.json").Content);
+            _cli.Cli("ws-a").Uploads.Last(u => u.Remote == "/home/agent/workspace/.mcp.json").Content);
         var after = _t._store.Get("agent1");
         Assert.Equal(before, System.Text.Json.JsonSerializer.Serialize(new
         {
@@ -1661,6 +1666,28 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.Equal("managed_binding_missing", (await runtime.RevokeAsync("agent1", default)).Code);
     }
 
+    [Fact]
+    public async Task Workspace_export_runs_only_in_the_persisted_scope_and_never_reads_a_same_named_foreign_sandbox()
+    {
+        // #507 A9: the helper upload, copy, download and cleanup carry the binding's persisted --workspace, like every other leg.
+        DockerTargetWithHistory(out var applied, out _);
+        File.WriteAllText(_cli.Cli("ws-a").Fs(applied.SandboxName, "/home/agent/workspace/mine.txt"), "ws-a user data");
+        _cli.Cli("ws-b").Sandboxes[applied.SandboxName] = (Guid.NewGuid().ToString(), "Ready");
+        File.WriteAllText(_cli.Cli("ws-b").Fs(applied.SandboxName, "/home/agent/workspace/foreign.txt"), "foreign");
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        Assert.Equal("ws-a user data", File.ReadAllText(Path.Combine(_t.DockerWorkspaceDir, "mine.txt")));
+        Assert.False(File.Exists(Path.Combine(_t.DockerWorkspaceDir, "foreign.txt")));
+        var transfer = _cli.Calls.Where(c => c.Args.Count > 1 && c.Args[0] == "sandbox" && c.Args[1] is "exec" or "upload" or "download").ToList();
+        Assert.Contains(transfer, c => c.Args[1] == "download");
+        Assert.Contains(transfer, c => c.Args.Contains("python3"));
+        Assert.All(transfer, c => Assert.Equal("ws-a", c.Ws));
+        Assert.Empty(_cli.Cli("ws-b").Calls);
+        Assert.Equal("Ready", _cli.Cli("ws-b").Sandboxes[applied.SandboxName].Phase);
+    }
+
     [Theory]
     [InlineData("docker_failed")]
     [InlineData("archive_conflict")]
@@ -1938,8 +1965,14 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
     /// The pinned CLI as seen per workspace: a leading <c>--workspace W</c> selects that workspace's sandboxes, providers
     /// and attachments; calls without it go to a separate unscoped fake. Stock outputs follow the pinned 0.1.5 shapes.
     /// </summary>
-    internal sealed class ScopedCli(MutableClock clock) : IStockCli
+    internal sealed class ScopedCli(MutableClock clock) : IStockCli, IDisposable
     {
+        public void Dispose()
+        {
+            Unscoped.Dispose();
+            foreach (var cli in _workspaces.Values) cli.Dispose();
+        }
+
         public readonly List<(string? Ws, List<string> Args, IReadOnlyDictionary<string, string>? Env)> Calls = [];
         public readonly ManagedStockRuntimeAdapterTests.FakeCli Unscoped = new();
         private readonly Dictionary<string, ManagedStockRuntimeAdapterTests.FakeCli> _workspaces = new();

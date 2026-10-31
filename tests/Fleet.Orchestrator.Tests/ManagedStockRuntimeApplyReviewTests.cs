@@ -133,11 +133,18 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
         var runtime = _t.Runtime();
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        // #507 A5: user edits in W inside the sandbox: a new file, deletions and a file that became a directory.
+        var w = _t._cli.Fs(ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!.SandboxName, "/home/agent/workspace");
+        File.WriteAllText(Path.Combine(w, "marker-back.txt"), "from sandbox");
+        File.Delete(Path.Combine(w, "deleted.txt"));
+        Directory.Delete(Path.Combine(w, "gone-dir"), recursive: true);
+        File.Delete(Path.Combine(w, "only-dir"));
+        Directory.CreateDirectory(Path.Combine(w, "only-dir"));
 
         _t._store.Get("agent1").RuntimeKind = "docker";
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
 
-        // The synthetic sandbox /workspace holds only marker-back.txt and only-dir/.
+        // The sandbox's W now holds only marker-back.txt and only-dir/ (and its routes file).
         Assert.Equal("from sandbox", File.ReadAllText(Path.Combine(ws, "marker-back.txt")));
         Assert.True(Directory.Exists(Path.Combine(ws, "only-dir")));
         Assert.False(File.Exists(Path.Combine(ws, "deleted.txt")));
@@ -158,9 +165,13 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         var remote = _t._cli.Uploads.Select(u => u.Remote).ToHashSet();
         // Nothing nests (/app/app, /workspace/workspace) or targets the image-owned /app or root-owned /trust.
         Assert.DoesNotContain(remote, r => r.StartsWith("/app/", StringComparison.Ordinal) || r.StartsWith("/trust/", StringComparison.Ordinal)
-            || r.StartsWith("/home/agent/app/app/", StringComparison.Ordinal) || r.StartsWith("/workspace/workspace/", StringComparison.Ordinal));
-        Assert.Contains("/workspace/marker.txt", remote);
-        Assert.Contains("/workspace/.mcp.json", remote);
+            || r.StartsWith("/home/agent/app/app/", StringComparison.Ordinal) || r.StartsWith("/workspace", StringComparison.Ordinal)
+            || r.StartsWith("/home/agent/workspace/workspace/", StringComparison.Ordinal));
+        // #507: the user tree, its fresh routes and the generated WorkDir are all W, inside the stock CLI's copy root.
+        Assert.Contains("/home/agent/workspace/marker.txt", remote);
+        Assert.Contains("/home/agent/workspace/.mcp.json", remote);
+        Assert.Equal("/home/agent/workspace", JsonNode.Parse(_t._cli.Uploads.Last(u => u.Remote == "/home/agent/app/appsettings.json").Content!)!["Agent"]!["WorkDir"]!.GetValue<string>());
+        Assert.Equal("/home/agent/workspace", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!.WorkloadWorkspacePath);
         Assert.Contains("/home/agent/app/" + Fleet.Shared.HarnessDefaults.CodexRootTomlFileName, remote);
         var settings = JsonNode.Parse(_t._cli.Uploads.Last(u => u.Remote == "/home/agent/app/appsettings.json").Content!)!["StockOpenShell"]!;
         // Every trust path the agent is configured with is exactly where an upload placed it.
@@ -328,9 +339,11 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal(("applied", image), (record.State, record.Applied!.Image));
         Assert.NotEqual(old.SandboxId, record.Applied.SandboxId);
         Assert.NotEqual(old.SandboxName, record.Applied.SandboxName);
-        // The old sandbox's workspace was carried (synthetic download) and the old sandbox is left stopped.
-        Assert.Contains(_t._cli.Calls, c => c.Args.SequenceEqual(["sandbox", "download", old.SandboxName, "/workspace", c.Args[^1]]));
-        Assert.Contains("/workspace/marker-back.txt", _t._cli.Uploads.Select(u => u.Remote));
+        // The old sandbox's W was exported through its filtered snapshot inside the stock root and the old sandbox is left stopped.
+        Assert.Contains(_t._cli.Calls, c => c.Args.Take(3).SequenceEqual(["sandbox", "download", old.SandboxName])
+            && c.Args[3].StartsWith("/home/agent/.phleet-workspace-transfer/", StringComparison.Ordinal) && c.Args[3].EndsWith("/data", StringComparison.Ordinal));
+        Assert.Contains("/home/agent/workspace/marker-back.txt", _t._cli.Uploads.Select(u => u.Remote));
+        Assert.Equal("from sandbox", File.ReadAllText(_t._cli.Fs(old.SandboxName, "/home/agent/workspace/marker-back.txt")));
         Assert.Equal("Stopped", _t._cli.Sandboxes[old.SandboxName].Phase);
         // Ownership tracking survives the replacement: the old sandbox stays recorded with its UUID.
         var superseded = Assert.Single(record.Superseded);
@@ -416,6 +429,582 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.DoesNotContain((await _t.Runtime().RevokeAsync("agent1", default)).Errors, e => e.StartsWith("admission", StringComparison.Ordinal));
         Assert.Equal(Fleet.Shared.Security.StockAuthoritySource.RetiredState,
             JsonNode.Parse(File.ReadAllText(Path.Combine(authority, "agent1.json")))!["State"]!.GetValue<string>());
+    }
+
+    // ── #507: one managed user tree W under the stock root, legacy preservation and transfer holds ──
+
+    private const string W = "/home/agent/workspace";
+    private const string Old = "registry.example.test/agent@sha256:old";
+
+    /// <summary>A binding recorded before #507: no persisted path; its epoch's private bundle generated the given WorkDir.</summary>
+    private ManagedBinding Legacy(string name, string image = "stock-agent:synthetic", string? workDir = "/workspace", string appRoot = "/home/agent/app")
+    {
+        var binding = _t.Binding(name, Guid.NewGuid()) with { WorkloadWorkspacePath = null, Image = image };
+        if (workDir is null) return binding;
+        var settings = Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"), "bundle", "app", "appsettings.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(settings)!);
+        File.WriteAllText(settings, new JsonObject
+        {
+            ["Agent"] = new JsonObject { ["WorkDir"] = workDir }, ["StockOpenShell"] = new JsonObject { ["AppRoot"] = appRoot },
+        }.ToJsonString());
+        return binding;
+    }
+
+    /// <summary>The old image's filesystem: a legacy /workspace with user data and a sentinel per exclusion, and no W.</summary>
+    private string LegacyTree(string sandbox)
+    {
+        Directory.Delete(_t._cli.Fs(sandbox, W), recursive: true);
+        var legacy = _t._cli.Fs(sandbox, "/workspace");
+        Directory.CreateDirectory(Path.Combine(legacy, "src"));
+        File.WriteAllText(Path.Combine(legacy, "src", "main.py"), "print('user')\n");
+        File.WriteAllText(Path.Combine(legacy, "run.sh"), "#!/bin/sh\n");
+        File.SetUnixFileMode(Path.Combine(legacy, "run.sh"), (UnixFileMode)0b111_101_101);
+        Directory.CreateDirectory(Path.Combine(legacy, "empty"));
+        Directory.CreateDirectory(Path.Combine(legacy, "app"));
+        File.WriteAllText(Path.Combine(legacy, "app", "readme"), "an ordinary project directory named app");
+        Directory.CreateDirectory(Path.Combine(legacy, "nested", ".ssh"));
+        File.WriteAllText(Path.Combine(legacy, "nested", ".ssh", "known"), "nested names are user data");
+        foreach (var name in StockOpenShellRuntime.PrivateWorkspaceEntries)
+            if (name.StartsWith(".fleet-", StringComparison.Ordinal) || name == ".mcp.json") File.WriteAllText(Path.Combine(legacy, name), "control");
+            else
+            {
+                Directory.CreateDirectory(Path.Combine(legacy, name));
+                File.WriteAllText(Path.Combine(legacy, name, "auth.json"), "{\"synthetic\":\"control\"}");
+            }
+        return legacy;
+    }
+
+    /// <summary>Relative path → content (or a directory marker and the owner-execute bit) of a host tree.</summary>
+    private static SortedDictionary<string, string> Tree(string root) => new(
+        Directory.EnumerateFileSystemEntries(root, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 })
+            .ToDictionary(p => Path.GetRelativePath(root, p), p => Directory.Exists(p) ? "<dir>"
+                : File.ReadAllText(p) + ((File.GetUnixFileMode(p) & UnixFileMode.UserExecute) != 0 ? "+x" : "")), StringComparer.Ordinal);
+
+    /// <summary>The portable part of a legacy tree: every exclusion and its contents removed.</summary>
+    private static SortedDictionary<string, string> Portable(SortedDictionary<string, string> tree) => new(
+        tree.Where(p => !StockOpenShellRuntime.PrivateWorkspaceEntries.Contains(p.Key.Split('/')[0])).ToDictionary(), StringComparer.Ordinal);
+
+    /// <summary>The activation write itself (the copy helper's exclusion arguments also name the marker).</summary>
+    private static bool Activation(ManagedStockRuntimeAdapterTests.Call c) => c.Args.Any(a => a.StartsWith("printf 1 > ", StringComparison.Ordinal));
+
+    private ManagedRecord Stored() => ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+
+    /// <summary>A stored record without its write timestamp (every final commit re-stamps it).</summary>
+    private static string Shape(string? json)
+    {
+        var node = JsonNode.Parse(json!)!.AsObject();
+        node.Remove("updatedAt");
+        return node.ToJsonString();
+    }
+
+    private bool Mutating(ManagedStockRuntimeAdapterTests.Call c) => c.Args.Count > 1 && c.Args[0] == "sandbox"
+        && c.Args[1] is "create" or "start" or "stop" or "upload" or "download" or "exec" or "provider";
+
+    [Fact]
+    public async Task Legacy_same_image_reprovision_moves_the_tree_into_W_on_the_same_sandbox_and_keeps_the_original()
+    {
+        var old = Legacy("fl-1e9ac7000000a401");
+        _t._cli.Sandboxes[old.SandboxName] = (old.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = old }));
+        var legacy = LegacyTree(old.SandboxName);
+        var before = Tree(legacy);
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Message);
+        var applied = Stored().Applied!;
+        Assert.Equal((old.SandboxName, old.SandboxId, W), (applied.SandboxName, applied.SandboxId, applied.WorkloadWorkspacePath));
+        Assert.DoesNotContain(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        var w = _t._cli.Fs(old.SandboxName, W);
+        var carried = Tree(w);
+        Assert.Equal("{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"}}}", carried[".mcp.json"]); // fresh routes
+        carried.Remove(".mcp.json");
+        Assert.Equal(Portable(before), carried); // bytes, empty directories, exec bits, W/app and nested names
+        Assert.Equal(before, Tree(legacy)); // the original is neither moved nor changed
+        Assert.Equal(W, JsonNode.Parse(_t._cli.Uploads.Last(u => u.Remote == "/home/agent/app/appsettings.json").Content!)!["Agent"]!["WorkDir"]!.GetValue<string>());
+        // Only the snapshot stays in the owned operation directory; the helper is gone; nothing was read outside the root.
+        var operation = Assert.Single(Directory.GetDirectories(_t._cli.Fs(old.SandboxName, "/home/agent/.phleet-workspace-transfer")));
+        Assert.Equal(["data"], Directory.GetFileSystemEntries(operation).Select(Path.GetFileName));
+        Assert.All(_t._cli.Downloads, d => Assert.StartsWith("/home/agent/.phleet-workspace-transfer/", d));
+        var snapshot = Assert.Single(Directory.GetDirectories(Path.Combine(_t._dir, "managed", "agent1", applied.Epoch.ToString("N"), "workspace-out")));
+        Assert.Equal(Portable(before).Keys, Tree(snapshot).Keys);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(snapshot));
+    }
+
+    [Fact]
+    public async Task Current_layout_reprovision_keeps_W_edits_and_never_unions_a_stale_legacy_tree()
+    {
+        var binding = _t.Binding("fl-1e9ac7000000a402", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        var w = _t._cli.Fs(binding.SandboxName, W);
+        File.WriteAllText(Path.Combine(w, "latest.txt"), "edit 2");
+        var stale = _t._cli.Fs(binding.SandboxName, "/workspace");
+        Directory.CreateDirectory(stale);
+        File.WriteAllText(Path.Combine(stale, "latest.txt"), "stale");
+        File.WriteAllText(Path.Combine(stale, "old-only.txt"), "stale");
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Message);
+        Assert.Equal((binding.SandboxId, W), (Stored().Applied!.SandboxId, Stored().Applied!.WorkloadWorkspacePath));
+        Assert.Equal("edit 2", File.ReadAllText(Path.Combine(w, "latest.txt")));
+        Assert.False(File.Exists(Path.Combine(w, "old-only.txt")));
+        Assert.Equal(["stale", "stale"], Directory.GetFiles(stale).Select(File.ReadAllText));
+        Assert.Empty(_t._cli.Downloads);
+        Assert.DoesNotContain(_t._cli.Uploads, u => u.Remote.StartsWith(W + "/", StringComparison.Ordinal) && u.Remote != W + "/.mcp.json");
+        Assert.Contains(_t._cli.Uploads, u => u.Remote == W + "/.mcp.json");
+    }
+
+    [Theory]
+    [InlineData("stray file")]
+    [InlineData("link")]
+    public async Task Legacy_reprovision_with_unexpected_W_content_holds_without_merging(string kind)
+    {
+        var old = Legacy("fl-1e9ac7000000a403");
+        _t._cli.Sandboxes[old.SandboxName] = (old.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = old }));
+        var legacy = LegacyTree(old.SandboxName);
+        var before = Tree(legacy);
+        var w = _t._cli.Fs(old.SandboxName, W);
+        if (kind == "link") File.CreateSymbolicLink(w, legacy);
+        else { Directory.CreateDirectory(w); File.WriteAllText(Path.Combine(w, "stray"), "unexpected"); }
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("workspace_layout_conflict", apply.Code);
+        var record = Stored();
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains("layout:workspace_layout_conflict", record.Errors);
+        Assert.Null(record.Applied!.WorkloadWorkspacePath); // the legacy layout is never silently promoted
+        Assert.DoesNotContain(_t._cli.Uploads, u => u.Remote.StartsWith(W + "/", StringComparison.Ordinal));
+        Assert.Empty(_t._cli.Downloads);
+        Assert.Equal(before, Tree(legacy));
+        if (kind != "link") Assert.Equal("unexpected", File.ReadAllText(Path.Combine(w, "stray")));
+        Assert.Equal("Stopped", _t._cli.Sandboxes[old.SandboxName].Phase);
+        Assert.DoesNotContain(_t._cli.Calls, Activation);
+    }
+
+    [Theory]
+    [InlineData("openshell", "no_generated_settings")]
+    [InlineData("openshell", "other_workdir")]
+    [InlineData("openshell", "other_home_in_settings")]
+    [InlineData("openshell", "unknown_persisted_path")]
+    [InlineData("openshell", "changed_home_config")]
+    [InlineData("openshell", "image_change")]
+    [InlineData("docker", "no_generated_settings")]
+    [InlineData("docker", "unknown_persisted_path")]
+    [InlineData("docker", "missing_helper")]
+    public async Task Unprovable_layout_or_missing_helper_refuses_before_any_effect(string desired, string fault)
+    {
+        var binding = fault switch
+        {
+            "no_generated_settings" => Legacy("fl-1e9ac7000000a404", workDir: null),
+            "other_workdir" => Legacy("fl-1e9ac7000000a404", workDir: W),
+            "other_home_in_settings" => Legacy("fl-1e9ac7000000a404", appRoot: "/home/other/app"),
+            "unknown_persisted_path" => _t.Binding("fl-1e9ac7000000a404", Guid.NewGuid()) with { WorkloadWorkspacePath = "/srv/workspace" },
+            "image_change" => Legacy("fl-1e9ac7000000a404", image: Old, workDir: null),
+            _ => _t.Binding("fl-1e9ac7000000a404", Guid.NewGuid()),
+        };
+        if (fault == "changed_home_config") _t.ConfigOverrides = new() { ["StockOpenShell:WorkloadHome"] = "/home/other" };
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        var state = fault == "image_change" ? "revoked" : "stopped";
+        _t._store.Add(_t.ManagedAgent(desired: desired, applied: "openshell", record: new ManagedRecord { State = state, Applied = binding }));
+        if (fault == "missing_helper") _t.HelperFile = Path.Combine(_t._dir, "absent.py");
+        var before = Shape(_t._store.Get("agent1").AppliedRuntimeBinding);
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal((409, fault == "missing_helper" ? "workspace_export_failed" : "workspace_layout_unverified"), (apply.Status, apply.Code));
+        Assert.DoesNotContain(_t._cli.Calls, Mutating);
+        Assert.Empty(_t._broker.Puts);
+        Assert.Empty(_t._broker.Deletes);
+        Assert.Equal(before, Shape(_t._store.Get("agent1").AppliedRuntimeBinding));
+        Assert.Empty(_t._dockerProvisions);
+    }
+
+    [Fact]
+    public async Task Legacy_image_change_exports_the_old_tree_into_a_fresh_W_and_retains_the_stopped_original()
+    {
+        var old = Legacy("fl-1e9ac7000000a405", image: Old);
+        _t._cli.Sandboxes[old.SandboxName] = (old.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = old }));
+        _t.WriteAuthority("active");
+        var legacy = LegacyTree(old.SandboxName);
+        var before = Tree(legacy);
+        var runtime = _t.Runtime();
+
+        Assert.Equal("managed_image_change_requires_revoke", (await runtime.ApplyAsync("agent1", default)).Code);
+        Assert.True((await runtime.RevokeAsync("agent1", default)).Ok);
+        var apply = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Message);
+        var record = Stored();
+        Assert.NotEqual(old.SandboxId, record.Applied!.SandboxId);
+        Assert.Equal(("stock-agent:synthetic", W), (record.Applied.Image, record.Applied.WorkloadWorkspacePath));
+        var carried = Tree(_t._cli.Fs(record.Applied.SandboxName, W));
+        Assert.StartsWith("{\"mcpServers\":", carried[".mcp.json"]);
+        carried.Remove(".mcp.json");
+        Assert.Equal(Portable(before), carried);
+        // The old identity keeps its data and custody: stopped, its legacy tree byte-identical, still recorded without a path.
+        Assert.Equal("Stopped", _t._cli.Sandboxes[old.SandboxName].Phase);
+        Assert.Equal(before, Tree(legacy));
+        var superseded = Assert.Single(record.Superseded);
+        Assert.Equal((old.SandboxId, (string?)null), (superseded.SandboxId, superseded.WorkloadWorkspacePath));
+        Assert.DoesNotContain("/workspace", _t._cli.Downloads);
+        Assert.All(_t._cli.Downloads, d => Assert.StartsWith("/home/agent/.phleet-workspace-transfer/", d));
+    }
+
+    /// <summary>A pinned CLI that fails one verb (download) like a nonzero or timed-out transfer.</summary>
+    private sealed class FailingCli(IStockCli inner, string verb, bool timeout) : IStockCli
+    {
+        public Task<StockCliResult> RunAsync(IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? secretEnv, TimeSpan bound, CancellationToken ct) =>
+            args.Count > 1 && args[0] == "sandbox" && args[1] == verb ? Task.FromResult(new StockCliResult(-1, "", TimedOut: timeout))
+                : inner.RunAsync(args, secretEnv, bound, ct);
+    }
+
+    [Theory]
+    [InlineData("included_link", "export:workspace_export_failed")]
+    [InlineData("absent_source", "export:workspace_layout_unverified")]
+    [InlineData("python_missing", "export:workspace_export_failed")]
+    [InlineData("policy_denied", "export:workspace_export_failed")]
+    [InlineData("root_mismatch", "export:workspace_layout_unverified")]
+    [InlineData("operation_collision", "export:workspace_layout_conflict")]
+    [InlineData("altered_download", "download:workspace_download_unknown")]
+    [InlineData("download_nonzero", "download:workspace_download_unknown")]
+    [InlineData("download_timeout", "download:workspace_download_unknown")]
+    [InlineData("identity_change", "download:sandbox_identity_changed")]
+    [InlineData("unwritable_staging", "download:workspace_stage_failed")]
+    [InlineData("cleanup_failed", "export:workspace_cleanup_failed")]
+    public async Task Image_change_transfer_faults_hold_before_any_new_sandbox_and_keep_the_source(string fault, string detail)
+    {
+        var old = Legacy("fl-1e9ac7000000a406", image: Old);
+        _t._cli.Sandboxes[old.SandboxName] = (old.SandboxId, "Stopped");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "revoked", Applied = old }));
+        var legacy = LegacyTree(old.SandboxName);
+        var cli = (IStockCli)_t._cli;
+        switch (fault)
+        {
+            case "included_link": File.CreateSymbolicLink(Path.Combine(legacy, "src", "link"), "/etc/hostname"); break;
+            case "absent_source": Directory.Delete(legacy, recursive: true); break;
+            case "python_missing": _t._cli.OnWorkspaceExec = label => label == "copy" ? 127 : null; break;
+            case "policy_denied": _t._cli.OnWorkspaceExec = label => label == "copy" ? 5 : null; break;
+            case "root_mismatch": _t._cli.OnWorkspaceExec = label => label == "copy" ? 3 : null; break;
+            case "operation_collision": _t._cli.OnWorkspaceExec = label => label == "transfer" ? 4 : null; break;
+            case "altered_download": _t._cli.BeforeDownload = data => File.WriteAllText(Path.Combine(data, "late.txt"), "appeared after the copy"); break;
+            case "download_nonzero": cli = new FailingCli(_t._cli, "download", timeout: false); break;
+            case "download_timeout": cli = new FailingCli(_t._cli, "download", timeout: true); break;
+            case "identity_change": _t._cli.BeforeDownload = _ => _t._cli.Sandboxes[old.SandboxName] = (Guid.NewGuid().ToString(), "Ready"); break;
+            case "unwritable_staging":
+                Directory.CreateDirectory(Path.Combine(_t._dir, "managed", "agent1", old.Epoch.ToString("N")));
+                File.WriteAllText(Path.Combine(_t._dir, "managed", "agent1", old.Epoch.ToString("N"), "workspace-out"), "not a directory");
+                break;
+            case "cleanup_failed": _t._cli.OnWorkspaceExec = label => label == "cleanup" ? 1 : null; break;
+        }
+        var before = Directory.Exists(legacy) ? Tree(legacy) : null;
+
+        var apply = await _t.Runtime(cli: cli).ApplyAsync("agent1", default);
+
+        Assert.Equal("image_change_workspace_unresolved", apply.Code);
+        Assert.Contains(detail, apply.Errors);
+        var record = Stored();
+        Assert.Equal(("needs_attention", old.SandboxId, (ManagedBinding?)null), (record.State, record.Applied!.SandboxId, record.Candidate));
+        Assert.DoesNotContain(_t._cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.DoesNotContain(_t._cli.Calls, Activation);
+        if (fault != "identity_change") Assert.Equal("Stopped", _t._cli.Sandboxes[old.SandboxName].Phase); // the bounded, verified Stop ran
+        if (before is not null) Assert.Equal(before, Tree(legacy));
+        // No partial snapshot ever reached a destination: the bundle workspace has only its generated routes.
+        Assert.DoesNotContain(_t._cli.Uploads, u => u.Remote.StartsWith(W + "/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_cancelled_handoff_stops_on_its_own_deadline_and_never_touches_docker()
+    {
+        var binding = _t.Binding("fl-1e9ac7000000a407", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        Directory.CreateDirectory(_t.DockerWorkspaceDir);
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "prior.txt"), "docker");
+        using var client = new CancellationTokenSource();
+        _t._cli.OnWorkspaceExec = label => { if (label == "copy") client.Cancel(); return null; };
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", client.Token);
+
+        Assert.Equal("openshell_to_docker_unresolved", apply.Code);
+        Assert.Contains("export:workspace_transfer_cancelled", apply.Errors);
+        Assert.Equal("Stopped", _t._cli.Sandboxes[binding.SandboxName].Phase);
+        Assert.Equal(["prior.txt"], Directory.GetFileSystemEntries(_t.DockerWorkspaceDir).Select(Path.GetFileName));
+        Assert.Empty(_t._dockerProvisions);
+        Assert.Equal("openshell", _t._store.Get("agent1").AppliedRuntimeKind);
+    }
+
+    [Fact]
+    public async Task Docker_handoff_snapshots_the_prior_portable_tree_and_leaves_excluded_state_untouched()
+    {
+        var binding = _t.Binding("fl-1e9ac7000000a408", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var w = _t._cli.Fs(binding.SandboxName, W);
+        Directory.CreateDirectory(Path.Combine(w, "app"));
+        File.WriteAllText(Path.Combine(w, "app", "main.py"), "user app");
+        File.WriteAllText(Path.Combine(w, ".ssh"), "sandbox-side control never transferred");
+        var docker = _t.DockerWorkspaceDir;
+        Directory.CreateDirectory(Path.Combine(docker, ".ssh"));
+        File.WriteAllText(Path.Combine(docker, ".ssh", "id"), "docker control");
+        Directory.CreateDirectory(Path.Combine(docker, "codex"));
+        File.CreateSymbolicLink(Path.Combine(docker, "codex", "current"), "/etc"); // inside an excluded entry: never read
+        File.WriteAllText(Path.Combine(docker, "prior.txt"), "replaced by the sandbox tree");
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Message);
+        Assert.Equal("user app", File.ReadAllText(Path.Combine(docker, "app", "main.py")));
+        Assert.Equal("from sandbox", File.ReadAllText(Path.Combine(docker, "marker-back.txt")));
+        Assert.False(File.Exists(Path.Combine(docker, "prior.txt")));
+        Assert.Equal("docker control", File.ReadAllText(Path.Combine(docker, ".ssh", "id")));
+        Assert.Equal("/etc", new FileInfo(Path.Combine(docker, "codex", "current")).LinkTarget);
+        var snapshot = Assert.Single(Directory.GetDirectories(Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"), "docker-before")));
+        Assert.Equal(["prior.txt"], Directory.GetFileSystemEntries(snapshot).Select(Path.GetFileName));
+        Assert.Equal("replaced by the sandbox tree", File.ReadAllText(Path.Combine(snapshot, "prior.txt")));
+        Assert.Single(Directory.GetDirectories(Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"), "workspace-out")));
+        // #507 review F8: the private stage record shows the excluded entries identical across the mirror, metadata only.
+        var record = File.ReadAllText(snapshot + ".excluded.json");
+        var stage = JsonNode.Parse(record)!;
+        Assert.Equal(stage["beforeMirror"]!.ToJsonString(), stage["afterMirror"]!.ToJsonString());
+        Assert.Equal([".ssh", ".ssh/id", "codex", "codex/current"], stage["beforeMirror"]!.AsObject().Select(p => p.Key).Order(StringComparer.Ordinal));
+        Assert.Equal("l:/etc", stage["beforeMirror"]!["codex/current"]!.GetValue<string>()); // the link itself, never its target tree
+        Assert.DoesNotContain("docker control", record);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(snapshot + ".excluded.json"));
+    }
+
+    [Fact]
+    public async Task An_excluded_state_change_during_the_mirror_holds_docker_as_a_proved_violation()
+    {
+        // Negative control: an unauthorized credential write into the Docker destination during the transfer stage.
+        var binding = _t.Binding("fl-1e9ac7000000a40b", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        Directory.CreateDirectory(Path.Combine(_t.DockerWorkspaceDir, "codex"));
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "codex", "auth.json"), "{\"synthetic\":\"before\"}");
+        _t.MirrorProbe = docker => File.WriteAllText(Path.Combine(docker, "codex", "auth.json"), "{\"synthetic\":\"unauthorized\"}");
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("openshell_to_docker_unresolved", apply.Code);
+        Assert.Contains("restore:excluded_state_changed", apply.Errors);
+        Assert.Empty(_t._dockerProvisions);
+        Assert.Equal("openshell", _t._store.Get("agent1").AppliedRuntimeKind);
+        var stage = JsonNode.Parse(File.ReadAllText(Directory.GetFiles(
+            Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"), "docker-before"), "*.excluded.json").Single()))!;
+        Assert.NotEqual(stage["beforeMirror"]!["codex/auth.json"]!.ToJsonString(), stage["afterMirror"]!["codex/auth.json"]!.ToJsonString());
+    }
+
+    [Fact]
+    public void The_regression_reads_excluded_state_exactly_as_the_adapter_records_it()
+    {
+        // #507 review F8: scripts/stock_workspace_transfer.py compares its own pre-apply view with the adapter's stage record.
+        var root = Path.Combine(_t._dir, "excluded-parity");
+        Directory.CreateDirectory(Path.Combine(root, "codex", "sessions", "deep"));
+        File.WriteAllText(Path.Combine(root, "codex", "auth.json"), "synthetic");
+        File.WriteAllBytes(Path.Combine(root, "codex", "sessions", "deep", "log"), new byte[1234]);
+        File.SetUnixFileMode(Path.Combine(root, "codex", "sessions"), (UnixFileMode)0b111_101_000);
+        File.WriteAllText(Path.Combine(root, ".fleet-ready"), "1");
+        File.CreateSymbolicLink(Path.Combine(root, "codex", "current"), "/etc");
+        Directory.CreateDirectory(Path.Combine(root, "portable"));
+        var script = Path.Combine(Path.GetDirectoryName(ManagedStockRuntimeAdapterTests.CopyHelper)!, "stock_workspace_transfer.py");
+        var psi = new System.Diagnostics.ProcessStartInfo("python3") { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in new[] { "-c", "import importlib.util, json, sys; s = importlib.util.spec_from_file_location('m', sys.argv[1]); "
+                     + "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m.excluded_state(sys.argv[2], json.loads(sys.argv[3]))))",
+                     script, root, System.Text.Json.JsonSerializer.Serialize(StockOpenShellRuntime.PrivateWorkspaceEntries) })
+            psi.ArgumentList.Add(arg);
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        Assert.True(process.ExitCode == 0, stderr);
+        var python = System.Text.Json.JsonSerializer.Deserialize<SortedDictionary<string, string>>(stdout)!;
+        Assert.Equal(StockOpenShellRuntime.ExcludedState(root), python);
+        Assert.Equal(7, python.Count); // codex, auth.json, sessions, deep, log, the current link and .fleet-ready
+    }
+
+    [Fact]
+    public void Excluded_state_is_metadata_only_and_sees_writes_prunes_and_additions()
+    {
+        var root = Path.Combine(_t._dir, "excluded-state");
+        Directory.CreateDirectory(Path.Combine(root, "codex"));
+        File.WriteAllText(Path.Combine(root, "codex", "auth.json"), "secret-synthetic");
+        File.WriteAllText(Path.Combine(root, "user.txt"), "portable, not excluded");
+        File.CreateSymbolicLink(Path.Combine(root, ".ssh"), "/nonexistent-target");
+        var before = StockOpenShellRuntime.ExcludedState(root);
+        Assert.Equal([".ssh", "codex", "codex/auth.json"], before.Keys.Order(StringComparer.Ordinal));
+        Assert.DoesNotContain(before.Values, v => v.Contains("secret"));
+        Assert.Equal("l:/nonexistent-target", before[".ssh"]);
+
+        File.WriteAllText(Path.Combine(root, "user.txt"), "portable change is not excluded state");
+        Assert.Equal(before, StockOpenShellRuntime.ExcludedState(root));
+        File.SetLastWriteTimeUtc(Path.Combine(root, "codex", "auth.json"), DateTime.UtcNow.AddMinutes(1));
+        Assert.NotEqual(before, StockOpenShellRuntime.ExcludedState(root));
+        File.WriteAllText(Path.Combine(root, "codex", "new"), "x");
+        Assert.Contains("codex/new", StockOpenShellRuntime.ExcludedState(root).Keys);
+    }
+
+    [Theory]
+    [InlineData(3, "workspace_layout_unverified")]
+    [InlineData(4, "workspace_layout_conflict")]
+    [InlineData(127, "workspace_layout_unverified")]
+    public async Task Fresh_apply_verifies_the_stock_root_and_an_empty_W_before_any_input_lands(int exit, string code)
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._cli.OnWorkspaceExec = label => label == "layout" ? exit : null;
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal(code, apply.Code);
+        var record = Stored();
+        Assert.Equal(("needs_attention", W), (record.State, record.Candidate!.WorkloadWorkspacePath)); // persisted before any effect
+        Assert.Empty(_t._cli.Uploads);
+        Assert.Equal("Stopped", _t._cli.Sandboxes[record.Candidate.SandboxName].Phase);
+    }
+
+    [Fact]
+    public async Task Fresh_image_with_content_in_W_is_a_conflict_not_a_merge()
+    {
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        _t._cli.OnWorkspaceExec = label =>
+        {
+            if (label == "layout") File.WriteAllText(_t._cli.Fs(_t._cli.Sandboxes.Keys.Single(), W + "/from-image"), "image content");
+            return null;
+        };
+
+        Assert.Equal("workspace_layout_conflict", (await _t.Runtime().ApplyAsync("agent1", default)).Code);
+        Assert.Empty(_t._cli.Uploads);
+    }
+
+    [Fact]
+    public async Task Workspace_operations_use_the_transfer_bound_only_for_the_copy_and_download()
+    {
+        var binding = _t.Binding("fl-1e9ac7000000a409", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var runtime = _t.Runtime();
+
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+
+        var execs = _t._cli.Timeouts.Where(c => c.Args.Take(2).SequenceEqual(["sandbox", "exec"])).ToList();
+        Assert.Equal(runtime.TransferTimeout, Assert.Single(execs, c => c.Args.Contains("python3")).Timeout);
+        Assert.All(execs.Where(c => !c.Args.Contains("python3")), c => Assert.Equal(runtime.LegTimeout, c.Timeout));
+        Assert.Equal(runtime.TransferTimeout, Assert.Single(_t._cli.Timeouts, c => c.Args.Take(2).SequenceEqual(["sandbox", "download"])).Timeout);
+        // The helper receives the adapter's one exclusion list.
+        var copy = Assert.Single(_t._cli.Calls, c => c.Args.Contains("python3")).Args;
+        Assert.Equal(StockOpenShellRuntime.PrivateWorkspaceEntries, copy.Select((a, i) => (a, i)).Where(p => p.a == "--exclude").Select(p => copy[p.i + 1]));
+        Assert.Equal(W, copy[copy.IndexOf("--source") + 1]);
+    }
+
+    [Fact]
+    public async Task Git_filtered_paths_are_reported_privately_and_kept_in_the_source()
+    {
+        var docker = _t.DockerWorkspaceDir;
+        Directory.CreateDirectory(docker);
+        foreach (var args in new[] { new[] { "init", "-q", docker } })
+            System.Diagnostics.Process.Start("git", args)!.WaitForExit();
+        File.WriteAllText(Path.Combine(docker, ".gitignore"), "ignored.log\n");
+        File.WriteAllText(Path.Combine(docker, "tracked.txt"), "kept");
+        File.WriteAllText(Path.Combine(docker, "ignored.log"), "filtered by the CLI's default Git filtering");
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+
+        Assert.True((await _t.Runtime().ApplyAsync("agent1", default)).Ok);
+
+        var epoch = Stored().Applied!.Epoch.ToString("N");
+        var report = Path.Combine(_t._dir, "managed", "agent1", epoch, "workspace-not-transferred.txt");
+        var omitted = File.ReadAllLines(report);
+        Assert.Contains("ignored.log", omitted);
+        Assert.Contains(omitted, line => line.StartsWith(".git/", StringComparison.Ordinal));
+        Assert.DoesNotContain("tracked.txt", omitted);
+        Assert.DoesNotContain(".gitignore", omitted);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(report));
+        Assert.True(File.Exists(Path.Combine(docker, "ignored.log"))); // the original stays
+    }
+
+    /// <summary>
+    /// #507 review F1: a user repository whose own config runs a canary through <c>core.fsmonitor</c> and an index hook,
+    /// with a kept file and an ignored one. Returns the canary path after proving plain Git really runs it.
+    /// </summary>
+    internal static string CanaryRepository(string repository, string scratch)
+    {
+        var canary = Path.Combine(scratch, "git-command-ran");
+        var hooks = Path.Combine(scratch, "hooks");
+        Directory.CreateDirectory(hooks);
+        var script = $"#!/bin/sh\ntouch '{canary}'\n";
+        foreach (var path in new[] { Path.Combine(scratch, "fsmonitor.sh"), Path.Combine(hooks, "post-index-change") })
+        {
+            File.WriteAllText(path, script);
+            File.SetUnixFileMode(path, (UnixFileMode)0b111_101_101);
+        }
+        Git("init", "-q", repository);
+        Git("-C", repository, "config", "core.fsmonitor", Path.Combine(scratch, "fsmonitor.sh"));
+        Git("-C", repository, "config", "core.hooksPath", hooks);
+        File.WriteAllText(Path.Combine(repository, ".gitignore"), "ignored.log\n");
+        File.WriteAllText(Path.Combine(repository, "kept.txt"), "kept");
+        File.WriteAllText(Path.Combine(repository, "ignored.log"), "ignored");
+        Git("-C", repository, "ls-files", "-co", "--exclude-standard"); // positive control: plain Git runs it
+        Assert.True(File.Exists(canary), "the canary repository does not exercise core.fsmonitor");
+        File.Delete(canary);
+        return canary;
+    }
+
+    private static void Git(params string[] args)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in args) psi.ArgumentList.Add(arg);
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        process.StandardOutput.ReadToEnd();
+        process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task A_copied_repository_config_never_runs_a_command_and_filtering_still_applies()
+    {
+        Directory.CreateDirectory(_t.DockerWorkspaceDir);
+        var canary = CanaryRepository(_t.DockerWorkspaceDir, Path.Combine(_t._dir, "canary"));
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+
+        Assert.True((await _t.Runtime().ApplyAsync("agent1", default)).Ok);
+
+        Assert.False(File.Exists(canary));
+        var report = File.ReadAllLines(Path.Combine(_t._dir, "managed", "agent1", Stored().Applied!.Epoch.ToString("N"), "workspace-not-transferred.txt"));
+        Assert.Contains("ignored.log", report);
+        Assert.DoesNotContain("kept.txt", report);
+    }
+
+    [Theory]
+    [InlineData("running", "restore:docker_quiescence_pending")]
+    [InlineData("restarting", "restore:docker_quiescence_pending")]
+    [InlineData("unobservable", "restore:docker_observation_failed")]
+    public async Task Docker_destination_is_never_snapshotted_or_written_unless_its_container_is_stopped(string docker, string detail)
+    {
+        var binding = _t.Binding("fl-1e9ac7000000a40a", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        Directory.CreateDirectory(Path.Combine(_t.DockerWorkspaceDir, "nested"));
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "prior.txt"), "docker bytes");
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "nested", "file"), "docker bytes");
+        var before = Tree(_t.DockerWorkspaceDir);
+        _t._host.DockerStates = docker == "unobservable" ? null : [docker];
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("openshell_to_docker_unresolved", apply.Code);
+        Assert.Contains(detail, apply.Errors);
+        Assert.Equal(before, Tree(_t.DockerWorkspaceDir));
+        var epochDir = Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"));
+        Assert.False(Directory.Exists(Path.Combine(epochDir, "docker-before")));
+        Assert.Single(Directory.GetDirectories(Path.Combine(epochDir, "workspace-out"))); // the verified export is retained
+        Assert.Equal("Stopped", _t._cli.Sandboxes[binding.SandboxName].Phase);
+        Assert.Empty(_t._dockerProvisions);
+        Assert.Equal("openshell", _t._store.Get("agent1").AppliedRuntimeKind);
     }
 
     /// <summary>The file's bytes as read by <paramref name="uid"/> (no supplementary groups), or null when that uid is refused.</summary>

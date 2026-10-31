@@ -1784,6 +1784,58 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.Contains(record.Superseded, h => h.Epoch == history.Epoch);
     }
 
+    // ── #503 W9: the staged launcher prepares with the provider environment its boot was spawned with ──
+
+    /// <summary>
+    /// The pinned preparation after activation: it reads the stock-issued subscription handle from the environment its main
+    /// process was spawned with (StockOpenShellEnrollment, else stock_enrollment_native_auth_invalid), so the daemon becomes
+    /// ready only when that boot carried the provider.
+    /// </summary>
+    private void PinnedPreparation(string sandbox) =>
+        _cli.Cli("ws-a").OnExec = script => script == StockOpenShellRuntime.DaemonReadyScript
+            && !(_cli.Booted.TryGetValue(("ws-a", sandbox), out var booted) && booted.Contains(Provider)) ? 1 : 0;
+
+    private int CallIndex(params string[] args) => _cli.Calls.FindIndex(c => c.Args.SequenceEqual(args));
+
+    [Fact]
+    public async Task Revoked_reuse_attaches_the_subscription_provider_before_the_staged_boot()
+    {
+        WriteSource();
+        var old = SubBinding("fleet-agent1-a9a9a9a9", phase: "Stopped", attached: false); // a clean revoke detached and stopped it
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "revoked", Applied = old }));
+        PinnedPreparation(old.SandboxName);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("applied", old.SandboxId), (record.State, record.Applied!.SandboxId)); // the same sandbox, reused
+        Assert.Equal([Provider], _cli.Booted[("ws-a", old.SandboxName)]);
+        Assert.InRange(CallIndex("sandbox", "provider", "attach", old.SandboxName, Provider), 0, CallIndex("sandbox", "start", old.SandboxName) - 1);
+        Assert.Single(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "attach"])); // once, before the boot only
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Stopped_restart_boots_only_with_the_provider_still_attached_and_never_reattaches(bool attached)
+    {
+        WriteSource();
+        var binding = SubBinding("fleet-agent1-a8a8a8a8", phase: "Stopped", attached: attached); // Stop keeps attachments
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
+        WriteSourceMatching(binding);
+        PinnedPreparation(binding.SandboxName);
+
+        var result = await Runtime().StartAsync("agent1", default);
+
+        Assert.Equal(attached, result.Ok);
+        Assert.Equal(attached ? [Provider] : [], _cli.Booted[("ws-a", binding.SandboxName)]);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "attach"]));
+        if (!attached) Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
+    }
+
     internal sealed class MutableClock : TimeProvider
     {
         public DateTimeOffset Now;
@@ -1806,6 +1858,11 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         public string ProfileExport = SyntheticProfile.Export;
         private int _exports;
         public bool DetachFails, AttachedListFails;
+        /// <summary>
+        /// #503 W9 pinned spawn semantics per workspace: the attached providers each boot (create or start) spawned the main
+        /// process with. A later attach changes <see cref="Attached"/> only, never a running boot's set.
+        /// </summary>
+        public readonly Dictionary<(string Ws, string Sandbox), HashSet<string>> Booted = new();
 
         public ManagedStockRuntimeAdapterTests.FakeCli Cli(string workspace) =>
             _workspaces.TryGetValue(workspace, out var cli) ? cli : _workspaces[workspace] = new();
@@ -1848,6 +1905,10 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
                 case ("sandbox", "create", _):
                     var name = list[list.IndexOf("--name") + 1];
                     Attached[(ws, name)] = [.. list.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => list[p.i + 1])];
+                    Booted[(ws, name)] = [.. Attached[(ws, name)]];
+                    return await Cli(ws).RunAsync(list, secretEnv, timeout, ct);
+                case ("sandbox", "start", _):
+                    Booted[(ws, At(2))] = Attached.TryGetValue((ws, At(2)), out var booting) ? [.. booting] : [];
                     return await Cli(ws).RunAsync(list, secretEnv, timeout, ct);
                 default:
                     return await Cli(ws).RunAsync(list, secretEnv, timeout, ct);

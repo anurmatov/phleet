@@ -222,6 +222,34 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         else Assert.DoesNotContain(revoke.Errors, e => e.StartsWith("stop:", StringComparison.Ordinal)); // the stop itself reconciled
     }
 
+    // #503 W9: pinned stock gives the main process only the providers attached when it spawns; a revoked reuse must reattach
+    // before the staged boot, as create's --provider does, and a stopped restart boots with the attachments it kept.
+    [Theory]
+    [InlineData("revoked_reuse")]
+    [InlineData("stopped_restart")]
+    public async Task Staged_boot_carries_the_api_provider_its_preparation_reads(string path)
+    {
+        var binding = Binding("fleet-agent1-a7a7a7a7", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Stopped");
+        var restart = path == "stopped_restart";
+        if (restart) _cli.Attached[binding.SandboxName] = [binding.Provider]; // a clean revoke would have detached it
+        _store.Add(ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = restart ? "stopped" : "revoked", Applied = binding }));
+        if (restart) Enroll(binding);
+        // The pinned preparation reads the OPENAI_API_KEY placeholder from the environment its boot was spawned with.
+        _cli.OnExec = script => script == StockOpenShellRuntime.DaemonReadyScript
+            && !(_cli.Booted.TryGetValue(binding.SandboxName, out var booted) && booted.Contains(binding.Provider)) ? 1 : 0;
+
+        var result = restart ? await Runtime().StartAsync("agent1", default) : await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        Assert.Contains(binding.Provider, _cli.Booted[binding.SandboxName]);
+        var start = _cli.Calls.FindIndex(c => c.Args.SequenceEqual(["sandbox", "start", binding.SandboxName]));
+        var attach = _cli.Calls.FindIndex(c => c.Args.SequenceEqual(["sandbox", "provider", "attach", binding.SandboxName, binding.Provider]));
+        if (restart) Assert.Equal(-1, attach);
+        else Assert.InRange(attach, 0, start - 1);
+    }
+
     [Fact]
     public async Task Concurrent_writer_gets_409_before_any_external_action()
     {
@@ -1229,8 +1257,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
                 ("sandbox", "get") => Sandboxes.TryGetValue(Name(2), out var s)
                     ? new(0, Get(Name(2), s))
                     : NameTaken ? new(0, JsonSerializer.Serialize(new { id = Guid.NewGuid().ToString(), name = Name(2), phase = "Ready" })) : new(1, ""),
-                ("sandbox", "start") => Phase(Name(2), "Ready"),
+                ("sandbox", "start") => Start(Name(2)),
                 ("sandbox", "stop") => Stop(Name(2)),
+                ("sandbox", "provider") => Attachment(args),
                 ("sandbox", "download") => Transfer(Name(2), () => Download(args[4])),
                 ("sandbox", "upload") => Transfer(Name(2), () => Upload(args[3], args[4])),
                 ("sandbox", "exec") => Transfer(args[3], () => new(OnExec?.Invoke(args[^1]) ?? 0, "")),
@@ -1250,6 +1279,8 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             // #503 W3: the pinned server's first spec validation (InvalidArgument, nothing allocated); a taken name refuses too.
             if (CreateRejects || !StockSandboxName(name) || Sandboxes.ContainsKey(name)) return new(1, "");
             Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready"); // the explicit launcher waits, staged, without a daemon
+            Attached[name] = [.. args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => args[p.i + 1])];
+            Booted[name] = [.. Attached[name]];
             // #503 W4: the stock labels create set, as `sandbox get -o json` reports them.
             Labels[name] = LabelsOverride ?? args.Select((a, i) => (a, i)).Where(p => p.a == "--label").Select(p => args[p.i + 1].Split('=', 2))
                 .ToDictionary(kv => kv[0], kv => kv[1]);
@@ -1335,6 +1366,29 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         {
             Sandboxes[name] = (Guid.NewGuid().ToString(), "Ready");
             return new(0, "line\n");
+        }
+
+        /// <summary>
+        /// #503 W9 pinned spawn semantics: the providers attached to each sandbox, and the set its main process was spawned
+        /// with at its last boot (create or start). Stock captures the provider environment when the supervisor starts and
+        /// injects it only at spawn (openshell-supervisor lib.rs:912, openshell-sandbox process.rs:514–523); an attach while
+        /// running updates the spec and pushes config (grpc/sandbox.rs:1481–1516) but never the running main process.
+        /// </summary>
+        public readonly Dictionary<string, HashSet<string>> Attached = new();
+        public readonly Dictionary<string, HashSet<string>> Booted = new();
+
+        private StockCliResult Start(string name)
+        {
+            Booted[name] = Attached.TryGetValue(name, out var attached) ? [.. attached] : [];
+            return Phase(name, "Ready");
+        }
+
+        private StockCliResult Attachment(IReadOnlyList<string> args)
+        {
+            if (args.Count != 5 || args[2] is not ("attach" or "detach")) return new(0, "");
+            var set = Attached.TryGetValue(args[3], out var current) ? current : Attached[args[3]] = [];
+            if (args[2] == "attach") set.Add(args[4]); else set.Remove(args[4]);
+            return new(0, "");
         }
 
         /// <summary>#503 W8: extra `sandbox get -o json` fields per name (the pinned exit_code and conditions).</summary>

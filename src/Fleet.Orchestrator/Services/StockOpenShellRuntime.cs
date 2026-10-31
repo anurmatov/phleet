@@ -1384,6 +1384,18 @@ public sealed class StockOpenShellRuntime(
             // #502: retained subscription history of an API reuse is verified before it can be retired at commit.
             if (RetirementTuples(agent, record) is { Count: > 0 } held && await RetirementFaultAsync(agent.Name, held, ct) is { } unverifiedHistory)
                 return await HoldStoppedAsync(applying, candidate, "subscription_retirement_unverified", [unverifiedHistory], ct);
+            // #503 W9: the cut detached every old provider, and pinned stock gives the main process only the provider
+            // environment captured when it spawns (openshell-supervisor lib.rs:912, openshell-sandbox process.rs:514–523);
+            // a later attach updates the spec and pushes config, never the running launcher's environment. So exactly the
+            // current set is attached while stopped, before the staged boot, as create's --provider does for a fresh sandbox.
+            if (Expired()) return await CutAsync(applying);
+            if (await EnsureProvidersAsync() is { } providerFault)
+                return providerFault == StockSubscriptionBinding.Expired ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, providerFault, [], ct);
+            foreach (var provider in candidate.AllProviders())
+            {
+                var attach = await cli.RunAsync(Scoped(candidate, ["sandbox", "provider", "attach", candidate.SandboxName, provider]), null, LegTimeout, ct);
+                if (attach.ExitCode != 0 || attach.TimedOut) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, "provider_attach_unknown", [], ct);
+            }
         }
         else
         {
@@ -1444,22 +1456,11 @@ public sealed class StockOpenShellRuntime(
                      : [("app", WorkloadHome), ("trust", WorkloadHome), ("workspace", "/")])
             if (await UploadAsync(candidate, Path.Combine(bundle, local), remote, ct) is { } upload)
                 return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, upload, [], ct);
-        if (reuse)
+        // Reuse: providers were attached before the boot (above); a policy change needs the running supervisor's --wait.
+        if (reuse && record.Applied!.PolicyVersionId != policy.Id)
         {
-            if (record.Applied!.PolicyVersionId != policy.Id)
-            {
-                var set = await cli.RunAsync(Scoped(candidate, ["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"]), null, LegTimeout, ct);
-                if (set.ExitCode != 0 || set.TimedOut) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, "policy_update_unknown", [], ct);
-            }
-            if (Expired()) return await CutAsync(applying);
-            if (await EnsureProvidersAsync() is { } providerFault)
-                return providerFault == StockSubscriptionBinding.Expired ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, providerFault, [], ct);
-            // The cut detached every old provider; attach exactly the current set (a dropped bot/journal stays detached).
-            foreach (var provider in candidate.AllProviders())
-            {
-                var attach = await cli.RunAsync(Scoped(candidate, ["sandbox", "provider", "attach", candidate.SandboxName, provider]), null, LegTimeout, ct);
-                if (attach.ExitCode != 0 || attach.TimedOut) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, "provider_attach_unknown", [], ct);
-            }
+            var set = await cli.RunAsync(Scoped(candidate, ["policy", "set", candidate.SandboxName, "--policy", Path.Combine(epochDir, "policy.yaml"), "--wait"]), null, LegTimeout, ct);
+            if (set.ExitCode != 0 || set.TimedOut) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, "policy_update_unknown", [], ct);
         }
 
         // Broker users exist only now; then the outside and guest enrollments carry the exact UUID/epoch.

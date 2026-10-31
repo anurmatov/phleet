@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,13 +27,10 @@ PINNED_CLI_SHA256 = "446f766842d2bf03abc37b56a3f5a3e46b96140b5b6c305d3f168d67921
 KEYS = {"orchestratorUrl", "tokenEnv", "cli", "cliConfigDir", "workloadHome", "freshAgent", "freshDockerWorkspace",
         "legacyAgent", "baselineImage", "replacementImage", "receiptDir"}
 CLEANUP_SECONDS = 120
-# Excluded-state reconciliation (A5). Ordinary provisioning (ContainerProvisioningService) rewrites these generated
-# control outputs on every apply; the Docker bind of .generated/output-styles creates its mount point; the committed
-# Docker workload mounts these homes read-write. Any other change, and any change to a script-placed sentinel, fails.
-GENERATED_FILES = {".generated/appsettings.json", ".generated/.mcp.json", ".generated/settings.json", ".generated/codex-root.toml"}
-GENERATED_TREES = (".generated/roles", ".generated/projects", ".generated/output-styles")
-BIND_TARGET_DIRECTORIES = {".claude/output-styles"}
-WORKLOAD_HOMES = {"claude", "codex"}
+# A5 excluded-state proof: script-owned sentinels in every excluded entry, and the adapter's private stage record of the
+# Docker destination's excluded metadata right before its snapshot and right after its mirror
+# (<ConfigDir>/managed/<agent>/<epoch>/docker-before/<operation>.excluded.json, written by StockOpenShellRuntime).
+TICKS_AT_UNIX_EPOCH = 621355968000000000  # .NET DateTime ticks at 1970-01-01, as the record's mtimes are written
 SENTINEL = "phleet-507-sentinel"
 STAGED = 'test -f "$HOME/.fleet-staged" && test ! -f "$HOME/.fleet-ready"'
 
@@ -115,43 +113,33 @@ def load_fixture(path):
     return data
 
 
-def control_state(top, excluded):
-    """Every entry under an excluded top-level name, without following links: type, size, content hash and mtime."""
-    rows = {}
-    for directory, dirs, files in os.walk(top):
-        for name in dirs + files:
-            path = os.path.join(directory, name)
-            rel = os.path.relpath(path, top)
-            if rel.split("/")[0] not in excluded:
-                continue
-            info = os.lstat(path)
-            kind = "d" if stat.S_ISDIR(info.st_mode) else "f" if stat.S_ISREG(info.st_mode) else "l" if stat.S_ISLNK(info.st_mode) else "other"
-            content = None
-            if kind == "f":
-                with open(path, "rb") as handle:
-                    content = hashlib.sha256(handle.read()).hexdigest()
-            rows[rel] = {"type": kind, "size": info.st_size if kind == "f" else 0, "sha256": content, "mtime": info.st_mtime}
-    return rows
+def excluded_state(top, excluded):
+    """Excluded-entry metadata exactly as StockOpenShellRuntime.ExcludedState records it; no content read, no link followed."""
+    state = {}
+
+    def describe(path, rel):
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode):
+            state[rel] = "l:" + os.readlink(path)
+            return
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISDIR(info.st_mode):
+            state[rel] = f"d:{mode}"
+            for name in os.listdir(path):
+                describe(os.path.join(path, name), rel + "/" + name)
+        else:
+            state[rel] = f"f:{info.st_size}:{TICKS_AT_UNIX_EPOCH + info.st_mtime_ns // 100}:{mode}"
+    if os.path.isdir(top):
+        for name in os.listdir(top):
+            if name in excluded:
+                describe(os.path.join(top, name), name)
+    return state
 
 
-def control_changes(before, after):
-    """Added, removed or changed (type or bytes) excluded-state entries; a directory whose listing changed shows as its entries."""
-    return [{"path": rel, "before": before.get(rel), "after": after.get(rel)} for rel in sorted(set(before) | set(after))
-            if not (rel in before and rel in after and (before[rel]["type"], before[rel]["sha256"]) == (after[rel]["type"], after[rel]["sha256"]))]
-
-
-def attribute(change, sentinels, started_at):
-    """Why an excluded-state entry changed; anything not positively attributable is `unattributed`, never assumed benign."""
-    path, before, after = change["path"], change["before"], change["after"]
-    if path in sentinels:
-        return "sentinel_violation"
-    if path in GENERATED_FILES or any(path == tree or path.startswith(tree + "/") for tree in GENERATED_TREES):
-        return "provisioning_regenerated"
-    if path in BIND_TARGET_DIRECTORIES and before is None and after is not None and after["type"] == "d":
-        return "docker_bind_target"
-    if path.split("/")[0] in WORKLOAD_HOMES and after is not None and started_at is not None and after["mtime"] >= started_at:
-        return "committed_workload_write"
-    return "unattributed"
+def state_changes(before, after):
+    """Added, removed or changed entries between two excluded-state views."""
+    return [{"path": rel, "before": before.get(rel), "after": after.get(rel)}
+            for rel in sorted(set(before) | set(after)) if before.get(rel) != after.get(rel)]
 
 
 def docker_time(value):
@@ -346,48 +334,85 @@ class Regression:
             raise AssertionError("several containers carry the agent's container name")
         return ids[0] if ids else None
 
+    def left(self, end, cap=60.0):
+        """Time left before a cleanup deadline (at most `cap`); raises once it has passed."""
+        remaining = end - self.clock()
+        if remaining <= 0:
+            raise CleanupDeadline(f"cleanup deadline of {CLEANUP_SECONDS}s exceeded")
+        return min(cap, remaining)
+
+    def bounded_api(self, method, path, end):
+        """One orchestrator call with a hard wall-clock bound at the cleanup deadline (urllib bounds only socket steps)."""
+        remaining = self.left(end, cap=CLEANUP_SECONDS)
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(value=self.api(method, path, timeout=remaining)), daemon=True)
+        worker.start()
+        worker.join(remaining)
+        if "value" not in result or self.clock() > end:
+            raise CleanupDeadline(f"cleanup deadline of {CLEANUP_SECONDS}s exceeded")
+        return result["value"]
+
     def agent_cleanup(self, agent):
-        """After a Docker commit the managed binding is gone (revoke would be a 409): stop the committed Docker workload."""
+        """ONE 120-second deadline from entry across the runtime lookup, the Docker workload stop and the revoke. After a Docker
+        commit the managed binding is gone (a revoke is a 409), so the committed Docker workload is stopped instead."""
+        end = self.clock() + CLEANUP_SECONDS
         pending = self.state.get("dockerApply")
         if not pending or pending["agent"] != agent:
-            self.revoke_cleanup(agent)
+            self.revoke_cleanup(agent, end)
             return
-        status, body = self.api("GET", f"/api/agents/{agent}/config", timeout=60)
-        applied = body.get("appliedRuntimeKind") if status == 200 and isinstance(body, dict) else None
+        try:
+            status, body = self.bounded_api("GET", f"/api/agents/{agent}/config", end)
+            applied = body.get("appliedRuntimeKind") if status == 200 and isinstance(body, dict) else None
+        except CleanupDeadline as error:
+            applied, status = None, str(error)
         if applied == "docker":
-            self.docker_stop_cleanup(pending)
+            self.docker_stop_cleanup(pending, end)
             return
         if applied is None:
             self.receipt["cleanup"].append({"action": "commit-state", "agent": agent, "result": "error", "reason": f"applied runtime unreadable ({status})"})
-            self.docker_stop_cleanup(pending)  # identity-checked: stops only a container provisioned after the Docker apply
-        self.revoke_cleanup(agent)
+            self.docker_stop_cleanup(pending, end)  # stops only a container whose ownership is proven
+        self.revoke_cleanup(agent, end)
 
-    def docker_stop_cleanup(self, pending):
-        """Identity check, stop and not-running polling of the committed Docker workload under ONE 120-second deadline."""
-        entry = {"action": "docker-stop", "agent": pending["agent"], "container": pending["container"]}
-        end = self.clock() + CLEANUP_SECONDS
-
-        def left(cap=60.0):
-            remaining = end - self.clock()
-            if remaining <= 0:
-                raise CleanupDeadline(f"cleanup deadline of {CLEANUP_SECONDS}s exceeded")
-            return min(cap, remaining)
+    def ownership_fault(self, pending, container, end):
+        """None only when `container` is provably the committed workload: the ID pinned at commit, or, when none was pinned,
+        independent fixture proof (the fixture's own Docker workspace bound at /workspace, created after the Docker apply)."""
+        if container == pending.get("before"):
+            return "the named container existed before the Docker apply"
+        if pending.get("committed") is not None:
+            return None if container == pending["committed"] else "the named container is not the pinned committed workload"
+        code, out = self.docker(["inspect", "--format", "{{json .Mounts}}\t{{.Created}}", container], timeout=self.left(end))
         try:
-            current = self.container_id(pending["container"], timeout=left())
+            mounts, created = out.decode(errors="replace").strip().split("\t", 1)
+            mounts = json.loads(mounts) if code == 0 else []
+        except ValueError:
+            mounts, created = [], ""
+        owned = os.path.realpath(self.f["freshDockerWorkspace"])
+        binds = [m for m in mounts if isinstance(m, dict) and m.get("Type") == "bind" and m.get("Destination") == "/workspace"]
+        if len(binds) != 1 or os.path.realpath(binds[0].get("Source") or "/") != owned:
+            return "ownership unproven: the container does not bind the fixture's own Docker workspace at /workspace"
+        created_at = docker_time(created)
+        if created_at is None or created_at < pending["issuedAt"]:
+            return "ownership unproven: the container was not created after the Docker apply"
+        return None
+
+    def docker_stop_cleanup(self, pending, end=None):
+        """Identity and ownership checks, stop and not-running polling of the committed Docker workload, within the deadline."""
+        entry = {"action": "docker-stop", "agent": pending["agent"], "container": pending["container"]}
+        end = end if end is not None else self.clock() + CLEANUP_SECONDS
+        try:
+            current = self.container_id(pending["container"], timeout=self.left(end))
             if current is None:
                 entry["result"] = "absent"
             else:
                 entry["containerId"] = current
-                # Only the workload the Docker apply provisioned: never the container that existed before it, and when the
-                # commit was observed, exactly that container.
-                if current == pending.get("before") or pending.get("committed") not in (None, current):
-                    raise AssertionError("the named container is not the committed Docker workload")
-                code, _ = self.docker(["stop", "--time", str(int(min(30, left()))), current], timeout=left())
+                if (fault := self.ownership_fault(pending, current, end)) is not None:
+                    raise AssertionError(fault + "; not stopped")
+                code, _ = self.docker(["stop", "--time", str(int(min(30, self.left(end)))), current], timeout=self.left(end))
                 while True:
-                    probe, out = self.docker(["inspect", "--format", "{{.State.Running}}", current], timeout=left())
+                    probe, out = self.docker(["inspect", "--format", "{{.State.Running}}", current], timeout=self.left(end))
                     if probe == 0 and out.decode(errors="replace").strip() == "false":
                         break
-                    self.sleep(left(2.0))
+                    self.sleep(self.left(end, 2.0))
                 entry["result"] = "stopped"
                 if code != 0:
                     entry["stopExit"] = code
@@ -395,9 +420,14 @@ class Regression:
             entry.update(result="error", reason=str(error))
         self.receipt["cleanup"].append(entry)
 
-    def revoke_cleanup(self, agent):
-        """The orchestrator's own bounded revoke (cut, detach, broker revoke, verified Stop) as one call within the deadline."""
-        status, body = self.api("POST", f"/api/agents/{agent}/revoke", timeout=CLEANUP_SECONDS)
+    def revoke_cleanup(self, agent, end=None):
+        """The orchestrator's own bounded revoke (cut, detach, broker revoke, verified Stop), within the cleanup deadline."""
+        end = end if end is not None else self.clock() + CLEANUP_SECONDS
+        try:
+            status, body = self.bounded_api("POST", f"/api/agents/{agent}/revoke", end)
+        except CleanupDeadline as error:
+            self.receipt["cleanup"].append({"action": "revoke", "agent": agent, "result": "error", "reason": str(error)})
+            return
         entry = {"action": "revoke", "agent": agent, "result": "revoked" if status == 200 else "error"}
         if status != 200:
             entry["reason"] = f"revoke returned {status} {json.dumps(body)[:200]}"
@@ -569,8 +599,10 @@ class Regression:
             else:
                 os.makedirs(path, exist_ok=True)
                 rel = name + "/" + SENTINEL
-            with open(os.path.join(ws, rel), "w") as handle:
-                handle.write("synthetic docker control " + name + "\n")
+            content = ("synthetic docker control " + name + "\n").encode()
+            with open(os.path.join(ws, rel), "wb") as handle:
+                handle.write(content)
+            self.state.setdefault("sentinelContent", {})[rel] = content
             sentinels.append(rel)
         return sentinels
 
@@ -586,12 +618,16 @@ class Regression:
         status, body = self.api("GET", f"/api/agents/{self.f['freshAgent']}", timeout=60)
         container = body.get("containerName") if status == 200 and isinstance(body, dict) else None
         assert container, "the agent's Docker container name is unreadable"
-        # Recorded before the Docker apply, so any cleanup (failure or interruption) can find the committed workload.
-        pending = self.state["dockerApply"] = {"agent": self.f["freshAgent"], "container": container, "before": self.container_id(container)}
+        epoch = (applied.get("epoch") or "").replace("-", "")
+        records = os.path.join(self.f["cliConfigDir"], "managed", self.f["freshAgent"], epoch, "docker-before")
+        known = self.stage_records(records)
         status, _ = self.api("PUT", f"/api/agents/{self.f['freshAgent']}/config", {"runtimeKind": "docker"})
         assert status == 200, f"desired runtime change returned {status}"
         ws = self.f["freshDockerWorkspace"]
-        before = control_state(ws, self.excluded)  # immediately before the handoff, not at seeding time
+        before = excluded_state(ws, self.excluded)  # immediately before the handoff, not at seeding time
+        # Recorded before the Docker apply, so any cleanup (failure or interruption) can identify the committed workload.
+        pending = self.state["dockerApply"] = {"agent": self.f["freshAgent"], "container": container,
+                                               "before": self.container_id(container), "issuedAt": time.time()}
         status, body = self.api("POST", f"/api/agents/{self.f['freshAgent']}/runtime/apply")
         assert status == 200, f"Docker apply returned {status} {json.dumps(body)[:200]}"
         cfg, _ = self.config(self.f["freshAgent"])
@@ -599,19 +635,51 @@ class Regression:
         committed = self.container_id(container)
         assert committed and committed != pending["before"], "no newly provisioned Docker workload"
         pending["committed"] = committed
-        code, out = self.docker(["inspect", "--format", "{{.State.StartedAt}}", committed])
-        started_at = docker_time(out.decode(errors="replace")) if code == 0 else None
         after = manifest(ws)
-        changes = [dict(change, cause=attribute(change, self.state.get("sentinels", []), started_at))
-                   for change in control_changes(before, control_state(ws, self.excluded))]
-        # The full private difference is retained before any assertion.
-        self.receipt["excludedStateChanges"] = {"containerStartedAt": started_at, "changes": changes}
+        final = excluded_state(ws, self.excluded)
+        # The adapter's stage record of exactly this handoff: the only accepted proof about the transfer stage.
+        new_records = sorted(set(self.stage_records(records)) - set(known))
+        stage = self.read_stage_record(records, new_records)
+        proof = {"record": new_records, "scriptBeforeVsRecordBefore": state_changes(before, stage.get("beforeMirror") or {}),
+                 "acrossMirror": state_changes(stage.get("beforeMirror") or {}, stage.get("afterMirror") or {}),
+                 "afterTransferStage": state_changes(stage.get("afterMirror") or {}, final)}
+        sentinels = {rel: self.read_sentinel(ws, rel) for rel in self.state.get("sentinels", [])}
+        proof["sentinelsChanged"] = sorted(rel for rel, content in sentinels.items() if content != self.state["sentinelContent"][rel])
+        # Every difference is retained privately before any assertion.
+        self.receipt["excludedStateProof"] = proof
         assert self.portable(after) == expected, "Docker workspace does not mirror W"
-        violations = [c["path"] for c in changes if c["cause"] in ("sentinel_violation", "unattributed")]
-        assert not violations, f"excluded Docker state changed without an attributable cause ({len(violations)} paths; see the receipt)"
-        causes = sorted({c["cause"] for c in changes})
-        return {"dockerSha256": digest(self.portable(after)), "entries": len(expected), "excludedSentinelsUnchanged": True,
-                "excludedChangeCauses": causes}
+        assert not proof["sentinelsChanged"], "a script sentinel in excluded Docker state changed"
+        assert stage.get("afterMirror") is not None and not proof["acrossMirror"], "excluded Docker state changed during the transfer stage"
+        assert not proof["scriptBeforeVsRecordBefore"], "excluded Docker state changed before the transfer stage"
+        return {"dockerSha256": digest(self.portable(after)), "entries": len(expected), "excludedUnchangedThroughTransfer": True,
+                "afterTransferStageChanges": len(proof["afterTransferStage"])}
+
+    def stage_records(self, directory):
+        try:
+            return [name for name in os.listdir(directory) if name.endswith(".excluded.json")]
+        except FileNotFoundError:
+            return []
+        except OSError:
+            raise AssertionError("the adapter's stage records are unreadable (run as a ConfigDir reader)")
+
+    def read_stage_record(self, directory, names):
+        if len(names) != 1:
+            raise AssertionError(f"expected exactly one new adapter stage record, found {len(names)}")
+        try:
+            with open(os.path.join(directory, names[0])) as handle:
+                record = json.load(handle)
+        except (OSError, ValueError):
+            raise AssertionError("the adapter's stage record is unreadable")
+        if not isinstance(record, dict) or record.get("version") != 1 or not isinstance(record.get("beforeMirror"), dict):
+            raise AssertionError("the adapter's stage record is malformed")
+        return record
+
+    def read_sentinel(self, ws, rel):
+        try:
+            with open(os.path.join(ws, rel), "rb") as handle:
+                return handle.read()
+        except OSError:
+            return None
 
     def run_cases(self):
         self.case("A1 legacy control", self.a1_legacy_control)

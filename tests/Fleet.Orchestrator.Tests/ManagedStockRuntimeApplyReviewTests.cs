@@ -767,6 +767,86 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal(["prior.txt"], Directory.GetFileSystemEntries(snapshot).Select(Path.GetFileName));
         Assert.Equal("replaced by the sandbox tree", File.ReadAllText(Path.Combine(snapshot, "prior.txt")));
         Assert.Single(Directory.GetDirectories(Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"), "workspace-out")));
+        // #507 review F8: the private stage record shows the excluded entries identical across the mirror, metadata only.
+        var record = File.ReadAllText(snapshot + ".excluded.json");
+        var stage = JsonNode.Parse(record)!;
+        Assert.Equal(stage["beforeMirror"]!.ToJsonString(), stage["afterMirror"]!.ToJsonString());
+        Assert.Equal([".ssh", ".ssh/id", "codex", "codex/current"], stage["beforeMirror"]!.AsObject().Select(p => p.Key).Order(StringComparer.Ordinal));
+        Assert.Equal("l:/etc", stage["beforeMirror"]!["codex/current"]!.GetValue<string>()); // the link itself, never its target tree
+        Assert.DoesNotContain("docker control", record);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(snapshot + ".excluded.json"));
+    }
+
+    [Fact]
+    public async Task An_excluded_state_change_during_the_mirror_holds_docker_as_a_proved_violation()
+    {
+        // Negative control: an unauthorized credential write into the Docker destination during the transfer stage.
+        var binding = _t.Binding("fl-1e9ac7000000a40b", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        Directory.CreateDirectory(Path.Combine(_t.DockerWorkspaceDir, "codex"));
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "codex", "auth.json"), "{\"synthetic\":\"before\"}");
+        _t.MirrorProbe = docker => File.WriteAllText(Path.Combine(docker, "codex", "auth.json"), "{\"synthetic\":\"unauthorized\"}");
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("openshell_to_docker_unresolved", apply.Code);
+        Assert.Contains("restore:excluded_state_changed", apply.Errors);
+        Assert.Empty(_t._dockerProvisions);
+        Assert.Equal("openshell", _t._store.Get("agent1").AppliedRuntimeKind);
+        var stage = JsonNode.Parse(File.ReadAllText(Directory.GetFiles(
+            Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"), "docker-before"), "*.excluded.json").Single()))!;
+        Assert.NotEqual(stage["beforeMirror"]!["codex/auth.json"]!.ToJsonString(), stage["afterMirror"]!["codex/auth.json"]!.ToJsonString());
+    }
+
+    [Fact]
+    public void The_regression_reads_excluded_state_exactly_as_the_adapter_records_it()
+    {
+        // #507 review F8: scripts/stock_workspace_transfer.py compares its own pre-apply view with the adapter's stage record.
+        var root = Path.Combine(_t._dir, "excluded-parity");
+        Directory.CreateDirectory(Path.Combine(root, "codex", "sessions", "deep"));
+        File.WriteAllText(Path.Combine(root, "codex", "auth.json"), "synthetic");
+        File.WriteAllBytes(Path.Combine(root, "codex", "sessions", "deep", "log"), new byte[1234]);
+        File.SetUnixFileMode(Path.Combine(root, "codex", "sessions"), (UnixFileMode)0b111_101_000);
+        File.WriteAllText(Path.Combine(root, ".fleet-ready"), "1");
+        File.CreateSymbolicLink(Path.Combine(root, "codex", "current"), "/etc");
+        Directory.CreateDirectory(Path.Combine(root, "portable"));
+        var script = Path.Combine(Path.GetDirectoryName(ManagedStockRuntimeAdapterTests.CopyHelper)!, "stock_workspace_transfer.py");
+        var psi = new System.Diagnostics.ProcessStartInfo("python3") { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in new[] { "-c", "import importlib.util, json, sys; s = importlib.util.spec_from_file_location('m', sys.argv[1]); "
+                     + "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m.excluded_state(sys.argv[2], json.loads(sys.argv[3]))))",
+                     script, root, System.Text.Json.JsonSerializer.Serialize(StockOpenShellRuntime.PrivateWorkspaceEntries) })
+            psi.ArgumentList.Add(arg);
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        Assert.True(process.ExitCode == 0, stderr);
+        var python = System.Text.Json.JsonSerializer.Deserialize<SortedDictionary<string, string>>(stdout)!;
+        Assert.Equal(StockOpenShellRuntime.ExcludedState(root), python);
+        Assert.Equal(7, python.Count); // codex, auth.json, sessions, deep, log, the current link and .fleet-ready
+    }
+
+    [Fact]
+    public void Excluded_state_is_metadata_only_and_sees_writes_prunes_and_additions()
+    {
+        var root = Path.Combine(_t._dir, "excluded-state");
+        Directory.CreateDirectory(Path.Combine(root, "codex"));
+        File.WriteAllText(Path.Combine(root, "codex", "auth.json"), "secret-synthetic");
+        File.WriteAllText(Path.Combine(root, "user.txt"), "portable, not excluded");
+        File.CreateSymbolicLink(Path.Combine(root, ".ssh"), "/nonexistent-target");
+        var before = StockOpenShellRuntime.ExcludedState(root);
+        Assert.Equal([".ssh", "codex", "codex/auth.json"], before.Keys.Order(StringComparer.Ordinal));
+        Assert.DoesNotContain(before.Values, v => v.Contains("secret"));
+        Assert.Equal("l:/nonexistent-target", before[".ssh"]);
+
+        File.WriteAllText(Path.Combine(root, "user.txt"), "portable change is not excluded state");
+        Assert.Equal(before, StockOpenShellRuntime.ExcludedState(root));
+        File.SetLastWriteTimeUtc(Path.Combine(root, "codex", "auth.json"), DateTime.UtcNow.AddMinutes(1));
+        Assert.NotEqual(before, StockOpenShellRuntime.ExcludedState(root));
+        File.WriteAllText(Path.Combine(root, "codex", "new"), "x");
+        Assert.Contains("codex/new", StockOpenShellRuntime.ExcludedState(root).Keys);
     }
 
     [Theory]

@@ -2823,14 +2823,62 @@ public sealed class StockOpenShellRuntime(
     {
         var target = DockerWorkspaceDir(agent);
         var before = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(snapshot)!)!, "docker-before", Path.GetFileName(snapshot));
+        SortedDictionary<string, string> excludedBefore;
         try
         {
             if (Directory.Exists(before)) return "restore:workspace_stage_failed";
             PrivateDirectory(before);
+            excludedBefore = ExcludedState(target);
             if (Directory.Exists(target)) CopyTree(target, before, PrivateWorkspaceEntries);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "restore:workspace_stage_failed"; }
-        return CarryInto(snapshot, target);
+        var restore = CarryInto(snapshot, target);
+        MirrorProbe?.Invoke(target);
+        // #507 review F8: stage evidence of the mirror itself, kept privately beside the snapshot. The excluded entries'
+        // metadata must be identical across the mirror; any difference holds Docker as a proved violation.
+        SortedDictionary<string, string>? excludedAfter;
+        try { excludedAfter = ExcludedState(target); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { excludedAfter = null; }
+        try
+        {
+            WriteText(before + ".excluded.json", new JsonObject
+            {
+                ["version"] = 1,
+                ["beforeMirror"] = JsonSerializer.SerializeToNode(excludedBefore),
+                ["afterMirror"] = excludedAfter is null ? null : JsonSerializer.SerializeToNode(excludedAfter),
+            }.ToJsonString());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return restore ?? "restore:excluded_state_unrecorded"; }
+        if (restore is not null) return restore;
+        return excludedAfter is not null && excludedAfter.SequenceEqual(excludedBefore) ? null : "restore:excluded_state_changed";
+    }
+
+    /// <summary>Test seam: runs on the Docker workspace right after the mirror, before its excluded state is re-read.</summary>
+    internal Action<string>? MirrorProbe { get; init; }
+
+    /// <summary>
+    /// #507 review F8: metadata of every excluded entry under <paramref name="root"/>, by relative path, without reading any
+    /// content or following links: <c>l:target</c>, <c>d:mode</c> or <c>f:size:mtime-ticks:mode</c> (100 ns ticks, UTC).
+    /// </summary>
+    internal static SortedDictionary<string, string> ExcludedState(string root)
+    {
+        var state = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        if (!Directory.Exists(root)) return state;
+        foreach (var top in new DirectoryInfo(root).EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0 }))
+            if (PrivateWorkspaceEntries.Contains(top.Name)) Describe(top);
+        return state;
+
+        // Manual recursion: the runtime's recursive enumeration descends into a linked directory, which this must never do.
+        void Describe(FileSystemInfo entry)
+        {
+            var relative = Path.GetRelativePath(root, entry.FullName).Replace('\\', '/');
+            if (entry.LinkTarget is { } link) { state[relative] = "l:" + link; return; }
+            var mode = OperatingSystem.IsWindows() ? 0 : (int)File.GetUnixFileMode(entry.FullName);
+            state[relative] = entry is DirectoryInfo ? FormattableString.Invariant($"d:{mode}")
+                : FormattableString.Invariant($"f:{((FileInfo)entry).Length}:{entry.LastWriteTimeUtc.Ticks}:{mode}");
+            if (entry is DirectoryInfo directory)
+                foreach (var child in directory.EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0 })) Describe(child);
+        }
     }
 
     /// <summary>

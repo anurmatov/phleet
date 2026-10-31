@@ -25,7 +25,7 @@ class FakeRegression(transfer.Regression):
     """The pinned CLI and orchestrator as an in-memory gateway; every call is recorded."""
 
     def __init__(self, work):
-        fixture = {"orchestratorUrl": "http://127.0.0.1:9", "tokenEnv": "T", "cli": "/x", "cliConfigDir": "/x", "workloadHome": "/home/agent",
+        fixture = {"orchestratorUrl": "http://127.0.0.1:9", "tokenEnv": "T", "cli": "/x", "cliConfigDir": work + "/config", "workloadHome": "/home/agent",
                    "freshAgent": "fresh", "freshDockerWorkspace": work + "/docker", "legacyAgent": "legacy",
                    "baselineImage": OLD["image"], "replacementImage": NEW["image"], "receiptDir": work}
         super().__init__(fixture, str(ROOT), "synthetic", work)
@@ -45,6 +45,7 @@ class FakeRegression(transfer.Regression):
         # Docker agent containers by exact name: full ID, running, StartedAt.
         self.containers = {}
         self.fresh_applied = "docker"
+        self.api_delay = 0.0
 
     def docker(self, args, timeout=60):
         self.docker_calls.append(list(args))
@@ -67,7 +68,8 @@ class FakeRegression(transfer.Regression):
                 container["running"] = False
             return (0, b"") if container else (1, b"")
         if args[0] == "inspect" and container:
-            field = {"{{.State.Running}}": "true" if container["running"] else "false", "{{.State.StartedAt}}": container["started"]}
+            field = {"{{.State.Running}}": "true" if container["running"] else "false", "{{.State.StartedAt}}": container["started"],
+                     "{{json .Mounts}}\t{{.Created}}": json.dumps(container.get("mounts", [])) + "\t" + container.get("created", "")}
             return 0, field[args[2]].encode() + b"\n"
         if args[0] == "inspect":
             sandbox = args[-1].removeprefix("container-")
@@ -111,6 +113,11 @@ class FakeRegression(transfer.Regression):
 
     def api(self, method, path, body=None, timeout=900):
         self.api_calls.append((method, path))
+        self.timeouts.append((self.now, timeout))
+        if self.api_delay > timeout:
+            self.now += timeout
+            return 0, None
+        self.now += self.api_delay
         if method == "GET" and path == "/api/agents/legacy/config":
             return 200, {"appliedRuntimeKind": "openshell", "appliedRuntimeBinding": json.dumps(self.legacy)}
         if method == "GET" and path == "/api/agents/fresh/config":
@@ -277,13 +284,17 @@ class StockWorkspaceTransferTests(unittest.TestCase):
 
     PRIOR, COMMITTED = "c" * 64, "d" * 64
 
+    def owned_container(self, container_id, created="2999-01-01T00:00:00Z", source=None):
+        return {"id": container_id, "running": True, "started": created, "created": created,
+                "mounts": [{"Type": "bind", "Source": source or self.run_.f["freshDockerWorkspace"], "Destination": "/workspace"}]}
+
     def pending_docker(self, committed=True, applied="docker"):
-        self.run_.containers["fleet-fresh"] = {"id": self.COMMITTED, "running": True, "started": "2026-10-31T19:00:00.5Z"}
-        self.run_.state["dockerApply"] = {"agent": "fresh", "container": "fleet-fresh", "before": self.PRIOR,
+        self.run_.containers["fleet-fresh"] = self.owned_container(self.COMMITTED)
+        self.run_.state["dockerApply"] = {"agent": "fresh", "container": "fleet-fresh", "before": self.PRIOR, "issuedAt": time.time(),
                                           **({"committed": self.COMMITTED} if committed else {})}
         self.run_.fresh_applied = applied
 
-    def test_a_failure_after_the_docker_commit_stops_the_committed_workload_instead_of_revoking(self):
+    def test_a_failure_after_the_docker_commit_stops_the_pinned_workload_instead_of_revoking(self):
         self.pending_docker()
         self.run_.case("A5", self.fail_case, agent="fresh")
         self.assertEqual({"action": "docker-stop", "agent": "fresh", "container": "fleet-fresh", "containerId": self.COMMITTED, "result": "stopped"},
@@ -299,55 +310,51 @@ class StockWorkspaceTransferTests(unittest.TestCase):
         self.assertTrue(self.run_.containers["fleet-fresh"]["running"])
         self.assertNotIn("stop", [c[0] for c in self.run_.docker_calls])
 
-    def test_the_container_that_existed_before_the_apply_or_a_different_one_is_never_stopped(self):
-        for current in [self.PRIOR, "e" * 64]:
-            with self.subTest(current=current):
+    def test_unproven_ownership_never_stops_a_same_name_container(self):
+        foreign_dir = tempfile.mkdtemp(dir=self.work)
+        cases = {
+            "the prior container": dict(committed=True, container=lambda: self.owned_container(self.PRIOR)),
+            "not the pinned committed ID": dict(committed=True, container=lambda: self.owned_container("e" * 64)),
+            "foreign mounts, nothing pinned": dict(committed=False, container=lambda: self.owned_container("e" * 64, source=foreign_dir)),
+            "created before the apply, nothing pinned": dict(committed=False, container=lambda: self.owned_container("e" * 64, created="2001-01-01T00:00:00Z")),
+            "unreadable mounts, nothing pinned": dict(committed=False, container=lambda: dict(self.owned_container("e" * 64), mounts="not-a-list")),
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
                 self.run_ = FakeRegression(self.work)
-                self.pending_docker()
-                self.run_.containers["fleet-fresh"]["id"] = current
+                self.pending_docker(committed=case["committed"])
+                self.run_.containers["fleet-fresh"] = case["container"]()
                 self.run_.case("A5", self.fail_case, agent="fresh")
                 self.assertEqual("error", self.run_.receipt["cleanup"][-1]["result"])
+                self.assertIn("not stopped", self.run_.receipt["cleanup"][-1]["reason"])
+                self.assertTrue(self.run_.containers["fleet-fresh"]["running"])
                 self.assertNotIn("stop", [c[0] for c in self.run_.docker_calls])
 
-    def test_docker_cleanup_shares_one_deadline_across_probe_stop_and_polling(self):
-        self.pending_docker()
-        self.run_.delay = 59.0
-        start = self.run_.now
-        self.run_.docker_stop_cleanup(self.run_.state["dockerApply"])
-        self.assertEqual("error", self.run_.receipt["cleanup"][-1]["result"])
-        self.assert_one_deadline(start)
+    def test_one_deadline_from_dispatcher_entry_covers_runtime_lookup_docker_stop_and_revoke(self):
+        for applied in ["docker", "openshell", None]:
+            with self.subTest(applied=applied):
+                self.run_ = FakeRegression(self.work)
+                self.pending_docker(committed=False, applied=applied)
+                self.run_.delay, self.run_.api_delay = 59.0, 70.0
+                start = self.run_.now
+                self.run_.agent_cleanup("fresh")
+                self.assert_one_deadline(start)
+                self.assertTrue(any(e["result"] == "error" for e in self.run_.receipt["cleanup"]))
 
-    # ── A5 excluded-state reconciliation ──
+    # ── A5 excluded-state proof: sentinels plus the adapter's stage record ──
 
-    def test_excluded_state_changes_are_attributed_only_with_evidence(self):
-        started = 1000.0
-        entry = lambda kind="f", mtime=2000.0, digest="x": {"type": kind, "size": 1, "sha256": digest, "mtime": mtime}
-        sentinels = [".ssh/" + transfer.SENTINEL, ".mcp.json"]
-        cases = [
-            ({"path": ".ssh/" + transfer.SENTINEL, "before": entry(), "after": entry(digest="y")}, "sentinel_violation"),
-            ({"path": ".mcp.json", "before": entry(), "after": None}, "sentinel_violation"),
-            ({"path": ".generated/appsettings.json", "before": entry(), "after": entry(digest="y")}, "provisioning_regenerated"),
-            ({"path": ".generated/roles/role.md", "before": None, "after": entry()}, "provisioning_regenerated"),
-            ({"path": ".generated/unexpected", "before": None, "after": entry()}, "unattributed"),
-            ({"path": ".claude/output-styles", "before": None, "after": entry("d")}, "docker_bind_target"),
-            ({"path": "codex/sessions/new.json", "before": None, "after": entry(mtime=started)}, "committed_workload_write"),
-            ({"path": "codex/auth.json", "before": entry(), "after": entry(mtime=started - 1, digest="y")}, "unattributed"),
-            ({"path": "claude/settings.json", "before": entry(), "after": None}, "unattributed"),
-            ({"path": ".ssh/new-key", "before": None, "after": entry()}, "unattributed"),
-        ]
-        for change, cause in cases:
-            with self.subTest(path=change["path"]):
-                self.assertEqual(cause, transfer.attribute(change, sentinels, started))
-        self.assertEqual("unattributed", transfer.attribute({"path": "codex/x", "before": None, "after": entry()}, sentinels, None))
-
-    def a5_with(self, mutate):
-        """A5 with the sandbox side stubbed; the Docker apply mirrors W and then applies `mutate(ws, started)`."""
+    def a5_with(self, during=None, before_stage=None, after=None, record=True):
+        """A5 with the sandbox side stubbed. The fake Docker apply writes the adapter's stage record around its mirror;
+        `before_stage`, `during` and `after` mutate the Docker workspace before, during and after the transfer stage."""
         ws = self.run_.f["freshDockerWorkspace"]
-        os.makedirs(ws)
+        os.makedirs(os.path.join(ws, "codex"))
+        with open(os.path.join(ws, "codex", "auth.json"), "w") as handle:
+            handle.write("synthetic")
         with open(os.path.join(ws, "old.txt"), "w") as handle:
             handle.write("old")
         self.run_.state["sentinels"] = self.run_.seed_sentinels(ws)
-        self.run_.state["fresh"] = dict(NEW)
+        epoch = "0f0f0f0f-0000-4000-8000-000000000001"
+        self.run_.state["fresh"] = dict(NEW, epoch=epoch)
         self.run_.gateway[NEW["sandboxName"]] = {"id": NEW["sandboxId"], "phase": "Ready"}
         tree = tempfile.mkdtemp(dir=self.work)
         for name, content in {"kept.txt": "edited", ".mcp.json": "{}"}.items():
@@ -356,68 +363,104 @@ class StockWorkspaceTransferTests(unittest.TestCase):
         self.run_.exec_ok = lambda sandbox, script, *args, timeout=60: True
         self.run_.download = lambda sandbox, source, label: (0, tree, b"")
         self.run_.fresh_applied = "openshell"
-        started = time.time() - 30
+        records = os.path.join(self.run_.f["cliConfigDir"], "managed", "fresh", epoch.replace("-", ""), "docker-before")
         real_api = self.run_.api
 
         def api(method, path, body=None, timeout=900):
             if method == "POST" and path.endswith("/runtime/apply"):
+                if before_stage:
+                    before_stage(ws)
+                stage = {"version": 1, "beforeMirror": transfer.excluded_state(ws, self.run_.excluded)}
                 for entry in os.listdir(ws):
                     if entry not in self.run_.excluded:
                         target = os.path.join(ws, entry)
                         shutil.rmtree(target) if os.path.isdir(target) else os.remove(target)
                 shutil.copy(os.path.join(tree, "kept.txt"), ws)
-                stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(started)) + "Z"
-                self.run_.containers["fleet-fresh"] = {"id": self.COMMITTED, "running": True, "started": stamp}
+                if during:
+                    during(ws)
+                stage["afterMirror"] = transfer.excluded_state(ws, self.run_.excluded)
+                if record:
+                    os.makedirs(records, exist_ok=True)
+                    with open(os.path.join(records, "op1.excluded.json"), "w") as handle:
+                        json.dump(stage, handle)
+                self.run_.containers["fleet-fresh"] = self.owned_container(self.COMMITTED)
                 self.run_.fresh_applied = "docker"
-                mutate(ws, started)
+                if after:
+                    after(ws)  # provisioning and the started workload, after the transfer stage
             return real_api(method, path, body, timeout)
         self.run_.api = api
-        self.run_.containers["fleet-fresh"] = {"id": self.PRIOR, "running": False, "started": "0001-01-01T00:00:00Z"}
+        self.run_.containers["fleet-fresh"] = dict(self.owned_container(self.PRIOR), running=False)
         self.run_.case("A5", self.run_.a5_current_to_docker, agent="fresh")
-        return self.run_.receipt["cases"]["A5"], self.run_.receipt["excludedStateChanges"]["changes"]
+        return self.run_.receipt["cases"]["A5"], self.run_.receipt.get("excludedStateProof")
 
-    def test_a5_passes_with_attributable_regeneration_and_keeps_every_difference_privately(self):
-        def regenerate(ws, started):
-            os.makedirs(os.path.join(ws, ".generated"), exist_ok=True)
-            with open(os.path.join(ws, ".generated", "appsettings.json"), "w") as handle:
-                handle.write("regenerated")
-            with open(os.path.join(ws, "codex", "session.json"), "w") as handle:
-                handle.write("written by the running workload")
-        result, changes = self.a5_with(regenerate)
+    @staticmethod
+    def write(ws, rel, content):
+        os.makedirs(os.path.dirname(os.path.join(ws, rel)), exist_ok=True)
+        with open(os.path.join(ws, rel), "w") as handle:
+            handle.write(content)
+
+    def test_a5_passes_when_the_transfer_stage_is_proved_unchanged_and_records_later_changes(self):
+        def provisioning_and_workload(ws):
+            self.write(ws, ".generated/appsettings.json", "regenerated")
+            self.write(ws, "codex/session.json", "written by the running workload")
+        result, proof = self.a5_with(after=provisioning_and_workload)
         self.assertEqual("PASS", result["result"], result.get("reason"))
-        self.assertEqual({".generated/appsettings.json": "provisioning_regenerated", "codex/session.json": "committed_workload_write"},
-                         {c["path"]: c["cause"] for c in changes})
-        self.assertEqual(["committed_workload_write", "provisioning_regenerated"], result["excludedChangeCauses"])
+        self.assertEqual(([], []), (proof["acrossMirror"], proof["scriptBeforeVsRecordBefore"]))
+        self.assertEqual([".generated/appsettings.json", "codex/session.json"], [c["path"] for c in proof["afterTransferStage"]])
         self.assertEqual([], self.run_.receipt["cleanup"])
 
-    def test_a5_fails_on_a_sentinel_or_unattributed_change_after_recording_it_and_stops_the_workload(self):
-        def violate(ws, started):
-            with open(os.path.join(ws, ".ssh", transfer.SENTINEL), "w") as handle:
-                handle.write("overwritten")
-            with open(os.path.join(ws, ".codex-host", "stray"), "w") as handle:
-                handle.write("unexplained")
-        result, changes = self.a5_with(violate)
-        self.assertEqual("FAIL", result["result"])
-        causes = {c["path"]: c["cause"] for c in changes}
-        self.assertEqual("sentinel_violation", causes[".ssh/" + transfer.SENTINEL])
-        self.assertEqual("unattributed", causes[".codex-host/stray"])
-        self.assertTrue(all(c["before"] is None or c["before"]["sha256"] for c in changes if c["path"].endswith(transfer.SENTINEL)))
-        self.assertEqual("docker-stop", self.run_.receipt["cleanup"][-1]["action"])
-        self.assertEqual(("stopped", self.COMMITTED), (self.run_.receipt["cleanup"][-1]["result"], self.run_.receipt["cleanup"][-1]["containerId"]))
-        self.assertNotIn(("POST", "/api/agents/fresh/revoke"), self.run_.api_calls)
+    def test_an_unauthorized_auth_write_during_or_before_the_transfer_stage_fails_and_stops_the_workload(self):
+        auth = lambda ws: self.write(ws, "codex/auth.json", "unauthorized")
+        for stage, kwargs, reason in [("during", {"during": auth}, "during the transfer stage"),
+                                      ("before", {"before_stage": auth}, "before the transfer stage")]:
+            with self.subTest(stage=stage):
+                self.run_ = FakeRegression(tempfile.mkdtemp(dir=self.work))
+                result, proof = self.a5_with(**kwargs)
+                self.assertEqual("FAIL", result["result"])
+                self.assertIn(reason, result["reason"])
+                changed = proof["acrossMirror"] if stage == "during" else proof["scriptBeforeVsRecordBefore"]
+                self.assertEqual(["codex/auth.json"], [c["path"] for c in changed])  # retained before the assertion
+                self.assertEqual(("docker-stop", "stopped", self.COMMITTED),
+                                 tuple(self.run_.receipt["cleanup"][-1][k] for k in ("action", "result", "containerId")))
+                self.assertNotIn(("POST", "/api/agents/fresh/revoke"), self.run_.api_calls)
 
-    def test_an_interruption_right_after_the_docker_apply_stops_the_new_workload(self):
-        def interrupt_next_read(ws, started):
+    def test_a5_fails_without_the_stage_record_or_with_a_changed_sentinel(self):
+        result, proof = self.a5_with(record=False)
+        self.assertEqual("FAIL", result["result"])
+        self.assertIn("stage record", result["reason"])
+        self.run_ = FakeRegression(tempfile.mkdtemp(dir=self.work))
+        result, proof = self.a5_with(after=lambda ws: self.write(ws, ".ssh/" + transfer.SENTINEL, "overwritten later"))
+        self.assertEqual("FAIL", result["result"])
+        self.assertEqual([".ssh/" + transfer.SENTINEL], proof["sentinelsChanged"])
+
+    def test_an_interruption_right_after_the_docker_apply_stops_only_the_proven_new_workload(self):
+        def interrupt_next_read(ws):
             def config(agent):
                 raise KeyboardInterrupt
             self.run_.config = config
         with self.assertRaises(KeyboardInterrupt):
-            self.a5_with(interrupt_next_read)
+            self.a5_with(after=interrupt_next_read)
         self.assertEqual("INTERRUPTED", self.run_.receipt["cases"]["A5"]["result"])
         self.assertEqual(("docker-stop", "stopped", self.COMMITTED),
                          tuple(self.run_.receipt["cleanup"][-1][k] for k in ("action", "result", "containerId")))
-        self.assertFalse(self.run_.containers["fleet-fresh"]["running"])
         self.assertEqual(130, self.run_.exit_code())
+
+    def test_a_foreign_same_name_container_after_an_interruption_is_left_running(self):
+        foreign = tempfile.mkdtemp(dir=self.work)
+
+        def foreign_replacement_then_interrupt(ws):
+            self.run_.containers["fleet-fresh"] = self.owned_container("f" * 64, source=foreign)
+
+            def config(agent):
+                raise KeyboardInterrupt
+            self.run_.config = config
+        with self.assertRaises(KeyboardInterrupt):
+            self.a5_with(after=foreign_replacement_then_interrupt)
+        entry = self.run_.receipt["cleanup"][-1]
+        self.assertEqual(("docker-stop", "error", "f" * 64), (entry["action"], entry["result"], entry["containerId"]))
+        self.assertIn("ownership unproven", entry["reason"])
+        self.assertTrue(self.run_.containers["fleet-fresh"]["running"])
+        self.assertNotIn("stop", [c[0] for c in self.run_.docker_calls])
 
     # ── F4: interruption unwinds through the same cleanup ──
 
@@ -454,9 +497,9 @@ class StockWorkspaceTransferTests(unittest.TestCase):
         self.addCleanup(lambda: [signal.signal(sig, handler) for sig, handler in previous.items()])
         revoke = self.run_.revoke_cleanup
 
-        def revoke_with_a_late_signal(agent):
+        def revoke_with_a_late_signal(agent, end=None):
             os.kill(os.getpid(), signal.SIGINT)  # arrives mid-cleanup: recorded and deferred, never cuts it short
-            revoke(agent)
+            revoke(agent, end)
         self.run_.revoke_cleanup = revoke_with_a_late_signal
         self.applied_legacy(lambda: os.kill(os.getpid(), signal.SIGTERM))
         with self.assertRaises(transfer.Interrupted):
@@ -472,9 +515,9 @@ class StockWorkspaceTransferTests(unittest.TestCase):
         self.run_.check_fixture_state()
         revoke = self.run_.revoke_cleanup
 
-        def revoke_with_a_signal(agent):
+        def revoke_with_a_signal(agent, end=None):
             os.kill(os.getpid(), signal.SIGTERM)
-            revoke(agent)
+            revoke(agent, end)
         self.run_.revoke_cleanup = revoke_with_a_signal
         self.run_.api = lambda method, path, body=None, timeout=900: (self.run_.api_calls.append((method, path)) or (500, None))
         with self.assertRaises(transfer.Interrupted):

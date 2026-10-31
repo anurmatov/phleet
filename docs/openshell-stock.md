@@ -533,7 +533,7 @@ every CLI child and the report's `git` get command-scope `core.fsmonitor=false` 
 | Current-layout reprovision | same UUID; persisted W is authoritative even if a stale `/workspace` exists (never merged); only `W/.mcp.json`, settings and trust are refreshed |
 | Legacy same-image reprovision | same UUID; W must be absent or empty, the proven `/workspace` is exported and uploaded into W, and the new layout commits only with the apply's success; the original `/workspace` stays |
 | Legacy or current image change | the existing revoke requirement; the old tree is exported and the old sandbox verified stopped before the replacement exists; the new sandbox uses W; the old identity, data and custody stay as Superseded |
-| OpenShell→Docker | the same export; after the verified Stop and once the agent's Docker container is observed absent, created, exited or dead, Docker's prior portable tree is copied to `<ConfigDir>/managed/<agent>/<epoch>/docker-before/<operation>`, then the existing deletion-aware mirror runs; Docker is provisioned only through the existing verified transition |
+| OpenShell→Docker | the same export; after the verified Stop and once the agent's Docker container is observed absent, created, exited or dead, Docker's prior portable tree is copied to `<ConfigDir>/managed/<agent>/<epoch>/docker-before/<operation>`, then the existing deletion-aware mirror runs. The excluded entries' metadata (type, size, mtime, mode, link target; content never read, links never followed) is recorded privately before the snapshot and after the mirror in `<operation>.excluded.json`, and must be identical; Docker is provisioned only through the existing verified transition |
 
 **Typed holds.** Failures keep the existing parents (`image_change_workspace_unresolved`,
 `openshell_to_docker_unresolved`) or, for reprovision, hold under the reason itself, with a bounded `phase:reason` detail
@@ -548,6 +548,7 @@ and no CLI stderr, payload or identifiers:
 | `download:workspace_stage_failed` / `restore:workspace_stage_failed` | the private snapshot, or Docker's prior-tree snapshot, could not be created |
 | `restore:workspace_restore_failed` | mirroring into the bundle or the Docker workspace failed part-way |
 | `restore:docker_quiescence_pending` / `restore:docker_observation_failed` | the agent's Docker container is running or cannot be observed; the Docker workspace is neither snapshotted nor written |
+| `restore:excluded_state_changed` / `restore:excluded_state_unrecorded` | an excluded Docker entry changed across the mirror, or its stage record could not be written; Docker stays held |
 | `export:workspace_cleanup_failed` | the helper file could not be removed after a verified download |
 | `*:workspace_transfer_cancelled` | the caller cancelled; the bounded Stop still runs on its own 120 s deadline |
 | `*:sandbox_identity_changed` / `*:sandbox_unobservable` | the exact UUID changed or could not be read around a leg |
@@ -578,13 +579,16 @@ read-only Docker access on the gateway host. It exits 0 only when every case pas
 fixture state is missing. Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox
 UUID and name in its persisted scope on the supplied gateway, so a fixture that disagrees with that gateway is BLOCKED
 before anything starts. A sandbox the script starts is always stopped again, a failed or interrupted case revokes its
-agent through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). After
-A5's Docker commit there is no managed binding to revoke: cleanup instead stops exactly the newly provisioned Docker
-container (exact name, an ID other than the container it had before the apply, and the ID observed at commit).
-A5 snapshots excluded state immediately before the handoff and records every path/type/hash difference privately before
-asserting. A difference passes only when attributable: documented provisioning outputs under `.generated`, the
-`.claude/output-styles` mount point, or writes in the workload's own `claude/` and `codex/` dated at or after its container
-start. A changed script sentinel or any unattributed difference fails. Each
+agent through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). One
+120-second deadline from cleanup entry covers the runtime lookup, any Docker stop and the revoke. After A5's Docker
+commit there is no managed binding to revoke, so cleanup stops the committed Docker workload instead, but only with
+proof: the container ID pinned at commit or, if the run was interrupted before that, the fixture's own Docker workspace
+bound at `/workspace` and a creation time after the apply. Unknown ownership is recorded and nothing is stopped. A5
+proves excluded state through the adapter's stage record, not paths or mtimes. The script's own pre-apply view must
+equal the record's before-mirror view, the record must show no change across the mirror, and every script sentinel must
+be unchanged. Later changes (regenerated provisioning outputs, the started workload) are kept privately as
+after-transfer-stage changes. A missing record, or any change before or during the transfer stage, fails. The script
+must run as a user that can read the record under `cliConfigDir`. Each
 cleanup action has one 120-second deadline across its identity probes, stop and polling. SIGINT/SIGTERM unwind through
 the same cleanup, a further signal waits until that cleanup finishes, the receipt is still written, and the run exits 130. stdout
 carries results only; manifests, identities and hashes go to an owner-only receipt in `receiptDir`. It never creates fixtures or touches production configuration, networks or grants; a source build,

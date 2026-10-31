@@ -1395,6 +1395,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     /// <summary>The helper file <see cref="Runtime"/> configures (a test may point it at a missing path).</summary>
     internal string HelperFile = CopyHelper;
 
+    /// <summary>Runs on the Docker workspace right after the mirror (a writer racing the transfer stage).</summary>
+    internal Action<string>? MirrorProbe;
+
     private static string FindCopyHelper()
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
@@ -1437,6 +1440,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             },
             DockerWorkspace = _ => DockerWorkspaceDir,
             CopyHelperFile = HelperFile,
+            MirrorProbe = MirrorProbe,
             Clock = clock ?? TimeProvider.System,
             DirectorySync = directorySync,
         };

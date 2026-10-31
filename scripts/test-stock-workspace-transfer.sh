@@ -30,8 +30,10 @@
 # Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox UUID and name in its
 # persisted scope on the supplied gateway; a fixture that disagrees with that gateway is BLOCKED before anything
 # starts. A sandbox this script starts is always stopped again, and a failed or interrupted case revokes its agent
-# through the orchestrator, or, once A5's Docker handoff committed, stops exactly the newly provisioned Docker container;
-# each cleanup action has one 120-second deadline, every cleanup result is kept in the private
+# through the orchestrator, or, once A5's Docker handoff committed, stops the committed Docker container only with
+# ownership proof (pinned ID, or the fixture's own workspace bind plus a post-apply creation time); one 120-second
+# deadline covers each cleanup from entry, and A5 proves excluded state with the adapter's private stage record (read
+# from cliConfigDir, so run as a user that can read it). Every cleanup result is kept in the private
 # receipt and a cleanup error fails the run. SIGINT/SIGTERM run the same cleanup (a further signal waits for it), the
 # receipt is still written, and the run exits 130.
 # Logic: scripts/stock_workspace_transfer.py (unit-tested by tests/scripts/test_stock_workspace_transfer.py).

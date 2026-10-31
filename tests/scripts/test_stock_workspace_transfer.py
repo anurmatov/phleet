@@ -2,8 +2,10 @@
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -40,14 +42,33 @@ class FakeRegression(transfer.Regression):
         self.images = {OLD["image"]: BASELINE_ID, NEW["image"]: REPLACEMENT_ID}
         self.workloads = {OLD["sandboxId"]: BASELINE_ID, NEW["sandboxId"]: REPLACEMENT_ID}
         self.docker_calls = []
+        # Docker agent containers by exact name: full ID, running, StartedAt.
+        self.containers = {}
+        self.fresh_applied = "docker"
 
     def docker(self, args, timeout=60):
         self.docker_calls.append(list(args))
+        self.timeouts.append((self.now, timeout))
+        if self.delay > timeout:
+            self.now += timeout
+            return 124, b""
+        self.now += self.delay
         if args[:2] == ["image", "inspect"]:
             return (0, self.images[args[-1]].encode() + b"\n") if args[-1] in self.images else (1, b"")
+        if args[0] == "ps" and any(a.startswith("name=") for a in args):
+            name = next(a for a in args if a.startswith("name="))[len("name=^/"):-1]
+            return 0, (self.containers[name]["id"].encode() + b"\n") if name in self.containers else b""
         if args[0] == "ps":
             sandbox = next(a.removeprefix("label=openshell.ai/sandbox-id=") for a in args if a.startswith("label=openshell.ai/sandbox-id="))
             return 0, (b"container-" + sandbox.encode() + b"\n") if sandbox in self.workloads else b""
+        container = next((c for c in self.containers.values() if c["id"] == args[-1]), None)
+        if args[0] == "stop":
+            if container:
+                container["running"] = False
+            return (0, b"") if container else (1, b"")
+        if args[0] == "inspect" and container:
+            field = {"{{.State.Running}}": "true" if container["running"] else "false", "{{.State.StartedAt}}": container["started"]}
+            return 0, field[args[2]].encode() + b"\n"
         if args[0] == "inspect":
             sandbox = args[-1].removeprefix("container-")
             return (0, self.workloads[sandbox].encode()) if sandbox in self.workloads else (1, b"")
@@ -93,7 +114,9 @@ class FakeRegression(transfer.Regression):
         if method == "GET" and path == "/api/agents/legacy/config":
             return 200, {"appliedRuntimeKind": "openshell", "appliedRuntimeBinding": json.dumps(self.legacy)}
         if method == "GET" and path == "/api/agents/fresh/config":
-            return 200, {"runtimeKind": "openshell", "appliedRuntimeKind": "docker", "appliedRuntimeBinding": None}
+            return 200, {"runtimeKind": "openshell", "appliedRuntimeKind": self.fresh_applied, "appliedRuntimeBinding": None}
+        if method == "GET" and path == "/api/agents/fresh":
+            return 200, {"name": "fresh", "containerName": "fleet-fresh"}
         return 200, {"message": "ok"}
 
     def mutations(self):
@@ -249,6 +272,152 @@ class StockWorkspaceTransferTests(unittest.TestCase):
         self.run_.case("A3", self.run_.a3_legacy_image_change)
         self.assertEqual("FAIL", self.run_.receipt["cases"]["A3"]["result"])
         self.assertIn("custody", self.run_.receipt["cases"]["A3"]["reason"])
+
+    # ── A5 post-Docker-commit cleanup: the committed Docker workload, never a managed revoke (409) ──
+
+    PRIOR, COMMITTED = "c" * 64, "d" * 64
+
+    def pending_docker(self, committed=True, applied="docker"):
+        self.run_.containers["fleet-fresh"] = {"id": self.COMMITTED, "running": True, "started": "2026-10-31T19:00:00.5Z"}
+        self.run_.state["dockerApply"] = {"agent": "fresh", "container": "fleet-fresh", "before": self.PRIOR,
+                                          **({"committed": self.COMMITTED} if committed else {})}
+        self.run_.fresh_applied = applied
+
+    def test_a_failure_after_the_docker_commit_stops_the_committed_workload_instead_of_revoking(self):
+        self.pending_docker()
+        self.run_.case("A5", self.fail_case, agent="fresh")
+        self.assertEqual({"action": "docker-stop", "agent": "fresh", "container": "fleet-fresh", "containerId": self.COMMITTED, "result": "stopped"},
+                         self.run_.receipt["cleanup"][-1])
+        self.assertFalse(self.run_.containers["fleet-fresh"]["running"])
+        self.assertNotIn(("POST", "/api/agents/fresh/revoke"), self.run_.api_calls)
+        self.assertEqual(1, self.run_.exit_code())
+
+    def test_an_uncommitted_docker_apply_still_revokes(self):
+        self.pending_docker(committed=False, applied="openshell")
+        self.run_.case("A5", self.fail_case, agent="fresh")
+        self.assertEqual(("POST", "/api/agents/fresh/revoke"), self.run_.api_calls[-1])
+        self.assertTrue(self.run_.containers["fleet-fresh"]["running"])
+        self.assertNotIn("stop", [c[0] for c in self.run_.docker_calls])
+
+    def test_the_container_that_existed_before_the_apply_or_a_different_one_is_never_stopped(self):
+        for current in [self.PRIOR, "e" * 64]:
+            with self.subTest(current=current):
+                self.run_ = FakeRegression(self.work)
+                self.pending_docker()
+                self.run_.containers["fleet-fresh"]["id"] = current
+                self.run_.case("A5", self.fail_case, agent="fresh")
+                self.assertEqual("error", self.run_.receipt["cleanup"][-1]["result"])
+                self.assertNotIn("stop", [c[0] for c in self.run_.docker_calls])
+
+    def test_docker_cleanup_shares_one_deadline_across_probe_stop_and_polling(self):
+        self.pending_docker()
+        self.run_.delay = 59.0
+        start = self.run_.now
+        self.run_.docker_stop_cleanup(self.run_.state["dockerApply"])
+        self.assertEqual("error", self.run_.receipt["cleanup"][-1]["result"])
+        self.assert_one_deadline(start)
+
+    # ── A5 excluded-state reconciliation ──
+
+    def test_excluded_state_changes_are_attributed_only_with_evidence(self):
+        started = 1000.0
+        entry = lambda kind="f", mtime=2000.0, digest="x": {"type": kind, "size": 1, "sha256": digest, "mtime": mtime}
+        sentinels = [".ssh/" + transfer.SENTINEL, ".mcp.json"]
+        cases = [
+            ({"path": ".ssh/" + transfer.SENTINEL, "before": entry(), "after": entry(digest="y")}, "sentinel_violation"),
+            ({"path": ".mcp.json", "before": entry(), "after": None}, "sentinel_violation"),
+            ({"path": ".generated/appsettings.json", "before": entry(), "after": entry(digest="y")}, "provisioning_regenerated"),
+            ({"path": ".generated/roles/role.md", "before": None, "after": entry()}, "provisioning_regenerated"),
+            ({"path": ".generated/unexpected", "before": None, "after": entry()}, "unattributed"),
+            ({"path": ".claude/output-styles", "before": None, "after": entry("d")}, "docker_bind_target"),
+            ({"path": "codex/sessions/new.json", "before": None, "after": entry(mtime=started)}, "committed_workload_write"),
+            ({"path": "codex/auth.json", "before": entry(), "after": entry(mtime=started - 1, digest="y")}, "unattributed"),
+            ({"path": "claude/settings.json", "before": entry(), "after": None}, "unattributed"),
+            ({"path": ".ssh/new-key", "before": None, "after": entry()}, "unattributed"),
+        ]
+        for change, cause in cases:
+            with self.subTest(path=change["path"]):
+                self.assertEqual(cause, transfer.attribute(change, sentinels, started))
+        self.assertEqual("unattributed", transfer.attribute({"path": "codex/x", "before": None, "after": entry()}, sentinels, None))
+
+    def a5_with(self, mutate):
+        """A5 with the sandbox side stubbed; the Docker apply mirrors W and then applies `mutate(ws, started)`."""
+        ws = self.run_.f["freshDockerWorkspace"]
+        os.makedirs(ws)
+        with open(os.path.join(ws, "old.txt"), "w") as handle:
+            handle.write("old")
+        self.run_.state["sentinels"] = self.run_.seed_sentinels(ws)
+        self.run_.state["fresh"] = dict(NEW)
+        self.run_.gateway[NEW["sandboxName"]] = {"id": NEW["sandboxId"], "phase": "Ready"}
+        tree = tempfile.mkdtemp(dir=self.work)
+        for name, content in {"kept.txt": "edited", ".mcp.json": "{}"}.items():
+            with open(os.path.join(tree, name), "w") as handle:
+                handle.write(content)
+        self.run_.exec_ok = lambda sandbox, script, *args, timeout=60: True
+        self.run_.download = lambda sandbox, source, label: (0, tree, b"")
+        self.run_.fresh_applied = "openshell"
+        started = time.time() - 30
+        real_api = self.run_.api
+
+        def api(method, path, body=None, timeout=900):
+            if method == "POST" and path.endswith("/runtime/apply"):
+                for entry in os.listdir(ws):
+                    if entry not in self.run_.excluded:
+                        target = os.path.join(ws, entry)
+                        shutil.rmtree(target) if os.path.isdir(target) else os.remove(target)
+                shutil.copy(os.path.join(tree, "kept.txt"), ws)
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(started)) + "Z"
+                self.run_.containers["fleet-fresh"] = {"id": self.COMMITTED, "running": True, "started": stamp}
+                self.run_.fresh_applied = "docker"
+                mutate(ws, started)
+            return real_api(method, path, body, timeout)
+        self.run_.api = api
+        self.run_.containers["fleet-fresh"] = {"id": self.PRIOR, "running": False, "started": "0001-01-01T00:00:00Z"}
+        self.run_.case("A5", self.run_.a5_current_to_docker, agent="fresh")
+        return self.run_.receipt["cases"]["A5"], self.run_.receipt["excludedStateChanges"]["changes"]
+
+    def test_a5_passes_with_attributable_regeneration_and_keeps_every_difference_privately(self):
+        def regenerate(ws, started):
+            os.makedirs(os.path.join(ws, ".generated"), exist_ok=True)
+            with open(os.path.join(ws, ".generated", "appsettings.json"), "w") as handle:
+                handle.write("regenerated")
+            with open(os.path.join(ws, "codex", "session.json"), "w") as handle:
+                handle.write("written by the running workload")
+        result, changes = self.a5_with(regenerate)
+        self.assertEqual("PASS", result["result"], result.get("reason"))
+        self.assertEqual({".generated/appsettings.json": "provisioning_regenerated", "codex/session.json": "committed_workload_write"},
+                         {c["path"]: c["cause"] for c in changes})
+        self.assertEqual(["committed_workload_write", "provisioning_regenerated"], result["excludedChangeCauses"])
+        self.assertEqual([], self.run_.receipt["cleanup"])
+
+    def test_a5_fails_on_a_sentinel_or_unattributed_change_after_recording_it_and_stops_the_workload(self):
+        def violate(ws, started):
+            with open(os.path.join(ws, ".ssh", transfer.SENTINEL), "w") as handle:
+                handle.write("overwritten")
+            with open(os.path.join(ws, ".codex-host", "stray"), "w") as handle:
+                handle.write("unexplained")
+        result, changes = self.a5_with(violate)
+        self.assertEqual("FAIL", result["result"])
+        causes = {c["path"]: c["cause"] for c in changes}
+        self.assertEqual("sentinel_violation", causes[".ssh/" + transfer.SENTINEL])
+        self.assertEqual("unattributed", causes[".codex-host/stray"])
+        self.assertTrue(all(c["before"] is None or c["before"]["sha256"] for c in changes if c["path"].endswith(transfer.SENTINEL)))
+        self.assertEqual("docker-stop", self.run_.receipt["cleanup"][-1]["action"])
+        self.assertEqual(("stopped", self.COMMITTED), (self.run_.receipt["cleanup"][-1]["result"], self.run_.receipt["cleanup"][-1]["containerId"]))
+        self.assertNotIn(("POST", "/api/agents/fresh/revoke"), self.run_.api_calls)
+
+    def test_an_interruption_right_after_the_docker_apply_stops_the_new_workload(self):
+        def interrupt_next_read(ws, started):
+            def config(agent):
+                raise KeyboardInterrupt
+            self.run_.config = config
+        with self.assertRaises(KeyboardInterrupt):
+            self.a5_with(interrupt_next_read)
+        self.assertEqual("INTERRUPTED", self.run_.receipt["cases"]["A5"]["result"])
+        self.assertEqual(("docker-stop", "stopped", self.COMMITTED),
+                         tuple(self.run_.receipt["cleanup"][-1][k] for k in ("action", "result", "containerId")))
+        self.assertFalse(self.run_.containers["fleet-fresh"]["running"])
+        self.assertEqual(130, self.run_.exit_code())
 
     # ── F4: interruption unwinds through the same cleanup ──
 

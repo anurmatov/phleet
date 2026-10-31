@@ -578,7 +578,13 @@ read-only Docker access on the gateway host. It exits 0 only when every case pas
 fixture state is missing. Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox
 UUID and name in its persisted scope on the supplied gateway, so a fixture that disagrees with that gateway is BLOCKED
 before anything starts. A sandbox the script starts is always stopped again, a failed or interrupted case revokes its
-agent through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). Each
+agent through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). After
+A5's Docker commit there is no managed binding to revoke: cleanup instead stops exactly the newly provisioned Docker
+container (exact name, an ID other than the container it had before the apply, and the ID observed at commit).
+A5 snapshots excluded state immediately before the handoff and records every path/type/hash difference privately before
+asserting. A difference passes only when attributable: documented provisioning outputs under `.generated`, the
+`.claude/output-styles` mount point, or writes in the workload's own `claude/` and `codex/` dated at or after its container
+start. A changed script sentinel or any unattributed difference fails. Each
 cleanup action has one 120-second deadline across its identity probes, stop and polling. SIGINT/SIGTERM unwind through
 the same cleanup, a further signal waits until that cleanup finishes, the receipt is still written, and the run exits 130. stdout
 carries results only; manifests, identities and hashes go to an owner-only receipt in `receiptDir`. It never creates fixtures or touches production configuration, networks or grants; a source build,

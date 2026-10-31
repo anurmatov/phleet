@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -55,6 +56,14 @@ class Blocked(Exception):
     """A missing or malformed prerequisite: nothing was mutated."""
 
 
+class Interrupted(BaseException):
+    """SIGINT/SIGTERM: like KeyboardInterrupt, it unwinds through every cleanup `finally` and ends the run."""
+
+
+class CleanupDeadline(Exception):
+    """A cleanup action used its whole 120-second budget."""
+
+
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -71,7 +80,8 @@ def load_fixture(path):
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise Blocked("fixture must be a regular, caller-owned, owner-only file")
     try:
-        data = json.load(open(path))
+        with open(path) as handle:
+            data = json.load(handle)
     except (OSError, ValueError):
         raise Blocked("fixture is not valid JSON")
     if not isinstance(data, dict) or set(data) != KEYS or not all(isinstance(v, str) and v for v in data.values()):
@@ -98,20 +108,23 @@ def load_fixture(path):
 
 def exclusions(root):
     """The adapter's one exclusion list (PrivateWorkspaceEntries), read from the exact checkout under test."""
-    text = open(os.path.join(root, "src/Fleet.Orchestrator/Services/StockOpenShellRuntime.cs")).read()
+    with open(os.path.join(root, "src/Fleet.Orchestrator/Services/StockOpenShellRuntime.cs")) as source:
+        text = source.read()
     return re.findall(r'"([^"]+)"', re.search(r"PrivateWorkspaceEntries = \[(.*?)\];", text, re.S).group(1))
 
 
 class Regression:
-    """One run against one fixture. `cli`, `api` and `wait` are the only effects; tests replace them."""
+    """One run against one fixture. `cli`, `api`, `clock` and `sleep` are the only effects; tests replace them."""
 
     def __init__(self, fixture, root, token, work):
         self.f, self.token, self.work = fixture, token, work
         self.home = fixture["workloadHome"]
         self.w = self.home + "/workspace"
         self.excluded = exclusions(root)
-        self.receipt = {"cases": {}, "cleanup": [], "started": now()}
+        self.receipt = {"cases": {}, "cleanup": [], "signals": [], "started": now()}
         self.state = {}
+        self.cleaning = False  # while True, a signal is recorded and deferred, never allowed to cut cleanup short
+        self.interrupted = None
 
     # ── effects ──
     def cli(self, args, timeout=300, scope=None):
@@ -139,13 +152,42 @@ class Regression:
         except (urllib.error.URLError, OSError, ValueError):
             return 0, None
 
+    def clock(self):
+        return time.monotonic()
+
+    def sleep(self, seconds):
+        time.sleep(seconds)
+
     def wait(self, predicate, seconds=180):
-        end = time.time() + seconds
-        while time.time() < end:
+        end = self.clock() + seconds
+        while self.clock() < end:
             if predicate():
                 return True
-            time.sleep(2)
+            self.sleep(max(0.0, min(2.0, end - self.clock())))
         return False
+
+    # ── interruption: SIGINT/SIGTERM unwind through the same cleanup as a failure, which they never cut short ──
+    def install_signal_handlers(self):
+        def handler(signum, frame):
+            name = signal.Signals(signum).name
+            self.receipt["signals"].append(name)
+            if self.cleaning or self.interrupted:
+                return  # deferred: raised once the cleanup in progress has finished
+            self.interrupted = name
+            raise Interrupted(name)
+        return {sig: signal.signal(sig, handler) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    @contextlib.contextmanager
+    def cleaning_up(self):
+        nested = self.cleaning
+        self.cleaning = True
+        try:
+            yield
+        finally:
+            self.cleaning = nested
+        if not nested and self.receipt["signals"] and self.interrupted is None:
+            self.interrupted = self.receipt["signals"][-1]
+            raise Interrupted(self.interrupted)
 
     # ── identity: every fixture mutation targets the exact persisted sandbox in its persisted scope ──
     def config(self, agent):
@@ -154,9 +196,9 @@ class Regression:
             raise Blocked(f"agent {agent} config unreadable")
         return body, json.loads(body.get("appliedRuntimeBinding") or "{}")
 
-    def observe(self, sandbox):
+    def observe(self, sandbox, timeout=60):
         """The phase of exactly this binding's sandbox (name, UUID, scope); anything else refuses."""
-        code, out, _ = self.cli(["sandbox", "get", sandbox["sandboxName"], "-o", "json"], 60, sandbox.get("sandboxWorkspace"))
+        code, out, _ = self.cli(["sandbox", "get", sandbox["sandboxName"], "-o", "json"], timeout, sandbox.get("sandboxWorkspace"))
         try:
             document = json.loads(out) if code == 0 else None
         except ValueError:
@@ -201,43 +243,58 @@ class Regression:
             if not self.wait(lambda: self.exec_ok(sandbox, STAGED)):
                 raise AssertionError("sandbox never reported staged")
             yield
-        finally:
-            self.stop_cleanup(sandbox)
+        finally:  # also on interruption
+            with self.cleaning_up():
+                self.stop_cleanup(sandbox)
 
     # ── cleanup: bounded, independent of the case outcome, every result kept in the private receipt ──
     def stop_cleanup(self, sandbox):
+        """Identity probe, stop and Stopped polling under ONE 120-second deadline; every call gets only the time left."""
         entry = {"action": "stop", "sandboxName": sandbox["sandboxName"], "sandboxId": sandbox["sandboxId"]}
+        end = self.clock() + CLEANUP_SECONDS
+
+        def left(cap=60.0):
+            remaining = end - self.clock()
+            if remaining <= 0:
+                raise CleanupDeadline(f"cleanup deadline of {CLEANUP_SECONDS}s exceeded")
+            return min(cap, remaining)
         try:
-            end = time.time() + CLEANUP_SECONDS
-            code = self.mutate(sandbox, ["sandbox", "stop", sandbox["sandboxName"]], timeout=60)[0]
-            stopped = self.wait(lambda: self.observe(sandbox) == "Stopped", max(1, end - time.time()))
-            entry["result"] = "stopped" if stopped else "error"
-            if not stopped:
-                entry["reason"] = f"stop unconfirmed (exit {code})"
+            self.observe(sandbox, timeout=left())  # never stop a different sandbox
+            code = self.cli(["sandbox", "stop", sandbox["sandboxName"]], left(), sandbox.get("sandboxWorkspace"))[0]
+            while self.observe(sandbox, timeout=left()) != "Stopped":
+                self.sleep(left(2.0))
+            entry["result"] = "stopped"
+            if code != 0:
+                entry["stopExit"] = code
         except Exception as error:  # cleanup never masks the case result, and is never retried
             entry.update(result="error", reason=str(error))
         self.receipt["cleanup"].append(entry)
 
     def revoke_cleanup(self, agent):
-        status, body = self.api("POST", f"/api/agents/{agent}/revoke", timeout=CLEANUP_SECONDS + 60)
+        """The orchestrator's own bounded revoke (cut, detach, broker revoke, verified Stop) as one call within the deadline."""
+        status, body = self.api("POST", f"/api/agents/{agent}/revoke", timeout=CLEANUP_SECONDS)
         entry = {"action": "revoke", "agent": agent, "result": "revoked" if status == 200 else "error"}
         if status != 200:
             entry["reason"] = f"revoke returned {status} {json.dumps(body)[:200]}"
         self.receipt["cleanup"].append(entry)
 
     def case(self, name, function, agent=None):
+        result = {"result": "INTERRUPTED"}
         try:
             detail = function()
-            self.receipt["cases"][name] = {"result": "PASS", **(detail or {})}
+            result = {"result": "PASS", **(detail or {})}
         except AssertionError as error:
-            self.receipt["cases"][name] = {"result": "FAIL", "reason": str(error)}
+            result = {"result": "FAIL", "reason": str(error)}
         except Blocked as error:
-            self.receipt["cases"][name] = {"result": "BLOCKED", "reason": str(error)}
+            result = {"result": "BLOCKED", "reason": str(error)}
         except Exception as error:  # an unexpected local error is a failure, never a pass
-            self.receipt["cases"][name] = {"result": "FAIL", "reason": type(error).__name__}
-        if self.receipt["cases"][name]["result"] != "PASS" and agent:
-            self.revoke_cleanup(agent)  # a failed case never leaves its agent's workload admitted
-        print(f"{name}: {self.receipt['cases'][name]['result']}")
+            result = {"result": "FAIL", "reason": type(error).__name__}
+        finally:  # also on Interrupted/KeyboardInterrupt, e.g. right after a successful Apply
+            with self.cleaning_up():
+                self.receipt["cases"][name] = result
+                if result["result"] != "PASS" and agent:
+                    self.revoke_cleanup(agent)  # a failed or interrupted case never leaves its agent's workload admitted
+                print(f"{name}: {result['result']}")
 
     # ── prerequisites: nothing mutates until all of these hold ──
     def check_fixture_state(self):
@@ -365,9 +422,20 @@ class Regression:
     def exit_code(self):
         results = [c["result"] for c in self.receipt["cases"].values()]
         clean = all(entry["result"] != "error" for entry in self.receipt["cleanup"])
+        if self.interrupted or "INTERRUPTED" in results:
+            return 130
         if results and all(r == "PASS" for r in results) and clean:
             return 0
         return 2 if "BLOCKED" in results else 1
+
+    def write_receipt(self, directory):
+        self.receipt["finished"] = now()
+        if self.interrupted:
+            self.receipt["interrupted"] = self.interrupted
+        path = os.path.join(directory, "workspace-transfer-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + ".json")
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
+            json.dump(self.receipt, handle, indent=2, sort_keys=True)
+        return path
 
 
 def main(argv):
@@ -398,18 +466,19 @@ def main(argv):
     regression.receipt["cli"] = {"sha256": PINNED_CLI_SHA256, "version": version[1].decode().strip()}
     regression.receipt["images"] = {"baseline": fixture["baselineImage"], "replacement": fixture["replacementImage"]}
     regression.work = tempfile.mkdtemp(prefix="work-", dir=fixture["receiptDir"])
+    regression.install_signal_handlers()
     try:
         regression.run_cases()
+    except (Interrupted, KeyboardInterrupt):
+        regression.interrupted = regression.interrupted or "SIGINT"  # every case's cleanup already ran in its finally
     finally:
+        regression.cleaning = True  # a late signal never truncates the receipt
         shutil.rmtree(regression.work, ignore_errors=True)  # owned downloads only; fixture state is never cleaned up here
-        regression.receipt["finished"] = now()
-        path = os.path.join(fixture["receiptDir"], "workspace-transfer-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + ".json")
-        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
-            json.dump(regression.receipt, handle, indent=2, sort_keys=True)
+        regression.write_receipt(fixture["receiptDir"])
     code = regression.exit_code()
     cleanup_errors = sum(entry["result"] == "error" for entry in regression.receipt["cleanup"])
     print(f"cleanup errors: {cleanup_errors}")
-    print("RESULT: " + ("PASS" if code == 0 else "BLOCKED" if code == 2 else "FAIL"))
+    print("RESULT: " + {0: "PASS", 2: "BLOCKED", 130: "INTERRUPTED"}.get(code, "FAIL"))
     return code
 
 

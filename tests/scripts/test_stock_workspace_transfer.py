@@ -1,6 +1,8 @@
 """#507 operator regression logic: identity checks and cleanup against an in-memory gateway; no CLI, network or fixture."""
 import importlib.util
 import json
+import os
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,9 +33,22 @@ class FakeRegression(transfer.Regression):
         self.download_code = {}
         self.on_exec = None
         self.legacy = {"state": "revoked", "applied": dict(OLD)}
+        self.now, self.delay, self.timeouts = 0.0, 0.0, []
+        self.stop_keeps_phase = False
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
 
     def cli(self, args, timeout=300, scope=None):
         self.calls.append(list(args))
+        self.timeouts.append((self.now, timeout))
+        if self.delay > timeout:  # a call slower than its bound returns as timed out at the bound
+            self.now += timeout
+            return 124, b"", b"timeout"
+        self.now += self.delay
         verb, name = args[1], args[2] if len(args) > 2 else ""
         sandbox = self.gateway.get(name)
         if verb == "get":
@@ -42,7 +57,7 @@ class FakeRegression(transfer.Regression):
             sandbox["phase"] = "Ready"
             return 0, b"", b""
         if verb == "stop":
-            if self.stop_code == 0:
+            if self.stop_code == 0 and not self.stop_keeps_phase:
                 sandbox["phase"] = "Stopped"
             return self.stop_code, b"", b""
         if verb == "exec":
@@ -63,9 +78,6 @@ class FakeRegression(transfer.Regression):
         if method == "GET" and path == "/api/agents/fresh/config":
             return 200, {"runtimeKind": "openshell", "appliedRuntimeKind": "docker", "appliedRuntimeBinding": None}
         return 200, {"message": "ok"}
-
-    def wait(self, predicate, seconds=180):
-        return any(predicate() for _ in range(3))
 
     def mutations(self):
         return [c for c in self.calls if c[1] in ("start", "stop", "exec", "download")]
@@ -146,6 +158,117 @@ class StockWorkspaceTransferTests(unittest.TestCase):
         self.assertEqual({"action": "revoke", "agent": "legacy", "result": "revoked"}, self.run_.receipt["cleanup"][-1])
         self.assertEqual("Stopped", self.run_.gateway[OLD["sandboxName"]]["phase"])  # the old sandbox was never started
         self.assertEqual(1, self.run_.exit_code())
+
+    # ── F4: interruption unwinds through the same cleanup ──
+
+    def applied_legacy(self, after_apply):
+        """A3 up to a successful Apply; `after_apply` runs right after Apply returned 200."""
+        self.run_.check_fixture_state()
+        self.run_.state["legacy"] = {"/workspace": {}}
+        calls = self.run_.api_calls
+
+        def api(method, path, body=None, timeout=900):
+            calls.append((method, path))
+            if method == "GET":
+                return 200, {"appliedRuntimeKind": "openshell", "appliedRuntimeBinding": json.dumps(self.run_.legacy)}
+            if path.endswith("/runtime/apply"):
+                after_apply()
+            return 200, {}
+        self.run_.api = api
+
+    def test_an_interruption_right_after_a_successful_apply_still_revokes_and_records_it(self):
+        def interrupt():
+            raise KeyboardInterrupt
+        self.applied_legacy(lambda: None)
+        original = self.run_.config
+        self.run_.config = lambda agent: interrupt() if ("POST", "/api/agents/legacy/runtime/apply") in self.run_.api_calls else original(agent)
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_.case("A3", self.run_.a3_legacy_image_change, agent="legacy")
+        self.assertEqual("INTERRUPTED", self.run_.receipt["cases"]["A3"]["result"])
+        self.assertEqual(("POST", "/api/agents/legacy/revoke"), self.run_.api_calls[-1])
+        self.assertEqual({"action": "revoke", "agent": "legacy", "result": "revoked"}, self.run_.receipt["cleanup"][-1])
+        self.assertEqual(130, self.run_.exit_code())
+
+    def test_sigterm_after_apply_unwinds_through_revoke_and_a_second_signal_waits_for_cleanup(self):
+        previous = self.run_.install_signal_handlers()
+        self.addCleanup(lambda: [signal.signal(sig, handler) for sig, handler in previous.items()])
+        revoke = self.run_.revoke_cleanup
+
+        def revoke_with_a_late_signal(agent):
+            os.kill(os.getpid(), signal.SIGINT)  # arrives mid-cleanup: recorded and deferred, never cuts it short
+            revoke(agent)
+        self.run_.revoke_cleanup = revoke_with_a_late_signal
+        self.applied_legacy(lambda: os.kill(os.getpid(), signal.SIGTERM))
+        with self.assertRaises(transfer.Interrupted):
+            self.run_.case("A3", self.run_.a3_legacy_image_change, agent="legacy")
+        self.assertEqual(("SIGTERM", ["SIGTERM", "SIGINT"]), (self.run_.interrupted, self.run_.receipt["signals"]))
+        self.assertEqual("INTERRUPTED", self.run_.receipt["cases"]["A3"]["result"])
+        self.assertEqual("revoked", self.run_.receipt["cleanup"][-1]["result"])
+        self.assertEqual(130, self.run_.exit_code())
+
+    def test_a_signal_during_failure_cleanup_is_raised_only_after_cleanup_completes(self):
+        previous = self.run_.install_signal_handlers()
+        self.addCleanup(lambda: [signal.signal(sig, handler) for sig, handler in previous.items()])
+        self.run_.check_fixture_state()
+        revoke = self.run_.revoke_cleanup
+
+        def revoke_with_a_signal(agent):
+            os.kill(os.getpid(), signal.SIGTERM)
+            revoke(agent)
+        self.run_.revoke_cleanup = revoke_with_a_signal
+        self.run_.api = lambda method, path, body=None, timeout=900: (self.run_.api_calls.append((method, path)) or (500, None))
+        with self.assertRaises(transfer.Interrupted):
+            self.run_.case("A3", lambda: self.fail_case(), agent="legacy")
+        self.assertEqual("FAIL", self.run_.receipt["cases"]["A3"]["result"])
+        self.assertEqual(("POST", "/api/agents/legacy/revoke"), self.run_.api_calls[-1])
+        self.assertEqual("error", self.run_.receipt["cleanup"][-1]["result"])  # the revoke outcome is kept, not lost
+        self.assertEqual(130, self.run_.exit_code())
+
+    @staticmethod
+    def fail_case():
+        raise AssertionError("synthetic failure")
+
+    def test_an_interrupted_staged_sandbox_is_still_stopped(self):
+        self.run_.check_fixture_state()
+        real = self.run_.cli
+
+        def cli(args, timeout=300, scope=None):
+            if "python3" in args:
+                raise KeyboardInterrupt
+            return real(args, timeout, scope)
+        self.run_.cli = cli
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_.case("A1", self.run_.a1_legacy_control)
+        self.assertEqual("Stopped", self.run_.gateway[OLD["sandboxName"]]["phase"])
+        self.assertEqual(["stopped"], [e["result"] for e in self.run_.receipt["cleanup"]])
+        self.assertEqual("INTERRUPTED", self.run_.receipt["cases"]["A1"]["result"])
+
+    # ── F7: one 120-second deadline across identity probes, stop and polling ──
+
+    def assert_one_deadline(self, start):
+        for began, bound in self.run_.timeouts:
+            self.assertLessEqual(began + bound, start + transfer.CLEANUP_SECONDS + 1e-9)
+        self.assertLessEqual(self.run_.now - start, transfer.CLEANUP_SECONDS)
+
+    def test_delayed_cleanup_calls_share_one_deadline(self):
+        self.run_.gateway[OLD["sandboxName"]]["phase"] = "Ready"
+        self.run_.delay = 59.0  # three 59 s calls used to reach 177 s
+        start = self.run_.now
+        self.run_.stop_cleanup(OLD)
+        self.assertEqual("error", self.run_.receipt["cleanup"][-1]["result"])
+        self.assert_one_deadline(start)
+        self.assertGreaterEqual(len(self.run_.timeouts), 3)
+
+    def test_polling_a_sandbox_that_never_stops_ends_at_the_deadline(self):
+        self.run_.gateway[OLD["sandboxName"]]["phase"] = "Ready"
+        self.run_.stop_keeps_phase = True
+        self.run_.delay = 7.0
+        start = self.run_.now
+        self.run_.stop_cleanup(OLD)
+        entry = self.run_.receipt["cleanup"][-1]
+        self.assertEqual("error", entry["result"])
+        self.assertIn("deadline", entry["reason"])
+        self.assert_one_deadline(start)
 
     def test_every_mutation_is_preceded_by_an_exact_identity_read(self):
         self.run_.check_fixture_state()

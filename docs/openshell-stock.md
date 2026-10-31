@@ -574,8 +574,10 @@ value), `cli`, `cliConfigDir`, `workloadHome`, `freshAgent`, `freshDockerWorkspa
 1 on a failure, and 2 (`BLOCKED`) before any mutating request when the fixture, token, pinned CLI, gateway or expected
 fixture state is missing. Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox
 UUID and name in its persisted scope on the supplied gateway, so a fixture that disagrees with that gateway is BLOCKED
-before anything starts. A sandbox the script starts is always stopped again (bounded), a failed case revokes its agent
-through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). stdout
+before anything starts. A sandbox the script starts is always stopped again, a failed or interrupted case revokes its
+agent through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). Each
+cleanup action has one 120-second deadline across its identity probes, stop and polling. SIGINT/SIGTERM unwind through
+the same cleanup, a further signal waits until that cleanup finishes, the receipt is still written, and the run exits 130. stdout
 carries results only; manifests, identities and hashes go to an owner-only receipt in `receiptDir`. It never creates fixtures or touches production configuration, networks or grants; a source build,
 FakeCli suite or historical native result is not this check. Native/provider/model qualification, account login or
 import and CONTROL restore remain out of scope and unrun here.

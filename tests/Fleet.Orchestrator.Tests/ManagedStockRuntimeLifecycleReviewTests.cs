@@ -1745,17 +1745,19 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
     // ── #503 W8: an owned, quiescent failed-main candidate is reconciled by revoke; subscription custody is unchanged ──
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Revoke_reconciles_an_owned_quiescent_failed_main_candidate_keeping_subscription_custody(bool running)
+    [InlineData("settled")]
+    [InlineData("running")]
+    [InlineData("operation_pending")] // F1: a pending driver operation holds even when quiescent
+    public async Task Revoke_reconciles_an_owned_quiescent_failed_main_candidate_keeping_subscription_custody(string variant)
     {
         WriteSource();
         var history = SubBinding("fleet-agent1-f9f9f9f0", phase: "Stopped", attached: false);
         var candidate = SubBinding("fleet-agent1-f9f9f9f9", phase: "Error");
         var scoped = _cli.Cli("ws-a");
-        scoped.Status[candidate.SandboxName] = ManagedStockRuntimeAdapterTests.FakeCli.FailedMain();
+        scoped.Status[candidate.SandboxName] = ManagedStockRuntimeAdapterTests.FakeCli.FailedMain(operationPending: variant == "operation_pending");
         scoped.StopKeepsPhase.Add(candidate.SandboxName);
-        if (running) _t._host.RunningContainers = ["workload"];
+        var held = variant != "settled";
+        if (variant == "running") _t._host.RunningContainers = ["workload"];
         _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "docker",
             new ManagedRecord { State = "needs_attention", Candidate = candidate, Superseded = [history], Errors = ["stop_unknown"] }));
         var tuples = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).SubscriptionTuples().Count();
@@ -1768,7 +1770,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
         Assert.Equal(tuples, record.SubscriptionTuples().Count()); // custody stays countable either way
         Assert.Equal((candidate.SandboxId, "Error"), scoped.Sandboxes[candidate.SandboxName]); // observed, never rewritten
-        if (running)
+        if (held)
         {
             Assert.False(revoke.Ok);
             Assert.Equal("needs_attention", record.State);

@@ -158,6 +158,15 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     [InlineData("no_exit_code", "stop:")]
     [InlineData("stopping_phase", "stop:")]
     [InlineData("restarted_during_check", "stop:")]
+    // F1: pinned stock checks the driver operation before its failed-main shortcut; pending or unreadable holds on either read.
+    [InlineData("settled_without_record", null)]
+    [InlineData("quiescent_operation_pending", "stop:")]
+    [InlineData("pending_set_during_stop", "stop:")]
+    [InlineData("pending_after_quiescence", "stop:")]
+    [InlineData("provisioning_missing", "stop:")]
+    [InlineData("provisioning_unreadable", "stop:")]
+    [InlineData("pending_field_missing", "stop:")]
+    [InlineData("pending_not_boolean", "stop:")]
     [InlineData("broker_fails", "broker:")]
     [InlineData("detach_hangs", "detach:")]
     public async Task Revoke_reconciles_only_an_exact_owned_already_quiescent_failed_main_sandbox(string variant, string? heldBy)
@@ -170,8 +179,21 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             "other_reason" => FakeCli.FailedMain(reason: "ConfigurationInvalid"),
             "no_exit_code" => FakeCli.FailedMain(exitCode: false),
             "status_unreadable" => new JsonObject { ["exit_code"] = 1, ["conditions"] = "unreadable" },
+            "settled_without_record" => FakeCli.FailedMain(operationPending: null),
+            "quiescent_operation_pending" => FakeCli.FailedMain(operationPending: true),
             _ => FakeCli.FailedMain(),
         };
+        var status = _cli.Status[binding.SandboxName];
+        void Pending() => status["provisioning"]!["driver_operation_pending"] = true;
+        switch (variant)
+        {
+            case "pending_set_during_stop": _cli.OnStop = _ => Pending(); break;
+            case "pending_after_quiescence": _host.OnRunningRead = Pending; break;
+            case "provisioning_missing": status.Remove("provisioning"); break;
+            case "provisioning_unreadable": status["provisioning"] = "unreadable"; break;
+            case "pending_field_missing": status["provisioning"]!.AsObject().Remove("driver_operation_pending"); break;
+            case "pending_not_boolean": status["provisioning"]!["driver_operation_pending"] = "false"; break;
+        }
         _cli.StopKeepsPhase.Add(binding.SandboxName);
         if (variant == "running") _host.RunningContainers = ["workload"];
         if (variant == "containers_unobservable") _host.RunningContainers = null;
@@ -1324,13 +1346,20 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         public readonly HashSet<string> StopKeepsPhase = [];
         public Action<string>? OnStop;
 
-        /// <summary>The pinned failed-main status: Error, exit code 1, Ready=False/MainProcessFailed.</summary>
-        internal static JsonObject FailedMain(string readyStatus = "False", string reason = "MainProcessFailed", bool exitCode = true) => new()
+        /// <summary>
+        /// The pinned failed-main status: Error, exit code 1, Ready=False/MainProcessFailed, with the pinned <c>provisioning</c>
+        /// field (settled by default; null is a row without a provisioning record).
+        /// </summary>
+        internal static JsonObject FailedMain(string readyStatus = "False", string reason = "MainProcessFailed", bool exitCode = true,
+            bool? operationPending = false) => new()
         {
             ["exit_code"] = exitCode ? 1 : null,
             ["conditions"] = new JsonArray(
                 new JsonObject { ["type"] = "Ready", ["status"] = readyStatus, ["reason"] = reason, ["message"] = "synthetic" },
                 new JsonObject { ["type"] = "ConfigurationReady", ["status"] = "True", ["reason"] = "ConfigurationAccepted", ["message"] = "" }),
+            ["provisioning"] = operationPending is { } pending
+                ? new JsonObject { ["phase"] = "ready", ["driver_operation_pending"] = pending, ["driver_operation_id"] = pending ? "op-synthetic" : "" }
+                : null,
         };
 
         private string Get(string name, (string Id, string Phase) s)

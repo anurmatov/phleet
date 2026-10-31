@@ -2252,15 +2252,21 @@ public sealed class StockOpenShellRuntime(
     /// #503 W8: pinned stock Stop returns a failed-main sandbox unchanged (openshell-server compute/mod.rs:1814–1822,
     /// is_failed_main_process_result at :6216) and the CLI then fails waiting for Stopped (openshell-cli run.rs:4154–4160),
     /// so a revoke of an already-terminal owned sandbox would otherwise hold forever. Only <c>stop_unknown</c> (a failed or
-    /// timed-out stop) is reconciled, and only for the exact owned UUID in that pinned state, which the server never
-    /// changes on Stop, with no container running under it and the same state observed again afterwards. Any other fault, phase, owner or unreadable observation keeps the fault; the other
-    /// revocation and detach legs are unaffected and must still succeed.
+    /// timed-out stop) is reconciled, and only for the exact owned UUID in that pinned state with its driver operation
+    /// settled, with no container running under it and the same state observed again afterwards. Stock checks the
+    /// operation before that shortcut (provisioning_operation.rs:67–73), so a pending or unreadable operation keeps the
+    /// fault on either read, as does any other fault, phase or owner. The revocation, detach and admission legs are
+    /// unaffected and must still succeed.
     /// </summary>
     private async Task<string?> FailedMainOrAsync(string fault, ManagedBinding target, CancellationToken ct) =>
         fault == "stop_unknown" && await FailedMainAsync(target, ct) && await QuiescentAsync(target, ct) is null && await FailedMainAsync(target, ct)
             ? null : fault;
 
-    /// <summary>The exact binding (name, UUID, persisted scope) reads Error with an exit code and Ready=False/MainProcessFailed.</summary>
+    /// <summary>
+    /// The exact binding (name, UUID, persisted scope) reads Error with an exit code and Ready=False/MainProcessFailed, and its
+    /// driver operation is settled: the pinned <c>provisioning</c> field is null (no record) or carries a boolean
+    /// <c>driver_operation_pending</c> that is false (provisioning_deadline.rs:264–270). A missing or malformed field is unreadable.
+    /// </summary>
     private async Task<bool> FailedMainAsync(ManagedBinding binding, CancellationToken ct)
     {
         if (ScopeFault(binding) is not null) return false;
@@ -2275,7 +2281,10 @@ public sealed class StockOpenShellRuntime(
                 && root.TryGetProperty("exit_code", out var exit) && exit.ValueKind == JsonValueKind.Number
                 && root.TryGetProperty("conditions", out var conditions) && conditions.ValueKind == JsonValueKind.Array
                 && conditions.EnumerateArray().Any(c => c.ValueKind == JsonValueKind.Object && Text(c, "type") == "Ready"
-                    && string.Equals(Text(c, "status"), "false", StringComparison.OrdinalIgnoreCase) && Text(c, "reason") == "MainProcessFailed");
+                    && string.Equals(Text(c, "status"), "false", StringComparison.OrdinalIgnoreCase) && Text(c, "reason") == "MainProcessFailed")
+                && root.TryGetProperty("provisioning", out var provisioning)
+                && (provisioning.ValueKind == JsonValueKind.Null || provisioning.ValueKind == JsonValueKind.Object
+                    && provisioning.TryGetProperty("driver_operation_pending", out var pending) && pending.ValueKind == JsonValueKind.False);
         }
         catch (JsonException) { return false; }
 

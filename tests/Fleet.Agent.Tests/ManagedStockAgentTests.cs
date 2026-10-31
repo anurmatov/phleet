@@ -493,9 +493,9 @@ public sealed class ManagedStockAgentTests
     private const string Handle = "openshell:resolve:env:v3_CODEX_AUTH_ACCESS_TOKEN";
     private const string Account = "synthetic-account_01";
 
-    private static Fixture SubscriptionFixture()
+    private static Fixture SubscriptionFixture(string memoryName = "memory")
     {
-        var f = new Fixture();
+        var f = new Fixture(memoryName: memoryName);
         f.Settings["Agent:NativeAuthMode"] = "subscription";
         f.Settings["Agent:ProviderApiKeyEnvRef"] = null;
         f.Settings["StockOpenShell:SubscriptionAccountId"] = Account;
@@ -627,6 +627,116 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv);
     }
 
+    // ── #505: the native memory route keeps the workload's own endpoint name ─────────────
+
+    private static string MemoryTable(string name, string tools) =>
+        $"\n[mcp_servers.{name}]\nurl = \"https://memory.example.test/mcp\"\nenabled_tools = {tools}\n";
+
+    private static int McpTables(string config) =>
+        System.Text.RegularExpressions.Regex.Matches(config, @"^\[mcp_servers\.", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
+
+    [Theory]
+    [InlineData("memory", "fleet-memory")]
+    [InlineData("fleet-memory", "memory")]
+    public void Api_profile_registers_one_memory_table_under_the_workload_name_with_only_its_own_grants(string name, string other)
+    {
+        using var f = new Fixture(memoryName: name);
+        f.Settings["Agent:AllowedTools:1"] = $"mcp__{name}__memory_search";
+        f.Settings["Agent:AllowedTools:2"] = $"mcp__{other}__memory_list"; // the other accepted name's grant never applies
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder);
+        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        Assert.EndsWith(MemoryTable(name, "[\"memory_get\",\"memory_search\"]"), config);
+        Assert.Equal(1, McpTables(config));
+    }
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("fleet-memory")]
+    public void Subscription_registers_exactly_memory_get_under_the_workload_name(string name)
+    {
+        using var f = SubscriptionFixture(name);
+        f.Settings["Agent:AllowedTools:1"] = $"mcp__{name}__memory_search";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, SubscriptionEnv)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv);
+        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        Assert.EndsWith("\n[features]\nplugins = false\napps = false\n" + MemoryTable(name, "[\"memory_get\"]"), config);
+        Assert.Equal(1, McpTables(config));
+    }
+
+    [Theory]
+    [InlineData("both", "stock_enrollment_mcp_route_invalid")]
+    [InlineData("case_variant", "stock_enrollment_mcp_route_invalid")]
+    [InlineData("custom", "stock_enrollment_mcp_route_invalid")]
+    [InlineData("plaintext", "stock_enrollment_mcp_route_invalid")]
+    [InlineData("other_host", "stock_enrollment_mcp_route_invalid")]
+    [InlineData("extra_field", "stock_enrollment_mcp_route_invalid")]
+    [InlineData("duplicate_key", "stock_enrollment_profile_invalid")]
+    [InlineData("opposite_grant", "stock_enrollment_memory_tools_missing")]
+    public void Memory_name_destination_shape_and_grant_faults_refuse_before_any_native_write(string fault, string code)
+    {
+        using var f = new Fixture(memoryName: "fleet-memory");
+        const string url = "{\"url\":\"https://memory.example.test/mcp\"}";
+        string? mcp = fault switch
+        {
+            "both" => "{\"mcpServers\":{\"fleet-memory\":" + url + ",\"memory\":" + url + "}}",
+            "case_variant" => "{\"mcpServers\":{\"Fleet-Memory\":" + url + "}}",
+            "custom" => "{\"mcpServers\":{\"memory-2\":" + url + "}}",
+            "plaintext" => "{\"mcpServers\":{\"fleet-memory\":{\"url\":\"http://memory.example.test/mcp\"}}}",
+            "other_host" => "{\"mcpServers\":{\"fleet-memory\":{\"url\":\"https://other.example.test/mcp\"}}}",
+            "extra_field" => "{\"mcpServers\":{\"fleet-memory\":{\"url\":\"https://memory.example.test/mcp\",\"headers\":{}}}}",
+            "duplicate_key" => "{\"mcpServers\":{\"fleet-memory\":" + url + ",\"fleet-memory\":" + url + "}}",
+            _ => null,
+        };
+        if (mcp is not null) File.WriteAllText(f.McpPath, mcp);
+        if (fault == "opposite_grant") f.Settings["Agent:AllowedTools:0"] = "mcp__memory__memory_get";
+        var c = f.Config();
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder));
+
+        Assert.Equal(code, refusal.Message);
+        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+    }
+
+    [Fact]
+    public void A_memory_name_changed_after_validation_refuses_preparation_and_registration()
+    {
+        using var f = new Fixture(memoryName: "fleet-memory");
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        var original = File.ReadAllText(f.McpPath);
+        // Both names before preparation: no alias is picked and nothing is written.
+        File.WriteAllText(f.McpPath, "{\"mcpServers\":{\"fleet-memory\":{\"url\":\"https://memory.example.test/mcp\"},\"memory\":{\"url\":\"https://memory.example.test/mcp\"}}}");
+        Assert.Equal("stock_enrollment_mcp_route_invalid", Assert.Throws<InvalidOperationException>(
+            () => StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+        // Prepared under one name, then renamed: registration no longer matches the prepared native table.
+        File.WriteAllText(f.McpPath, original);
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        File.WriteAllText(f.McpPath, original.Replace("fleet-memory", "memory"));
+        Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder));
+    }
+
+    [Theory]
+    [InlineData("mcp__fleet-memory__memory_search")]
+    [InlineData("mcp__memory__memory_get")]
+    public void Subscription_under_the_ordinary_name_needs_its_own_memory_get_grant(string grant)
+    {
+        using var f = SubscriptionFixture("fleet-memory");
+        f.Settings["Agent:AllowedTools:0"] = grant;
+        var c = f.Config();
+        Assert.StartsWith("stock_enrollment_", Assert.Throws<InvalidOperationException>(() =>
+        {
+            var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, SubscriptionEnv)!;
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
+        }).Message);
+        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
+    }
+
     [Fact]
     public void Subscription_metadata_without_stock_mode_and_api_profile_with_it_both_refuse()
     {
@@ -647,7 +757,9 @@ public sealed class ManagedStockAgentTests
         public string Home => Path.Combine(_dir, "home");
         public string Root => Path.Combine(_dir, "root.toml");
         public Dictionary<string, string?> Settings { get; } = new();
-        public Fixture(StockJournalReadRoute? journalRead = null)
+        public string McpPath => Path.Combine(_dir, ".mcp.json");
+        /// <param name="memoryName">#505: the workload's memory endpoint name and the prefix of its <c>memory_get</c> grant.</param>
+        public Fixture(StockJournalReadRoute? journalRead = null, string memoryName = "memory")
         {
             Directory.CreateDirectory(Home);
             File.WriteAllText(Root, HarnessDefaults.Build(AgentHarness.InputFor(new AgentOptions { Name = "agent1", Role = "synthetic", Provider = "codex", WorkDir = _dir }, _ => null)!).CodexRootToml);
@@ -667,12 +779,12 @@ public sealed class ManagedStockAgentTests
                 ["StockOpenShell:Enabled"] = "true", ["StockOpenShell:EnrollmentFile"] = authority,
                 ["StockOpenShell:AuthorityFile"] = authority, ["StockOpenShell:BrokerPasswordFile"] = password,
                 ["Agent:Name"] = "agent1", ["Agent:ShortName"] = "agent1", ["Agent:Role"] = "synthetic", ["Agent:Provider"] = "codex",
-                ["Agent:Model"] = "sol", ["Agent:WorkDir"] = _dir, ["Agent:AllowedTools:0"] = "mcp__memory__memory_get",
+                ["Agent:Model"] = "sol", ["Agent:WorkDir"] = _dir, ["Agent:AllowedTools:0"] = $"mcp__{memoryName}__memory_get",
                 ["Agent:NativeAuthMode"] = "api_key", ["Agent:ProviderApiKeyEnvRef"] = "EXTERNAL_KEY_REF", ["RabbitMq:Host"] = "broker.example.test"
             }) Settings[key] = value;
-            File.WriteAllText(Path.Combine(_dir, ".mcp.json"), journalRead is null
-                ? "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"}}}"
-                : "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"},\"fleet-comms-journal\":{\"url\":\"https://" + journalRead.Host + journalRead.Path + "\"}}}");
+            File.WriteAllText(McpPath, journalRead is null
+                ? "{\"mcpServers\":{\"" + memoryName + "\":{\"url\":\"https://memory.example.test/mcp\"}}}"
+                : "{\"mcpServers\":{\"" + memoryName + "\":{\"url\":\"https://memory.example.test/mcp\"},\"fleet-comms-journal\":{\"url\":\"https://" + journalRead.Host + journalRead.Path + "\"}}}");
         }
         public IConfiguration Config() => new ConfigurationBuilder().AddInMemoryCollection(Settings).Build();
         public void Dispose() => Directory.Delete(_dir, true);

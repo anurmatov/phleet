@@ -408,5 +408,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The dashboard can save/list immutable stock policy versions and select an agent's desired
 runtime/version and API-key reference (or the unqualified subscription mode, which takes none). Saving does not activate or migrate a runtime, change
-applied bindings, or grant service access. Managed apply is unavailable in this release.
+applied bindings, or grant service access. Managed apply is default-off and requires separate
+operator configuration and authorization; saving a selection does not enable it.
 See [saved policies and errors](docs/openshell-stock.md#saved-managed-policies-no-activation).
+See [managed runtime](docs/openshell-stock.md#managed-runtime-492-default-off) for apply prerequisites and limits.

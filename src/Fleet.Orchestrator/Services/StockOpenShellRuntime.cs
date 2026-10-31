@@ -2902,14 +2902,26 @@ public sealed class StockOpenShellRuntime(
 
     /// <summary>
     /// One authority record, published 0600 for <see cref="AuthorityReader"/>. An active record the reader cannot be
-    /// given is refused. A pending, revoked or retired record is still published writer-owned, so revocation never
-    /// depends on ownership: every reader refuses a record it cannot read.
+    /// given, or whose directory the reader cannot open, is refused. A pending, revoked or retired record is still
+    /// published writer-owned, so revocation never depends on ownership: every reader refuses a record it cannot read.
     /// </summary>
     private void WriteAuthorityRecord(string path, JsonObject record)
     {
+        var active = record["State"]?.GetValue<string>() == "active";
+        // Review W12-DIR: a directory this root process created (0700) blocks the reader; the operator prepares it.
+        if (active && AuthorityReader is { } reader && !ReaderOwnsDirectory(Path.GetDirectoryName(path)!, reader))
+            throw new IOException("authority_directory_unreadable");
         try { WriteText(path, record.ToJsonString(), AuthorityReader); }
-        catch (IOException) when (AuthorityReader is not null && record["State"]?.GetValue<string>() != "active") { WriteRecord(path, record); }
+        catch (IOException) when (AuthorityReader is not null && !active) { WriteRecord(path, record); }
     }
+
+    /// <summary>
+    /// The reader can list and open the directory it mounts: an unlinked directory it owns, with owner read and search.
+    /// Readers mount only this directory, so its host ancestors are not on their path.
+    /// </summary>
+    private static bool ReaderOwnsDirectory(string directory, uint reader) =>
+        new DirectoryInfo(directory) is { Exists: true, LinkTarget: null } && OwnerUid(directory) == reader
+        && (File.GetUnixFileMode(directory) & (UnixFileMode.UserRead | UnixFileMode.UserExecute)) == (UnixFileMode.UserRead | UnixFileMode.UserExecute);
 
     private static void WriteText(string path, string content, uint? owner = null)
     {

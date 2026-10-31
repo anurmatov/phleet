@@ -374,6 +374,28 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Empty(Directory.GetFiles(authority, "*.tmp"));
     }
 
+    /// <summary>Review W12-DIR: setup prepared only ConfigDir, so the runtime itself creates <c>managed/authority</c> as root.</summary>
+    [Fact]
+    public async Task A_fresh_root_created_authority_directory_refuses_active_publication()
+    {
+        var runtime = _t.Runtime();
+        if (StockOpenShellRuntime.OwnerUid(_t._dir) != 0) return; // a cross-uid publication needs a root writer
+        Assert.Equal(0, Chown(_t._dir, 1000, 1000)); // setup.sh creates ConfigDir as the recorded operator
+        _t.ConfigDirOwnerUid = "1000";
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        var authority = Path.Combine(_t._dir, "managed", "authority");
+        var record = Path.Combine(authority, "agent1.json");
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("managed_files_failed", apply.Code);
+        Assert.Equal((0u, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute),
+            (StockOpenShellRuntime.OwnerUid(authority), File.GetUnixFileMode(authority)));
+        Assert.Null(ReadAs(1000, record)); // the fresh directory blocks the reader, whoever owns the file
+        Assert.Equal("revoked", JsonNode.Parse(File.ReadAllText(record))!["State"]!.GetValue<string>());
+        Assert.DoesNotContain(_t._cli.Calls, c => c.Args.Any(a => a.Contains(".fleet-activate")));
+    }
+
     [Fact]
     public async Task An_active_record_the_operator_cannot_be_given_is_refused_while_revocation_still_publishes()
     {

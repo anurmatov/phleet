@@ -480,6 +480,108 @@ arrays, JSON output, TLS-skip/endpoint variables removed) and never falls back t
 - **Broker.** Per epoch: vhost `stock-<epoch>`, then the `fleet.group` exchange (`PUT exchanges/<vhost>/fleet.group`), its existing bridge reply queue `fleet.agent.bridge` (`PUT queues/<vhost>/fleet.agent.bridge`) and the binding from `fleet.group` to it with route `bridge` (`POST bindings/<vhost>/e/fleet.group/q/fleet.agent.bridge`), all declared with exactly the properties the Bridge lane redeclares (durable direct exchange; durable, non-exclusive, non-auto-delete queue; no arguments), then `-workload`, `-control` and `-observer` users with random passwords, no tags, and exact anchored permissions built from the source queue/exchange names. All of this precedes workload activation, and a failure holds the epoch. Existing resources refuse, partial writes are reported as owned partials, and revoke closes connections and deletes the users while keeping the vhost and its queues for custody.
   The orchestrator writes no grant for its management user: the queue/exchange/binding writes inside the new vhost rely on RabbitMQ granting the creating management user `.*` configure/write/read on a vhost it creates (the internal auth backend's implicit creator grant on `PUT /api/vhosts`). Under a backend without that grant, those writes are refused and every apply holds the epoch. Revoke removes that grant last, with one exact DELETE of `permissions/<epoch vhost>/<management user>` (already absent counts as removed; a failure is reported as `permission:management`, never naming the user). The grant is owned because create refuses a pre-existing vhost, and removing it keeps custody: the vhost and its queues stay, and an administrator can re-grant itself to inspect them.
 
+### Managed workspace layout (#507)
+
+The pinned CLI's `sandbox download` accepts only paths inside the sandbox's discovered `pwd -P`, the stock image's
+OCI working directory and HOME (`/home/agent`, uid/gid `10001`). The managed user tree is therefore
+**W = `StockOpenShell:WorkloadHome` + `/workspace`** (normally `/home/agent/workspace`), a real child of that root. The
+image's working directory, HOME and user stay as they were; ordinary Docker agents keep their host workspace mounted at
+`/workspace` and are unchanged. There is no new configuration key.
+
+| Item | Contract |
+|---|---|
+| Generated inputs | `Agent:WorkDir=W`; user files uploaded into W; `.mcp.json` regenerated at `W/.mcp.json` on every apply |
+| HOME siblings | `app`, `trust`, native homes and launcher markers stay outside W and are never exported; an ordinary `W/app` project directory is user data |
+| Binding field | `workloadWorkspacePath` in the existing `ManagedBinding` JSON, persisted on every new candidate before any effect; absent in older records |
+| Legacy proof | no persisted path, that epoch's private bundle copy `<ConfigDir>/managed/<agent>/<epoch>/bundle/app/appsettings.json` says `Agent:WorkDir=/workspace` and `StockOpenShell:AppRoot=<HOME>/app`, the in-sandbox root (`pwd -P` and HOME) equals the configured HOME, and `/workspace` is a real readable directory |
+| Refused before any effect | a persisted path other than this installation's W, a changed HOME, an unproven legacy binding (`workspace_layout_unverified`), or a missing copy helper (`workspace_export_failed`) |
+| Resource namespace | `SandboxWorkspace` stays a stock resource scope; every transfer command carries the persisted `--workspace` like every other leg |
+
+**Exclusions.** One list (`PrivateWorkspaceEntries`) drives host staging, the in-sandbox helper and destination pruning,
+by exact top-level name: `.generated`, `claude`, `.claude`, `codex`, `.codex`, `.codex-host`, `gemini`, `.gemini`, `.ssh`,
+`.mcp.json`, `.fleet-activate`, `.fleet-ready`, `.fleet-staged`. Excluded entries are never read, copied, overwritten or
+pruned (a link inside one no longer refuses the copy); nested entries with those names are user data. Routes are
+recreated from current grants, never migrated. The guarantee covers a portable tree of regular files and directories
+with bytes, empty directories and the owner-execute bit, not links, special files, ACLs/xattrs, account state or a
+full-system restore.
+
+**Export.** Every carry out of an existing sandbox uses the supported path, from a revoked, verified-stopped sandbox
+booted into its staged launcher (no activation, daemon or native/model turn):
+1. `sandbox exec` creates a new operation directory `HOME/.phleet-workspace-transfer/<operation>` (0700).
+2. `sandbox upload` puts the public helper `scripts/stock-workspace-copy.py` (shipped in the orchestrator image as
+   `/app/stock-workspace-copy.py`) into it; it needs the workload's existing `python3` and is never installed into a
+   retained image.
+3. `sandbox exec`, as the workload user under the existing filesystem policy, runs it: it verifies the observed root and
+   HOME, copies only the selected tree (legacy `/workspace` or the persisted W) into the new `data` child without
+   following links, refuses any included link or special file, and prints a manifest.
+4. The unmodified pinned CLI downloads `data` into a new private snapshot
+   `<ConfigDir>/managed/<agent>/<epoch>/workspace-out/<operation>` (`sandbox download NAME DATA SNAPSHOT`).
+5. The download is used only when its recomputed manifest (paths in UTF-8 byte order, kinds, sizes, execute bits and
+   SHA-256 contents) equals the helper's. Afterwards only the helper file and empty operation directories are removed.
+
+Nothing moves or deletes the source. Default CLI Git filtering stays on for uploads (no `--no-git-ignore`): when a staged
+tree is itself a Git work tree, the paths the filter will omit (ignored files and the repository metadata) are listed
+privately in `<ConfigDir>/managed/<agent>/<epoch>/workspace-not-transferred.txt` (0600), and the originals stay in the
+source and the private snapshot. A staged user repository's own `.git/config` never runs a command in the orchestrator:
+every CLI child and the report's `git` get command-scope `core.fsmonitor=false` and `core.hooksPath=/dev/null`
+(`GIT_CONFIG_COUNT`, inherited `GIT_CONFIG_PARAMETERS` removed), which override repository config while `.gitignore`,
+`info/exclude` and `core.excludesFile` filtering stay as they are.
+
+| Case | Behavior |
+|---|---|
+| Fresh apply (Docker→OpenShell or first apply) | after staging, the root and HOME must equal the configured HOME and W must be absent or an empty real directory, then the staged tree uploads into W |
+| Current-layout reprovision | same UUID; persisted W is authoritative even if a stale `/workspace` exists (never merged); only `W/.mcp.json`, settings and trust are refreshed |
+| Legacy same-image reprovision | same UUID; W must be absent or empty, the proven `/workspace` is exported and uploaded into W, and the new layout commits only with the apply's success; the original `/workspace` stays |
+| Legacy or current image change | the existing revoke requirement; the old tree is exported and the old sandbox verified stopped before the replacement exists; the new sandbox uses W; the old identity, data and custody stay as Superseded |
+| OpenShell→Docker | the same export; after the verified Stop and once the agent's Docker container is observed absent, created, exited or dead, Docker's prior portable tree is copied to `<ConfigDir>/managed/<agent>/<epoch>/docker-before/<operation>`, then the existing deletion-aware mirror runs; Docker is provisioned only through the existing verified transition |
+
+**Typed holds.** Failures keep the existing parents (`image_change_workspace_unresolved`,
+`openshell_to_docker_unresolved`) or, for reprovision, hold under the reason itself, with a bounded `phase:reason` detail
+and no CLI stderr, payload or identifiers:
+
+| Detail | Meaning |
+|---|---|
+| `layout:workspace_layout_unverified` / `export:workspace_layout_unverified` | root or HOME differs, W is a link or missing when kept, or the selected source is absent or linked |
+| `layout:workspace_layout_conflict` / `export:workspace_layout_conflict` | W already holds content for a new or migrated tree, or the operation directory exists |
+| `export:workspace_export_failed` | helper upload failed, Python missing, policy denial, an included link or special file, an unsupported name, or a copy error |
+| `download:workspace_download_unknown` | nonzero or timed-out download, or a snapshot that does not match the helper's manifest (kept, never consumed) |
+| `download:workspace_stage_failed` / `restore:workspace_stage_failed` | the private snapshot, or Docker's prior-tree snapshot, could not be created |
+| `restore:workspace_restore_failed` | mirroring into the bundle or the Docker workspace failed part-way |
+| `restore:docker_quiescence_pending` / `restore:docker_observation_failed` | the agent's Docker container is running or cannot be observed; the Docker workspace is neither snapshotted nor written |
+| `export:workspace_cleanup_failed` | the helper file could not be removed after a verified download |
+| `*:workspace_transfer_cancelled` | the caller cancelled; the bounded Stop still runs on its own 120 s deadline |
+| `*:sandbox_identity_changed` / `*:sandbox_unobservable` | the exact UUID changed or could not be read around a leg |
+
+Every hold keeps the source and custody, runs the existing bounded verified Stop, and is never retried or replayed
+automatically. A same-image legacy migration that failed after W received content stays a conflict on the next apply:
+inspect the private snapshot and the retained `/workspace`, then clear W only through a supported, scoped `sandbox exec`
+before re-applying. A partial Docker mirror leaves Docker held: restore from `docker-before/<operation>` with a scoped
+copy before any Docker start. Snapshots and operation `data` directories stay until an operator explicitly disposes of
+them after the handoff is verified.
+
+**Downgrade.** An image without `LABEL org.phleet.managed-stock-workspace=1` would apply its old `/workspace` layout to a
+binding whose tree now lives in W. The rollout guard therefore requires `appliedOpenShell=0` and
+`unresolvedBindings=0` for a managed target without that label: revoke, verify detach/stop/quiescence, apply an authorized
+Docker target with this checkout, complete custody retirement, run this checkout's guard against the exact target, then
+switch and separately authorize Start. A guard from an earlier checkout takes the two-label shortcut and is unprotected.
+
+**Operator regression.** `bash scripts/test-stock-workspace-transfer.sh <private-fixture.json>` drives the real pinned
+CLI (binary SHA-256 `446f766842d2bf03abc37b56a3f5a3e46b96140b5b6c305d3f168d67921fd271`) and the fixture orchestrator through
+A1 (legacy control: the CLI refuses `/workspace`), A3 (legacy image change), A2 (fresh layout) and A5 (current layout to
+Docker). The fixture file is owner-only JSON with exactly `orchestratorUrl`, `tokenEnv` (a variable name, never a
+value), `cli`, `cliConfigDir`, `workloadHome`, `freshAgent`, `freshDockerWorkspace`, `legacyAgent`, `baselineImage`,
+`replacementImage` (immutable `@sha256` references) and `receiptDir` (0700). It exits 0 only when every case passes,
+1 on a failure, and 2 (`BLOCKED`) before any mutating request when the fixture, token, pinned CLI, gateway or expected
+fixture state is missing. Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox
+UUID and name in its persisted scope on the supplied gateway, so a fixture that disagrees with that gateway is BLOCKED
+before anything starts. A sandbox the script starts is always stopped again, a failed or interrupted case revokes its
+agent through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). Each
+cleanup action has one 120-second deadline across its identity probes, stop and polling. SIGINT/SIGTERM unwind through
+the same cleanup, a further signal waits until that cleanup finishes, the receipt is still written, and the run exits 130. stdout
+carries results only; manifests, identities and hashes go to an owner-only receipt in `receiptDir`. It never creates fixtures or touches production configuration, networks or grants; a source build,
+FakeCli suite or historical native result is not this check. Native/provider/model qualification, account login or
+import and CONTROL restore remain out of scope and unrun here.
+
 Operator inputs live in the private `${FLEET_BASE_DIR}/openshell-client` directory (0700), mounted
 into the orchestrator at `/var/lib/fleet-openshell-client`:
 - stock CLI client metadata/trust (`XDG_CONFIG_HOME`); with the example `--profile openshell` gateway the
@@ -784,8 +886,9 @@ database outage returns `managed_delete_unavailable` (503).
 **Rollout guard and rollback.** `scripts/check-stock-runtime-rollout.sh` runs in `upgrade.sh`
 before anything is stopped, and it is the operator rollback entrypoint (`--image IMAGE`). A target
 without the label needs the operator-authenticated `GET /api/managed-runtime/rollback-preflight` to
-report zero desired, applied and unresolved managed bindings. A nonzero, malformed or unavailable
-answer refuses. Ordered rollback:
+report zero desired, applied and unresolved managed bindings; a managed target without the #507 workspace label needs
+zero applied and unresolved bindings ([managed workspace layout](#managed-workspace-layout-507)). A nonzero, malformed or
+unavailable answer refuses. Ordered rollback:
 1. revoke;
 2. confirm quiescence and no unresolved errors;
 3. apply Docker;

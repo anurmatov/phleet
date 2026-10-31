@@ -165,6 +165,44 @@ class StockStartupTests(unittest.TestCase):
         self.assertIn("test -r /app/Fleet.Agent.dll", stock)
         self.assertEqual("", default.strip())
 
+    def test_managed_user_tree_is_a_stock_only_home_child_and_the_oci_root_is_unchanged(self):
+        # #507: W is HOME's real workspace child, created as the runtime user in the opt-in stage only.
+        docker = (ROOT / "Dockerfile").read_text()
+        runtime, stock = docker.split("FROM agent-runtime AS stock-agent", 1)
+        stock, default = stock.split("FROM agent-runtime AS default", 1)
+        before_user, as_user = stock.split("USER 10001:10001", 1)
+        self.assertEqual(["WORKDIR /home/agent"], [l for l in stock.splitlines() if l.startswith("WORKDIR ")])
+        self.assertEqual(["ENV HOME=/home/agent"], [l for l in stock.splitlines() if l.startswith("ENV ")])
+        self.assertIn("RUN mkdir -p /workspace /root/.claude", runtime)  # ordinary Docker's /workspace is unchanged
+        self.assertNotIn("/home/agent/workspace", runtime + before_user + default)
+        self.assertIn("RUN mkdir -m 0755 /home/agent/workspace", as_user)
+        for check in ["test ! -L /home/agent/workspace", 'test "$(stat -c %u:%g /home/agent/workspace)" = 10001:10001',
+                      "test -w /home/agent/workspace", 'test -z "$(ls -A /home/agent/workspace)"']:
+            self.assertIn(check, as_user)
+        self.assertEqual("", default.strip())
+        ci = (ROOT / ".github/workflows/ci.yml").read_text().split("  agent-image:", 1)[1].split("  minio-init-dependencies:", 1)[0]
+        for check in ['test "$(stat -c %u:%g /home/agent/workspace)" = 10001:10001', "test ! -e /home/agent/workspace",
+                      'for directory in "$PWD" /workspace /home/agent/workspace']:
+            self.assertIn(check, ci)
+
+    def test_ci_container_probe_scripts_keep_their_single_quotes_balanced(self):
+        # #507 review F5: an apostrophe inside a `sh -c '...'` probe ends the quote and fails the image job.
+        ci = (ROOT / ".github/workflows/ci.yml").read_text().split("  agent-image:", 1)[1].split("  minio-init-dependencies:", 1)[0]
+        bodies = re.findall(r" -c '\n(.*?)\n\s*'\n", ci, re.S)
+        self.assertGreaterEqual(len(bodies), 2)
+        for body in bodies:
+            self.assertNotIn("'", body)
+            self.assertEqual(0, subprocess.run(["sh", "-n"], input=body, text=True).returncode)
+
+    def test_orchestrator_image_ships_the_copy_helper_without_new_dependencies(self):
+        orchestrator = (ROOT / "src/Fleet.Orchestrator/Dockerfile").read_text()
+        self.assertIn("COPY scripts/stock-workspace-copy.py /app/stock-workspace-copy.py", orchestrator)
+        self.assertIn("LABEL org.phleet.managed-stock-workspace=1", orchestrator)
+        self.assertNotIn("python", orchestrator.split("COPY scripts/stock-workspace-copy.py", 1)[0].lower())
+        self.assertEqual(2, orchestrator.count("apt-get install"))  # the base curl line and the opt-in CLI's ssh/git
+        runtime = (ROOT / "src/Fleet.Orchestrator/Services/StockOpenShellRuntime.cs").read_text()
+        self.assertIn('internal const string CopyHelperName = "stock-workspace-copy.py";', runtime)
+
     def test_restrictive_context_startup_scripts_get_explicit_read_execute_modes(self):
         docker = (ROOT / "Dockerfile").read_text()
         runtime, stock = docker.split("FROM agent-runtime AS stock-agent", 1)

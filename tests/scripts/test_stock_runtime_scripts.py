@@ -40,11 +40,23 @@ class RolloutGuardTests(unittest.TestCase):
         return subprocess.run(["bash", str(GUARD), *args], env=environment, capture_output=True, text=True)
 
     def dockerfile(self, labelled):
-        # #502: a fully capable target declares the managed AND the subscription capability.
+        # #502/#507: a fully capable target declares the managed, subscription AND workspace-layout capability.
         path = Path(self.tmp.name, "Dockerfile")
         path.write_text("FROM x\n" + ("LABEL org.phleet.managed-stock-runtime=1\n"
-                                       "LABEL org.phleet.managed-stock-subscription=1\n" if labelled else ""))
+                                       "LABEL org.phleet.managed-stock-subscription=1\n"
+                                       "LABEL org.phleet.managed-stock-workspace=1\n" if labelled else ""))
         return str(path)
+
+    def test_pre_workspace_managed_target_needs_every_openshell_binding_handed_back(self):
+        # #507 A12: a managed target from before the HOME/workspace layout never takes the shortcut.
+        path = Path(self.tmp.name, "Dockerfile.pre507")
+        path.write_text("FROM x\nLABEL org.phleet.managed-stock-runtime=1\nLABEL org.phleet.managed-stock-subscription=1\n")
+        counts = '{{"desiredOpenShell":2,"appliedOpenShell":{0},"unresolvedBindings":{1},"subscriptionBindings":1}}'
+        for applied, unresolved, code in [(1, 0, 1), (0, 1, 1), (0, 0, 0)]:
+            with self.subTest(applied=applied, unresolved=unresolved):
+                result = self.run_guard("--dockerfile", str(path), ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT=counts.format(applied, unresolved))
+                self.assertEqual(result.returncode, code, result.stderr)
+        self.assertEqual(1, self.run_guard("--dockerfile", str(path)).returncode)  # no token: never assumed safe
 
     def test_capable_source_passes_without_any_preflight_call(self):
         result = self.run_guard("--dockerfile", self.dockerfile(True))

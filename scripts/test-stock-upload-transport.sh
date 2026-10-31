@@ -63,6 +63,12 @@ for tool in ssh git; do
   fi
 done
 pass "default image has neither ssh nor git (opt-in only)"
+# #507: both orchestrator images carry the exact public workspace copy helper (no extra dependency).
+for image in "$DEFAULT_IMAGE" "$OPTIN_IMAGE"; do
+  docker run --rm --entrypoint sh "$image" -c 'test -f /app/stock-workspace-copy.py && test ! -L /app/stock-workspace-copy.py && cat /app/stock-workspace-copy.py' \
+    | cmp -s - "$ROOT/scripts/stock-workspace-copy.py" || fail "$image lacks the exact workspace copy helper"
+done
+pass "both orchestrator images carry the workspace copy helper"
 
 # 3. Real CLI default local planning (Git filtering on, as the adapter calls it) for a regular directory
 #    and a single file. Planning succeeds when the CLI warns that the source is outside a Git work tree
@@ -83,6 +89,26 @@ pass "real CLI default planning passes for a regular directory and a single file
 control="$(docker run --rm --entrypoint sh "$OPTIN_IMAGE" -c "$(plan 'env PATH=/usr/local/bin')")"
 grep -qF "failed to run git rev-parse" <<<"$control" || fail "control without git did not stop at planning: $control"
 pass "control: without git the real CLI stops at planning (failed to run git rev-parse)"
+
+# #507 review F1: the real CLI's Git planning in a staged user repository whose own config runs a canary through
+# core.fsmonitor. Without the adapter's command-scope settings (ProcessStockCli.NeutralizeGit) the canary runs (positive
+# control); with them it never runs and ignore filtering still plans the upload.
+canary_plan() { # $1: an environment prefix applied to the CLI invocation only
+  printf '%s\n' 'git init -q /tmp/repo && printf "#!/bin/sh\ntouch /tmp/canary\n" > /tmp/fsmonitor.sh && chmod 755 /tmp/fsmonitor.sh' \
+    'git -C /tmp/repo config core.fsmonitor /tmp/fsmonitor.sh && echo ignored.log > /tmp/repo/.gitignore && echo k > /tmp/repo/kept.txt && echo i > /tmp/repo/ignored.log' \
+    "$1 openshell --gateway-endpoint http://127.0.0.1:9 sandbox upload probe /tmp/repo /sandbox/dst 2>&1 || true" \
+    'if [ -e /tmp/canary ]; then echo CANARY_RAN; else echo CANARY_ABSENT; fi'
+}
+NEUTRAL='env GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null'
+grep -qF 'GitCommandScope = [("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null")]' "$ROOT/src/Fleet.Orchestrator/Services/StockOpenShellRuntime.cs" \
+  || fail "NEUTRAL no longer matches the adapter's GitCommandScope"
+unguarded="$(docker run --rm --entrypoint sh "$OPTIN_IMAGE" -c "$(canary_plan '')")"
+grep -qx CANARY_RAN <<<"$unguarded" || fail "control: the canary repository did not exercise core.fsmonitor: $unguarded"
+guarded="$(docker run --rm --entrypoint sh "$OPTIN_IMAGE" -c "$(canary_plan "$NEUTRAL")")"
+grep -qx CANARY_ABSENT <<<"$guarded" || fail "the real CLI ran repository config despite command-scope settings: $guarded"
+grep -qF "Uploading /tmp/repo -> sandbox:/sandbox/dst" <<<"$guarded" || fail "guarded Git planning did not start the upload: $guarded"
+! grep -qF "Git filtering failed" <<<"$guarded" || fail "guarded Git filtering failed: $guarded"
+pass "real CLI Git planning never runs repository config under the adapter's settings (control ran it)"
 
 # 4. Supported upload: the pinned upload invocation from the opt-in image, through a ProxyCommand,
 #    into a throwaway sshd whose openshell-upload-v1 subsystem stores stdin.

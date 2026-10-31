@@ -52,6 +52,8 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
         foreach (var name in new[] { "OPENSHELL_GATEWAY_INSECURE", "OPENSHELL_GATEWAY_ENDPOINT", "OPENSHELL_GATEWAY" })
             psi.Environment.Remove(name);
         if (config["StockOpenShell:ConfigDir"] is { Length: > 0 } dir) psi.Environment["XDG_CONFIG_HOME"] = dir;
+        // #507 review F1: upload planning runs git in staged copies of user repositories; their config never runs here.
+        NeutralizeGit(psi.Environment);
         if (secretEnv is not null)
             foreach (var (key, value) in secretEnv) psi.Environment[key] = value;
 
@@ -90,6 +92,26 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
     }
 
     private const string SetsidPath = "/usr/bin/setsid";
+
+    /// <summary>
+    /// #507 review F1: command-scope Git settings for every Git process the orchestrator starts or the pinned CLI spawns.
+    /// The CLI's upload planning runs <c>git rev-parse</c>/<c>git ls-files</c> inside a staged copy of a user repository,
+    /// whose own <c>.git/config</c> could otherwise make Git run a command here (<c>core.fsmonitor</c>, index hooks).
+    /// Command scope overrides repository, global and system config; <c>.gitignore</c>, <c>info/exclude</c> and
+    /// <c>core.excludesFile</c> filtering stay exactly as they are.
+    /// </summary>
+    internal static readonly (string Key, string Value)[] GitCommandScope = [("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null")];
+
+    internal static void NeutralizeGit(IDictionary<string, string?> environment)
+    {
+        environment.Remove("GIT_CONFIG_PARAMETERS");
+        environment["GIT_CONFIG_COUNT"] = GitCommandScope.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        for (var i = 0; i < GitCommandScope.Length; i++)
+        {
+            environment[$"GIT_CONFIG_KEY_{i}"] = GitCommandScope[i].Key;
+            environment[$"GIT_CONFIG_VALUE_{i}"] = GitCommandScope[i].Value;
+        }
+    }
 
     /// <summary>An explicit path must be an existing file; a bare name must resolve on PATH.</summary>
     internal static bool CliExists(string cliPath)
@@ -202,6 +224,13 @@ public sealed record ManagedBinding(string SandboxName, string SandboxId, Guid E
     /// <summary>#502: the outside subscription identity, captured before any effect; null for API-key bindings.</summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public ManagedSubscription? Subscription { get; init; }
+
+    /// <summary>
+    /// #507: the workload's user tree, <c>WorkloadHome/workspace</c>, persisted on every new candidate before any effect.
+    /// Null in older records: those are the legacy <c>/workspace</c> layout only once proven (never assumed).
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? WorkloadWorkspacePath { get; init; }
 
     [System.Text.Json.Serialization.JsonIgnore]
     public bool IsSubscription => AuthMode == StockSubscriptionBinding.Mode;
@@ -372,8 +401,12 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Ordinary MCP endpoint name → first-party receiving service that verifies the outside assertion.</summary>
     internal static readonly IReadOnlyDictionary<string, string> ServiceByMcpName =
         StockServices.McpNames.ToDictionary(p => p.Value, p => p.Key, StringComparer.Ordinal);
-    /// <summary>Account/control state that never crosses a runtime switch with the workspace.</summary>
-    internal static readonly string[] PrivateWorkspaceEntries = [".generated", "claude", ".claude", "codex", ".codex", ".codex-host", "gemini", ".gemini", ".ssh", ".mcp.json"];
+    /// <summary>
+    /// Account/control state that never crosses a runtime switch with the workspace: the one list host staging, the
+    /// in-sandbox copy helper and destination pruning all use (#507 adds the staged launcher's markers).
+    /// </summary>
+    internal static readonly string[] PrivateWorkspaceEntries = [".generated", "claude", ".claude", "codex", ".codex", ".codex-host", "gemini", ".gemini", ".ssh", ".mcp.json",
+        ".fleet-activate", ".fleet-ready", ".fleet-staged"];
 
     internal TimeSpan LegTimeout { get; init; } = TimeSpan.FromSeconds(30);
     internal TimeSpan FanoutTimeout { get; init; } = TimeSpan.FromSeconds(120);
@@ -430,13 +463,31 @@ public sealed class StockOpenShellRuntime(
     private string ConfigDir => config["StockOpenShell:ConfigDir"] ?? "";
 
     /// <summary>
-    /// The stock image's non-root HOME (uid 10001); /app and / are not writable there, so every input lands
-    /// under it. Pinned 0.1.5 <c>sandbox upload NAME DIR DEST</c> extracts at <c>DEST/basename(DIR)/</c>, so
-    /// the bundle's <c>app</c>/<c>trust</c> go to HOME and <c>workspace</c> to <c>/</c>.
+    /// The stock image's non-root HOME (uid 10001) and OCI working directory; /app and / are not writable there, so every
+    /// input lands under it. Pinned 0.1.5 <c>sandbox upload NAME DIR DEST</c> extracts at <c>DEST/basename(DIR)/</c>, so
+    /// the bundle's <c>app</c>, <c>trust</c> and <c>workspace</c> all go to HOME.
     /// </summary>
     internal string WorkloadHome => (config["StockOpenShell:WorkloadHome"] is { Length: > 0 } home ? home : "/home/agent").TrimEnd('/');
     internal string WorkloadAppRoot => WorkloadHome + "/app";
     internal string WorkloadEnrollmentFile => WorkloadHome + "/trust/enrollment.json";
+
+    /// <summary>
+    /// #507: the managed user tree W. The pinned CLI downloads only paths inside the sandbox's discovered <c>pwd -P</c>,
+    /// the stock root (= HOME), so the tree is HOME's real <c>workspace</c> child, beside but never including
+    /// <c>app</c>, <c>trust</c>, native homes and launcher markers.
+    /// </summary>
+    internal string WorkloadWorkspace => WorkloadHome + "/workspace";
+
+    /// <summary>#507: the generated <c>Agent:WorkDir</c> of bindings recorded before W (no persisted path).</summary>
+    internal const string LegacyWorkspace = "/workspace";
+
+    /// <summary>#507: per-operation directories for the copy helper and its filtered snapshot, under the stock root.</summary>
+    private string TransferRoot => WorkloadHome + "/.phleet-workspace-transfer";
+
+    internal const string CopyHelperName = "stock-workspace-copy.py";
+
+    /// <summary>#507: the public in-sandbox copy helper shipped beside the orchestrator (<c>scripts/stock-workspace-copy.py</c>).</summary>
+    internal string CopyHelperFile { get; init; } = Path.Combine(AppContext.BaseDirectory, CopyHelperName);
     private string AuthorityDir => Path.Combine(ConfigDir, "managed", "authority");
     /// <summary>Orchestrator-only observer credentials (review W4); never mounted into another service.</summary>
     private string ObserverDir => StockAuthoritySource.ObserverDirectory(AuthorityDir);
@@ -1232,9 +1283,9 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// OpenShell→Docker: cut off, copy the workspace out while running, stop and verify, then run the
-    /// ordinary Docker provisioning while this operation still holds the agent. Applied Docker is
-    /// published only after that Docker transition succeeded.
+    /// OpenShell→Docker: cut off, export the workspace from the staged sandbox, stop and verify, mirror it
+    /// into Docker, then run the ordinary Docker provisioning while this operation still holds the agent.
+    /// Applied Docker is published only after that Docker transition succeeded.
     /// </summary>
     private async Task<(ManagedRecord, string?, int?, Result)> ApplyDockerAsync(Agent agent, ManagedRecord record,
         Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
@@ -1243,15 +1294,27 @@ public sealed class StockOpenShellRuntime(
         {
             // The workspace copy-out and revoke record live under ConfigDir: refuse before any write.
             if (DescribeConfigDirFault() is { } dirFault) return (record, null, null, Result.Refused(409, dirFault));
-            // Cut off (unless already revoked), quiesce every writer, start into staging (no daemon),
-            // copy the workspace out, then stop and verify. Any failure still attempts a bounded Stop.
+            // #507: the tree to carry is the persisted (or proven legacy) layout, resolved before any effect.
+            var (source, layoutFault) = WorkspaceSource(agent.Name, applied);
+            if ((layoutFault ?? ExportUnavailable()) is { } refused) return (record, null, null, Result.Refused(409, refused));
+            // Cut off (unless already revoked), quiesce every writer, start into staging (no daemon), export the
+            // workspace, then stop and verify. Any failure still attempts a bounded Stop.
             var errors = new List<string>();
             if (record.State != "revoked") errors.AddRange(await RevokeFanoutAsync(agent.Name, record, ct, stop: false));
             if (errors.Count == 0 && await StopVerifiedAsync(applied, ct) is { } quiet) errors.Add(quiet);
             if (errors.Count == 0 && await StageAsync(applied, ct) is { } staged) errors.Add(staged);
-            if (errors.Count == 0 && await DownloadWorkspaceAsync(agent, applied, DockerWorkspaceDir(agent), ct) is { } workspace) errors.Add(workspace);
+            string? snapshot = null;
+            if (errors.Count == 0 && await ExportWorkspaceAsync(agent.Name, applied, source!, ct) is var (exported, exportFault))
+            {
+                if (exportFault is not null) errors.Add(exportFault);
+                snapshot = exported;
+            }
             using (var cleanup = new CancellationTokenSource(FanoutTimeout))
                 if (await StopVerifiedAsync(applied, cleanup.Token) is { } stopped) errors.Add(stopped);
+            // The deletion-aware mirror runs only once the sandbox is verified stopped and, #507 review F2, the Docker
+            // destination's own container is observed stopped (absent, created, exited or dead), after Docker's snapshot.
+            if (errors.Count == 0 && await DockerDestinationFaultAsync(agent) is { } busy) errors.Add(busy);
+            if (errors.Count == 0 && RestoreDockerWorkspace(agent, snapshot!) is { } restore) errors.Add(restore);
             if (errors.Count > 0) return Hold(record, 502, "openshell_to_docker_unresolved", [.. errors]);
             record = record with { State = "revoked" };
             await checkpoint(record);
@@ -1326,20 +1389,32 @@ public sealed class StockOpenShellRuntime(
             if (replaced) return (record, null, null, Result.Refused(409, "managed_auth_change_requires_revoke"));
             if (await VerifyIdentityAsync(old, ct) is { } identity) return (record, null, null, identity);
         }
+        // #507: the user tree a kept or replaced sandbox already holds is resolved from its persisted binding before any
+        // effect. A reuse of a proven legacy binding migrates /workspace into W; an unknown layout refuses.
+        string? userTree = null;
+        if ((retired ?? (reuse ? record.Applied : null)) is { } existing)
+        {
+            var (tree, layoutFault) = WorkspaceSource(agent.Name, existing);
+            if (layoutFault is not null) return (record, null, null, Result.Refused(409, layoutFault));
+            userTree = tree;
+        }
+        var migrating = reuse && userTree == LegacyWorkspace;
+        if ((retired is not null || migrating) && ExportUnavailable() is { } helperFault) return (record, null, null, Result.Refused(409, helperFault));
         var epoch = Guid.NewGuid();
-        // #502: the subscription identity and both workspaces are captured in the candidate BEFORE any effect.
+        // #502: the subscription identity and both workspaces are captured in the candidate BEFORE any effect. #507: so is W.
         var tuple = subscription ? Tuple(source!) : null;
         var candidate = reuse
             ? record.Applied! with
             {
                 Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef ?? "",
                 GatewayGeneration = generation, ServiceProviders = serviceProviders, Subscription = tuple,
-                Provider = subscription ? source!.ProviderName : record.Applied!.Provider,
+                Provider = subscription ? source!.ProviderName : record.Applied!.Provider, WorkloadWorkspacePath = WorkloadWorkspace,
             }
             : new ManagedBinding(SandboxNameFor(agent.Name, epoch), "", epoch, image, policy.Id, policy.Sha256, mode,
                 agent.ProviderApiKeyEnvRef ?? "", subscription ? source!.ProviderName : $"fleet-{agent.Name}-openai", generation)
             {
                 ServiceProviders = serviceProviders, SandboxWorkspace = source?.SandboxWorkspace, Subscription = tuple,
+                WorkloadWorkspacePath = WorkloadWorkspace,
             };
         // #502: a reused sandbox rebound to a new outside identity keeps the old tuple as custody history.
         var history = reuse && record.Applied!.IsSubscription && subscription && !SameIdentity(record.Applied, source!)
@@ -1439,12 +1514,21 @@ public sealed class StockOpenShellRuntime(
             }
             else if (retired is not null)
             {
-                // Staged (no daemon) only for the transfer, then verified stopped again before the new sandbox exists.
-                var carried = await StageAsync(retired, ct) ?? await DownloadWorkspaceAsync(agent, retired, Path.Combine(bundle, "workspace"), ct);
+                // Staged (no daemon) only for the export, then verified stopped again before the new sandbox exists.
+                // #507: the old tree (legacy /workspace or its W) is exported, never moved; the old sandbox keeps it.
+                var carried = new List<string>();
+                string? snapshot = null;
+                if (await StageAsync(retired, ct) is { } staged) carried.Add(staged);
+                else if (await ExportWorkspaceAsync(agent.Name, retired, userTree!, ct) is var (exported, exportFault))
+                {
+                    if (exportFault is not null) carried.Add(exportFault);
+                    snapshot = exported;
+                }
                 using (var cleanup = new CancellationTokenSource(FanoutTimeout))
-                    if (await StopVerifiedAsync(retired, cleanup.Token) is { } stopped) carried = carried is null ? "stop:" + stopped : carried + ",stop:" + stopped;
+                    if (await StopVerifiedAsync(retired, cleanup.Token) is { } stopped) carried.Add("stop:" + stopped);
+                if (carried.Count == 0 && CarryInto(snapshot!, Path.Combine(bundle, "workspace")) is { } restore) carried.Add(restore);
                 // Nothing new exists yet: hold the revoked record itself (no UUID-less candidate), so revoke clears it.
-                if (carried is not null) return Hold(record, 502, "image_change_workspace_unresolved", carried);
+                if (carried.Count > 0) return Hold(record, 502, "image_change_workspace_unresolved", [.. carried]);
             }
             // #502: a mode change away from subscription first verifies every old tuple cut, detached and quiescent.
             if (RetirementTuples(agent, record) is { Count: > 0 } old && await RetirementFaultAsync(agent.Name, old, ct) is { } unverified)
@@ -1483,9 +1567,23 @@ public sealed class StockOpenShellRuntime(
 
         // Staging: the launcher waits without a daemon, so transfers race no native task or file writer.
         if (await StageAsync(candidate, ct) is { } stage) return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, stage, [], ct);
+        // #507: before any input lands, the observed stock root must be the configured HOME, and W must be the persisted
+        // tree a current-layout reuse keeps, or absent/empty for a new or migrated tree (never merged into or overwritten).
+        var keepTree = reuse && !migrating;
+        if (await ProbeWorkspaceAsync(candidate, keepTree, ct) is { } layout)
+            return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, Reason(layout), [layout], ct);
+        if (migrating)
+        {
+            // #507 same-image legacy reprovision: the proven /workspace is exported from this staged sandbox (same UUID) and
+            // lands in W; the original stays in place, and the new layout commits only with this apply's success.
+            var (snapshot, exportFault) = await ExportWorkspaceAsync(agent.Name, candidate, LegacyWorkspace, ct);
+            if ((exportFault ?? CarryInto(snapshot!, Path.Combine(bundle, "workspace"))) is { } carry)
+                return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, Reason(carry), [carry], ct);
+        }
+        if (!keepTree) RecordNotTransferred(Path.Combine(bundle, "workspace"), epochDir);
         // Reuse keeps the workspace but refreshes its MCP routes, which follow the current grants.
-        foreach (var (local, remote) in reuse ? new[] { ("app", WorkloadHome), ("trust", WorkloadHome), (Path.Combine("workspace", ".mcp.json"), "/workspace/.mcp.json") }
-                     : [("app", WorkloadHome), ("trust", WorkloadHome), ("workspace", "/")])
+        foreach (var (local, remote) in keepTree ? new[] { ("app", WorkloadHome), ("trust", WorkloadHome), (Path.Combine("workspace", ".mcp.json"), WorkloadWorkspace + "/.mcp.json") }
+                     : [("app", WorkloadHome), ("trust", WorkloadHome), ("workspace", WorkloadHome)])
             if (await UploadAsync(candidate, Path.Combine(bundle, local), remote, ct) is { } upload)
                 return Expired() ? await CutAsync(applying) : await HoldStoppedAsync(applying, candidate, upload, [], ct);
         // Reuse: providers were attached before the boot (above); a policy change needs the running supervisor's --wait.
@@ -2506,25 +2604,261 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// Copies the running sandbox's /workspace into <paramref name="target"/>, control state excluded.
-    /// The pinned CLI extracts the directory's contents straight into the destination; no re-rooting.
+    /// #507: the user tree an existing binding's workload uses, resolved from host state alone before any effect. A
+    /// persisted path counts only when it is exactly this installation's W; a binding without one is the legacy
+    /// <c>/workspace</c> only when that epoch's own generated settings say <c>Agent:WorkDir=/workspace</c> under this HOME
+    /// (never inferred from a directory name or the image). The in-sandbox root and tree are verified again before use.
     /// </summary>
-    private async Task<string?> DownloadWorkspaceAsync(Agent agent, ManagedBinding binding, string target, CancellationToken ct)
+    private (string? Tree, string? Fault) WorkspaceSource(string agentName, ManagedBinding binding) =>
+        (binding.WorkloadWorkspacePath is { } path ? (path == WorkloadWorkspace ? path : null) : LegacyWorkDir(agentName, binding) ? LegacyWorkspace : null)
+            is { } tree ? (tree, null) : (null, "workspace_layout_unverified");
+
+    /// <summary>The legacy proof: the binding epoch's private bundle copy of its generated settings (no-follow regular file).</summary>
+    private bool LegacyWorkDir(string agentName, ManagedBinding binding)
     {
-        var staging = Path.Combine(ConfigDir, "managed", agent.Name, binding.Epoch.ToString("N"), "workspace-out");
         try
         {
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
-            PrivateDirectory(staging);
+            var path = Path.Combine(ConfigDir, "managed", agentName, binding.Epoch.ToString("N"), "bundle", "app", "appsettings.json");
+            RefuseLinkedAncestors(path);
+            if (AuthorityEntry(path) != true) return false;
+            var settings = JsonNode.Parse(File.ReadAllText(path));
+            return Text(settings?["Agent"]?["WorkDir"]) == LegacyWorkspace && Text(settings?["StockOpenShell"]?["AppRoot"]) == WorkloadAppRoot;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_stage_failed"; }
-        if (await VerifyIdentityAsync(binding, ct) is { } before) return before.Code;
-        var download = await cli.RunAsync(Scoped(binding, ["sandbox", "download", binding.SandboxName, "/workspace", staging]), null, TransferTimeout, ct);
-        if (download.ExitCode != 0 || download.TimedOut) return "workspace_download_unknown";
-        if (await VerifyIdentityAsync(binding, ct) is { } after) return after.Code;
-        // Mirror the working tree (deletions included); excluded account/control state is never touched.
-        try { CopyTree(staging, target, PrivateWorkspaceEntries, prune: true); return null; }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "workspace_restore_failed"; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { return false; }
+
+        static string? Text(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
+    }
+
+    /// <summary>#507: an export needs the public copy helper beside the orchestrator; refused before any effect without it.</summary>
+    private string? ExportUnavailable() => AuthorityEntry(CopyHelperFile) == true ? null : "workspace_export_failed";
+
+    /// <summary>The reason part of a bounded <c>phase:reason</c> transfer fault.</summary>
+    private static string Reason(string fault) => fault[(fault.IndexOf(':') + 1)..];
+
+    /// <summary>
+    /// #507 layout probe ($1 root, $2 W, $3 current|new). The observed stock root (<c>pwd -P</c>, the root the pinned CLI
+    /// downloads within) and HOME are exactly the configured root; a kept tree is a real directory, a new one absent or an
+    /// empty real directory. Exit 3 is unverified, 4 a conflict.
+    /// </summary>
+    internal const string WorkspaceProbeScript =
+        "[ \"$(pwd -P)\" = \"$1\" ] && [ \"$(cd \"$HOME\" && pwd -P)\" = \"$1\" ] || exit 3; "
+        + "if [ \"$3\" = current ]; then [ -d \"$2\" ] && [ ! -L \"$2\" ] || exit 3; exit 0; fi; "
+        + "[ -L \"$2\" ] && exit 4; [ -e \"$2\" ] || exit 0; [ -d \"$2\" ] || exit 4; "
+        + "c=$(ls -A -- \"$2\") || exit 3; [ -z \"$c\" ] || exit 4";
+
+    /// <summary>#507 ($1 root, $2 transfer root, $3 operation): a real transfer root and a new operation directory created here.</summary>
+    internal const string TransferDirectoryScript =
+        "[ \"$(pwd -P)\" = \"$1\" ] || exit 3; [ -L \"$2\" ] && exit 4; [ -d \"$2\" ] || mkdir -m 700 -- \"$2\" || exit 5; "
+        + "[ -d \"$2\" ] && [ ! -L \"$2\" ] || exit 4; [ -e \"$2/$3\" ] && exit 4; mkdir -m 700 -- \"$2/$3\" || exit 5";
+
+    /// <summary>#507 ($1 operation): after a verified download only the helper file and empty operation directories go.</summary>
+    internal const string TransferCleanupScript =
+        "[ -d \"$1\" ] && [ ! -L \"$1\" ] || exit 1; rm -f -- \"$1/" + CopyHelperName + "\" || exit 1; "
+        + "rmdir -- \"$1/data\" 2>/dev/null; rmdir -- \"$1\" 2>/dev/null; exit 0";
+
+    private async Task<string?> ProbeWorkspaceAsync(ManagedBinding binding, bool current, CancellationToken ct)
+    {
+        var (run, fault) = await SandboxCommandAsync(binding, ["sh", "-c", WorkspaceProbeScript, "layout", WorkloadHome, WorkloadWorkspace, current ? "current" : "new"], LegTimeout, ct);
+        if (ct.IsCancellationRequested) return "layout:workspace_transfer_cancelled";
+        if (fault is not null) return "layout:" + fault;
+        return run!.ExitCode == 0 && !run.TimedOut ? null : "layout:" + (run.ExitCode == 4 && !run.TimedOut ? "workspace_layout_conflict" : "workspace_layout_unverified");
+    }
+
+    /// <summary>One <c>sandbox exec</c> of <paramref name="command"/> with exact-UUID checks before and after; (result, identity fault).</summary>
+    private async Task<(StockCliResult? Run, string? Fault)> SandboxCommandAsync(ManagedBinding binding, IReadOnlyList<string> command, TimeSpan timeout,
+        CancellationToken ct)
+    {
+        if (await VerifyIdentityAsync(binding, ct) is { } before) return (null, before.Code);
+        var run = await cli.RunAsync(Scoped(binding, ["sandbox", "exec", "-n", binding.SandboxName, "--", .. command]), null, timeout, ct);
+        return await VerifyIdentityAsync(binding, ct) is { } after ? (null, after.Code) : (run, null);
+    }
+
+    /// <summary>
+    /// #507 supported export of one user tree from a staged, quiescent sandbox into a new private host snapshot
+    /// (<c>managed/&lt;agent&gt;/&lt;epoch&gt;/workspace-out/&lt;operation&gt;</c>). The public helper goes into a new
+    /// operation directory under the stock root and, as the workload user, copies the selected tree (exclusions, no links or
+    /// special files) into its <c>data</c> child; the unmodified pinned CLI downloads that child, and the download is used only
+    /// once it matches the helper's manifest. Nothing is moved or deleted except, afterwards, the helper file and empty
+    /// operation directories; snapshots stay until explicitly disposed. Faults are bounded <c>phase:reason</c> values.
+    /// </summary>
+    private async Task<(string? Snapshot, string? Fault)> ExportWorkspaceAsync(string agentName, ManagedBinding binding, string tree, CancellationToken ct)
+    {
+        try { return await ExportOnceAsync(agentName, binding, tree, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return (null, "export:workspace_transfer_cancelled"); }
+    }
+
+    private async Task<(string? Snapshot, string? Fault)> ExportOnceAsync(string agentName, ManagedBinding binding, string tree, CancellationToken ct)
+    {
+        var operation = Guid.NewGuid().ToString("N");
+        var remote = TransferRoot + "/" + operation;
+        (string?, string?) Failed(string phase, string reason) => (null, phase + ":" + (ct.IsCancellationRequested ? "workspace_transfer_cancelled" : reason));
+        static string Exit(StockCliResult run) => run.TimedOut ? "workspace_export_failed"
+            : run.ExitCode switch { 3 => "workspace_layout_unverified", 4 => "workspace_layout_conflict", _ => "workspace_export_failed" };
+
+        var (prepared, fault) = await SandboxCommandAsync(binding, ["sh", "-c", TransferDirectoryScript, "transfer", WorkloadHome, TransferRoot, operation], LegTimeout, ct);
+        if (fault is not null) return Failed("export", fault);
+        if (prepared!.ExitCode != 0 || prepared.TimedOut) return Failed("export", Exit(prepared));
+        ct.ThrowIfCancellationRequested();
+        if (await UploadAsync(binding, CopyHelperFile, remote + "/", ct) is { } upload)
+            return Failed("export", upload == "input_upload_unknown" ? "workspace_export_failed" : upload);
+        ct.ThrowIfCancellationRequested();
+        var (copied, copyFault) = await SandboxCommandAsync(binding, ["python3", remote + "/" + CopyHelperName, "--root", WorkloadHome, "--source", tree,
+            "--dest", remote + "/data", .. PrivateWorkspaceEntries.SelectMany(name => new[] { "--exclude", name })], TransferTimeout, ct);
+        if (copyFault is not null) return Failed("export", copyFault);
+        if (copied!.ExitCode != 0 || copied.TimedOut) return Failed("export", Exit(copied));
+        if (ParseManifest(copied.Stdout) is not { } expected) return Failed("export", "workspace_export_failed");
+        ct.ThrowIfCancellationRequested();
+
+        var snapshot = Path.Combine(ConfigDir, "managed", agentName, binding.Epoch.ToString("N"), "workspace-out", operation);
+        try
+        {
+            RefuseLinkedAncestors(Path.GetDirectoryName(snapshot)!);
+            if (Directory.Exists(snapshot) || File.Exists(snapshot)) return Failed("download", "workspace_stage_failed");
+            PrivateDirectory(snapshot);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Failed("download", "workspace_stage_failed"); }
+        if (await VerifyIdentityAsync(binding, ct) is { } before) return Failed("download", before.Code);
+        var download = await cli.RunAsync(Scoped(binding, ["sandbox", "download", binding.SandboxName, remote + "/data", snapshot]), null, TransferTimeout, ct);
+        if (download.ExitCode != 0 || download.TimedOut) return Failed("download", "workspace_download_unknown");
+        if (await VerifyIdentityAsync(binding, ct) is { } after) return Failed("download", after.Code);
+        // A partial or altered download is kept for inspection but never consumed, least of all as an empty tree.
+        if (SnapshotManifest(snapshot) != expected) return Failed("download", "workspace_download_unknown");
+        ct.ThrowIfCancellationRequested();
+
+        var (cleaned, cleanupFault) = await SandboxCommandAsync(binding, ["sh", "-c", TransferCleanupScript, "cleanup", remote], LegTimeout, ct);
+        if (cleanupFault is not null || cleaned!.ExitCode != 0 || cleaned.TimedOut) return Failed("export", "workspace_cleanup_failed");
+        logger.LogInformation("Managed workspace export for {Agent}: {Entries} entries verified", agentName, expected.Entries);
+        return (snapshot, null);
+    }
+
+    /// <summary>The helper's one-line manifest (its last output line); null unless it is exactly the expected shape.</summary>
+    internal static (int Entries, long Bytes, string Sha256)? ParseManifest(string stdout)
+    {
+        try
+        {
+            var line = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault();
+            if (line is null || JsonNode.Parse(line) is not JsonObject manifest || manifest.Count != 3) return null;
+            var (entries, bytes, sha) = (manifest["entries"]!.GetValue<int>(), manifest["bytes"]!.GetValue<long>(), manifest["sha256"]!.GetValue<string>());
+            return entries >= 0 && bytes >= 0 && Regex.IsMatch(sha, @"\A[0-9a-f]{64}\z") ? (entries, bytes, sha) : null;
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or NullReferenceException) { return null; }
+    }
+
+    /// <summary>
+    /// #507: the helper's manifest recomputed over a downloaded snapshot without following links: per entry in UTF-8 byte
+    /// order of its relative path, kind, path, size, owner-execute bit and content SHA-256, NUL-terminated. Null when the tree
+    /// holds anything but regular files and directories.
+    /// </summary>
+    internal static (int Entries, long Bytes, string Sha256)? SnapshotManifest(string root)
+    {
+        var entries = new List<(byte[] Key, string Relative, bool Directory, string Path)>();
+        var options = new EnumerationOptions { AttributesToSkip = 0 };
+        bool Walk(string directory, string prefix)
+        {
+            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos("*", options))
+            {
+                var relative = prefix + entry.Name;
+                if (entry.LinkTarget is not null) return false;
+                if (entry is DirectoryInfo)
+                {
+                    entries.Add((Encoding.UTF8.GetBytes(relative), relative, true, entry.FullName));
+                    if (!Walk(entry.FullName, relative + "/")) return false;
+                }
+                else if (AuthorityEntry(entry.FullName) == true) entries.Add((Encoding.UTF8.GetBytes(relative), relative, false, entry.FullName));
+                else return false;
+            }
+            return true;
+        }
+        try
+        {
+            if (new DirectoryInfo(root).LinkTarget is not null || !Walk(root, "")) return null;
+            entries.Sort((a, b) => a.Key.AsSpan().SequenceCompareTo(b.Key));
+            using var digest = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            long total = 0;
+            foreach (var (_, relative, directory, path) in entries)
+            {
+                if (directory) { Record("d", relative, 0, 0, ""); continue; }
+                long size;
+                string content;
+                using (var stream = File.OpenRead(path))
+                {
+                    size = stream.Length;
+                    content = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(stream));
+                }
+                total += size;
+                Record("f", relative, size, (File.GetUnixFileMode(path) & UnixFileMode.UserExecute) != 0 ? 1 : 0, content);
+            }
+            return (entries.Count, total, Convert.ToHexStringLower(digest.GetHashAndReset()));
+
+            // kind NUL path NUL size NUL owner-execute NUL content-sha256 NUL, exactly as scripts/stock-workspace-copy.py.
+            void Record(string kind, string relative, long size, int executable, string content) =>
+                digest.AppendData(Encoding.UTF8.GetBytes(string.Join('\0', kind, relative, size.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    executable.ToString(System.Globalization.CultureInfo.InvariantCulture), content) + "\0"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>#507: a verified snapshot into a host destination (the bundle's workspace), mirrored; excluded entries untouched.</summary>
+    private static string? CarryInto(string snapshot, string target)
+    {
+        try { CopyTree(snapshot, target, PrivateWorkspaceEntries, prune: true); return null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "restore:workspace_restore_failed"; }
+    }
+
+    /// <summary>#507 review F2: Docker's workspace is snapshotted or written only while its container is observed stopped.</summary>
+    private async Task<string?> DockerDestinationFaultAsync(Agent agent) =>
+        await host.DockerContainerStatesAsync(agent.ContainerName, CancellationToken.None) switch
+        {
+            null => "restore:docker_observation_failed",
+            var states when states.All(s => s is "exited" or "created" or "dead") => null,
+            _ => "restore:docker_quiescence_pending",
+        };
+
+    /// <summary>
+    /// #507 OpenShell→Docker restore: Docker's prior portable tree is first copied to a private snapshot beside the export
+    /// (<c>docker-before/&lt;operation&gt;</c>), then the existing deletion-aware mirror runs. Excluded destination entries are
+    /// neither read, copied, overwritten nor pruned. A partial mirror leaves Docker held with both snapshots retained.
+    /// </summary>
+    private string? RestoreDockerWorkspace(Agent agent, string snapshot)
+    {
+        var target = DockerWorkspaceDir(agent);
+        var before = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(snapshot)!)!, "docker-before", Path.GetFileName(snapshot));
+        try
+        {
+            if (Directory.Exists(before)) return "restore:workspace_stage_failed";
+            PrivateDirectory(before);
+            if (Directory.Exists(target)) CopyTree(target, before, PrivateWorkspaceEntries);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "restore:workspace_stage_failed"; }
+        return CarryInto(snapshot, target);
+    }
+
+    /// <summary>
+    /// #507: the pinned CLI's default Git filtering stays on for every upload. When the staged tree is a Git work tree, the
+    /// paths that filtering will omit (ignored files and the repository metadata) are listed privately, 0600, in
+    /// <c>&lt;epoch&gt;/workspace-not-transferred.txt</c>; the originals stay in the old source and the private snapshot.
+    /// </summary>
+    private void RecordNotTransferred(string payload, string epochDir)
+    {
+        if (!Directory.Exists(Path.Combine(payload, ".git"))) return;
+        try
+        {
+            var git = new ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var arg in new[] { "-C", payload, "ls-files", "-co", "--exclude-standard", "-z" }) git.ArgumentList.Add(arg);
+            ProcessStockCli.NeutralizeGit(git.Environment);
+            using var process = Process.Start(git)!;
+            var listed = process.StandardOutput.ReadToEndAsync();
+            _ = process.StandardError.ReadToEndAsync();
+            var exited = process.WaitForExit(LegTimeout);
+            if (!exited) process.Kill(entireProcessTree: true);
+            if (!exited || process.ExitCode != 0) { WriteText(Path.Combine(epochDir, "workspace-not-transferred.txt"), "unknown\n"); return; }
+            var kept = listed.GetAwaiter().GetResult().Split('\0', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+            var omitted = Directory.EnumerateFiles(payload, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 })
+                .Select(file => Path.GetRelativePath(payload, file).Replace('\\', '/')).Where(file => !kept.Contains(file)).Order(StringComparer.Ordinal);
+            WriteText(Path.Combine(epochDir, "workspace-not-transferred.txt"), string.Concat(omitted.Select(file => file + "\n")));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception or InvalidOperationException)
+        { logger.LogWarning("Managed workspace Git filtering report unavailable ({Type})", ex.GetType().Name); }
     }
 
     // ── files: private ConfigDir only, atomic replacement, 0700/0600 ───────
@@ -2738,7 +3072,7 @@ public sealed class StockOpenShellRuntime(
             agentNode["NativeAuthMode"] = "api_key";
             agentNode["ProviderApiKeyEnvRef"] = agent.ProviderApiKeyEnvRef;
         }
-        agentNode["WorkDir"] = "/workspace";
+        agentNode["WorkDir"] = WorkloadWorkspace;
         (settings["RabbitMq"] ??= new JsonObject())["Host"] = template["BrokerHost"]!.GetValue<string>();
         // #492: credential slots stay empty. The agent fills them from the placeholders stock issues for
         // the attached providers; it gets only the public bot id and the journal listener's route.
@@ -2767,12 +3101,21 @@ public sealed class StockOpenShellRuntime(
         return bundle;
     }
 
-    /// <summary>Refuses any symlinked file or directory in a tree before any recursive privileged copy.</summary>
-    internal static void RefuseLinks(string root)
+    /// <summary>
+    /// Refuses any symlinked file or directory in a tree before any recursive privileged copy. #507: top-level
+    /// <paramref name="exclude"/> entries, which the copy never reads, are not descended into.
+    /// </summary>
+    internal static void RefuseLinks(string root, IReadOnlyCollection<string>? exclude = null)
     {
         if (new DirectoryInfo(root).LinkTarget is not null) throw new IOException("symlink_refused");
-        foreach (var entry in new DirectoryInfo(root).EnumerateFileSystemInfos("*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }))
-            if (entry.LinkTarget is not null) throw new IOException("symlink_refused");
+        foreach (var top in new DirectoryInfo(root).EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0 }))
+        {
+            if (exclude?.Contains(top.Name) == true) continue;
+            if (top.LinkTarget is not null) throw new IOException("symlink_refused");
+            if (top is DirectoryInfo directory)
+                foreach (var entry in directory.EnumerateFileSystemInfos("*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }))
+                    if (entry.LinkTarget is not null) throw new IOException("symlink_refused");
+        }
     }
 
     /// <summary>
@@ -2783,7 +3126,7 @@ public sealed class StockOpenShellRuntime(
     private static void CopyTree(string source, string target, IReadOnlyCollection<string> exclude, bool prune = false)
     {
         RefuseLinkedAncestors(source);
-        RefuseLinks(source);
+        RefuseLinks(source, exclude);
         RefuseLinkedAncestors(target);
         Copy(source, target, top: true);
 

@@ -44,6 +44,8 @@ jobs:
       - name: Entrypoint codex config.toml
         run: bash tests/entrypoint-codex/run.sh
 
+      # Includes #507's in-sandbox workspace copy helper (test_stock_workspace_copy.py); the runner is non-root,
+      # so its unreadable-source rows execute rather than skip.
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
 
@@ -94,6 +96,8 @@ jobs:
         run: |
           docker build -f src/Fleet.Orchestrator/Dockerfile -t orchestrator-test:pr .
           env -u ORCHESTRATOR_AUTH_TOKEN bash scripts/check-stock-runtime-rollout.sh --image orchestrator-test:pr
+          # #507: the image carries the exact public workspace copy helper the managed adapter uploads.
+          docker run --rm --entrypoint cat orchestrator-test:pr /app/stock-workspace-copy.py | cmp - scripts/stock-workspace-copy.py
 
       # #503 W6/W7: the opt-in image (real pinned CLI, digests checked) carries the git and ssh that the pinned
       # `sandbox upload` spawns, the default image does not, the CLI's default upload planning passes for the
@@ -805,7 +809,12 @@ jobs:
             find /app/skills -type f -exec cat {} + > /dev/null
             test -r /opt/fleet/acceptance_plan.py
             python3 /opt/fleet/acceptance_plan.py --help > /dev/null
-            for directory in "$PWD" /workspace; do
+            # #507: the managed user tree is the real, empty, owned workspace child of HOME; the OCI root stays HOME.
+            test -d /home/agent/workspace
+            test ! -L /home/agent/workspace
+            test "$(stat -c %u:%g /home/agent/workspace)" = 10001:10001
+            test -z "$(ls -A /home/agent/workspace)"
+            for directory in "$PWD" /workspace /home/agent/workspace; do
               probe=$(mktemp "$directory/workspace-probe.XXXXXX")
               printf "owned workspace probe\n" > "$probe"
               cp "$probe" "$probe.copy"
@@ -818,6 +827,7 @@ jobs:
             test "$(id -u)" = 0
             test "$PWD" = /app
             test -r /app/Fleet.Agent.dll
+            test ! -e /home/agent/workspace
           '
 
       - name: mc runs and reports the pinned release

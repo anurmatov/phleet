@@ -114,7 +114,27 @@ public sealed class StockSupervisorMiddleware(StockAuthorityFile file) : Supervi
                     Value = StockRequestProof.Issue(record, service, request.Target.Method, request.Body.ToByteArray(), session),
                     OnExisting = ExistingHeaderAction.Overwrite } } } });
         }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        { return Task.FromResult(new HttpRequestResult { Decision = Decision.Deny, ReasonCode = "identity_denied" }); }
+        // #503 W11: an expected refusal reports its existing public code; anything else stays the generic code.
+        catch (StockIdentityDenied denied) when (EvaluationReasons.Contains(denied.Message)) { return Deny(denied.Message); }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return Deny(GenericReason); }
     }
+
+    private const string GenericReason = "identity_denied";
+
+    /// <summary>
+    /// The existing <see cref="StockIdentityDenied"/> codes that data evaluation can raise for an expected refusal. They are
+    /// fixed strings with no request content, and each satisfies the pinned stock reason-code rule
+    /// (openshell-supervisor-middleware lib.rs:824–830, else the stage fails as response_reason_code_invalid).
+    /// </summary>
+    private static readonly IReadOnlySet<string> EvaluationReasons = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "tls_required", "gateway_token", "gateway_trust_invalid", "assertion_encoding", "duplicate_field",
+        "authority_mapping_invalid", "authority_mapping_missing", "authority_mapping_ambiguous", "authority_unavailable",
+        "authority_directory_size", "authority_size", "enrollment_denied", "request_scope", "identity_override",
+        "service_not_enrolled", "service_unsupported", "request_shape", "session_required", "rpc_unsupported",
+        "tool_unsupported", "assertion_key",
+    };
+
+    private static Task<HttpRequestResult> Deny(string reason) =>
+        Task.FromResult(new HttpRequestResult { Decision = Decision.Deny, ReasonCode = reason });
 }

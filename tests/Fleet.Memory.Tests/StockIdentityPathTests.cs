@@ -175,6 +175,36 @@ public sealed class StockIdentityPathTests
         Assert.Equal(4, fixture.AclFetches);
     }
 
+    // #503 W11: Codex 0.164.0 (6aaac694) native MCP on its default legacy 2025-06-18 lifecycle.
+    private const string NativeInitialize = """{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"codex-mcp-client","title":"Codex","version":"0.164.0"}}}""";
+    private const string NativeInitialized = """{"jsonrpc":"2.0","method":"notifications/initialized"}""";
+    private const string NativeToolsList = """{"jsonrpc":"2.0","id":1,"method":"tools/list"}""";
+    private static string NativeCall(string tool) =>
+        """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"TOOL","arguments":{"id":"00000000-0000-0000-0000-000000000001"}}}""".Replace("TOOL", tool);
+
+    [Fact]
+    public async Task NativeCodexInitialization_ReachesMemoryGet_AndRefusalsReportTheirExistingCode()
+    {
+        await using var fixture = new Fixture(actualMcp: true);
+        var initialized = await fixture.Native(NativeInitialize, null);
+        Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
+        var session = initialized.Headers.GetValues("Mcp-Session-Id").Single();
+        Assert.Equal(HttpStatusCode.Accepted, (await fixture.Native(NativeInitialized, session)).StatusCode);
+        Assert.Contains("memory_get", await (await fixture.Native(NativeToolsList, session)).Content.ReadAsStringAsync());
+        Assert.Contains("synthetic-visible-memory", await (await fixture.Native(NativeCall("memory_get"), session)).Content.ReadAsStringAsync());
+        Assert.Equal(Decision.Allow, (await fixture.NativeHook("", session, "GET")).Decision); // the standalone event stream
+
+        // The same native shape keeps every restriction; a refusal now reports its existing code.
+        Assert.Equal("identity_override", (await fixture.NativeHook(NativeInitialize, null, extra: ("x-fleet-agent", "agent2"))).ReasonCode);
+        Assert.Equal("request_scope", (await fixture.NativeHook(NativeInitialize, null, query: "agent=agent2")).ReasonCode);
+        Assert.Equal("gateway_token", (await fixture.NativeHook(NativeInitialize, null, sandbox: "sandbox2")).ReasonCode);
+        Assert.Equal("session_required", (await fixture.NativeHook(NativeToolsList, null)).ReasonCode);
+        Assert.Equal("tool_unsupported", (await fixture.NativeHook(NativeCall("memory_store"), session)).ReasonCode);
+        // An unexpected failure (an unparseable body) keeps the generic code.
+        Assert.Equal("identity_denied", (await fixture.NativeHook("{", session)).ReasonCode);
+        Assert.Equal(4, fixture.AclFetches);
+    }
+
     [Fact]
     public async Task UnsupportedWrite_DeniesAtHook()
     {
@@ -458,6 +488,44 @@ public sealed class StockIdentityPathTests
                 Body = ByteString.CopyFrom(Body(method, fault)), Headers = { new HttpHeader { Name = StockRequestProof.Header, Value = "spoof" } } };
             if (session is not null) request.Headers.Add(new HttpHeader { Name = "Mcp-Session-Id", Value = session });
             return _hook.EvaluateHttpRequest(request, context);
+        }
+        /// <summary>
+        /// The evaluation the pinned stock supervisor (OpenShell bdb956f2) builds for one native request: lowercased wire-order
+        /// headers without host/content-length/authorization (l7/middleware.rs safe_middleware_headers), a path-only target,
+        /// the full request context and a supervisor token minted as mint_extension_token_with_metadata does.
+        /// </summary>
+        public Task<HttpRequestResult> NativeHook(string body, string? session, string method = "POST",
+            (string Name, string Value)? extra = null, string query = "", string sandbox = "sandbox1")
+        {
+            var request = new HttpRequestEvaluation { Phase = SupervisorMiddlewarePhase.PreCredentials,
+                Config = new Struct { Fields = { ["service"] = Value.ForString("memory") } },
+                Context = new RequestContext { RequestId = Guid.NewGuid().ToString(), SandboxId = sandbox, Sandbox = "synthetic-sandbox", Workspace = "synthetic-workspace" },
+                Target = new HttpRequestTarget { Method = method, Scheme = "https", Host = Record.MemoryHost, Port = 443, Path = "/mcp", Query = query },
+                Body = ByteString.CopyFromUtf8(body) };
+            foreach (var (name, value) in NativeHeaders(method, session)) request.Headers.Add(new HttpHeader { Name = name, Value = value });
+            if (extra is { } header) request.Headers.Add(new HttpHeader { Name = header.Name, Value = header.Value });
+            return _hook.EvaluateHttpRequest(request, GatewayContext("supervisor"));
+        }
+        /// <summary>The native request through the hook, then to the receiver with the original headers plus the hook's one mutation.</summary>
+        public async Task<HttpResponseMessage> Native(string body, string? session)
+        {
+            var hook = await NativeHook(body, session);
+            Assert.Equal(Decision.Allow, hook.Decision);
+            var mutation = hook.HeaderMutations.Single().Write;
+            var message = new HttpRequestMessage(HttpMethod.Post, "/mcp") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+            foreach (var (name, value) in NativeHeaders("POST", session).Where(h => h.Name != "content-type"))
+                message.Headers.TryAddWithoutValidation(name, value);
+            message.Headers.Add(mutation.Name, mutation.Value);
+            return await _client.SendAsync(message);
+        }
+        // rmcp-client http_client_adapter.rs: default user-agent, protocol version once negotiated, accept, content type, session.
+        private static IEnumerable<(string Name, string Value)> NativeHeaders(string method, string? session)
+        {
+            yield return ("user-agent", "codex-mcp-client/0.164.0");
+            if (session is not null) yield return ("mcp-protocol-version", "2025-06-18");
+            yield return ("accept", method == "GET" ? "text/event-stream" : "text/event-stream, application/json");
+            if (method == "POST") yield return ("content-type", "application/json");
+            if (session is not null) yield return ("mcp-session-id", session);
         }
         public async Task<HttpResponseMessage> Send(string method, string? session = null, string? fault = null)
         {

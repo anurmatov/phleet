@@ -337,6 +337,75 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.Equal((old.SandboxName, old.SandboxId), (superseded.SandboxName, superseded.SandboxId));
     }
 
+    /// <summary>
+    /// #503 W12: the live layout. ConfigDir and the mounted <c>managed/authority</c> parents belong to the recorded host
+    /// operator (here 1000, 0700), the orchestrator writes as root and the outside signer reads as the operator.
+    /// </summary>
+    [Fact]
+    public async Task Root_written_authority_records_are_published_for_the_operator_reader_and_secrets_stay_writer_owned()
+    {
+        var runtime = _t.Runtime(); // creates the fixture's private ConfigDir
+        if (StockOpenShellRuntime.OwnerUid(_t._dir) != 0) return; // a cross-uid publication needs a root writer
+        var authority = Path.Combine(_t._dir, "managed", "authority");
+        Directory.CreateDirectory(authority, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        foreach (var dir in new[] { _t._dir, Path.GetDirectoryName(authority)!, authority }) Assert.Equal(0, Chown(dir, 1000, 1000));
+        _t.ConfigDirOwnerUid = "1000";
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        var record = Path.Combine(authority, "agent1.json");
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(apply.Ok, apply.Message);
+        Assert.Equal((1000u, UnixFileMode.UserRead | UnixFileMode.UserWrite), (StockOpenShellRuntime.OwnerUid(record), File.GetUnixFileMode(record)));
+        Assert.Equal(File.ReadAllText(record), ReadAs(1000, record)); // what `test -r` as the signer uid refused at 64efc522
+        var applied = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!;
+        Assert.Equal(applied.SandboxId, Fleet.Shared.Security.StockEnrollmentAuthority.Load(record).SandboxId);
+        // Only the record changes hands: control and observer passwords stay root-owned 0600 and unreadable to the reader.
+        foreach (var secret in new[] { Path.Combine(authority, "agent1.control.password"), Path.Combine(_t._dir, "managed", "observer", "agent1.observer.password") })
+        {
+            Assert.Equal((0u, UnixFileMode.UserRead | UnixFileMode.UserWrite), (StockOpenShellRuntime.OwnerUid(secret), File.GetUnixFileMode(secret)));
+            Assert.Null(ReadAs(1000, secret));
+        }
+
+        // Atomic replacement keeps the reader: the revoked record is still the operator's and reads as revoked.
+        Assert.True((await _t.Runtime().RevokeAsync("agent1", default)).Ok);
+        Assert.Equal(1000u, StockOpenShellRuntime.OwnerUid(record));
+        Assert.Equal("revoked", JsonNode.Parse(ReadAs(1000, record)!)!["State"]!.GetValue<string>());
+        Assert.Empty(Directory.GetFiles(authority, "*.tmp"));
+    }
+
+    [Fact]
+    public async Task An_active_record_the_operator_cannot_be_given_is_refused_while_revocation_still_publishes()
+    {
+        var runtime = _t.Runtime();
+        if (StockOpenShellRuntime.OwnerUid(_t._dir) is not { } writer || writer == 0) return; // root can always hand a file over
+        _t.ConfigDirOwnerUid = (writer + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+        var authority = Path.Combine(_t._dir, "managed", "authority");
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.False(apply.Ok);
+        Assert.Equal("managed_files_failed", apply.Code);
+        Assert.Equal("revoked", JsonNode.Parse(File.ReadAllText(Path.Combine(authority, "agent1.json")))!["State"]!.GetValue<string>());
+        Assert.Empty(Directory.GetFiles(authority, "*.tmp"));
+        Assert.DoesNotContain(_t._cli.Calls, c => c.Args.Any(a => a.Contains(".fleet-activate")));
+        // Revocation's own writes are never held by ownership (still applied Docker, so revoke ends retired).
+        Assert.DoesNotContain((await _t.Runtime().RevokeAsync("agent1", default)).Errors, e => e.StartsWith("admission", StringComparison.Ordinal));
+        Assert.Equal(Fleet.Shared.Security.StockAuthoritySource.RetiredState,
+            JsonNode.Parse(File.ReadAllText(Path.Combine(authority, "agent1.json")))!["State"]!.GetValue<string>());
+    }
+
+    /// <summary>The file's bytes as read by <paramref name="uid"/> (no supplementary groups), or null when that uid is refused.</summary>
+    private static string? ReadAs(uint uid, string path)
+    {
+        using var reader = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("setpriv",
+            [$"--reuid={uid}", $"--regid={uid}", "--clear-groups", "cat", path]) { RedirectStandardOutput = true, RedirectStandardError = true })!;
+        var text = reader.StandardOutput.ReadToEnd();
+        reader.WaitForExit();
+        return reader.ExitCode == 0 ? text : null;
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "chown")]
     private static extern int Chown([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 

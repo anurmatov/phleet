@@ -1341,7 +1341,7 @@ public sealed class StockOpenShellRuntime(
             if (!reuse)
             {
                 WriteBrokerPasswords(agent.Name, passwords);
-                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, "pending", epoch, policy.Sha256, "revoked", tuple?.ExpiresAt));
+                WriteAuthorityRecord(AuthorityPath(agent.Name), Authority(template, agent, "pending", epoch, policy.Sha256, "revoked", tuple?.ExpiresAt));
             }
             bundle = await BuildBundleAsync(agent, template, generated, epochDir, passwords["workload"], epoch, policy,
                 reuse ? candidate.SandboxId : "pending", botId, serviceSecrets.Select(s => s.Value), candidate);
@@ -1382,7 +1382,7 @@ public sealed class StockOpenShellRuntime(
             try
             {
                 WriteBrokerPasswords(agent.Name, passwords);
-                WriteRecord(AuthorityPath(agent.Name), Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "revoked", tuple?.ExpiresAt));
+                WriteAuthorityRecord(AuthorityPath(agent.Name), Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "revoked", tuple?.ExpiresAt));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return await HoldStoppedAsync(applying, candidate, "managed_files_failed", [], ct); }
             // #502: retained subscription history of an API reuse is verified before it can be retired at commit.
@@ -1474,7 +1474,7 @@ public sealed class StockOpenShellRuntime(
         try
         {
             var active = Authority(template, agent, candidate.SandboxId, epoch, policy.Sha256, "active", tuple?.ExpiresAt);
-            WriteRecord(AuthorityPath(agent.Name), active);
+            WriteAuthorityRecord(AuthorityPath(agent.Name), active);
             WriteRecord(Path.Combine(bundle, "trust", "enrollment.json"), active);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return await HoldStoppedAsync(applying, candidate, "managed_files_failed", [], ct); }
@@ -2167,7 +2167,7 @@ public sealed class StockOpenShellRuntime(
                 var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
                 if (keepRetired && current["State"]?.GetValue<string>() == StockAuthoritySource.RetiredState) return Task.FromResult<string?>(null);
                 current["State"] = "revoked";
-                WriteRecord(path, current);
+                WriteAuthorityRecord(path, current);
                 return Task.FromResult<string?>(null);
             }),
         };
@@ -2810,7 +2810,7 @@ public sealed class StockOpenShellRuntime(
             var current = JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))!.AsObject();
             if (current["State"]?.GetValue<string>() is not ("revoked" or StockAuthoritySource.RetiredState)) return false;
             current["State"] = StockAuthoritySource.RetiredState;
-            WriteRecord(path, current);
+            WriteAuthorityRecord(path, current);
             return AuthorityEntry(path) == true
                 && JsonNode.Parse(StockEnrollmentAuthority.ReadBounded(path))?["State"]?.GetValue<string>() == StockAuthoritySource.RetiredState;
         }
@@ -2892,14 +2892,46 @@ public sealed class StockOpenShellRuntime(
 
     private static void WriteRecord(string path, JsonObject record) => WriteText(path, record.ToJsonString());
 
-    private static void WriteText(string path, string content)
+    /// <summary>
+    /// #503 W12: the uid that receives published authority records. The outside signer and receivers mount only
+    /// <c>managed/authority</c> and run as the host operator recorded in <c>StockOpenShell:ConfigDirOwnerUid</c>, so a
+    /// record this process writes as another uid (the root container) is handed to that uid. Null keeps the writer.
+    /// </summary>
+    private uint? AuthorityReader =>
+        AuthorizedConfigDirOwner is { } uid && uid != (EffectiveUid?.Invoke() ?? CurrentEffectiveUid()) ? uid : null;
+
+    /// <summary>
+    /// One authority record, published 0600 for <see cref="AuthorityReader"/>. An active record the reader cannot be
+    /// given is refused. A pending, revoked or retired record is still published writer-owned, so revocation never
+    /// depends on ownership: every reader refuses a record it cannot read.
+    /// </summary>
+    private void WriteAuthorityRecord(string path, JsonObject record)
+    {
+        try { WriteText(path, record.ToJsonString(), AuthorityReader); }
+        catch (IOException) when (AuthorityReader is not null && record["State"]?.GetValue<string>() != "active") { WriteRecord(path, record); }
+    }
+
+    private static void WriteText(string path, string content, uint? owner = null)
     {
         PrivateDirectory(Path.GetDirectoryName(path)!);
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
         if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        var refused = false;
         using (var stream = new FileStream(temp, options))
-        using (var writer = new StreamWriter(stream)) writer.Write(content);
+        {
+            // The owner is set on the open, still-unpublished temp (group unchanged), so the rename publishes it complete.
+            if (owner is { } uid && LibcFchown((int)stream.SafeFileHandle.DangerousGetHandle(), uid, uint.MaxValue) != 0) refused = true;
+            else using (var writer = new StreamWriter(stream)) writer.Write(content);
+        }
+        if (refused)
+        {
+            File.Delete(temp);
+            throw new IOException("owner_refused");
+        }
         File.Move(temp, path, overwrite: true);
     }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fchown", SetLastError = true)]
+    private static extern int LibcFchown(int fd, uint owner, uint group);
 }

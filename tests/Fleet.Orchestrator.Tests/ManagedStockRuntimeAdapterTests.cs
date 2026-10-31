@@ -1230,6 +1230,9 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
 
     internal StockBrokerProvisioner Provisioner() => new(Config(), _broker.Credentials) { HandlerFactory = () => _broker };
 
+    /// <summary>The recorded host-operator owner (<c>StockOpenShell:ConfigDirOwnerUid</c>); unset by default.</summary>
+    internal string? ConfigDirOwnerUid;
+
     private IConfiguration Config(Dictionary<string, string?>? overrides = null)
     {
         var values = new Dictionary<string, string?>
@@ -1242,6 +1245,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             ["StockOpenShell:BrokerAdminUserRef"] = "BROKER_ADMIN_USER",
             ["StockOpenShell:BrokerAdminPasswordRef"] = "BROKER_ADMIN_PASSWORD",
         };
+        if (ConfigDirOwnerUid is not null) values["StockOpenShell:ConfigDirOwnerUid"] = ConfigDirOwnerUid;
         foreach (var (key, value) in overrides ?? []) values[key] = value;
         return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }

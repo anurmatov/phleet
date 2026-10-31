@@ -508,7 +508,11 @@ unless `FLEET_STOCK_BROKER_MANAGEMENT_URL` is `https://`, `broker-ca.pem` is rea
 succeeds (`scripts/lib/stock-managed-preflight.sh`). Default-off installs skip these checks.
 
 The adapter writes per-agent records and `<agent>.control.password` under `managed/authority/` (0600,
-directory 0700). Observer broker passwords go only to the orchestrator-private sibling
+directory 0700). The outside signer and receivers read those records as the host operator recorded in
+`StockOpenShell:ConfigDirOwnerUid`. When that uid is not the orchestrator's own (the root container), each per-agent
+record is handed to it before its atomic rename and stays 0600. An active record that cannot be handed over holds the
+apply as `managed_files_failed`. Pending, revoked and retired records are still published, writer-owned. Control and
+observer passwords always stay writer-owned. Observer broker passwords go only to the orchestrator-private sibling
 `managed/observer/<agent>.observer.password` (0600, directory 0700) and are never written to, or read from,
 the authority directory. Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
 `managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram, Bridge), keeping

@@ -570,7 +570,10 @@ CLI (binary SHA-256 `446f766842d2bf03abc37b56a3f5a3e46b96140b5b6c305d3f168d67921
 A1 (legacy control: the CLI refuses `/workspace`), A3 (legacy image change), A2 (fresh layout) and A5 (current layout to
 Docker). The fixture file is owner-only JSON with exactly `orchestratorUrl`, `tokenEnv` (a variable name, never a
 value), `cli`, `cliConfigDir`, `workloadHome`, `freshAgent`, `freshDockerWorkspace`, `legacyAgent`, `baselineImage`,
-`replacementImage` (immutable `@sha256` references) and `receiptDir` (0700). It exits 0 only when every case passes,
+`replacementImage` (pinned `@sha256` digests) and `receiptDir` (0700). A binding keeps the image reference it recorded,
+tag or digest, and nothing rewrites it. The script compares images by resolved local image ID: the pinned digest, the
+recorded reference and the workload container's image (stock label `openshell.ai/sandbox-id`) must all match, so it needs
+read-only Docker access on the gateway host. It exits 0 only when every case passes,
 1 on a failure, and 2 (`BLOCKED`) before any mutating request when the fixture, token, pinned CLI, gateway or expected
 fixture state is missing. Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox
 UUID and name in its persisted scope on the supplied gateway, so a fixture that disagrees with that gateway is BLOCKED

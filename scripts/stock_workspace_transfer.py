@@ -158,6 +158,14 @@ class Regression:
     def sleep(self, seconds):
         time.sleep(seconds)
 
+    def docker(self, args, timeout=60):
+        """Read-only Docker queries on the gateway host (image and label lookups); (exit code, stdout)."""
+        try:
+            run = subprocess.run(["docker", *args], stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            return 124, b""
+        return run.returncode, run.stdout
+
     def wait(self, predicate, seconds=180):
         end = self.clock() + seconds
         while self.clock() < end:
@@ -296,6 +304,39 @@ class Regression:
                     self.revoke_cleanup(agent)  # a failed or interrupted case never leaves its agent's workload admitted
                 print(f"{name}: {result['result']}")
 
+    # ── image identity: references may be tags or digests; the pinned image is compared by its resolved local ID ──
+    def image_id(self, reference):
+        """The local image ID a reference (tag or digest) resolves to now; None when it does not resolve exactly."""
+        code, out = self.docker(["image", "inspect", "--format", "{{.Id}}", reference])
+        value = out.decode(errors="replace").strip() if code == 0 else ""
+        return value if re.fullmatch(r"sha256:[0-9a-f]{64}", value) else None
+
+    def workload_image_id(self, sandbox_id):
+        """The image ID the stock driver's workload container for exactly this sandbox UUID was created from."""
+        code, out = self.docker(["ps", "-a", "--no-trunc", "--filter", "label=openshell.ai/sandbox-id=" + sandbox_id,
+                                 "--filter", "label=openshell.ai/isolation-role=sandbox", "--format", "{{.ID}}"])
+        containers = out.decode(errors="replace").split() if code == 0 else []
+        if len(containers) != 1:
+            return None
+        code, out = self.docker(["inspect", "--format", "{{.Image}}", containers[0]])
+        value = out.decode(errors="replace").strip() if code == 0 else ""
+        return value if re.fullmatch(r"sha256:[0-9a-f]{64}", value) else None
+
+    def image_fault(self, binding, pinned):
+        """None when the binding's recorded reference (kept as recorded) and its workload both resolve to the pinned image."""
+        expected = self.image_id(pinned)
+        if expected is None:
+            return "pinned image reference does not resolve on the gateway host"
+        recorded = self.image_id(binding.get("image") or "")
+        workload = self.workload_image_id(binding.get("sandboxId") or "")
+        self.receipt.setdefault("imageIdentity", []).append({"sandboxId": binding.get("sandboxId"), "recorded": binding.get("image"),
+                                                             "pinned": pinned, "pinnedId": expected, "recordedId": recorded, "workloadId": workload})
+        if recorded != expected:
+            return "the binding's recorded image reference does not resolve to the pinned image"
+        if workload != expected:
+            return "the sandbox workload does not run the pinned image"
+        return None
+
     # ── prerequisites: nothing mutates until all of these hold ──
     def check_fixture_state(self):
         fresh_cfg, _ = self.config(self.f["freshAgent"])
@@ -307,9 +348,16 @@ class Regression:
         if os.path.islink(ws) or (os.path.exists(ws) and (not os.path.isdir(ws) or os.listdir(ws))):
             raise Blocked("freshDockerWorkspace must be absent or an empty real directory")
         if legacy_cfg.get("appliedRuntimeKind") != "openshell" or legacy.get("state") not in ("revoked", "stopped") \
-                or legacy.get("candidate") or "workloadWorkspacePath" in old or old.get("image") != self.f["baselineImage"] \
+                or legacy.get("candidate") or "workloadWorkspacePath" in old or not old.get("image") \
                 or not old.get("sandboxName") or not old.get("sandboxId"):
-            raise Blocked("legacyAgent must hold a revoked or stopped legacy binding on baselineImage")
+            raise Blocked("legacyAgent must hold a revoked or stopped legacy binding")
+        # Two distinct pinned images; the legacy binding's recorded reference (a tag or a digest, never rewritten) and its
+        # actual workload container must both resolve to the pinned baseline.
+        baseline, replacement = self.image_id(self.f["baselineImage"]), self.image_id(self.f["replacementImage"])
+        if baseline is None or replacement is None or baseline == replacement:
+            raise Blocked("baselineImage and replacementImage must resolve to two distinct local images")
+        if (fault := self.image_fault(old, self.f["baselineImage"])) is not None:
+            raise Blocked("legacy binding is not on baselineImage: " + fault)
         # The supplied gateway must hold exactly that persisted sandbox, stopped, before anything starts.
         try:
             phase = self.observe(old)
@@ -341,8 +389,12 @@ class Regression:
         _, record = self.config(self.f["legacyAgent"])
         new = record.get("applied") or {}
         assert record.get("state") == "applied" and new.get("sandboxId") not in (None, old["sandboxId"]), "no fresh sandbox was applied"
-        assert new.get("image") == self.f["replacementImage"] and new.get("workloadWorkspacePath") == self.w, "new binding is not the W layout on the replacement image"
-        assert any(s.get("sandboxId") == old["sandboxId"] and "workloadWorkspacePath" not in s for s in record.get("superseded", [])), "old custody not retained"
+        assert new.get("workloadWorkspacePath") == self.w, "new binding is not the W layout"
+        fault = self.image_fault(new, self.f["replacementImage"])
+        assert fault is None, f"new binding is not on the replacement image: {fault}"
+        # The old identity stays exactly as recorded: same UUID, same recorded image reference, no persisted path.
+        assert any(s.get("sandboxId") == old["sandboxId"] and s.get("image") == old["image"] and "workloadWorkspacePath" not in s
+                   for s in record.get("superseded", [])), "old custody not retained as recorded"
         code, target, _ = self.download(new, self.w, "a3-new")
         assert code == 0, "unmodified CLI could not download W"
         carried = manifest(target)
@@ -448,9 +500,9 @@ def main(argv):
         token = os.environ.get(fixture["tokenEnv"], "")
         if not token:
             raise Blocked("the named token environment variable is unset")
-        for tool in ("curl", "ssh", "git"):
+        for tool in ("curl", "ssh", "git", "docker"):
             if shutil.which(tool) is None:
-                raise Blocked(f"{tool} not on PATH (the pinned CLI spawns ssh and git)")
+                raise Blocked(f"{tool} not on PATH (the pinned CLI spawns ssh and git; image identity is read from Docker)")
         if not os.path.isfile(fixture["cli"]) or hashlib.sha256(open(fixture["cli"], "rb").read()).hexdigest() != PINNED_CLI_SHA256:
             raise Blocked("cli is not the pinned OpenShell 0.1.5 binary")
         regression = Regression(fixture, root, token, work="")

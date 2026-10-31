@@ -13,14 +13,19 @@
 #   freshAgent            synthetic agent: desired openshell, applied docker, empty/absent Docker workspace
 #   freshDockerWorkspace  that agent's owned Docker workspace path
 #   legacyAgent           synthetic agent: a retained revoked/stopped binding without a persisted path (legacy layout)
-#   baselineImage         the legacy binding's immutable image (name@sha256:...)
-#   replacementImage      the immutable image the fixture orchestrator is configured with (name@sha256:...)
+#   baselineImage         the pinned digest (name@sha256:...) of the legacy binding's image
+#   replacementImage      the pinned digest (name@sha256:...) of the image the fixture orchestrator is configured with
+#
+# Bindings keep the image reference they recorded (a tag or a digest), never rewritten here. Image identity is the
+# resolved local image ID: the pinned digest, the binding's recorded reference and the image its workload container
+# (stock label openshell.ai/sandbox-id) was created from must all be the same, else BLOCKED (legacy) or FAIL (replacement).
 #   receiptDir            owner-only (0700) directory for the private receipt
 #
 # Cases, in order: A1 legacy control (the pinned CLI refuses /workspace), A3 legacy image change, A2 fresh layout,
 # A5/A6 current layout to Docker. Exit 0 only when every case is PASS; 1 when any case FAILs; 2 BLOCKED (missing or
 # malformed fixture, runtime, gateway or tool) before any mutating request. stdout carries results and booleans only;
-# manifests, identities and hashes go to the private receipt. Needs bash, python3, curl, ssh and git.
+# manifests, identities and hashes go to the private receipt. Needs bash, python3, curl, ssh, git and read-only Docker
+# access to the gateway host (image and label lookups).
 #
 # Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox UUID and name in its
 # persisted scope on the supplied gateway; a fixture that disagrees with that gateway is BLOCKED before anything

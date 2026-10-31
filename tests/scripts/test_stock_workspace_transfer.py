@@ -16,6 +16,7 @@ OLD = {"sandboxName": "fl-0000000000000001", "sandboxId": "11111111-1111-4111-81
 NEW = {"sandboxName": "fl-0000000000000002", "sandboxId": "22222222-2222-4222-8222-222222222222", "image": "r/a@sha256:" + "b" * 64,
        "workloadWorkspacePath": "/home/agent/workspace"}
 REFUSAL = b"sandbox source path '/workspace' is outside the sandbox workspace (/home/agent)"
+BASELINE_ID, REPLACEMENT_ID, OTHER_ID = ("sha256:" + c * 64 for c in "abc")
 
 
 class FakeRegression(transfer.Regression):
@@ -35,6 +36,22 @@ class FakeRegression(transfer.Regression):
         self.legacy = {"state": "revoked", "applied": dict(OLD)}
         self.now, self.delay, self.timeouts = 0.0, 0.0, []
         self.stop_keeps_phase = False
+        # Local images by reference (tag or digest) and the image each sandbox UUID's workload container was created from.
+        self.images = {OLD["image"]: BASELINE_ID, NEW["image"]: REPLACEMENT_ID}
+        self.workloads = {OLD["sandboxId"]: BASELINE_ID, NEW["sandboxId"]: REPLACEMENT_ID}
+        self.docker_calls = []
+
+    def docker(self, args, timeout=60):
+        self.docker_calls.append(list(args))
+        if args[:2] == ["image", "inspect"]:
+            return (0, self.images[args[-1]].encode() + b"\n") if args[-1] in self.images else (1, b"")
+        if args[0] == "ps":
+            sandbox = next(a.removeprefix("label=openshell.ai/sandbox-id=") for a in args if a.startswith("label=openshell.ai/sandbox-id="))
+            return 0, (b"container-" + sandbox.encode() + b"\n") if sandbox in self.workloads else b""
+        if args[0] == "inspect":
+            sandbox = args[-1].removeprefix("container-")
+            return (0, self.workloads[sandbox].encode()) if sandbox in self.workloads else (1, b"")
+        return 1, b""
 
     def clock(self):
         return self.now
@@ -158,6 +175,80 @@ class StockWorkspaceTransferTests(unittest.TestCase):
         self.assertEqual({"action": "revoke", "agent": "legacy", "result": "revoked"}, self.run_.receipt["cleanup"][-1])
         self.assertEqual("Stopped", self.run_.gateway[OLD["sandboxName"]]["phase"])  # the old sandbox was never started
         self.assertEqual(1, self.run_.exit_code())
+
+    # ── image identity: recorded references stay as recorded; the pinned image is compared by resolved ID ──
+
+    def test_a_tag_recorded_legacy_binding_on_the_pinned_image_passes_and_is_never_rewritten(self):
+        tag = "registry.example.test/stock-agent:legacy"
+        self.run_.legacy["applied"]["image"] = tag
+        self.run_.images[tag] = BASELINE_ID
+        self.run_.check_fixture_state()
+        self.assertEqual(tag, self.run_.state["old"]["image"])
+        identity = self.run_.receipt["imageIdentity"][-1]
+        self.assertEqual((tag, OLD["image"], BASELINE_ID, BASELINE_ID), (identity["recorded"], identity["pinned"], identity["recordedId"], identity["workloadId"]))
+        self.assertEqual([], self.run_.mutations())
+
+    def test_a_digest_recorded_legacy_binding_passes(self):
+        self.run_.check_fixture_state()
+        self.assertEqual(OLD["image"], self.run_.state["old"]["image"])
+
+    def test_legacy_image_identity_faults_are_blocked_before_anything_starts(self):
+        tag = "registry.example.test/stock-agent:moved"
+        cases = {
+            "moved_tag": lambda: (self.run_.legacy["applied"].update(image=tag), self.run_.images.update({tag: OTHER_ID})),
+            "unresolvable_tag": lambda: self.run_.legacy["applied"].update(image=tag),
+            "other_workload_image": lambda: self.run_.workloads.update({OLD["sandboxId"]: OTHER_ID}),
+            "no_workload_container": lambda: self.run_.workloads.pop(OLD["sandboxId"]),
+            "unresolvable_pin": lambda: self.run_.images.pop(OLD["image"]),
+            "same_images": lambda: self.run_.images.update({NEW["image"]: BASELINE_ID}),
+        }
+        for name, arrange in cases.items():
+            with self.subTest(fault=name):
+                self.run_ = FakeRegression(self.work)
+                arrange()
+                with self.assertRaises(transfer.Blocked):
+                    self.run_.check_fixture_state()
+                self.assertEqual([], self.run_.mutations())
+
+    def a3_until_identity(self, new):
+        """A3 with the transfer itself stubbed: only the applied binding's identity and custody decide the result."""
+        self.run_.check_fixture_state()
+        self.run_.state["legacy"] = {"/workspace": {}}
+        self.run_.gateway[new["sandboxName"]] = {"id": new["sandboxId"], "phase": "Ready"}
+        applied = {"state": "applied", "applied": new, "superseded": [dict(self.run_.state["old"])]}
+        self.run_.api = lambda method, path, body=None, timeout=900: (
+            (200, {"appliedRuntimeKind": "openshell", "appliedRuntimeBinding": json.dumps(applied)}) if method == "GET" else (200, {}))
+        empty = tempfile.mkdtemp(dir=self.work)
+        self.run_.download = lambda sandbox, source, label: (0, empty, b"")
+        self.run_.remote_manifest = lambda sandbox, *paths: self.run_.state["legacy"]
+        self.run_.case("A3", self.run_.a3_legacy_image_change)
+        return self.run_.receipt["cases"]["A3"]
+
+    def test_a3_accepts_a_replacement_recorded_by_tag_or_digest_and_checks_its_workload(self):
+        tag = "registry.example.test/stock-agent:replacement"
+        for recorded in [NEW["image"], tag]:
+            with self.subTest(recorded=recorded):
+                self.run_ = FakeRegression(self.work)
+                self.run_.images[tag] = REPLACEMENT_ID
+                self.assertEqual("PASS", self.a3_until_identity(dict(NEW, image=recorded))["result"])
+        self.run_ = FakeRegression(self.work)
+        self.run_.workloads[NEW["sandboxId"]] = BASELINE_ID  # recorded right, but the new workload runs the old image
+        result = self.a3_until_identity(dict(NEW))
+        self.assertEqual("FAIL", result["result"])
+        self.assertIn("replacement image", result["reason"])
+
+    def test_a3_requires_the_old_custody_exactly_as_recorded(self):
+        self.run_.check_fixture_state()
+        new = dict(NEW)
+        self.run_.state["legacy"] = {"/workspace": {}}
+        self.run_.gateway[new["sandboxName"]] = {"id": new["sandboxId"], "phase": "Ready"}
+        rewritten = dict(OLD, image="registry.example.test/stock-agent:rewritten")
+        applied = {"state": "applied", "applied": new, "superseded": [rewritten]}
+        self.run_.api = lambda method, path, body=None, timeout=900: (
+            (200, {"appliedRuntimeKind": "openshell", "appliedRuntimeBinding": json.dumps(applied)}) if method == "GET" else (200, {}))
+        self.run_.case("A3", self.run_.a3_legacy_image_change)
+        self.assertEqual("FAIL", self.run_.receipt["cases"]["A3"]["result"])
+        self.assertIn("custody", self.run_.receipt["cases"]["A3"]["reason"])
 
     # ── F4: interruption unwinds through the same cleanup ──
 

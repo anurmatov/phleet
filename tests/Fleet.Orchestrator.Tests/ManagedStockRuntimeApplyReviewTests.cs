@@ -846,6 +846,87 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         Assert.True(File.Exists(Path.Combine(docker, "ignored.log"))); // the original stays
     }
 
+    /// <summary>
+    /// #507 review F1: a user repository whose own config runs a canary through <c>core.fsmonitor</c> and an index hook,
+    /// with a kept file and an ignored one. Returns the canary path after proving plain Git really runs it.
+    /// </summary>
+    internal static string CanaryRepository(string repository, string scratch)
+    {
+        var canary = Path.Combine(scratch, "git-command-ran");
+        var hooks = Path.Combine(scratch, "hooks");
+        Directory.CreateDirectory(hooks);
+        var script = $"#!/bin/sh\ntouch '{canary}'\n";
+        foreach (var path in new[] { Path.Combine(scratch, "fsmonitor.sh"), Path.Combine(hooks, "post-index-change") })
+        {
+            File.WriteAllText(path, script);
+            File.SetUnixFileMode(path, (UnixFileMode)0b111_101_101);
+        }
+        Git("init", "-q", repository);
+        Git("-C", repository, "config", "core.fsmonitor", Path.Combine(scratch, "fsmonitor.sh"));
+        Git("-C", repository, "config", "core.hooksPath", hooks);
+        File.WriteAllText(Path.Combine(repository, ".gitignore"), "ignored.log\n");
+        File.WriteAllText(Path.Combine(repository, "kept.txt"), "kept");
+        File.WriteAllText(Path.Combine(repository, "ignored.log"), "ignored");
+        Git("-C", repository, "ls-files", "-co", "--exclude-standard"); // positive control: plain Git runs it
+        Assert.True(File.Exists(canary), "the canary repository does not exercise core.fsmonitor");
+        File.Delete(canary);
+        return canary;
+    }
+
+    private static void Git(params string[] args)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in args) psi.ArgumentList.Add(arg);
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        process.StandardOutput.ReadToEnd();
+        process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task A_copied_repository_config_never_runs_a_command_and_filtering_still_applies()
+    {
+        Directory.CreateDirectory(_t.DockerWorkspaceDir);
+        var canary = CanaryRepository(_t.DockerWorkspaceDir, Path.Combine(_t._dir, "canary"));
+        _t._store.Add(_t.ManagedAgent(desired: "openshell", applied: "docker"));
+
+        Assert.True((await _t.Runtime().ApplyAsync("agent1", default)).Ok);
+
+        Assert.False(File.Exists(canary));
+        var report = File.ReadAllLines(Path.Combine(_t._dir, "managed", "agent1", Stored().Applied!.Epoch.ToString("N"), "workspace-not-transferred.txt"));
+        Assert.Contains("ignored.log", report);
+        Assert.DoesNotContain("kept.txt", report);
+    }
+
+    [Theory]
+    [InlineData("running", "restore:docker_quiescence_pending")]
+    [InlineData("restarting", "restore:docker_quiescence_pending")]
+    [InlineData("unobservable", "restore:docker_observation_failed")]
+    public async Task Docker_destination_is_never_snapshotted_or_written_unless_its_container_is_stopped(string docker, string detail)
+    {
+        var binding = _t.Binding("fl-1e9ac7000000a40a", Guid.NewGuid());
+        _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
+        _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        Directory.CreateDirectory(Path.Combine(_t.DockerWorkspaceDir, "nested"));
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "prior.txt"), "docker bytes");
+        File.WriteAllText(Path.Combine(_t.DockerWorkspaceDir, "nested", "file"), "docker bytes");
+        var before = Tree(_t.DockerWorkspaceDir);
+        _t._host.DockerStates = docker == "unobservable" ? null : [docker];
+
+        var apply = await _t.Runtime().ApplyAsync("agent1", default);
+
+        Assert.Equal("openshell_to_docker_unresolved", apply.Code);
+        Assert.Contains(detail, apply.Errors);
+        Assert.Equal(before, Tree(_t.DockerWorkspaceDir));
+        var epochDir = Path.Combine(_t._dir, "managed", "agent1", binding.Epoch.ToString("N"));
+        Assert.False(Directory.Exists(Path.Combine(epochDir, "docker-before")));
+        Assert.Single(Directory.GetDirectories(Path.Combine(epochDir, "workspace-out"))); // the verified export is retained
+        Assert.Equal("Stopped", _t._cli.Sandboxes[binding.SandboxName].Phase);
+        Assert.Empty(_t._dockerProvisions);
+        Assert.Equal("openshell", _t._store.Get("agent1").AppliedRuntimeKind);
+    }
+
     /// <summary>The file's bytes as read by <paramref name="uid"/> (no supplementary groups), or null when that uid is refused.</summary>
     private static string? ReadAs(uint uid, string path)
     {

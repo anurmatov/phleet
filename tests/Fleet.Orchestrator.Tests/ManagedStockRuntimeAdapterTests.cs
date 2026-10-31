@@ -991,6 +991,31 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
     }
 
     [Fact]
+    public async Task Cli_children_get_command_scope_git_settings_that_stop_repository_commands_but_keep_filtering()
+    {
+        // #507 review F1: a stand-in CLI that plans like the pinned one (git ls-files with default ignore filtering) in a
+        // user repository whose config runs a canary; ProcessStockCli's environment must keep the canary from running.
+        var repository = Path.Combine(_dir, "user-repo");
+        Directory.CreateDirectory(repository);
+        var canary = ManagedStockRuntimeApplyReviewTests.CanaryRepository(repository, Path.Combine(_dir, "canary"));
+        var script = Path.Combine(_dir, "fake-openshell-git");
+        File.WriteAllText(script, "#!/bin/sh\nexec git -C \"$1\" ls-files -co --exclude-standard\n");
+        File.SetUnixFileMode(script, (UnixFileMode)0b111_000_000);
+
+        var run = await new ProcessStockCli(Config(new() { ["StockOpenShell:CliPath"] = script })).RunAsync([repository], null, TimeSpan.FromSeconds(30), default);
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Equal([".gitignore", "kept.txt"], run.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries).Order(StringComparer.Ordinal));
+        Assert.False(File.Exists(canary));
+        // Inherited command-scope settings are replaced, never merged with ours.
+        var environment = new Dictionary<string, string?> { ["GIT_CONFIG_PARAMETERS"] = "'core.fsmonitor'='/x'", ["GIT_CONFIG_COUNT"] = "3", ["GIT_CONFIG_KEY_0"] = "core.fsmonitor" };
+        ProcessStockCli.NeutralizeGit(environment);
+        Assert.False(environment.ContainsKey("GIT_CONFIG_PARAMETERS"));
+        Assert.Equal(("2", "core.fsmonitor", "false", "core.hooksPath", "/dev/null"), (environment["GIT_CONFIG_COUNT"], environment["GIT_CONFIG_KEY_0"],
+            environment["GIT_CONFIG_VALUE_0"], environment["GIT_CONFIG_KEY_1"], environment["GIT_CONFIG_VALUE_1"]));
+    }
+
+    [Fact]
     public async Task Failed_cut_still_attempts_a_bounded_stop_and_keeps_every_error()
     {
         var binding = Binding("fleet-agent1-66666666", Guid.NewGuid());

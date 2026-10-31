@@ -185,6 +185,15 @@ class StockStartupTests(unittest.TestCase):
                       'for directory in "$PWD" /workspace /home/agent/workspace']:
             self.assertIn(check, ci)
 
+    def test_ci_container_probe_scripts_keep_their_single_quotes_balanced(self):
+        # #507 review F5: an apostrophe inside a `sh -c '...'` probe ends the quote and fails the image job.
+        ci = (ROOT / ".github/workflows/ci.yml").read_text().split("  agent-image:", 1)[1].split("  minio-init-dependencies:", 1)[0]
+        bodies = re.findall(r" -c '\n(.*?)\n\s*'\n", ci, re.S)
+        self.assertGreaterEqual(len(bodies), 2)
+        for body in bodies:
+            self.assertNotIn("'", body)
+            self.assertEqual(0, subprocess.run(["sh", "-n"], input=body, text=True).returncode)
+
     def test_orchestrator_image_ships_the_copy_helper_without_new_dependencies(self):
         orchestrator = (ROOT / "src/Fleet.Orchestrator/Dockerfile").read_text()
         self.assertIn("COPY scripts/stock-workspace-copy.py /app/stock-workspace-copy.py", orchestrator)

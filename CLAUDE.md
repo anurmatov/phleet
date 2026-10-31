@@ -485,7 +485,9 @@ Managed workspace layout (#507): the user tree is `W = WorkloadHome/workspace` (
 field is legacy `/workspace` only after proof; anything else refuses `workspace_layout_unverified`. Every carry-out uploads
 `scripts/stock-workspace-copy.py` (image `/app/stock-workspace-copy.py`), copies one filtered tree into
 `HOME/.phleet-workspace-transfer/<op>/data`, downloads that and checks its manifest; `PrivateWorkspaceEntries` is the one
-exclusion list. Pre-#507 managed images need `appliedOpenShell=0` in the rollout guard (`org.phleet.managed-stock-workspace=1`).
+exclusion list. Every CLI child and the report's `git` get command-scope `core.fsmonitor=false`/`core.hooksPath=/dev/null`
+(`ProcessStockCli.NeutralizeGit`) so a copied user repository never runs a command; Docker is written only while its container
+is stopped. Pre-#507 managed images need `appliedOpenShell=0` in the rollout guard (`org.phleet.managed-stock-workspace=1`).
 Operator regression: `scripts/test-stock-workspace-transfer.sh`. Runbook: `docs/openshell-stock.md` (workspace layout).
 Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
 full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate

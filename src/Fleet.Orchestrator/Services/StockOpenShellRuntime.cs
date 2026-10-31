@@ -52,6 +52,8 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
         foreach (var name in new[] { "OPENSHELL_GATEWAY_INSECURE", "OPENSHELL_GATEWAY_ENDPOINT", "OPENSHELL_GATEWAY" })
             psi.Environment.Remove(name);
         if (config["StockOpenShell:ConfigDir"] is { Length: > 0 } dir) psi.Environment["XDG_CONFIG_HOME"] = dir;
+        // #507 review F1: upload planning runs git in staged copies of user repositories; their config never runs here.
+        NeutralizeGit(psi.Environment);
         if (secretEnv is not null)
             foreach (var (key, value) in secretEnv) psi.Environment[key] = value;
 
@@ -90,6 +92,26 @@ public sealed class ProcessStockCli(IConfiguration config) : IStockCli
     }
 
     private const string SetsidPath = "/usr/bin/setsid";
+
+    /// <summary>
+    /// #507 review F1: command-scope Git settings for every Git process the orchestrator starts or the pinned CLI spawns.
+    /// The CLI's upload planning runs <c>git rev-parse</c>/<c>git ls-files</c> inside a staged copy of a user repository,
+    /// whose own <c>.git/config</c> could otherwise make Git run a command here (<c>core.fsmonitor</c>, index hooks).
+    /// Command scope overrides repository, global and system config; <c>.gitignore</c>, <c>info/exclude</c> and
+    /// <c>core.excludesFile</c> filtering stay exactly as they are.
+    /// </summary>
+    internal static readonly (string Key, string Value)[] GitCommandScope = [("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null")];
+
+    internal static void NeutralizeGit(IDictionary<string, string?> environment)
+    {
+        environment.Remove("GIT_CONFIG_PARAMETERS");
+        environment["GIT_CONFIG_COUNT"] = GitCommandScope.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        for (var i = 0; i < GitCommandScope.Length; i++)
+        {
+            environment[$"GIT_CONFIG_KEY_{i}"] = GitCommandScope[i].Key;
+            environment[$"GIT_CONFIG_VALUE_{i}"] = GitCommandScope[i].Value;
+        }
+    }
 
     /// <summary>An explicit path must be an existing file; a bare name must resolve on PATH.</summary>
     internal static bool CliExists(string cliPath)
@@ -1289,7 +1311,9 @@ public sealed class StockOpenShellRuntime(
             }
             using (var cleanup = new CancellationTokenSource(FanoutTimeout))
                 if (await StopVerifiedAsync(applied, cleanup.Token) is { } stopped) errors.Add(stopped);
-            // The deletion-aware mirror runs only once the sandbox is verified stopped, after Docker's own snapshot.
+            // The deletion-aware mirror runs only once the sandbox is verified stopped and, #507 review F2, the Docker
+            // destination's own container is observed stopped (absent, created, exited or dead), after Docker's snapshot.
+            if (errors.Count == 0 && await DockerDestinationFaultAsync(agent) is { } busy) errors.Add(busy);
             if (errors.Count == 0 && RestoreDockerWorkspace(agent, snapshot!) is { } restore) errors.Add(restore);
             if (errors.Count > 0) return Hold(record, 502, "openshell_to_docker_unresolved", [.. errors]);
             record = record with { State = "revoked" };
@@ -2781,6 +2805,15 @@ public sealed class StockOpenShellRuntime(
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "restore:workspace_restore_failed"; }
     }
 
+    /// <summary>#507 review F2: Docker's workspace is snapshotted or written only while its container is observed stopped.</summary>
+    private async Task<string?> DockerDestinationFaultAsync(Agent agent) =>
+        await host.DockerContainerStatesAsync(agent.ContainerName, CancellationToken.None) switch
+        {
+            null => "restore:docker_observation_failed",
+            var states when states.All(s => s is "exited" or "created" or "dead") => null,
+            _ => "restore:docker_quiescence_pending",
+        };
+
     /// <summary>
     /// #507 OpenShell→Docker restore: Docker's prior portable tree is first copied to a private snapshot beside the export
     /// (<c>docker-before/&lt;operation&gt;</c>), then the existing deletion-aware mirror runs. Excluded destination entries are
@@ -2812,6 +2845,7 @@ public sealed class StockOpenShellRuntime(
         {
             var git = new ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
             foreach (var arg in new[] { "-C", payload, "ls-files", "-co", "--exclude-standard", "-z" }) git.ArgumentList.Add(arg);
+            ProcessStockCli.NeutralizeGit(git.Environment);
             using var process = Process.Start(git)!;
             var listed = process.StandardOutput.ReadToEndAsync();
             _ = process.StandardError.ReadToEndAsync();

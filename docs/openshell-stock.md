@@ -522,7 +522,10 @@ booted into its staged launcher (no activation, daemon or native/model turn):
 Nothing moves or deletes the source. Default CLI Git filtering stays on for uploads (no `--no-git-ignore`): when a staged
 tree is itself a Git work tree, the paths the filter will omit (ignored files and the repository metadata) are listed
 privately in `<ConfigDir>/managed/<agent>/<epoch>/workspace-not-transferred.txt` (0600), and the originals stay in the
-source and the private snapshot.
+source and the private snapshot. A staged user repository's own `.git/config` never runs a command in the orchestrator:
+every CLI child and the report's `git` get command-scope `core.fsmonitor=false` and `core.hooksPath=/dev/null`
+(`GIT_CONFIG_COUNT`, inherited `GIT_CONFIG_PARAMETERS` removed), which override repository config while `.gitignore`,
+`info/exclude` and `core.excludesFile` filtering stay as they are.
 
 | Case | Behavior |
 |---|---|
@@ -530,7 +533,7 @@ source and the private snapshot.
 | Current-layout reprovision | same UUID; persisted W is authoritative even if a stale `/workspace` exists (never merged); only `W/.mcp.json`, settings and trust are refreshed |
 | Legacy same-image reprovision | same UUID; W must be absent or empty, the proven `/workspace` is exported and uploaded into W, and the new layout commits only with the apply's success; the original `/workspace` stays |
 | Legacy or current image change | the existing revoke requirement; the old tree is exported and the old sandbox verified stopped before the replacement exists; the new sandbox uses W; the old identity, data and custody stay as Superseded |
-| OpenShell→Docker | the same export; after the verified Stop, Docker's prior portable tree is copied to `<ConfigDir>/managed/<agent>/<epoch>/docker-before/<operation>`, then the existing deletion-aware mirror runs; Docker is provisioned only through the existing verified transition |
+| OpenShell→Docker | the same export; after the verified Stop and once the agent's Docker container is observed absent, created, exited or dead, Docker's prior portable tree is copied to `<ConfigDir>/managed/<agent>/<epoch>/docker-before/<operation>`, then the existing deletion-aware mirror runs; Docker is provisioned only through the existing verified transition |
 
 **Typed holds.** Failures keep the existing parents (`image_change_workspace_unresolved`,
 `openshell_to_docker_unresolved`) or, for reprovision, hold under the reason itself, with a bounded `phase:reason` detail
@@ -544,6 +547,7 @@ and no CLI stderr, payload or identifiers:
 | `download:workspace_download_unknown` | nonzero or timed-out download, or a snapshot that does not match the helper's manifest (kept, never consumed) |
 | `download:workspace_stage_failed` / `restore:workspace_stage_failed` | the private snapshot, or Docker's prior-tree snapshot, could not be created |
 | `restore:workspace_restore_failed` | mirroring into the bundle or the Docker workspace failed part-way |
+| `restore:docker_quiescence_pending` / `restore:docker_observation_failed` | the agent's Docker container is running or cannot be observed; the Docker workspace is neither snapshotted nor written |
 | `export:workspace_cleanup_failed` | the helper file could not be removed after a verified download |
 | `*:workspace_transfer_cancelled` | the caller cancelled; the bounded Stop still runs on its own 120 s deadline |
 | `*:sandbox_identity_changed` / `*:sandbox_unobservable` | the exact UUID changed or could not be read around a leg |
@@ -568,8 +572,11 @@ Docker). The fixture file is owner-only JSON with exactly `orchestratorUrl`, `to
 value), `cli`, `cliConfigDir`, `workloadHome`, `freshAgent`, `freshDockerWorkspace`, `legacyAgent`, `baselineImage`,
 `replacementImage` (immutable `@sha256` references) and `receiptDir` (0700). It exits 0 only when every case passes,
 1 on a failure, and 2 (`BLOCKED`) before any mutating request when the fixture, token, pinned CLI, gateway or expected
-fixture state is missing. stdout carries results only; manifests, identities and hashes go to an owner-only receipt in
-`receiptDir`. It never creates fixtures or touches production configuration, networks or grants; a source build,
+fixture state is missing. Every fixture mutation (start, stop, exec, download) first proves the exact persisted sandbox
+UUID and name in its persisted scope on the supplied gateway, so a fixture that disagrees with that gateway is BLOCKED
+before anything starts. A sandbox the script starts is always stopped again (bounded), a failed case revokes its agent
+through the orchestrator, and every cleanup result is kept in the receipt (a cleanup error fails the run). stdout
+carries results only; manifests, identities and hashes go to an owner-only receipt in `receiptDir`. It never creates fixtures or touches production configuration, networks or grants; a source build,
 FakeCli suite or historical native result is not this check. Native/provider/model qualification, account login or
 import and CONTROL restore remain out of scope and unrun here.
 

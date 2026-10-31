@@ -1374,7 +1374,11 @@ public sealed class StockOpenShellRuntime(
             // Cut the old epoch (unless already revoked), then quiesce every writer before any input changes.
             var cut = record.State == "revoked" ? [] : await RevokeFanoutAsync(agent.Name, record, ct, stop: false);
             if (cut.Count > 0) return await HoldStoppedAsync(applying, candidate, "revoke_unresolved", cut, ct);
-            if (await StopVerifiedAsync(candidate, ct) is { } quiet) return await HoldStoppedAsync(applying, candidate, quiet, [], ct);
+            // #503 W10: after a clean revoke, a failed-main sandbox stays Error and its Stop exits nonzero; the same proven
+            // terminal state the revoke fanout reconciles is quiet enough to reuse (pinned Start accepts a failed-main Error).
+            if (await StopVerifiedAsync(candidate, ct) is { } quiet
+                && (record.State != "revoked" || await FailedMainOrAsync(quiet, candidate, ct) is not null))
+                return await HoldStoppedAsync(applying, candidate, quiet, [], ct);
             try
             {
                 WriteBrokerPasswords(agent.Name, passwords);
@@ -2039,7 +2043,10 @@ public sealed class StockOpenShellRuntime(
     private async Task<bool> PlannedRestartAsync(string agentName, ManagedRecord record, ManagedBinding binding, CancellationToken ct)
     {
         if (record.State is not ("stopped" or "revoked") || record.Candidate is not null || record.Errors.Count > 0) return false;
-        if (await StoppedQuiescentAsync(binding, ct) is not null) return false;
+        // #503 W10: a clean revoke of a failed-main sandbox leaves it Error, which pinned Stop never changes; only that proven
+        // terminal state of this record's own sandbox counts like Stopped. Peers below keep the exact Stopped requirement.
+        if (await StoppedQuiescentAsync(binding, ct) is { } own
+            && !(record.State == "revoked" && own == "sandbox_not_stopped" && await FailedMainQuiescentAsync(binding, ct))) return false;
         IReadOnlyList<Agent> agents;
         try { agents = await store.ListAsync(ct); }
         catch (Exception ex) when (ex is DbException or InvalidOperationException) { return false; }
@@ -2260,8 +2267,14 @@ public sealed class StockOpenShellRuntime(
     /// unaffected and must still succeed.
     /// </summary>
     private async Task<string?> FailedMainOrAsync(string fault, ManagedBinding target, CancellationToken ct) =>
-        fault == "stop_unknown" && await FailedMainAsync(target, ct) && await QuiescentAsync(target, ct) is null && await FailedMainAsync(target, ct)
-            ? null : fault;
+        fault == "stop_unknown" && await FailedMainQuiescentAsync(target, ct) ? null : fault;
+
+    /// <summary>
+    /// The exact owned sandbox reads the pinned failed-main state with a settled operation, no container runs under it, and
+    /// the same state reads again afterwards: the terminal state pinned Stop never changes (W8, F1).
+    /// </summary>
+    private async Task<bool> FailedMainQuiescentAsync(ManagedBinding binding, CancellationToken ct) =>
+        await FailedMainAsync(binding, ct) && await QuiescentAsync(binding, ct) is null && await FailedMainAsync(binding, ct);
 
     /// <summary>
     /// The exact binding (name, UUID, persisted scope) reads Error with an exit code and Ready=False/MainProcessFailed, and its

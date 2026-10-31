@@ -1816,6 +1816,30 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
     }
 
+    [Fact]
+    public async Task Clean_revoked_failed_main_subscription_reapplies_after_a_gateway_restart_with_its_handle_at_boot()
+    {
+        // #503 W10: the revoked failed-main sandbox stays Error; the restarted gateway's planned-restart check and the reuse
+        // Stop accept only its proven terminal state, then W9 attaches the provider before the staged boot.
+        var old = SubBinding("fleet-agent1-a5a5a5a5", phase: "Error", attached: false);
+        var scoped = _cli.Cli("ws-a");
+        scoped.Status[old.SandboxName] = ManagedStockRuntimeAdapterTests.FakeCli.FailedMain();
+        scoped.StopKeepsPhase.Add(old.SandboxName);
+        _t._host.Generation = "gateway-2@restart"; // the outside source is renewed for the current gateway
+        WriteSource();
+        _t._store.Add(SubscriptionAgent(desired: "openshell", applied: "openshell", new ManagedRecord { State = "revoked", Applied = old }));
+        PinnedPreparation(old.SandboxName);
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("applied", old.SandboxId, "gateway-2@restart"), (record.State, record.Applied!.SandboxId, record.Applied.GatewayGeneration));
+        Assert.Equal([Provider], _cli.Booted[("ws-a", old.SandboxName)]);
+        Assert.InRange(CallIndex("sandbox", "provider", "attach", old.SandboxName, Provider), 0, CallIndex("sandbox", "start", old.SandboxName) - 1);
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

@@ -250,6 +250,71 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         else Assert.InRange(attach, 0, start - 1);
     }
 
+    // #503 W10: a clean revoke of a failed-main sandbox leaves it Error, which pinned Stop never changes. Reapply reaches the
+    // staged boot at the same and at a changed gateway generation only with the W8/F1 proof; every unproven state holds.
+    [Theory]
+    [InlineData("same", "proven", null)]
+    [InlineData("restart", "proven", null)]
+    [InlineData("same", "running", "held")]
+    [InlineData("restart", "running", "gateway_generation_changed")]
+    [InlineData("same", "operation_pending", "held")]
+    [InlineData("restart", "operation_pending", "gateway_generation_changed")]
+    [InlineData("same", "foreign_after_stop", "held")]
+    [InlineData("restart", "status_unreadable", "gateway_generation_changed")]
+    [InlineData("same", "not_clean_revoke", "held")]
+    [InlineData("restart", "not_clean_revoke", "gateway_generation_changed")]
+    [InlineData("restart", "failed_main_peer", "gateway_generation_changed")]
+    public async Task Clean_revoked_failed_main_sandbox_is_reapplied_only_with_its_proof(string generation, string variant, string? held)
+    {
+        var binding = Binding("fleet-agent1-a6a6a6a6", Guid.NewGuid());
+        _cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Error");
+        _cli.Status[binding.SandboxName] = variant switch
+        {
+            "operation_pending" => FakeCli.FailedMain(operationPending: true),
+            "status_unreadable" => new JsonObject { ["exit_code"] = 1, ["conditions"] = "unreadable" },
+            _ => FakeCli.FailedMain(),
+        };
+        _cli.StopKeepsPhase.Add(binding.SandboxName);
+        if (variant == "running") _host.RunningContainers = ["workload"];
+        if (variant == "foreign_after_stop") _cli.OnStop = name => _cli.Sandboxes[name] = (Guid.NewGuid().ToString(), "Error");
+        _store.Add(ManagedAgent(desired: "openshell", applied: "openshell",
+            record: new ManagedRecord { State = variant == "not_clean_revoke" ? "stopped" : "revoked", Applied = binding }));
+        if (variant == "failed_main_peer")
+        {
+            // Peers keep the exact Stopped requirement: a clean-revoked failed-main peer still holds a planned restart.
+            var peer = Binding("fleet-agent2-a6a6a6a6", Guid.NewGuid());
+            _cli.Sandboxes[peer.SandboxName] = (peer.SandboxId, "Error");
+            _cli.Status[peer.SandboxName] = FakeCli.FailedMain();
+            var other = ManagedAgent(desired: "openshell", applied: "openshell", record: new ManagedRecord { State = "revoked", Applied = peer });
+            other.Name = other.ShortName = other.ContainerName = "agent2";
+            _store.Add(other);
+        }
+        if (generation == "restart") _host.Generation = "gateway-2@restart";
+
+        var result = await Runtime().ApplyAsync("agent1", default);
+
+        var record = ManagedRecord.Parse(_store.Get("agent1").AppliedRuntimeBinding);
+        var started = _cli.Calls.Any(c => c.Args.SequenceEqual(["sandbox", "start", binding.SandboxName]));
+        if (held is null)
+        {
+            Assert.True(result.Ok, result.Code + ":" + string.Join(",", result.Errors));
+            Assert.Equal(("applied", binding.SandboxId, _host.Generation), (record.State, record.Applied!.SandboxId, record.Applied.GatewayGeneration));
+            Assert.True(started); // pinned Start accepts a failed-main Error sandbox
+            Assert.Contains(binding.Provider, _cli.Booted[binding.SandboxName]); // W9: attached before the staged boot
+            return;
+        }
+        Assert.False(result.Ok);
+        Assert.False(started);
+        if (held == "gateway_generation_changed")
+        {
+            Assert.Equal("gateway_generation_changed", result.Code);
+            Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "stop"])); // refused before any effect
+            Assert.Equal((variant == "not_clean_revoke" ? "stopped" : "revoked", binding.SandboxId, binding.Epoch, binding.GatewayGeneration),
+                (record.State, record.Applied!.SandboxId, record.Applied.Epoch, record.Applied.GatewayGeneration)); // never rebound
+        }
+        else Assert.Equal("needs_attention", record.State);
+    }
+
     [Fact]
     public async Task Concurrent_writer_gets_409_before_any_external_action()
     {

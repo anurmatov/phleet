@@ -129,7 +129,7 @@ public sealed class ManagedSignerPolicyTests
             "        enforcement: enforce\n        mcp: {versions: [2025-11-25, 2025-06-18]}\n"), new()));
         // The exact method and tool rules still decide: versions never widen them.
         Assert.Equal(StockManagedSignerPolicy.Mismatch, StockManagedSignerPolicy.DescribeBindingFault(
-            native.Replace("tool: memory_get", "tool: memory_search"), MemoryHosts));
+            native.Replace("tool: memory_get", "tool: memory_store"), MemoryHosts));
         Assert.NotNull(SandboxPolicyValidation.DescribeFault(native.Replace("method: tools/list", "method: '*'"), new()));
         // A stored version without the block keeps its meaning (the stock default revision only).
         Assert.Null(StockManagedSignerPolicy.DescribeBindingFault(SignedPolicy.MemoryOnly, MemoryHosts));
@@ -241,7 +241,8 @@ public sealed class ManagedSignerPolicyTests
             "memory_access_preset" => Memory(SignedPolicy.Rules("memory_get"), "        access: read-only\n"),
             "rules_and_access" => Memory("        enforcement: enforce\n", "        enforcement: enforce\n        access: read-only\n"),
             "memory_write_tool" => Memory("tool: memory_get", "tool: memory_store"),
-            "memory_extra_tool" => Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_get", "memory_search")),
+            // #512: a fixed read beside a write is still a widening.
+            "memory_extra_tool" => Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_get", "memory_search", "memory_store")),
             "memory_tool_glob" => Memory("tool: memory_get", "tool: memory_*"),
             "memory_any_methods" => Memory("method: tools/list", "method: '*'"),
             "memory_no_initialized" => Memory("          - allow:\n              method: notifications/initialized\n", ""),
@@ -258,6 +259,65 @@ public sealed class ManagedSignerPolicyTests
         if (fault is "missing_temporal" or "temporal_access_preset") hosts = new() { ["memory"] = "memory.example.test", ["temporal"] = "temporal.example.test" };
 
         Assert.Equal(code, StockManagedSignerPolicy.DescribeBindingFault(yaml, hosts));
+    }
+
+    // #512 A1: each fixed read alone, any pair and all three explicit tools/call rules save and admit, and AdmittedTools
+    // reports exactly the selected set.
+    [Theory]
+    [InlineData("memory_get")]
+    [InlineData("memory_list")]
+    [InlineData("memory_search")]
+    [InlineData("memory_list", "memory_search")]
+    [InlineData("memory_get", "memory_search", "memory_list")]
+    public void ManagedMemoryReads_each_fixed_read_alone_or_together_saves_and_admits(params string[] reads)
+    {
+        var yaml = Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules(reads));
+        Assert.Null(SandboxPolicyValidation.DescribeFault(yaml, new()));
+        Assert.Null(StockManagedSignerPolicy.DescribeBindingFault(yaml, MemoryHosts));
+        Assert.True(StockManagedSignerPolicy.AdmittedTools(yaml, SignedPolicy.Memory.Host)!.SetEquals(reads));
+    }
+
+    // #512 A1: writes, unknown names, case variants and globs never admit, beside a valid read or alone; an empty or
+    // duplicated read list and a wildcard/extra method stay refused at save and admission.
+    [Theory]
+    [InlineData("memory_store")]
+    [InlineData("memory_update")]
+    [InlineData("memory_delete")]
+    [InlineData("memory_stats")]
+    [InlineData("memory_list", "memory_store")]
+    [InlineData("memory_search", "memory_delete")]
+    public void ManagedMemoryReads_a_write_or_unknown_tool_never_admits(params string[] tools)
+    {
+        var yaml = Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules(tools));
+        Assert.Equal(StockManagedSignerPolicy.Mismatch, StockManagedSignerPolicy.DescribeBindingFault(yaml, MemoryHosts));
+    }
+
+    [Theory]
+    [InlineData("tool: memory_list", "tool: Memory_list")]
+    [InlineData("tool: memory_list", "tool: memory_*")]
+    [InlineData("tool: memory_list", "tool: [memory_list, memory_search]")]
+    [InlineData("              tool: memory_list\n", "")]
+    public void ManagedMemoryReads_case_glob_list_or_missing_tool_refuses_at_save_and_admission(string from, string to)
+    {
+        var yaml = Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_list")).Replace(from, to);
+        Assert.NotNull(SandboxPolicyValidation.DescribeFault(yaml, new()));
+        Assert.Equal(StockManagedSignerPolicy.Mismatch, StockManagedSignerPolicy.DescribeBindingFault(yaml, MemoryHosts));
+    }
+
+    [Fact]
+    public void ManagedMemoryReads_empty_or_duplicate_read_lists_and_extra_methods_stay_refused()
+    {
+        foreach (var yaml in new[]
+        {
+            Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules()), // control methods only, no read
+            Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_list", "memory_list")),
+            Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_list") + "          - allow:\n              method: ping\n"),
+            Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_search").Replace("method: tools/list", "method: '*'")),
+        })
+        {
+            Assert.NotNull(SandboxPolicyValidation.DescribeFault(yaml, new()));
+            Assert.Equal(StockManagedSignerPolicy.Mismatch, StockManagedSignerPolicy.DescribeBindingFault(yaml, MemoryHosts));
+        }
     }
 
     [Fact]

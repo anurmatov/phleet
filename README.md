@@ -159,6 +159,10 @@ sandbox on that gateway. This adds no runtime qualification; see the
 Managed workloads (#507) keep their user tree in HOME's `workspace` child, inside the stock CLI's copy root; older
 `/workspace` bindings are carried there only after proof, through a filtered in-sandbox snapshot, and never rewritten in
 place. See the [workspace layout runbook](docs/openshell-stock.md#managed-workspace-layout-507).
+Managed agents (#512) keep exactly the memory reads (`memory_get`, `memory_search`, `memory_list`) they are granted
+and their saved policy lists explicitly, in both auth modes. Existing get-only selections are unchanged. An API-key
+agent whose get-only policy does not list its extra read grants now refuses Apply until an explicit version is
+selected; see [explicit memory reads](docs/openshell-stock.md#explicit-memory-reads-512).
 
 | OpenShell capability | Status |
 |---|---|

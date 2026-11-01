@@ -470,7 +470,8 @@ subset (`stock-memory`/`stock-temporal`/`stock-telegram` → registration `stock
 create/policy-set effect with 409 `managed_signer_policy_missing`/`_mismatch`/`_scope`. It requires the stored hash
 to be the SHA-256 of the exact saved bytes, the entries to equal memory plus the selected routes, and one enforced
 `host:443` MCP endpoint per receiver with exact MCP rules, never an access preset (pinned stock rejects MCP presets;
-memory allows `tools/call` for `memory_get` only). Start/restart/pre-activation check the applied version
+memory allows `tools/call` only for an explicit nonempty subset of `memory_get`/`memory_search`/`memory_list`, #512).
+Start/restart/pre-activation check the applied version
 and its outside enrollment (`managed_signer_authority_unavailable`), never desired. Never normalize or inject into
 saved YAML. Cleanup (Stop/revoke/expiry/retirement) never depends on this check. Backups require the registration's
 CA under STATE_DIR (`coverage_incomplete: signer_tls_ca`) and record `SNAPSHOT_MODE`. Eligibility is
@@ -492,13 +493,21 @@ is stopped, and its excluded entries' metadata must be identical across the mirr
 Operator regression: `scripts/test-stock-workspace-transfer.sh`. Runbook: `docs/openshell-stock.md` (workspace layout).
 Subscription ordinary services (#510, UNQUALIFIED): the subscription branch keeps an agent's existing bot, journal capture/read/
 files and Temporal/Telegram MCP routes through the API-key branch's service checks (no native key). Every enabled grant on a
-signer-bound route must be in the saved policy's MCP rules (memory stays `memory_get`), else `managed_route_unsupported:mcp:*`
+signer-bound route must be in the saved policy's MCP rules (memory: its listed fixed reads, #512), else `managed_route_unsupported:mcp:*`
 before Stop; grants are never pruned or edited. Service providers live only in the persisted provider workspace, never on the
 OAuth provider; the binding records `ServiceProviderIds` (name→UUID, absent only on old memory-only records). A new one is
 created once after scoped absence and checkpointed before attach; foreign/ambiguous/uncertain → `subscription_service_provider_unverified`
 or `provider_setup_unknown` hold, no adoption or retry. Images carry `org.phleet.managed-stock-subscription-services=1`; a
 target without it needs `subscriptionBindings=0` (memory-only subscriptions retire too). Pins unchanged. Runbook:
 `docs/openshell-stock.md` (ordinary services).
+Explicit memory reads (#512): in both auth modes Apply runs `GrantAdmissionFault`, so every enabled grant on memory
+(selected name), Temporal and Telegram must be a saved `tools/call` rule; an older API-key get-only policy with list/search
+grants refuses until an explicit version is appended and selected (never prune grants). Only `GenerateManagedInputsAsync`
+passes `managed: true` down to `AllowedToolsFor`, which then skips the implicit Codex `mcp__fleet-memory__memory_get`;
+ordinary generation keeps it. The native memory table is exactly the selected-name read grants (no subscription get-only
+narrowing); managed unsupported/empty memory grants refuse at enrollment. A planned restart (`signerAdmission:false`) skips
+grant admission and reuses the applied bundle; additions need a new Apply, receiver revocation stays immediate. Read-denial
+logs carry only tool and fixed reason. Runbook: `docs/openshell-stock.md` (explicit memory reads).
 Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
 full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate
 an agent name into one. A fresh name must be proven absent before apply records or creates anything

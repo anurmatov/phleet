@@ -221,9 +221,11 @@ public static class StockOpenShellEnrollment
                     Deny("stock_enrollment_mcp_route_invalid");
             }
             // #505: only grants under the workload's own memory name count, never the other accepted name's.
-            if (!configuration.GetSection("Agent:AllowedTools").GetChildren().Any(c =>
-                    StockServices.MemoryTools.Any(tool => c.Value == StockServices.ToolGrant(memoryName, tool))))
-                Deny("stock_enrollment_memory_tools_missing");
+            var memoryGrants = MemoryGrants(configuration, memoryName);
+            if (!memoryGrants.Any(StockServices.MemoryTools.Contains)) Deny("stock_enrollment_memory_tools_missing");
+            // #512: managed mode enables exactly its selected-name grants (both auth modes), so a grant outside the fixed reads
+            // refuses here instead of being filtered out of the native table. The manual profile keeps its read intersection.
+            if (IsManaged(configuration) && !memoryGrants.All(StockServices.MemoryTools.Contains)) Deny("stock_enrollment_mcp_route_invalid");
             var auth = NativeAuthFor(configuration, home, environment);
             if ((auth.Manual && !File.Exists(Path.Combine(home, ".codex-host", "auth.json"))) || !File.Exists(rootFile))
                 Deny("stock_enrollment_native_inputs_missing");
@@ -389,6 +391,14 @@ public static class StockOpenShellEnrollment
         return MemoryMcpName(servers);
     }
 
+    /// <summary>The configured AllowedTools under the workload's own memory endpoint name, as bare tool names.</summary>
+    private static string[] MemoryGrants(IConfiguration configuration, string memoryName)
+    {
+        var prefix = "mcp__" + memoryName + "__";
+        return [.. configuration.GetSection("Agent:AllowedTools").GetChildren().Select(c => c.Value).OfType<string>()
+            .Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])];
+    }
+
     /// <summary>
     /// Memory under the workload's own endpoint name, then each first-party service route of the outside record, then
     /// the comms-journal read route (#492), as (MCP name, exact URL, callable tools).
@@ -409,7 +419,9 @@ public static class StockOpenShellEnrollment
 
     /// <summary>
     /// The exact native MCP tables: one per route, enabled tools narrowed to the configured AllowedTools
-    /// that the route permits (memory's read-only set, or the record's grants), never widened.
+    /// that the route permits (memory's read-only set, or the record's grants), never widened. #512: in managed mode, of
+    /// either auth mode, the memory table is exactly the selected-name grants, which the profile check already limited to
+    /// a nonempty set of fixed reads.
     /// </summary>
     private static string NativeMcp(IConfiguration configuration, StockEnrollmentAuthority authority, Func<string, string?> environment)
     {
@@ -419,15 +431,9 @@ public static class StockOpenShellEnrollment
         foreach (var (name, url, tools) in McpRoutes(authority, configuration, memoryName))
         {
             var prefix = "mcp__" + name + "__";
+            // #510/#512: every route, memory included, keeps the same enabled-grant ∩ route-tool intersection in both auth modes.
             var enabled = allowed.Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])
                 .Where(t => tools.Contains(t, StringComparer.Ordinal)).ToArray();
-            // #502: the subscription path registers exactly memory_get on the native memory route (its get-only signer
-            // rule). #510: every other enrolled route keeps the same enabled-grant ∩ record-tool intersection as API-key mode.
-            if (configuration["Agent:NativeAuthMode"] == SubscriptionMode && name == memoryName)
-            {
-                if (!enabled.Contains("memory_get")) Deny("stock_enrollment_mcp_route_invalid");
-                enabled = ["memory_get"];
-            }
             text.Append("\n[mcp_servers.").Append(name).Append("]\nurl = ").Append(JsonSerializer.Serialize(url))
                 .Append("\nenabled_tools = ").Append(JsonSerializer.Serialize(enabled)).Append('\n');
             // #492: the comms-journal read MCP authenticates with the derived read token, which stays

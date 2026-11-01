@@ -722,14 +722,15 @@ before any old-runtime Stop or external mutation:
 | any MCP endpoint that is not one of these names (including case variants), a routed service or the journal read MCP | `managed_route_unsupported:mcp:<name>` |
 | no memory endpoint | `managed_memory_route_missing` |
 | more than one (a duplicate, or both names) | `managed_memory_route_ambiguous`, never a pick |
-| an enabled grant under the selected name: any of `memory_get`/`memory_search`/`memory_list` (API key), `memory_get` (subscription) | `managed_memory_grant_missing` |
+| an enabled read grant under the selected name: any of `memory_get`/`memory_search`/`memory_list`, in both auth modes (#512) | `managed_memory_grant_missing` |
 | transport `http` and URL byte-exactly `https://<MemoryHost>/mcp` from `managed-authority.json` | `managed_route_unsupported:mcp:<name>` |
 
 The ordinary template row (`http://fleet-memory:3100`) is not a managed route, and no plaintext, other host, port,
 path, userinfo, query or fragment is accepted. The workload `.mcp.json` and the native `[mcp_servers.<name>]` table
 keep the selected name; the agent reads it from the bounded, duplicate-checked `.mcp.json` for validation,
-preparation and registration. The receiving service, outside record, signer policy (memory endpoint allows
-`memory_get` only), MCP revisions and the receiver's fresh endpoint/tool/project checks are unchanged; the receiver
+preparation and registration. The receiving service, outside record, signer policy (memory endpoint allows only its
+explicitly listed fixed reads, [#512](#explicit-memory-reads-512)), MCP revisions and the receiver's fresh
+endpoint/tool/project checks are unchanged; the receiver
 already resolves the name of the one endpoint at the exact memory URL.
 Rollback: revert and rebuild; grants, policies, bindings and workspaces are retained. An older build refuses an
 agent applied under `fleet-memory` at its next apply, so take that agent through the ordered rollback below first
@@ -1003,7 +1004,7 @@ Unknown, duplicate or missing fields refuse. Examples in this repository use pla
 
 **Readiness before any mutation.** Apply requires: exactly one memory MCP endpoint, named `memory` or
 `fleet-memory` at the exact HTTPS memory URL (#505, see [Managed runtime](#managed-runtime-492-default-off)), with that
-name's existing `memory_get` grant; any other route only as an [ordinary service](#ordinary-services-510) (#510),
+at least one of that name's existing read grants (#512); any other route only as an [ordinary service](#ordinary-services-510) (#510),
 otherwise `managed_route_unsupported:*`, never silently dropped; the binding file; pinned CLI and gateway client trust in the persisted scope; the
 profile hash; the current gateway generation; sole ownership (no other agent's live tuple names the provider
 UUID or workspace/name: `subscription_owner_conflict`); the existing provider found exactly once across every
@@ -1040,8 +1041,8 @@ the stock-issued `CODEX_AUTH_ACCESS_TOKEN` handle (exact placeholder syntax; att
 and writes the stock example cache shape with an empty refresh token and the parsing-only ID-token stub
 (0700/0600, no foreign cache overwrite, no host-cache fallback). The config is: forced ChatGPT login and
 workspace and `model_provider = "openai-http"`, the generated defaults unchanged, the exact #498 descriptor, one
-`[features] plugins = false, apps = false` block, then the memory table under its selected name with exactly
-`enabled_tools = ["memory_get"]`, then one table per enrolled #510 route. Any drift exits with a secret-free
+`[features] plugins = false, apps = false` block, then the memory table under its selected name with exactly its
+enabled read grants (#512, no longer forced to `["memory_get"]`), then one table per enrolled #510 route. Any drift exits with a secret-free
 `stock_enrollment_*` reason before intake. The receivers keep their fresh ACL, endpoint/tool/project and
 session/epoch checks.
 
@@ -1052,7 +1053,7 @@ ChatGPT account, provider, refresh owner and billing basis do not change, and no
 
 | Route | Kept when | Workload sees |
 |---|---|---|
-| memory | the selected `memory`/`fleet-memory` endpoint with its `memory_get` grant | native table, `memory_get` only |
+| memory | the selected `memory`/`fleet-memory` endpoint with a read grant (#512) | native table, exactly its enabled read grants |
 | `fleet-temporal`, `fleet-telegram` MCP | the endpoint exists and `ServiceHosts` names its receiving host | native table, enabled grants ∩ record tools |
 | own Telegram bot | a `TELEGRAM_*_BOT_TOKEN` reference resolves outside | public bot id plus the issued placeholder |
 | journal capture | journal enabled with the bot, and `JournalHost` set | the issued ingest placeholder |
@@ -1073,7 +1074,7 @@ Preflight refuses before the old runtime stops, with no grant edit:
 |---|---|
 | bot reference or journal key unresolved | `telegram_bot_token_unresolved`, existing journal key fault |
 | a service or journal host missing | `managed_route_unsupported:mcp:<name>` or `managed_route_unsupported:journal` |
-| an enabled grant on memory, Temporal or Telegram that the saved policy's MCP rules do not allow (memory stays `memory_get` only, so `memory_search`/write grants block) | `managed_route_unsupported:mcp:<name>` |
+| an enabled grant on memory, Temporal or Telegram that the saved policy's MCP rules do not allow (memory admits only the reads its rules list, so an unlisted read or any write grant blocks; #512 applies the same check to API-key mode) | `managed_route_unsupported:mcp:<name>` |
 | a selected service profile unpinned, or its scoped export digest differs | `provider_profile_unpinned:<p>`, `provider_profile_hash_mismatch:<p>` |
 | a same-named service provider in the workspace that is not this agent's recorded one (other UUID, type or key set), or an unobservable list | `subscription_service_provider_unverified` |
 
@@ -1260,7 +1261,8 @@ block and select it, as described for old bindings below; an existing version is
 
 **Literal design mismatch, disclosed.** The approved #503 design table says memory uses `access: read-only` and other
 receivers keep "their existing accepted access preset". Pinned stock rejects both for MCP, so the read-only intent is
-kept as the memory endpoint allowing `tools/call` for `memory_get` only; the approved issue text is not edited. A version
+kept as the memory endpoint allowing `tools/call` for `memory_get` only (#512 later allows explicit fixed reads); the
+approved issue text is not edited. A version
 saved with a preset on an MCP endpoint keeps its bytes and is refused at apply as `managed_signer_policy_mismatch`;
 append a new version with the rules above and select it (see **Old unbound bindings** below for the steps).
 
@@ -1272,10 +1274,11 @@ never changes meaning. Stock may reserialize the policy it stores, so compare it
 | stage | check | refusal |
 |---|---|---|
 | save (create/append) | the subset above, with the existing size/event/depth/alias/tag limits | 400, no row |
-| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset; memory allows `tools/call` for `memory_get` only | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
+| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset; memory allows `tools/call` only for a nonempty subset of `memory_get`, `memory_search`, `memory_list` (#512) | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
+| apply, API-key and subscription (#512 for API key) | every enabled grant on memory (selected name), Temporal and Telegram is a `tools/call` rule of that receiver's endpoint | 409 `managed_route_unsupported:mcp:<name>`, same point; no grant is pruned |
 | bypass ambiguity | wildcard endpoint hosts, a duplicate, alternate-port, plaintext/TCP or case/trailing-dot variant of a receiving host, extra or unselected signer entries | `managed_signer_policy_scope` |
 | policy file | written from the saved bytes, then read back against the stored hash | `managed_files_failed` |
-| Start, restart, before activation | the persisted applied version and hash, and its outside enrollment (exact agent, UUID, epoch, stock commit, policy hash and receiving hosts), never the desired selection or the current template | 409 named fault before staging; `managed_signer_authority_unavailable` for a missing or ambiguous enrollment; drift while staging is the bounded revoke/Stop hold |
+| Start, restart, before activation | the persisted applied version and hash, and its outside enrollment (exact agent, UUID, epoch, stock commit, policy hash and receiving hosts), never the desired selection or the current template; a planned gateway restart's trust recheck skips grant admission and reuses the applied bundle | 409 named fault before staging; `managed_signer_authority_unavailable` for a missing or ambiguous enrollment; drift while staging is the bounded revoke/Stop hold |
 
 The same `PolicySha256` is carried by the binding, the outside and guest enrollments and the bytes passed to
 `--policy`. Unrelated explicit destinations and provider profiles are unchanged. Refusals are logged with the
@@ -1288,6 +1291,88 @@ grandfathering. Stop, revoke, expiry, retirement and Docker handoff never depend
 3. revoke cleanly;
 4. run a normal apply.
 Never edit a version in place.
+
+### Explicit memory reads (#512)
+
+A managed agent keeps the memory reads it is already granted. Nothing becomes callable unless both sides say so: the
+saved policy lists the read, and the agent holds an enabled grant for it under the selected memory endpoint name.
+
+| Piece | Contract |
+|---|---|
+| saved policy | the memory endpoint's `tools/call` rules name a nonempty subset of `memory_get`, `memory_search`, `memory_list`, one rule each; writes, other tools, wildcards and duplicates refuse at save or apply |
+| grants | only enabled `mcp__<selected-name>__memory_*` reads count; a grant under the other accepted name never does |
+| apply, both auth modes | every enabled grant on memory, Temporal or Telegram must be a rule in the saved policy, checked before any old-runtime Stop or provider/broker/create/policy-set effect; grants are never pruned or edited |
+| generated tools | managed bundles list exactly the saved enabled grants; ordinary Docker provisioning still adds its automatic `mcp__fleet-memory__memory_get` for Codex, unchanged |
+| native table | `[mcp_servers.<name>] enabled_tools` = exactly those reads, in both auth modes; an empty or unsupported managed memory grant set refuses before registration |
+| receiver | unchanged: fresh identity, endpoint/tool grant and project ACL on every request |
+
+Opting in to list and search beside get means appending a new version whose memory endpoint carries:
+
+```yaml
+        rules:
+          - allow:
+              method: initialize
+          - allow:
+              method: notifications/initialized
+          - allow:
+              method: tools/list
+          - allow:
+              method: tools/call
+              tool: memory_get
+          - allow:
+              method: tools/call
+              tool: memory_list
+          - allow:
+              method: tools/call
+              tool: memory_search
+```
+
+Expected refusals:
+
+| Situation | Result |
+|---|---|
+| memory rule names a write or unknown tool | 409 `managed_signer_policy_mismatch` |
+| enabled read grant the saved policy does not list, or any memory write/unknown grant | 409 `managed_route_unsupported:mcp:<name>` |
+| no enabled read grant under the selected name | 409 `managed_memory_grant_missing` |
+| managed generation failed | 409 `managed_inputs_invalid`, before Stop |
+| workload AllowedTools hold an unsupported memory grant, or none | `stock_enrollment_mcp_route_invalid` / `stock_enrollment_memory_tools_missing` |
+| policy lists a read the agent is not granted | not in the native table; a direct call gets receiver `403` |
+| grant removed after Apply | the next receiver request is `403`; no Apply needed |
+
+**Upgrade refusal for older API-key selections.** Before #512 the API-key branch only checked that some memory
+read grant existed. An agent with a saved get-only policy and enabled `memory_list`/`memory_search` grants therefore
+now gets 409 `managed_route_unsupported:mcp:<name>` on its next Apply, before Stop or any effect. Temporal and Telegram
+grants that their saved rules do not list refuse the same way. The applied bundle keeps running and is not rebuilt.
+Recovery, without pruning grants or changing account, provider or billing:
+1. append an immutable version whose rules list every currently enabled grant on those routes;
+2. review it and select that exact version (a desired-only save);
+3. run a separately authorized Apply.
+The old version stays stored as it was.
+
+**Planned restart versus Apply.** A planned gateway restart rechecks trust with grant admission skipped and keeps the
+persisted applied policy, authority and bundle. Grants added since the last Apply are not admitted or added to the
+native table by a restart; they need a new Apply, which runs the full admission above. Grant or project removals
+take effect at the receiver immediately.
+
+**Verification before merge or rollout.** Unit and integration tests are not acceptance. The operator check runs the
+exact head and images on an isolated owned fixture. It covers get-only, list-only, search-only and all-read
+selections under both names. For each, it reads back AllowedTools, the native table and the policy hash, plus the
+ordinary-generation control and the API-key refusal/recovery. Requests go through stock enforcement, the signer and a
+dedicated receiver with synthetic records in isolated storage and index. Expected: allowed reads return allowed data,
+and ungranted reads, writes, foreign projects and revoked sessions are denied. HTTP health alone is not acceptance.
+
+**Downgrade.** An older orchestrator refuses an extended version as `managed_signer_policy_mismatch`, and an older
+agent would narrow the native table to `memory_get`. Neither is a compatible fallback. Before switching images:
+1. revoke the affected agent and prove scoped detach, Stop and quiescence;
+2. keep its bindings, policy versions, grants, custody and workspace;
+3. run the current rollout guard against the exact target image.
+The existing capability labels do not record this extension. An extended binding therefore stays stopped on an older
+build until the supporting image returns or a compatible selection is separately approved. Nothing resumes
+automatically.
+
+**Monitoring.** Read denials in `memory_get`, `memory_list` and `memory_search` log only the tool and a fixed reason
+(`project_not_allowed` or `no_project`), never a record ID, project, agent, query or content. The existing
+per-agent denial counters are unchanged.
 
 ### Gateway registration
 

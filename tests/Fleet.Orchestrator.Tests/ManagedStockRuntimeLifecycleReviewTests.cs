@@ -1190,8 +1190,9 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         return agent;
     }
 
-    private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, Func<string, bool>? directorySync = null) =>
-        _t.Runtime(dockerStop, cli: _cli, clock: _clock, directorySync: directorySync);
+    private StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, Func<string, bool>? directorySync = null,
+        ContainerProvisioningService? provisioning = null) =>
+        _t.Runtime(dockerStop, cli: _cli, clock: _clock, directorySync: directorySync, provisioning: provisioning);
 
     private ManagedBinding SubBinding(string name, string phase = "Ready", string? workspace = "ws-a", DateTimeOffset? expires = null, bool attached = true)
     {
@@ -1248,6 +1249,41 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         Assert.Equal("synthetic-account_01", settings["StockOpenShell"]!["SubscriptionAccountId"]!.GetValue<string>());
         var authority = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!;
         Assert.True(authority["ExpiresAt"]!.GetValue<DateTimeOffset>() <= applied.Subscription.ExpiresAt);
+    }
+
+    // #512 A2–A5/A16 (subscription): any selected-name read grant satisfies the presence check, and the actual generation
+    // path bundles exactly the saved enabled reads with their matching explicit policy, never an implicit get.
+    [Theory]
+    [InlineData("memory", new[] { "memory_get" })]
+    [InlineData("fleet-memory", new[] { "memory_get" })]
+    [InlineData("memory", new[] { "memory_list" })]
+    [InlineData("fleet-memory", new[] { "memory_list" })]
+    [InlineData("memory", new[] { "memory_search" })]
+    [InlineData("fleet-memory", new[] { "memory_search" })]
+    [InlineData("fleet-memory", new[] { "memory_get", "memory_list", "memory_search" })]
+    public async Task ManagedMemoryReads_subscription_applies_exactly_the_saved_reads(string name, string[] reads)
+    {
+        WriteSource();
+        await using var harness = Fleet.Orchestrator.Tests.Services.ProvisioningHarness.Create();
+        Agent Row()
+        {
+            var agent = _t.ManagedAgentWithReads(name, reads);
+            agent.NativeAuthMode = "subscription";
+            agent.ProviderApiKeyEnvRef = null;
+            return agent;
+        }
+        await harness.SeedAsync(db => db.Agents.Add(ManagedStockRuntimeAdapterTests.GeneratorRow(Row())));
+        _t._store.Add(Row());
+        _t._store.PolicyYaml = SignedPolicy.MemoryReads(reads);
+        _t._host.DockerStates = ["exited"];
+
+        var result = await Runtime(provisioning: harness.Service).ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        Assert.Equal(reads.Select(r => $"mcp__{name}__{r}").Order(StringComparer.Ordinal),
+            ManagedStockRuntimeAdapterTests.BundledMemoryTools(_cli.Cli("ws-a")).Order(StringComparer.Ordinal));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(_t._store.PolicyYaml, File.ReadAllText(create.Args[create.Args.IndexOf("--policy") + 1]));
     }
 
     [Theory]
@@ -1367,7 +1403,9 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
     [InlineData("transport", "managed_route_unsupported:mcp:fleet-memory")]
     [InlineData("disabled_grant", "managed_memory_grant_missing")]
     [InlineData("opposite_grant", "managed_memory_grant_missing")]
-    [InlineData("search_only_grant", "managed_memory_grant_missing")]
+    // #512: any read counts for presence; a search grant the get-only saved policy omits then refuses at grant admission.
+    [InlineData("search_only_grant", "managed_route_unsupported:mcp:fleet-memory")]
+    [InlineData("write_only_grant", "managed_memory_grant_missing")]
     public async Task Memory_name_destination_and_grant_faults_refuse_before_effects(string fault, string code)
     {
         WriteSource();
@@ -1384,6 +1422,7 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
             case "disabled_grant": agent.Tools.Single().IsEnabled = false; break;
             case "opposite_grant": agent.Tools.Single().ToolName = "mcp__memory__memory_get"; break;
             case "search_only_grant": agent.Tools.Single().ToolName = "mcp__fleet-memory__memory_search"; break;
+            case "write_only_grant": agent.Tools.Single().ToolName = "mcp__fleet-memory__memory_store"; break;
         }
         _t._store.Add(agent);
 
@@ -2695,6 +2734,50 @@ public sealed class ManagedSignerLifecycleTests : IDisposable
         var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
         Assert.Equal(("applied", 1, "gateway-2@planned"), (record.State, record.Applied!.PolicyVersionId, record.Applied.GatewayGeneration));
         Assert.Empty(_t._broker.Deletes); // no revoke fanout
+    }
+
+    // #512 A10/A18: a planned gateway restart rechecks trust with signerAdmission:false, so grants added after the applied
+    // get-only bundle neither block nor reach it (the persisted bundle is reused, nothing re-uploaded). A new Apply on the
+    // old get-only version refuses; only an explicitly selected matching version plus Apply bundles the added reads. Receiver
+    // removals stay immediate without any Apply (Fleet.Memory StockIdentityPathTests).
+    [Fact]
+    public async Task ManagedMemoryReads_planned_restart_reuses_the_applied_bundle_and_added_reads_need_a_new_apply()
+    {
+        var (agent, binding) = Stopped("fleet-agent1-c5120001");
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__memory__memory_list" });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__memory__memory_search" });
+        await using var harness = Fleet.Orchestrator.Tests.Services.ProvisioningHarness.Create();
+        await harness.SeedAsync(db => db.Agents.Add(ManagedStockRuntimeAdapterTests.GeneratorRow(
+            _t.ManagedAgentWithReads("memory", "memory_get", "memory_list", "memory_search"))));
+        var runtime = _t.Runtime(provisioning: harness.Service);
+        _t._host.Generation = "gateway-2@planned";
+
+        var start = await runtime.StartAsync("agent1", default);
+
+        Assert.True(start.Ok, start.Message);
+        var record = ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+        Assert.Equal(("applied", 1, binding.PolicySha256, "gateway-2@planned"),
+            (record.State, record.Applied!.PolicyVersionId, record.Applied.PolicySha256, record.Applied.GatewayGeneration));
+        Assert.Empty(_t._cli.Uploads); // the applied bundle (its get-only native inputs) is reused, never regenerated
+        Assert.Contains(_t._cli.Calls, Activation);
+
+        // A new Apply on the old get-only version refuses before Stop or any effect; the running binding is untouched.
+        var calls = _t._cli.Calls.Count;
+        var refused = await runtime.ApplyAsync("agent1", default);
+        Assert.Equal((409, "managed_route_unsupported:mcp:memory"), (refused.Status, refused.Code));
+        Assert.DoesNotContain(_t._cli.Calls.Skip(calls), c => Verb(c, "stop") || Verb(c, "upload") || c.Args[0] == "policy");
+        Assert.Equal(("applied", 1), (ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State, _t._store.Get("agent1").AppliedSandboxPolicyVersionId));
+
+        // Explicit recovery: append and select a matching version, then a separately requested Apply bundles all three reads.
+        _t._store.PolicyYaml2 = SignedPolicy.MemoryReads("memory_get", "memory_list", "memory_search");
+        agent.SandboxPolicyVersionId = 2;
+        Assert.True((await runtime.StopAsync("agent1", default)).Ok);
+        var applied = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(applied.Ok, applied.Message);
+        Assert.Equal(2, ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).Applied!.PolicyVersionId);
+        Assert.Equal(["mcp__memory__memory_get", "mcp__memory__memory_list", "mcp__memory__memory_search"],
+            ManagedStockRuntimeAdapterTests.BundledMemoryTools(_t._cli));
     }
 
     [Theory]

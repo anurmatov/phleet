@@ -445,9 +445,8 @@ With `StockOpenShell:ManagedEnabled=true` the managed runtime below performs app
 
 ### Synthetic preparation diagnostics (#514)
 
-A Linux run selected and passed all 12 `NativePreparation_` cases in
-`tests/Fleet.Agent.Tests/ManagedStockAgentTests.cs`, and all 113 cases in that test class.
-The existing `Fixture` exercises preparation and registration checks with synthetic files,
+The existing `Fixture` in `tests/Fleet.Agent.Tests/ManagedStockAgentTests.cs`
+exercises preparation and registration checks with synthetic files,
 injected placeholders and crossed authority/binding controls, without a provider or gateway.
 
 | Case | Measured result |
@@ -461,8 +460,8 @@ injected placeholders and crossed authority/binding controls, without a provider
 | Root-TOML drift | Preparation refuses the distinct `stock_enrollment_native_config_mismatch` before native writes |
 | Nonprivate mode or symlink | Both paths refuse `stock_enrollment_native_path_invalid`, bytes and link target retained |
 | Auth-file read blocked by an exclusive synthetic file handle | Both paths refuse `stock_enrollment_native_not_prepared`, native bytes retained |
-| Broader `Fleet.Agent.Tests` project run | 2604 passed, 8 failed in `JournalFilesListenerTests`, not a suite pass |
-| Injected write failure, installed-image provenance, actual Apply/Stop and real receiver reads | Not exercised by these synthetic controls |
+| Atomic temporary-write path exceeds Linux `PATH_MAX`, existing native paths still readable | Preparation refuses `stock_enrollment_native_not_prepared`, native bytes, root TOML and authority retained, no temporary file, registration check still succeeds |
+| Installed-image provenance, actual Apply/Stop and real receiver reads | Not exercised by these synthetic controls |
 
 Reproduce the selected cases, checking discovery first:
 

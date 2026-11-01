@@ -408,6 +408,50 @@ public sealed class ManagedStockAgentTests
         f.AssertNativeUnchanged(before);
     }
 
+    [Fact]
+    public void NativePreparation_TemporaryWritePathTooLong_ReturnsBoundedReasonAndRetainsInputs()
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Stock startup requires Linux");
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        var root = File.ReadAllBytes(f.Root);
+        var authorityPath = f.Settings["StockOpenShell:AuthorityFile"]!;
+        var authority = File.ReadAllBytes(authorityPath);
+
+        // Linux PATH_MAX includes the terminator: existing inputs fit, but PrivateWrite's
+        // extra dot + 32-hex GUID + .tmp cannot fit. This fails even when tests run as root.
+        var home = f.Home;
+        while (home.Length < 4053)
+            home = Path.Combine(home, new string('d', Math.Max(1, Math.Min(200, 4053 - home.Length - 1))));
+        var directory = Path.Combine(home, ".codex");
+        Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        foreach (var leaf in new[] { "auth.json", "config.toml" })
+        {
+            var path = Path.Combine(directory, leaf);
+            Assert.True(path.Length < 4096);
+            File.Copy(Path.Combine(f.Home, ".codex", leaf), path);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        Assert.True((Path.Combine(directory, "auth.json") + "." + new string('0', 32) + ".tmp").Length >= 4096);
+        // Establish that admission, binding, private inputs and all reads succeed before the write.
+        Assert.NotNull(StockOpenShellEnrollment.Validate(c, home, () => 10001, f.Root, _ => Placeholder));
+        StockOpenShellEnrollment.RequirePrepared(c, b, home, _ => Placeholder);
+
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, home, b, f.Root, _ => Placeholder)).Message);
+
+        Assert.Equal(before.Auth, File.ReadAllBytes(Path.Combine(directory, "auth.json")));
+        Assert.Equal(before.Config, File.ReadAllBytes(Path.Combine(directory, "config.toml")));
+        Assert.Empty(Directory.GetFiles(directory, "*.tmp"));
+        Assert.Equal(root, File.ReadAllBytes(f.Root));
+        Assert.Equal(authority, File.ReadAllBytes(authorityPath));
+        f.AssertNativeUnchanged(before);
+        StockOpenShellEnrollment.RequirePrepared(c, b, home, _ => Placeholder);
+    }
+
     // ── own Telegram bot and journal capture (#492) ────────────────────────
 
     private const string TelegramPlaceholder = "openshell:resolve:env:v7_TELEGRAM_BOT_TOKEN";

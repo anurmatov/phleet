@@ -24,9 +24,6 @@ internal static class StockManagedSignerPolicy
     internal const string Scope = "managed_signer_policy_scope";
     internal const string AuthorityUnavailable = "managed_signer_authority_unavailable";
 
-    /// <summary>The one tool a memory receiver endpoint's rules may allow.</summary>
-    internal const string MemoryTool = "memory_get";
-
     /// <summary>Entry key → (receiving service, fixed unique order).</summary>
     internal static readonly IReadOnlyDictionary<string, (string Service, int Order)> Entries =
         new Dictionary<string, (string, int)>(StringComparer.Ordinal)
@@ -104,7 +101,7 @@ internal static class StockManagedSignerPolicy
 
     /// <summary>
     /// Exactly one inspected, enforced <c>host:443</c> MCP endpoint per receiving host, in a rule with binaries, stating its
-    /// traffic as the exact MCP rules (memory: <see cref="MemoryTool"/> only).
+    /// traffic as the exact MCP rules (memory: #512 a nonempty subset of the fixed reads in <see cref="StockServices.MemoryTools"/>).
     /// </summary>
     private static string? DescribeEndpointFault(YamlMappingNode root, IReadOnlyDictionary<string, string> expectedHosts)
     {
@@ -122,12 +119,13 @@ internal static class StockManagedSignerPolicy
             if (SandboxPolicyValidation.Scalar(endpoint, "protocol") != "mcp" || SandboxPolicyValidation.Scalar(endpoint, "enforcement") != "enforce"
                 || SandboxPolicyValidation.Scalar(endpoint, "tls") != "") return Mismatch;
             // #503 W5: exact MCP rules, never an access preset (pinned stock rejects them) or a stock field outside the saved
-            // subset such as mcp.allow_all_known_mcp_methods; memory stays read-only as memory_get alone. W13: the only
-            // mcp field is the bounded versions list.
+            // subset such as mcp.allow_all_known_mcp_methods. #512: memory stays read-only, one tools/call rule per explicitly
+            // selected fixed read (McpRules already refuses an empty or duplicate list). W13: the only mcp field is the
+            // bounded versions list.
             SandboxPolicyValidation.Map(endpoint, "host", "port", "protocol", "tls", "enforcement", "rules", "mcp");
             SandboxPolicyValidation.McpVersions(endpoint);
             var tools = SandboxPolicyValidation.McpRules(endpoint);
-            if (service == StockServices.Memory && !tools.SetEquals([MemoryTool])) return Mismatch;
+            if (service == StockServices.Memory && !tools.IsSubsetOf(StockServices.MemoryTools)) return Mismatch;
             if (SandboxPolicyValidation.Get(rule, "binaries") is not { } binaries || !SandboxPolicyValidation.List(binaries).Any()) return Mismatch;
         }
         return null;

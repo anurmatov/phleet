@@ -574,3 +574,29 @@ route/header/refresh/refusal contract, a meaningful existing same-principal B an
 receipts, plus the full applicable #493/#498 closure. Account metadata, cache/JWT and forced-workspace equality are
 workload-side input checks, not issuer singleton enforcement. No production subscription workload is permitted by
 this amendment.
+
+## #510 ordinary-service amendment
+
+**Configured first-party MCP is not issuer Apps MCP.** A managed subscription workload may now keep the agent's
+existing first-party routes: memory, Temporal and Telegram receivers, the comms-journal read route, and the
+agent-local journal files/send listener, with its own bot and journal capture through stock service providers. They
+appear as further `[mcp_servers.<name>]` tables after the memory table. Each table holds the agent's enabled grants
+that the outside record permits, and memory stays `memory_get` only. These are workload-configured receivers that
+verify the outside assertion or derived token. They are not the cloud Apps route: `[features] plugins = false,
+apps = false` stays, so `POST /backend-api/ps/mcp` is still never registered or allowed. No issuer endpoint,
+WebSocket permission or subscription endpoint is widened. #498's empty-MCP requirement remains the contract of its
+isolated auth trial, not of an ordinary agent.
+
+**Auth custody is unchanged.** The forced ChatGPT login and workspace, the `openai-http` descriptor, the selected
+account, the outside binding and its existing provider, the empty refresh token, the parsing-only ID-token stub and
+the gateway as sole refresh owner are all unchanged. Service credentials live in their own scoped stock providers,
+never in the OAuth provider, the cache or workload inputs. The workload sees only stock-issued handles. Routes,
+refusals, service-provider custody, cleanup and the capability-aware rollback are in
+[the stock runbook](openshell-stock.md#ordinary-services-510).
+
+**Limits.** This adds source support only. Status stays **UNQUALIFIED**: it is not issuer isolation (#501), CONTROL
+restore qualification or a #493/#498 pass. One useful real-work, cancel and revoke check on an exact build needs
+separate human and operator authority with named candidate, images, custody, policy and profile hashes, grants,
+refresh window, a current eligible stopped recovery checkpoint and cleanup authority. While any applicable
+#501/#498 positive-work gate or that CONTROL prerequisite is open, the check is **BLOCKED** before native work.
+Until it runs, delivery is source-only and every live row remains UNRUN.

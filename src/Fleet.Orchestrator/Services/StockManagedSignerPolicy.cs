@@ -108,14 +108,7 @@ internal static class StockManagedSignerPolicy
     /// </summary>
     private static string? DescribeEndpointFault(YamlMappingNode root, IReadOnlyDictionary<string, string> expectedHosts)
     {
-        var endpoints = new List<(YamlMappingNode Endpoint, YamlMappingNode Rule)>();
-        if (SandboxPolicyValidation.Get(root, "network_policies") is { } rules)
-            foreach (var pair in SandboxPolicyValidation.Map(rules).Children)
-            {
-                var rule = SandboxPolicyValidation.Map(pair.Value);
-                if (SandboxPolicyValidation.Get(rule, "endpoints") is { } list)
-                    foreach (var endpoint in SandboxPolicyValidation.List(list)) endpoints.Add((SandboxPolicyValidation.Map(endpoint), rule));
-            }
+        var endpoints = Endpoints(root);
         // A wildcard could match a receiving host outside the one signed endpoint.
         if (endpoints.Any(e => SandboxPolicyValidation.Scalar(e.Endpoint, "host").Contains('*'))) return Scope;
         foreach (var (service, host) in expectedHosts)
@@ -138,6 +131,39 @@ internal static class StockManagedSignerPolicy
             if (SandboxPolicyValidation.Get(rule, "binaries") is not { } binaries || !SandboxPolicyValidation.List(binaries).Any()) return Mismatch;
         }
         return null;
+    }
+
+    /// <summary>
+    /// #510: the exact MCP tools the saved policy's one receiver endpoint for <paramref name="host"/> allows in
+    /// <c>tools/call</c> rules; null when the policy is unparsable or that host is not exactly one inspected, enforced
+    /// <c>host:443</c> MCP endpoint (signer admission refuses those shapes first).
+    /// </summary>
+    internal static IReadOnlySet<string>? AdmittedTools(string yaml, string host)
+    {
+        try
+        {
+            if (SandboxPolicyValidation.ParseRoot(yaml, out _) is not { } root) return null;
+            if (Endpoints(root).Where(e => Comparable(SandboxPolicyValidation.Scalar(e.Endpoint, "host")) == Comparable(host)).ToList() is not [var (endpoint, _)]
+                || SandboxPolicyValidation.Scalar(endpoint, "host") != host || SandboxPolicyValidation.Scalar(endpoint, "port") != "443"
+                || SandboxPolicyValidation.Scalar(endpoint, "protocol") != "mcp" || SandboxPolicyValidation.Scalar(endpoint, "enforcement") != "enforce")
+                return null;
+            return SandboxPolicyValidation.McpRules(endpoint);
+        }
+        catch (Exception ex) when (ex is YamlException or ArgumentException or InvalidOperationException) { return null; }
+    }
+
+    /// <summary>Every <c>network_policies</c> endpoint with its enclosing rule.</summary>
+    private static List<(YamlMappingNode Endpoint, YamlMappingNode Rule)> Endpoints(YamlMappingNode root)
+    {
+        var endpoints = new List<(YamlMappingNode Endpoint, YamlMappingNode Rule)>();
+        if (SandboxPolicyValidation.Get(root, "network_policies") is { } rules)
+            foreach (var pair in SandboxPolicyValidation.Map(rules).Children)
+            {
+                var rule = SandboxPolicyValidation.Map(pair.Value);
+                if (SandboxPolicyValidation.Get(rule, "endpoints") is { } list)
+                    foreach (var endpoint in SandboxPolicyValidation.List(list)) endpoints.Add((SandboxPolicyValidation.Map(endpoint), rule));
+            }
+        return endpoints;
     }
 
     private static string Comparable(string host) => host.TrimEnd('.').ToLowerInvariant();

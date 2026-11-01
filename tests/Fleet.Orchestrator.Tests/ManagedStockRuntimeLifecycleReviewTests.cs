@@ -1955,6 +1955,385 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         if (!attached) Assert.NotEqual("applied", ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding).State);
     }
 
+    // ── #510: ordinary services (own bot, journal capture, Temporal/Telegram MCP) on the subscription branch ──
+
+    private const string ServiceBot = "515151:synthetic-sub-bot-secret-never-in-argv";
+    private const string ServiceIngest = "cj1.ingest.agent1.synthetic-sub-ingest-mac-never-in-argv";
+    private const string TelegramService = "fleet-agent1-telegram";
+    private const string JournalService = "fleet-agent1-journal";
+
+    /// <summary>A subscription agent with its own bot, journal capture and granted Temporal/Telegram MCP routes.</summary>
+    private Agent ServicesAgent(string applied = "docker", ManagedRecord? record = null)
+    {
+        var agent = SubscriptionAgent(desired: "openshell", applied: applied, record);
+        agent.JournalEnabled = true;
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" });
+        _t._broker.Credentials.Extra["TELEGRAM_AGENT1_BOT_TOKEN"] = ServiceBot;
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-temporal", Url = "http://fleet-temporal:3001/mcp", TransportType = "http" });
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-telegram", Url = "http://fleet-telegram:3800/mcp", TransportType = "http" });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-temporal__temporal_start_workflow" });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-telegram__send_message" });
+        _t._store.PolicyYaml = SignedPolicy.Yaml(SignedPolicy.Memory, SignedPolicy.Temporal, SignedPolicy.Telegram);
+        return agent;
+    }
+
+    /// <summary>
+    /// A runtime whose generated inputs carry the derived ingest token and whose outside template routes the journal
+    /// listener (written after <see cref="Runtime"/>, which rewrites both files); <paramref name="template"/> edits it further.
+    /// </summary>
+    private StockOpenShellRuntime ServicesRuntime(Func<string, Task<bool>>? dockerStop = null, Action<System.Text.Json.Nodes.JsonObject>? template = null)
+    {
+        var runtime = Runtime(dockerStop);
+        File.WriteAllText(Path.Combine(_t._dir, "generated", "appsettings.json"), new System.Text.Json.Nodes.JsonObject
+        {
+            ["Agent"] = new System.Text.Json.Nodes.JsonObject { ["Name"] = "agent1" },
+            ["Telegram"] = new System.Text.Json.Nodes.JsonObject { ["AllowedUserIds"] = new System.Text.Json.Nodes.JsonArray(1001) },
+            ["Journal"] = new System.Text.Json.Nodes.JsonObject { ["IngestToken"] = ServiceIngest, ["ExcludedChatIds"] = "" },
+        }.ToJsonString());
+        var path = Path.Combine(_t._dir, "managed-authority.json");
+        var outside = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        outside["JournalHost"] = "journal.example.test";
+        template?.Invoke(outside);
+        File.WriteAllText(path, outside.ToJsonString());
+        return runtime;
+    }
+
+    /// <summary>Recorded service providers of a revoked earlier binding, present in ws-a with their exact identities.</summary>
+    private ManagedBinding RecordedServices(ManagedBinding binding)
+    {
+        var telegram = Guid.NewGuid().ToString();
+        var journal = Guid.NewGuid().ToString();
+        _cli.Providers[("ws-a", TelegramService)] = (telegram, "telegram", ["TELEGRAM_BOT_TOKEN"]);
+        _cli.Providers[("ws-a", JournalService)] = (journal, "fleet-journal", ["FLEET_JOURNAL_INGEST_TOKEN"]);
+        return binding with
+        {
+            ServiceProviders = [TelegramService, JournalService],
+            ServiceProviderIds = new Dictionary<string, string> { [TelegramService] = telegram, [JournalService] = journal },
+        };
+    }
+
+    /// <summary>The pinned preparation of a booted workload: ready only when its boot carried every selected provider.</summary>
+    private void ServicesPreparation(string sandbox) =>
+        _cli.Cli("ws-a").OnExec = script => script == StockOpenShellRuntime.DaemonReadyScript
+            && !(_cli.Booted.TryGetValue(("ws-a", sandbox), out var booted) && booted.SetEquals([Provider, TelegramService, JournalService])) ? 1 : 0;
+
+    private List<(string? Ws, List<string> Args, IReadOnlyDictionary<string, string>? Env)> ProviderCalls(string verb) =>
+        [.. _cli.Calls.Where(c => c.Args.Count > 1 && c.Args[0] == "provider" && c.Args[1] == verb)];
+
+    private ManagedRecord Stored() => ManagedRecord.Parse(_t._store.Get("agent1").AppliedRuntimeBinding);
+
+    [Fact]
+    public async Task Subscription_services_first_apply_creates_scoped_providers_and_checkpoints_their_ids_before_create()
+    {
+        WriteSource();
+        _t._store.Add(ServicesAgent());
+        _t._host.DockerStates = ["exited"];
+        var foreign = (Id: "9a9a9a9a-0000-4000-8000-0000000000aa", Type: "telegram", Keys: new[] { "TELEGRAM_BOT_TOKEN" });
+        _cli.Providers[("ws-b", TelegramService)] = foreign; // same name in another workspace: never touched
+
+        var result = await ServicesRuntime().ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var applied = Stored().Applied!;
+        Assert.Equal([TelegramService, JournalService], applied.ServiceProviders);
+        Assert.Equal(new[] { (TelegramService, _cli.Providers[("ws-a", TelegramService)].Id), (JournalService, _cli.Providers[("ws-a", JournalService)].Id) },
+            applied.ServiceProviderIds!.OrderByDescending(p => p.Key).Select(p => (p.Key, p.Value)));
+        // Each service is created once in ws-a, its own value only in the CLI environment under its key; the OAuth
+        // provider is never created, updated or given a service credential, and no native key is requested.
+        var creates = ProviderCalls("create");
+        Assert.Equal([("ws-a", TelegramService, "telegram", "TELEGRAM_BOT_TOKEN", ServiceBot), ("ws-a", JournalService, "fleet-journal", "FLEET_JOURNAL_INGEST_TOKEN", ServiceIngest)],
+            creates.Select(c => (c.Ws, c.Args[3], c.Args[5], c.Args[7], Assert.Single(c.Env!).Value)));
+        Assert.All(creates, c => Assert.Equal(c.Args[7], Assert.Single(c.Env!).Key));
+        Assert.Empty(ProviderCalls("update"));
+        Assert.Empty(ProviderCalls("get"));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" && c.Args.Contains(Provider) && c.Args[1] is "create" or "update" or "delete");
+        Assert.All(_cli.Calls.Where(c => c.Env is not null), c => Assert.Equal("provider", c.Args[0]));
+        Assert.DoesNotContain(_cli.Calls, c => c.Env?.ContainsKey("OPENAI_API_KEY") == true);
+        foreach (var secret in new[] { ServiceBot, ServiceIngest, "synthetic-sub" })
+            Assert.DoesNotContain(_cli.Calls, c => c.Args.Any(a => a.Contains(secret, StringComparison.Ordinal)));
+        // Every resource call ran in the persisted workspace, never ws-b or the ambient scope.
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+        Assert.Empty(_cli.Cli("ws-b").Calls);
+        Assert.Equal(foreign, _cli.Providers[("ws-b", TelegramService)]);
+        // Both UUIDs were checkpointed from scoped metadata before the sandbox existed; create got the complete set.
+        var recorded = _t._store.History.Select(ManagedRecord.Parse).First(r => r.Candidate?.ServiceProviderIds?.Count == 2);
+        Assert.Equal("", recorded.Candidate!.SandboxId);
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal([Provider, TelegramService, JournalService], create.Args.Select((a, i) => (a, i)).Where(p => p.a == "--provider").Select(p => create.Args[p.i + 1]));
+        Assert.True(_cli.Calls.IndexOf(creates[^1]) < _cli.Calls.IndexOf(create));
+        // Workload inputs: memory plus the routed services, the public bot id and capture switch, no secret anywhere.
+        var scoped = _cli.Cli("ws-a");
+        var mcp = System.Text.Json.Nodes.JsonNode.Parse(scoped.Uploads.Last(u => u.Remote == "/home/agent/workspace/.mcp.json").Content!)!["mcpServers"]!.AsObject();
+        Assert.Equal(["fleet-telegram", "fleet-temporal", "memory"], mcp.Select(p => p.Key).Order(StringComparer.Ordinal));
+        Assert.Equal("https://telegram.example.test/mcp", mcp["fleet-telegram"]!["url"]!.GetValue<string>());
+        var settings = System.Text.Json.Nodes.JsonNode.Parse(scoped.Uploads.Last(u => u.Remote == "/home/agent/app/appsettings.json").Content!)!;
+        Assert.Equal(("subscription", "515151", true), (settings["Agent"]!["NativeAuthMode"]!.GetValue<string>(),
+            settings["StockOpenShell"]!["TelegramBotId"]!.GetValue<string>(), settings["StockOpenShell"]!["JournalCapture"]!.GetValue<bool>()));
+        Assert.All(scoped.Uploads, u => Assert.DoesNotContain("synthetic-sub", u.Content ?? "", StringComparison.Ordinal));
+        var authority = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!;
+        Assert.Equal("[\"send_message\"]", authority["Services"]!["telegram"]!["Tools"]!.ToJsonString());
+        Assert.Equal("[\"temporal_start_workflow\"]", authority["Services"]!["temporal"]!["Tools"]!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task Subscription_services_reprovision_updates_recorded_providers_in_place_and_attaches_all_before_the_boot()
+    {
+        WriteSource();
+        _t._store.Add(ServicesAgent());
+        _t._host.DockerStates = ["exited"];
+        var runtime = ServicesRuntime();
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        var first = Stored().Applied!;
+        ServicesPreparation(first.SandboxName);
+        _cli.Calls.Clear();
+
+        var result = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(result.Ok, result.Message);
+        var applied = Stored().Applied!;
+        Assert.Equal(first.SandboxId, applied.SandboxId);
+        Assert.Equal(first.ServiceProviderIds!.OrderBy(p => p.Key), applied.ServiceProviderIds!.OrderBy(p => p.Key));
+        Assert.Empty(ProviderCalls("create"));
+        Assert.Equal([TelegramService, JournalService], ProviderCalls("update").Select(c => c.Args[2]));
+        Assert.All(ProviderCalls("update"), c => Assert.Equal(("ws-a", c.Args[4]), (c.Ws, Assert.Single(c.Env!).Key)));
+        // The cut detached all three; exactly the current set is attached while stopped, so the boot inherits it.
+        var start = _cli.Calls.FindIndex(c => c.Args.SequenceEqual(["sandbox", "start", first.SandboxName]));
+        Assert.All(new[] { Provider, TelegramService, JournalService }, p =>
+            Assert.InRange(_cli.Calls.FindIndex(c => c.Args.SequenceEqual(["sandbox", "provider", "attach", first.SandboxName, p])), 0, start - 1));
+        Assert.True(_cli.Booted[("ws-a", first.SandboxName)].SetEquals([Provider, TelegramService, JournalService]));
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+    }
+
+    [Theory]
+    [InlineData("foreign_same_name")]
+    [InlineData("changed_uuid")]
+    [InlineData("wrong_type")]
+    [InlineData("extra_key")]
+    [InlineData("recorded_absent")]
+    public async Task Subscription_services_foreign_or_changed_provider_refuses_before_any_effect(string fault)
+    {
+        WriteSource();
+        var record = new ManagedRecord();
+        if (fault == "foreign_same_name")
+        {
+            _cli.Providers[("ws-a", TelegramService)] = (Guid.NewGuid().ToString(), "telegram", ["TELEGRAM_BOT_TOKEN"]);
+            _t._store.Add(ServicesAgent());
+        }
+        else
+        {
+            var old = RecordedServices(SubBinding("fleet-agent1-b1b1b1b1", phase: "Stopped", attached: false));
+            var (id, type, keys) = _cli.Providers[("ws-a", TelegramService)];
+            switch (fault)
+            {
+                case "changed_uuid": _cli.Providers[("ws-a", TelegramService)] = (Guid.NewGuid().ToString(), type, keys); break;
+                case "wrong_type": _cli.Providers[("ws-a", TelegramService)] = (id, "fleet-journal", keys); break;
+                case "extra_key": _cli.Providers[("ws-a", TelegramService)] = (id, type, [.. keys, "OTHER_KEY"]); break;
+                case "recorded_absent": _cli.Providers.Remove(("ws-a", TelegramService)); break;
+            }
+            record = new ManagedRecord { State = "revoked", Applied = old };
+            _t._store.Add(ServicesAgent(applied: "openshell", record: record));
+        }
+        var stops = 0;
+
+        var result = await ServicesRuntime(_ => { stops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "subscription_service_provider_unverified"), (result.Status, result.Code));
+        Assert.Equal(0, stops);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" && c.Args[1] is "create" or "update" or "delete");
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "sandbox" && c.Args[1] is "create" or "start" or "stop" or "provider");
+        var unchanged = Stored();
+        Assert.Equal((record.State, record.Applied?.Epoch, record.Errors.Count), (unchanged.State, unchanged.Applied?.Epoch, unchanged.Errors.Count));
+        Assert.Null(unchanged.Candidate);
+    }
+
+    [Theory]
+    [InlineData("bot_unresolved", "telegram_bot_token_unresolved")]
+    [InlineData("profile_unpinned", "provider_profile_unpinned:telegram")]
+    [InlineData("journal_host", "managed_route_unsupported:journal")]
+    [InlineData("service_host", "managed_route_unsupported:mcp:fleet-temporal")]
+    [InlineData("unadmitted_grant", "managed_route_unsupported:mcp:fleet-telegram")]
+    [InlineData("memory_write_grant", "managed_route_unsupported:mcp:memory")]
+    [InlineData("unsupported_endpoint", "managed_route_unsupported:mcp:other")]
+    [InlineData("unbound_signer", "managed_signer_policy_missing")]
+    public async Task Subscription_services_missing_route_profile_reference_or_grant_refuses_before_stop(string fault, string code)
+    {
+        WriteSource();
+        var agent = _t._store.Add(ServicesAgent());
+        Action<System.Text.Json.Nodes.JsonObject>? template = null;
+        switch (fault)
+        {
+            case "bot_unresolved": _t._broker.Credentials.Extra.Remove("TELEGRAM_AGENT1_BOT_TOKEN"); break;
+            case "profile_unpinned":
+                var pins = System.Text.Json.Nodes.JsonNode.Parse(_t._store.ProfileHashes)!.AsObject();
+                pins.Remove("telegram");
+                _t._store.ProfileHashes = pins.ToJsonString();
+                break;
+            case "journal_host": template = t => t.Remove("JournalHost"); break;
+            case "service_host": template = t => t["ServiceHosts"]!.AsObject().Remove("temporal"); break;
+            case "unadmitted_grant": agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-telegram__send_photo" }); break;
+            case "memory_write_grant": agent.Tools.Add(new AgentTool { ToolName = "mcp__memory__memory_store" }); break;
+            case "unsupported_endpoint": agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "other", Url = "https://other.example.test/mcp", TransportType = "http" }); break;
+            case "unbound_signer": _t._store.PolicyYaml = SignedPolicy.Yaml(SignedPolicy.Memory, SignedPolicy.Temporal); break;
+        }
+        var stops = 0;
+
+        var result = await ServicesRuntime(_ => { stops++; return Task.FromResult(true); }, template).ApplyAsync("agent1", default);
+
+        Assert.Equal((409, code), (result.Status, result.Code));
+        Assert.Equal(0, stops);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" && c.Args[1] is "create" or "update");
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        var unchanged = Stored();
+        Assert.Equal(("none", null, null, "docker"), (unchanged.State, unchanged.Candidate, unchanged.Applied, _t._store.Get("agent1").AppliedRuntimeKind));
+        Assert.Equal(3, agent.Tools.Count(t => t.IsEnabled) - (fault is "unadmitted_grant" or "memory_write_grant" ? 1 : 0)); // grants never edited
+    }
+
+    [Fact]
+    public async Task Subscription_services_uncertain_creation_holds_without_retry_and_a_later_apply_reuses_only_recorded_ids()
+    {
+        WriteSource();
+        _t._store.Add(ServicesAgent());
+        _t._host.DockerStates = ["exited"];
+        _cli.FailingProviderMutations.Add(JournalService); // the bot provider is created and checkpointed, the journal create is uncertain
+
+        var held = await ServicesRuntime().ApplyAsync("agent1", default);
+
+        Assert.Equal((502, "provider_setup_unknown"), (held.Status, held.Code));
+        var record = Stored();
+        Assert.Equal("needs_attention", record.State);
+        Assert.Equal(_cli.Providers[("ws-a", TelegramService)].Id, record.Candidate!.ServiceProviderIds![TelegramService]);
+        Assert.False(record.Candidate.ServiceProviderIds.ContainsKey(JournalService));
+        Assert.Single(ProviderCalls("create"), c => c.Args[3] == JournalService); // no retry
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" && c.Args.Contains(Provider) && c.Args[1] is "create" or "update");
+
+        // A clean revoke keeps the held candidate as countable custody; the next apply updates the recorded provider in
+        // place and creates only the one that was never recorded.
+        Assert.True((await ServicesRuntime().RevokeAsync("agent1", default)).Ok);
+        Assert.Contains(Stored().Superseded, h => h.ServiceProviderIds?.ContainsKey(TelegramService) == true);
+        _cli.FailingProviderMutations.Clear();
+        _cli.Calls.Clear();
+
+        var applied = await ServicesRuntime().ApplyAsync("agent1", default);
+
+        Assert.True(applied.Ok, applied.Message);
+        Assert.Equal([TelegramService], ProviderCalls("update").Select(c => c.Args[2]));
+        Assert.Equal([JournalService], ProviderCalls("create").Select(c => c.Args[3]));
+        Assert.Equal(2, Stored().Applied!.ServiceProviderIds!.Count);
+    }
+
+    [Fact]
+    public async Task Subscription_services_unobserved_creation_is_held_never_adopted()
+    {
+        WriteSource();
+        _t._store.Add(ServicesAgent());
+        _t._host.DockerStates = ["exited"];
+        // The create reports success but scoped metadata no longer shows exactly that provider (a racing change).
+        _cli.OnProviderCreated = (ws, name) => _cli.Providers[(ws, name)] = (_cli.Providers[(ws, name)].Id, "other-type", ["TELEGRAM_BOT_TOKEN"]);
+
+        var result = await ServicesRuntime().ApplyAsync("agent1", default);
+
+        Assert.Equal((502, "subscription_service_provider_unverified"), (result.Status, result.Code));
+        var record = Stored();
+        Assert.Equal("needs_attention", record.State);
+        Assert.Null(record.Candidate!.ServiceProviderIds);
+        Assert.Single(ProviderCalls("create"));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+    }
+
+    [Theory]
+    [InlineData("start")]
+    [InlineData("apply")]
+    public async Task Subscription_services_incomplete_recorded_custody_is_held_and_cleanup_still_detaches_and_stops(string action)
+    {
+        WriteSource();
+        // O2: a service-bearing binding with no name→UUID map (or a partial one) is never reused or started.
+        var binding = SubBinding("fleet-agent1-c2c2c2c2", phase: "Stopped") with { ServiceProviders = [TelegramService, JournalService] };
+        if (action == "apply") binding = binding with { ServiceProviderIds = new Dictionary<string, string> { [TelegramService] = Guid.NewGuid().ToString() } };
+        _cli.Attached[("ws-a", binding.SandboxName)] = [Provider, TelegramService, JournalService];
+        _t._store.Add(ServicesAgent(applied: "openshell", record: new ManagedRecord { State = "stopped", Applied = binding }));
+        _t.Enroll(binding);
+        WriteSourceMatching(binding);
+
+        var result = action == "start" ? await ServicesRuntime().StartAsync("agent1", default) : await ServicesRuntime().ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "subscription_service_provider_unverified"), (result.Status, result.Code));
+        var record = Stored();
+        Assert.Equal("needs_attention", record.State);
+        Assert.Contains("subscription_service_provider_unverified", record.Errors);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "start"]) || c.Args.Any(a => a.Contains(".fleet-activate")));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] == "provider" && c.Args[1] is "create" or "update");
+        if (action == "start") // cut by the persisted names, never by the missing identities
+        {
+            Assert.Empty(_cli.Attached[("ws-a", binding.SandboxName)]);
+            Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "stop", binding.SandboxName]));
+        }
+        else Assert.DoesNotContain(_cli.Calls, ResourceCall);
+        // A clean revoke clears the hold, detaching every persisted provider name in the persisted workspace.
+        Assert.True((await ServicesRuntime().RevokeAsync("agent1", default)).Ok);
+        Assert.Equal("revoked", Stored().State);
+        Assert.Empty(_cli.Attached[("ws-a", binding.SandboxName)]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Subscription_services_revoke_after_source_loss_detaches_every_provider_and_stops_independently(bool detachFails)
+    {
+        WriteSource();
+        _t._store.Add(ServicesAgent());
+        _t._host.DockerStates = ["exited"];
+        var runtime = ServicesRuntime();
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        var applied = Stored().Applied!;
+        File.Delete(StockSubscriptionBinding.SourcePath(_t._dir, "agent1")); // the outside descriptor is gone
+        _cli.DetachFails = detachFails;
+        _cli.Calls.Clear();
+
+        var result = await runtime.RevokeAsync("agent1", default);
+
+        Assert.Equal(!detachFails, result.Ok);
+        Assert.Contains(_cli.Calls, c => c.Ws == "ws-a" && c.Args.SequenceEqual(["sandbox", "stop", applied.SandboxName])); // Stop despite a failed detach
+        Assert.Equal("Stopped", _cli.Cli("ws-a").Sandboxes[applied.SandboxName].Phase);
+        Assert.Equal("revoked", System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(_t.AuthorityPath()))!["State"]!.GetValue<string>());
+        Assert.All(_cli.Calls.Where(ResourceCall), c => Assert.Equal("ws-a", c.Ws));
+        if (detachFails)
+        {
+            Assert.Equal("needs_attention", Stored().State);
+            Assert.Contains(result.Errors, e => e.Contains("provider_detach_unknown"));
+        }
+        else
+        {
+            Assert.Equal(new[] { Provider, TelegramService, JournalService }.Order(),
+                _cli.Calls.Where(c => c.Args.Take(3).SequenceEqual(["sandbox", "provider", "detach"])).Select(c => c.Args[4]).Order());
+            Assert.Empty(_cli.Attached[("ws-a", applied.SandboxName)]);
+        }
+        Assert.Empty(ProviderCalls("delete")); // providers are detached, never deleted
+    }
+
+    [Fact]
+    public async Task Subscription_services_start_refuses_a_changed_service_identity_before_activation()
+    {
+        WriteSource();
+        _t._store.Add(ServicesAgent());
+        _t._host.DockerStates = ["exited"];
+        var runtime = ServicesRuntime();
+        Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        Assert.True((await runtime.StopAsync("agent1", default)).Ok);
+        var (id, type, keys) = _cli.Providers[("ws-a", JournalService)];
+        _cli.Providers[("ws-a", JournalService)] = (Guid.NewGuid().ToString(), type, keys); // recreated outside under the same name
+        _cli.Calls.Clear();
+
+        var result = await runtime.StartAsync("agent1", default);
+
+        Assert.Equal((409, "subscription_service_provider_unverified"), (result.Status, result.Code));
+        Assert.DoesNotContain(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "start"]) || c.Args.Any(a => a.Contains(".fleet-activate")));
+        Assert.Equal("stopped", Stored().State);
+
+        _cli.Providers[("ws-a", JournalService)] = (id, type, keys); // the recorded identity again: Start proceeds
+        Assert.True((await runtime.StartAsync("agent1", default)).Ok);
+    }
+
     internal sealed class MutableClock : TimeProvider
     {
         public DateTimeOffset Now;
@@ -1983,6 +2362,10 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
         public string ProfileExport = SyntheticProfile.Export;
         private int _exports;
         public bool DetachFails, AttachedListFails;
+        /// <summary>#510: provider names whose scoped create/update exits nonzero (an uncertain outcome), creating nothing.</summary>
+        public readonly HashSet<string> FailingProviderMutations = [];
+        /// <summary>#510: runs after a scoped create recorded its provider (for example, a racing change before observation).</summary>
+        public Action<string, string>? OnProviderCreated;
         /// <summary>
         /// #503 W9 pinned spawn semantics per workspace: the attached providers each boot (create or start) spawned the main
         /// process with. A later attach changes <see cref="Attached"/> only, never a running boot's set.
@@ -2009,6 +2392,16 @@ public sealed class ManagedStockSubscriptionLifecycleTests : IDisposable
                         id = p.Value.Id, name = p.Key.Name, workspace = ws, type = p.Value.Type, credential_keys = p.Value.Keys,
                     });
                     return new(0, System.Text.Json.JsonSerializer.Serialize(new { providers = entries, next_page_token = "" }));
+                // #510: a scoped create records one provider of the requested type and credential key names (never values).
+                case ("provider", "create", _):
+                    var providerName = list[list.IndexOf("--name") + 1];
+                    if (FailingProviderMutations.Contains(providerName)) return new(1, "");
+                    Providers[(ws, providerName)] = (Guid.NewGuid().ToString(), list[list.IndexOf("--type") + 1],
+                        [.. list.Select((a, i) => (a, i)).Where(p => p.a == "--credential").Select(p => list[p.i + 1])]);
+                    OnProviderCreated?.Invoke(ws, providerName);
+                    return new(0, "");
+                case ("provider", "update", _):
+                    return new(FailingProviderMutations.Contains(At(2)) || !Providers.ContainsKey((ws, At(2))) ? 1 : 0, "");
                 case ("provider", "refresh", "status"):
                     var now = clock.Now;
                     return new(0, StockSubscriptionBindingTests.RefreshStatus(At(3), RefreshState.Status, RefreshState.Recovery,

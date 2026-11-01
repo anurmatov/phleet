@@ -242,6 +242,7 @@ Default provisioning and the ordinary memory receiver remain unchanged without o
 | Stock auth capability | Boundary |
 |---|---|
 | Isolated Codex subscriptions | **UNQUALIFIED**; [docs/profile trial contract](docs/openshell-subscription-auth.md) pins stock 0.1.5 / Codex 0.164.0 and retains all A0–A9/operator gates, without changing API-key/manual behavior |
+| Subscription ordinary services (#510) | **UNQUALIFIED** source support; existing bot/journal/first-party MCP routes on the managed subscription branch, no account/billing/grant change |
 
 ## Project contexts
 
@@ -489,6 +490,15 @@ exclusion list. Every CLI child and the report's `git` get command-scope `core.f
 (`ProcessStockCli.NeutralizeGit`) so a copied user repository never runs a command; Docker is written only while its container
 is stopped, and its excluded entries' metadata must be identical across the mirror (private `<op>.excluded.json`). Pre-#507 managed images need `appliedOpenShell=0` in the rollout guard (`org.phleet.managed-stock-workspace=1`).
 Operator regression: `scripts/test-stock-workspace-transfer.sh`. Runbook: `docs/openshell-stock.md` (workspace layout).
+Subscription ordinary services (#510, UNQUALIFIED): the subscription branch keeps an agent's existing bot, journal capture/read/
+files and Temporal/Telegram MCP routes through the API-key branch's service checks (no native key). Every enabled grant on a
+signer-bound route must be in the saved policy's MCP rules (memory stays `memory_get`), else `managed_route_unsupported:mcp:*`
+before Stop; grants are never pruned or edited. Service providers live only in the persisted provider workspace, never on the
+OAuth provider; the binding records `ServiceProviderIds` (name→UUID, absent only on old memory-only records). A new one is
+created once after scoped absence and checkpointed before attach; foreign/ambiguous/uncertain → `subscription_service_provider_unverified`
+or `provider_setup_unknown` hold, no adoption or retry. Images carry `org.phleet.managed-stock-subscription-services=1`; a
+target without it needs `subscriptionBindings=0` (memory-only subscriptions retire too). Pins unchanged. Runbook:
+`docs/openshell-stock.md` (ordinary services).
 Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
 full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate
 an agent name into one. A fresh name must be proven absent before apply records or creates anything

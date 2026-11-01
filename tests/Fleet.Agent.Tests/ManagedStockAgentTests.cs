@@ -751,6 +751,145 @@ public sealed class ManagedStockAgentTests
         Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(off.Config(), off.Home, () => 10001, off.Root, _ => null));
     }
 
+    // ── #510: the subscription branch keeps the agent's ordinary bot, journal and first-party MCP routes ─────────────
+
+    private const string ServicesMcp = "{\"mcpServers\":{\"memory\":{\"url\":\"https://memory.example.test/mcp\"},"
+        + "\"fleet-telegram\":{\"url\":\"https://telegram.example.test/mcp\"},\"fleet-temporal\":{\"url\":\"https://temporal.example.test/mcp\"},"
+        + "\"fleet-comms-journal\":{\"url\":\"https://journal.example.test/journal/v1/mcp\"}}}";
+
+    /// <summary>A subscription workload whose outside record enrolls Telegram/Temporal routes and the journal read route.</summary>
+    private static Fixture SubscriptionServicesFixture()
+    {
+        var f = SubscriptionFixture();
+        var path = f.Settings["StockOpenShell:AuthorityFile"]!;
+        File.WriteAllText(path, JsonSerializer.Serialize(StockEnrollmentAuthority.Load(path) with
+        {
+            Services = new Dictionary<string, StockServiceRoute>
+            {
+                ["telegram"] = new() { Host = "telegram.example.test", Tools = ["send_message"], Query = "formatting_mode=1" },
+                ["temporal"] = new() { Host = "temporal.example.test", Tools = ["temporal_start_workflow"] },
+            },
+            JournalRead = JournalReadRoute,
+        }));
+        File.WriteAllText(f.McpPath, ServicesMcp);
+        SelectBotAndJournal(f);
+        f.Settings["Agent:AllowedTools:1"] = "mcp__fleet-telegram__send_message";
+        f.Settings["Agent:AllowedTools:2"] = "mcp__fleet-temporal__temporal_start_workflow";
+        f.Settings["Agent:AllowedTools:3"] = "mcp__fleet-comms-journal__get_message";
+        return f;
+    }
+
+    /// <summary>The stock-issued child environment of a subscription workload with services: placeholders only.</summary>
+    private static Func<string, string?> SubscriptionServicesEnv(string? telegram = TelegramPlaceholder, string? journal = JournalPlaceholder,
+        string? read = ReadPlaceholder, string? handle = Handle) => key => key switch
+    {
+        "CODEX_AUTH_ACCESS_TOKEN" => handle,
+        StockCredentials.TelegramBotToken => telegram,
+        StockCredentials.JournalIngestToken => journal,
+        StockCredentials.JournalReadToken => read,
+        "OPENAI_API_KEY" or "CODEX_API_KEY" => null,
+        _ => throw new Exception("unexpected environment read"),
+    };
+
+    [Fact]
+    public void Subscription_services_prepare_every_enrolled_route_with_placeholder_slots_and_existing_grants()
+    {
+        using var f = SubscriptionServicesFixture();
+        var env = SubscriptionServicesEnv();
+        var c = f.Config();
+        Assert.NotNull(StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)); // validation-only entrypoint run
+
+        var overlay = StockOpenShellEnrollment.ManagedCredentialOverlay(c, env);
+        Assert.Equal("424242:" + TelegramPlaceholder, overlay["Telegram:BotToken"]);
+        Assert.Equal(JournalPlaceholder, overlay["Journal:IngestToken"]);
+        var daemon = new ConfigurationBuilder().AddInMemoryCollection(f.Settings).AddInMemoryCollection(overlay).Build();
+        var b = StockOpenShellEnrollment.Validate(daemon, f.Home, () => 10001, f.Root, env)!; // final daemon start
+        StockOpenShellEnrollment.PrepareNative(daemon, f.Home, b, f.Root, env);
+        StockOpenShellEnrollment.RequirePrepared(daemon, b, f.Home, env);
+
+        // Unchanged subscription auth custody: forced ChatGPT/account root keys, the descriptor, suppression, the issued handle.
+        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        Assert.StartsWith("forced_login_method = \"chatgpt\"\nforced_chatgpt_workspace_id = \"" + Account + "\"\nmodel_provider = \"openai-http\"\n", config);
+        Assert.Contains("\n[features]\nplugins = false\napps = false\n" + MemoryTable("memory", "[\"memory_get\"]"), config);
+        using (var auth = JsonDocument.Parse(File.ReadAllText(Path.Combine(f.Home, ".codex", "auth.json"))))
+            Assert.Equal(Handle, auth.RootElement.GetProperty("tokens").GetProperty("access_token").GetString());
+        // Every enrolled route, narrowed to the granted tools the record permits; the read route carries only its placeholder.
+        Assert.Contains("\n[mcp_servers.fleet-telegram]\nurl = \"https://telegram.example.test/mcp\"\nenabled_tools = [\"send_message\"]\n", config);
+        Assert.Contains("\n[mcp_servers.fleet-temporal]\nurl = \"https://temporal.example.test/mcp\"\nenabled_tools = [\"temporal_start_workflow\"]\n", config);
+        Assert.Contains("\n[mcp_servers.fleet-comms-journal]\nurl = \"https://journal.example.test/journal/v1/mcp\"\nenabled_tools = [\"get_message\"]\n"
+            + "http_headers = { Authorization = \"Bearer " + ReadPlaceholder + "\" }\n", config);
+        Assert.Equal(4, McpTables(config));
+        foreach (var absent in new[] { "cj1.", "base_url", "env_key", "experimental_bearer_token" }) Assert.DoesNotContain(absent, config);
+        // The ordinary readers see placeholder-only slots.
+        var journal = daemon.GetSection(Fleet.Journal.Client.JournalOptions.Section).Get<Fleet.Journal.Client.JournalOptions>()!;
+        Assert.True(journal.Enabled);
+        Assert.Null(journal.DescribeFault());
+        Assert.Equal(424242, new global::Telegram.Bot.TelegramBotClientOptions(daemon["Telegram:BotToken"]!).BotId);
+    }
+
+    [Theory]
+    [InlineData("telegram_literal")]
+    [InlineData("telegram_foreign")]
+    [InlineData("journal_missing")]
+    [InlineData("read_foreign")]
+    [InlineData("handle_foreign")]
+    [InlineData("literal_bot_slot")]
+    [InlineData("extra_route")]
+    [InlineData("unenrolled_route")]
+    [InlineData("opposite_memory_grant")]
+    public void Subscription_services_refuse_literal_missing_or_foreign_handles_and_extra_routes_before_any_write(string fault)
+    {
+        using var f = SubscriptionServicesFixture();
+        string? telegram = TelegramPlaceholder, journal = JournalPlaceholder, read = ReadPlaceholder, handle = Handle;
+        switch (fault)
+        {
+            case "telegram_literal": telegram = "424242:synthetic-literal-token"; break;
+            case "telegram_foreign": telegram = Handle; break;
+            case "journal_missing": journal = null; break;
+            case "read_foreign": read = JournalPlaceholder; break;
+            case "handle_foreign": handle = TelegramPlaceholder; break;
+            case "literal_bot_slot": f.Settings["Telegram:BotToken"] = "424242:synthetic-literal-token"; break;
+            case "extra_route": File.WriteAllText(f.McpPath, ServicesMcp.Replace("}}}", "},\"other\":{\"url\":\"https://other.example.test/mcp\"}}}")); break;
+            case "unenrolled_route": File.WriteAllText(f.McpPath, ServicesMcp.Replace(",\"fleet-temporal\":{\"url\":\"https://temporal.example.test/mcp\"}", "")); break;
+            case "opposite_memory_grant": f.Settings["Agent:AllowedTools:0"] = "mcp__fleet-memory__memory_get"; break;
+        }
+        var env = SubscriptionServicesEnv(telegram, journal, read, handle);
+        var c = f.Config();
+
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+        {
+            var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, env);
+        });
+
+        Assert.StartsWith("stock_enrollment_", refusal.Message);
+        Assert.DoesNotContain("synthetic", refusal.Message);
+        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
+        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "config.toml")));
+    }
+
+    [Fact]
+    public void Subscription_services_registration_refuses_a_widened_or_missing_route_table()
+    {
+        using var f = SubscriptionServicesFixture();
+        var env = SubscriptionServicesEnv();
+        var c = new ConfigurationBuilder().AddInMemoryCollection(f.Settings)
+            .AddInMemoryCollection(StockOpenShellEnrollment.ManagedCredentialOverlay(f.Config(), env)).Build();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, env);
+        var path = Path.Combine(f.Home, ".codex", "config.toml");
+        var good = File.ReadAllText(path);
+        const string telegram = "\n[mcp_servers.fleet-telegram]\nurl = \"https://telegram.example.test/mcp\"\nenabled_tools = [\"send_message\"]\n";
+        foreach (var drift in new[] { good.Replace("enabled_tools = [\"send_message\"]", "enabled_tools = [\"send_message\", \"send_photo\"]"),
+                     good.Replace(telegram, "\n"), good.Replace("enabled_tools = [\"memory_get\"]", "enabled_tools = [\"memory_get\", \"memory_search\"]") })
+        {
+            File.WriteAllText(path, drift);
+            Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, env));
+        }
+        File.WriteAllText(path, good);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, env);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _dir = Path.Combine(Path.GetTempPath(), "managed-agent-" + Guid.NewGuid().ToString("N"));

@@ -147,6 +147,10 @@ The managed Codex **subscription** branch (#502) is experimental and compatibili
 provider binding plus one native memory route, with no tested account isolation, no automatic enrollment or
 login, and no new environment key or tool. API-key and manual paths are unchanged. See the
 [subscription runbook](docs/openshell-stock.md#managed-codex-subscription-branch-502-unqualified-compatibility-only).
+Since #510 that branch can keep an agent's existing bot, journal and first-party MCP routes through scoped stock
+service providers, with the same account, billing basis and grants. Any grant the saved policy cannot carry blocks the
+migration instead of being dropped. It is still **UNQUALIFIED** source support; see
+[ordinary services](docs/openshell-stock.md#ordinary-services-510).
 Managed apply (#503) needs a saved policy that binds the fixed `stock-memory` signer to exactly the agent's
 first-party receiving hosts. It is one restricted subset, with no arbitrary middleware, and the saved bytes and
 hash stay the effective policy. Registering that signer in the gateway makes it a startup dependency of every
@@ -158,7 +162,7 @@ place. See the [workspace layout runbook](docs/openshell-stock.md#managed-worksp
 
 | OpenShell capability | Status |
 |---|---|
-| Isolated Codex subscriptions | **UNQUALIFIED** at stock 0.1.5 / Codex 0.164.0; [separate docs/profile qualification](docs/openshell-subscription-auth.md), no migration; the managed subscription branch (#502) is compatibility-only and unqualified |
+| Isolated Codex subscriptions | **UNQUALIFIED** at stock 0.1.5 / Codex 0.164.0; [separate docs/profile qualification](docs/openshell-subscription-auth.md), no migration; the managed subscription branch (#502) and its ordinary-service routes (#510) are compatibility-only and unqualified |
 
 ## Platform support
 

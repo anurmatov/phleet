@@ -601,9 +601,16 @@ into the orchestrator at `/var/lib/fleet-openshell-client`:
   client endpoint is `https://openshell-gateway:8443` on `fleet-net`, authenticated with the mTLS
   client cert/key (the gateway cert needs that DNS SAN), never the host loopback, which the
   orchestrator container cannot reach;
-- `managed-authority.json` (gateway issuer/audience/JWKS, assertion key paths, memory and broker hosts,
-  optional `ServiceHosts` such as `{"temporal": "temporal.example.test", "telegram": "telegram.example.test"}`
-  and optional `JournalHost` such as `"journal.example.test"`);
+- `managed-authority.json`, the orchestrator's adapter template (gateway issuer/audience/JWKS, assertion key
+  paths, memory and broker hosts, optional `ServiceHosts` such as
+  `{"temporal": "temporal.example.test", "telegram": "telegram.example.test"}` and optional `JournalHost` such as
+  `"journal.example.test"`). Only the orchestrator reads it; it is never any service's `StockOpenShell:AuthorityFile`;
+- a separate enrollment-shaped gateway-trust file for the outside signer, for example `gateway-trust.json`.
+  It holds only outside-enrollment record fields: at least `GatewayIssuer`, `GatewayAudience` and an absolute
+  `GatewayJwksPath`, equal to the template's. It carries no `ServiceHosts`, `JournalHost` or other template-only
+  field. `Fleet.StockIdentity` names it as `StockOpenShell:AuthorityFile`, and its strict parser refuses any
+  unknown field as `gateway_trust_invalid`, which denies every control-plane call. Keep the two files separate;
+  never relax that parser to share one file;
 - `broker-ca.pem`.
 
 Gateway reachability (the design's network row) with the example `--profile openshell` unit:
@@ -639,8 +646,9 @@ the directory is root-owned 0700, so every active publication holds as `managed_
 (mode stays 0700). Observer broker passwords go only to the orchestrator-private sibling
 `managed/observer/<agent>.observer.password` (0600, directory 0700) and are never written to, or read from,
 the authority directory. Outside consumers select records by sandbox: set `StockOpenShell:AuthorityDirectory` to that
-`managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram, Bridge), keeping
-`AuthorityFile` for gateway trust. Mount only `managed/authority` into those services, read-only (see the
+`managed/authority` directory on `Fleet.StockIdentity` and each receiver (memory, Temporal, Telegram, Bridge). Keep the
+signer's `AuthorityFile` on the separate gateway-trust file above, never `managed-authority.json`. Mount only
+`managed/authority` into those services, read-only (see the
 commented mounts in `docker-compose.example.yml`); never mount `managed/` or `managed/observer`. An enrollment
 written before this split has its legacy `<agent>.observer.password` moved once, at orchestrator startup, into
 the private sibling as a 0600 file (links refused and left in place; a stale copy is removed when the sibling already
@@ -757,9 +765,24 @@ Operator inputs (nothing is generated; the policy YAML is stored as supplied):
   `fleet-journal-cross-chat` (`env_vars: [FLEET_JOURNAL_CROSS_CHAT_TOKEN]`, same host, `dotnet`),
   pinned the same way.
 - Add `"JournalHost": "journal.example.test"` to `managed-authority.json`. This is a TLS front for the
-  Comms journal listener, an exact DNS name distinct from the memory and service hosts.
+  Comms journal listener, an exact DNS name distinct from the memory and service hosts. Add it to the
+  adapter template only, never to the signer's gateway-trust file, whose strict parser refuses it.
 - The authored sandbox policy must allow `api.telegram.org:443` and the journal host `:443` as
-  inspected REST endpoints for that binary only. `tls: skip` and raw tunnels disable substitution.
+  inspected REST endpoints for that binary only, each with an explicit access preset. The Bot API, journal
+  ingest and the read MCP all send POST, so use `access: read-write`. `read-only` admits GET but denies POST,
+  and these services never need `full`:
+
+  ```yaml
+  - host: api.telegram.org
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    access: read-write
+  ```
+
+  The journal host entry is the same with its own host. The save-time policy check still accepts a
+  `protocol: rest` endpoint without `access`, but the pinned stock gateway rejected that form in an
+  exact-head check, so always state it. `tls: skip` and raw tunnels disable substitution.
 
 Placeholders are not secret values, but anything that can read the daemon's environment can present
 them to those endpoints. Binary scoping and endpoint binding are the boundary.
@@ -1038,7 +1061,9 @@ ChatGPT account, provider, refresh owner and billing basis do not change, and no
 
 Prerequisites are the operator's own, in the persisted provider workspace: each selected service profile
 (`telegram`, `fleet-journal`, `fleet-journal-read`, `fleet-journal-cross-chat`) imported and pinned in the
-selected policy version's `providerProfileHashes`; the receiving and journal hosts in `managed-authority.json`;
+selected policy version's `providerProfileHashes`; the receiving and journal hosts in `managed-authority.json` (the
+adapter template, not the signer's gateway-trust file); explicit `access: read-write` on the bot and journal REST
+endpoints;
 the signer bindings for every selected receiving host. Nothing is created or imported for them except the
 service providers below.
 
@@ -1286,7 +1311,8 @@ registration. Its fields are `name = "stock-memory"`, `grpc_endpoint = "https://
 - **Order on host boot and every restart:** the outside JWT trust and verified signer HTTPS/HTTP2 readiness first,
   then the gateway's authenticated Describe/negotiation and readiness, then managed admission. A running signer
   process is not readiness.
-- **Exact audience.** `audience` must equal `GatewayAudience` in `managed-authority.json` exactly, case included;
+- **Exact audience.** `audience` must equal `GatewayAudience` in `managed-authority.json` and in the signer's
+  separate gateway-trust file exactly, case included;
   set it explicitly. The stock default `urn:openshell:extension:middleware:stock-memory` works only when it is that
   value. A mismatch is `signer_gateway_audience_mismatch`.
 - **Shared addressing.** One operator-supplied DNS name and port must resolve and reach the same signer from BOTH

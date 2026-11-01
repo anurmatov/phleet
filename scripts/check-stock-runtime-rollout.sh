@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
-# Managed stock OpenShell rollout guard (#492, #502, #507). Run before ANY path that replaces the orchestrator:
+# Managed stock OpenShell rollout guard (#492, #502, #507, #510). Run before ANY path that replaces the orchestrator:
 # upgrade.sh calls it, and it is the documented operator rollback entrypoint.
 #
 #   check-stock-runtime-rollout.sh --dockerfile PATH   # source about to be built (upgrade.sh)
 #   check-stock-runtime-rollout.sh --image IMAGE       # an image about to be run (rollback)
 #
-# A target declaring LABEL org.phleet.managed-stock-runtime=1, LABEL org.phleet.managed-stock-subscription=1 and
-# LABEL org.phleet.managed-stock-workspace=1 understands managed, subscription and #507 workspace-layout bindings
-# and passes. Any other target needs the running orchestrator's operator-authenticated rollback preflight, whose
-# answer must have exactly the keys desiredOpenShell, appliedOpenShell, unresolvedBindings and
-# subscriptionBindings (nonnegative integers). A target without the managed label requires all four counts zero.
-# A managed target without the workspace label would apply its old /workspace layout to a binding whose user tree
-# now lives under HOME, so it requires appliedOpenShell=0 and unresolvedBindings=0 (every agent handed back to
-# Docker through this checkout first), plus subscriptionBindings=0 when it also lacks the subscription label. A
+# A target declaring LABEL org.phleet.managed-stock-runtime=1, LABEL org.phleet.managed-stock-subscription=1,
+# LABEL org.phleet.managed-stock-workspace=1 and LABEL org.phleet.managed-stock-subscription-services=1 understands
+# managed, subscription, #507 workspace-layout and #510 subscription service bindings and passes. Any other target
+# needs the running orchestrator's operator-authenticated rollback preflight, whose answer must have exactly the keys
+# desiredOpenShell, appliedOpenShell, unresolvedBindings and subscriptionBindings (nonnegative integers). A target
+# without the managed label requires all four counts zero. A managed target without the workspace label would apply
+# its old /workspace layout to a binding whose user tree now lives under HOME, so it requires appliedOpenShell=0 and
+# unresolvedBindings=0 (every agent handed back to Docker through this checkout first). A managed target without the
+# subscription label, or without the #510 services label, requires subscriptionBindings=0: an older image cannot read
+# service-provider custody, and the count does not separate memory-only subscriptions, so those are retired too. A
 # nonzero, malformed or unavailable answer refuses; it is never treated as "none".
 #
-# Run THIS (workspace-capable) guard against the intended target BEFORE switching checkout or replacing guard
-# files: an older checkout's guard/upgrade.sh takes the two-label shortcut for a pre-#507 managed target and is
-# unprotected while any OpenShell binding is applied (and its #502 predecessor while subscriptionBindings>0).
+# Run THIS (services-capable) guard against the intended target BEFORE switching checkout or replacing guard
+# files: an older checkout's guard/upgrade.sh takes the three-label shortcut for a pre-#510 target and is
+# unprotected while any subscription binding exists (and its #507 predecessor while any OpenShell binding is applied).
 # Environment: ORCHESTRATOR_AUTH_TOKEN, optional FLEET_ORCHESTRATOR_URL (default http://127.0.0.1:3600).
 set -euo pipefail
 
 MANAGED_LABEL=org.phleet.managed-stock-runtime
 SUBSCRIPTION_LABEL=org.phleet.managed-stock-subscription
 WORKSPACE_LABEL=org.phleet.managed-stock-workspace
+SERVICES_LABEL=org.phleet.managed-stock-subscription-services
 refuse() { echo "REFUSED: $*" >&2; exit 1; }
 usage() { echo "usage: $0 --dockerfile PATH | --image IMAGE" >&2; exit 2; }
 
@@ -42,12 +45,13 @@ case "$1" in
   *) usage ;;
 esac
 
-managed=false; subscription=false; workspace=false
+managed=false; subscription=false; workspace=false; services=false
 has_label "$MANAGED_LABEL" "$2" && managed=true
 has_label "$SUBSCRIPTION_LABEL" "$2" && subscription=true
 has_label "$WORKSPACE_LABEL" "$2" && workspace=true
-if $managed && $subscription && $workspace; then
-  echo "OK: target supports managed bindings, including subscription and workspace-layout bindings"; exit 0
+has_label "$SERVICES_LABEL" "$2" && services=true
+if $managed && $subscription && $workspace && $services; then
+  echo "OK: target supports managed bindings, including subscription, workspace-layout and subscription service bindings"; exit 0
 fi
 
 token=${ORCHESTRATOR_AUTH_TOKEN:-}
@@ -58,19 +62,21 @@ esc=${token//\\/\\\\}; esc=${esc//\"/\\\"}
 body=$(printf 'header = "Authorization: Bearer %s"\n' "$esc" \
   | curl -fsS --max-time 10 -K - "$url/api/managed-runtime/rollback-preflight") \
   || refuse "rollback preflight unavailable"
-python3 - "$body" "$managed" "$subscription" <<'PY' || refuse "managed, subscription or workspace-layout bindings exist for this target, or the preflight answer is invalid"
+python3 - "$body" "$managed" "$subscription" "$workspace" "$services" <<'PY' || refuse "managed, subscription, workspace-layout or service bindings exist for this target, or the preflight answer is invalid"
 import json, sys
 data = json.loads(sys.argv[1])
 keys = {"desiredOpenShell", "appliedOpenShell", "unresolvedBindings", "subscriptionBindings"}
 if not isinstance(data, dict) or set(data) != keys or any(type(data[k]) is not int or data[k] < 0 for k in keys):
     sys.exit(1)
-if sys.argv[2] != "true":
+managed, subscription, workspace, services = (arg == "true" for arg in sys.argv[2:6])
+if not managed:
     required = keys
 else:
-    required = {"appliedOpenShell", "unresolvedBindings"} | (set() if sys.argv[3] == "true" else {"subscriptionBindings"})
+    required = (set() if workspace else {"appliedOpenShell", "unresolvedBindings"}) \
+        | (set() if subscription and services else {"subscriptionBindings"})
 if any(data[k] for k in required):
     print("managed counts: " + ", ".join(f"{k}={data[k]}" for k in sorted(keys)), file=sys.stderr)
     sys.exit(1)
 PY
-if $managed; then echo "OK: no applied OpenShell, unresolved or (unsupported) subscription bindings remain for this older managed target"
+if $managed; then echo "OK: no bindings this older managed target cannot read remain"
 else echo "OK: no managed, unresolved or subscription bindings"; fi

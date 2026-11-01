@@ -22,6 +22,8 @@ LABEL org.phleet.managed-stock-runtime=1
 LABEL org.phleet.managed-stock-subscription=1
 # #507: this image understands the persisted HOME/workspace layout and migrates proven legacy /workspace bindings.
 LABEL org.phleet.managed-stock-workspace=1
+# #510: this image understands subscription bindings with service providers (ServiceProviderIds custody).
+LABEL org.phleet.managed-stock-subscription-services=1
 # Opt-in exact stock CLI. Both build args or neither: the binary must match the SHA-256 and report
 # the pinned version. Without them no CLI is installed and managed apply reports stock_cli_missing.
 # #503 W6/W7: the pinned CLI's `sandbox upload` spawns the external `ssh` client (openshell-cli ssh.rs

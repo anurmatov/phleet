@@ -186,10 +186,10 @@ public static class StockOpenShellEnrollment
                 || HostedModelProviders.TryResolve("codex", configuration["Agent:Model"] ?? "", out _, out _)
                 || CodexLocalModelProviders.Split(configuration["Agent:Model"] ?? "").Provider is not null)
                 Deny("stock_enrollment_native_profile_unsupported");
-            // Managed mode only (#492): the agent's own bot and journal capture may hold exactly the stock
-            // placeholders from the child environment (the final start's overlay), never a literal or
+            // Managed mode only (#492; #510 also subscription): the agent's own bot and journal capture may hold exactly
+            // the stock placeholders from the child environment (the final start's overlay), never a literal or
             // another value. The manual profile, files/send/cross-chat and other routes stay refused.
-            var slots = configuration["Agent:NativeAuthMode"] == "api_key" ? ManagedCredentialSlots(configuration, environment) : null;
+            var slots = IsManaged(configuration) ? ManagedCredentialSlots(configuration, environment) : null;
             var subscription = configuration["Agent:NativeAuthMode"] == SubscriptionMode;
             if ((slots is null && ManagedRouteKeys.Any(key => !string.IsNullOrEmpty(configuration[key])
                     && !(subscription && SubscriptionKeys.Contains(key))))
@@ -225,8 +225,6 @@ public static class StockOpenShellEnrollment
                     StockServices.MemoryTools.Any(tool => c.Value == StockServices.ToolGrant(memoryName, tool))))
                 Deny("stock_enrollment_memory_tools_missing");
             var auth = NativeAuthFor(configuration, home, environment);
-            // #502: the compatibility-only subscription path has exactly the native memory route, nothing else.
-            if (auth.Subscription is not null && routes.Count != 1) Deny("stock_enrollment_extra_route_unsupported");
             if ((auth.Manual && !File.Exists(Path.Combine(home, ".codex-host", "auth.json"))) || !File.Exists(rootFile))
                 Deny("stock_enrollment_native_inputs_missing");
             var options = configuration.GetSection(AgentOptions.Section).Get<AgentOptions>()!;
@@ -290,7 +288,8 @@ public static class StockOpenShellEnrollment
     /// The one deterministic native config builder shared by preparation and registration checks. Subscription (#502):
     /// forced ChatGPT/account/provider root keys first, then the generated defaults unchanged (their own
     /// <c>[analytics] enabled=false</c> and <c>[history]</c>), then the exact descriptor, one <c>[features]</c> block and the
-    /// native memory table. Duplicate or shadowing keys/tables in the defaults refuse.
+    /// native MCP tables (memory, then #510 each enrolled first-party route). Duplicate or shadowing keys/tables in the
+    /// defaults refuse.
     /// </summary>
     internal static string NativeConfig(IConfiguration configuration, StockEnrollmentAuthority authority, Func<string, string?> environment,
         string root, NativeAuth auth)
@@ -422,10 +421,11 @@ public static class StockOpenShellEnrollment
             var prefix = "mcp__" + name + "__";
             var enabled = allowed.Where(t => t.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t[prefix.Length..])
                 .Where(t => tools.Contains(t, StringComparer.Ordinal)).ToArray();
-            // #502: the compatibility-only subscription path registers exactly memory_get on the native memory route.
-            if (configuration["Agent:NativeAuthMode"] == SubscriptionMode)
+            // #502: the subscription path registers exactly memory_get on the native memory route (its get-only signer
+            // rule). #510: every other enrolled route keeps the same enabled-grant ∩ record-tool intersection as API-key mode.
+            if (configuration["Agent:NativeAuthMode"] == SubscriptionMode && name == memoryName)
             {
-                if (name != memoryName || !enabled.Contains("memory_get")) Deny("stock_enrollment_mcp_route_invalid");
+                if (!enabled.Contains("memory_get")) Deny("stock_enrollment_mcp_route_invalid");
                 enabled = ["memory_get"];
             }
             text.Append("\n[mcp_servers.").Append(name).Append("]\nurl = ").Append(JsonSerializer.Serialize(url))

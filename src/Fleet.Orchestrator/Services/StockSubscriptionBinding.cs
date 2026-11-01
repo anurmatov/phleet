@@ -44,6 +44,8 @@ public static class StockSubscriptionBinding
     public const string Changed = "subscription_binding_changed";
     public const string Unrecoverable = "subscription_binding_unrecoverable";
     public const string ProviderUnverified = "subscription_provider_unverified";
+    /// <summary>#510: a selected service provider that is foreign, ambiguous, unobservable or not exactly its recorded custody.</summary>
+    public const string ServiceProviderUnverified = "subscription_service_provider_unverified";
     public const string OwnerConflict = "subscription_owner_conflict";
 
     private static readonly string[] Fields =

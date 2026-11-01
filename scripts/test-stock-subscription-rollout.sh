@@ -4,6 +4,7 @@
 #
 #   bash scripts/test-stock-subscription-rollout.sh
 #
+# #510 adds: the four-label (subscription-services) shortcut and pre-services targets requiring zero subscription bindings.
 # #503 adds: fixed signer-registration CA coverage (both TOML parsers), SNAPSHOT_MODE markers and the four
 # control/plain x registered/unregistered eligibility cases with no downgrade, dedicated maintenance S0/S1 retention and
 # pre-restart re-verification, and the freshness-only default versus the --require-subscription-recovery warnings.
@@ -42,15 +43,24 @@ STUB
 chmod 755 "$WORK/bin/curl"
 export PATH="$WORK/bin:$PATH" STUB_CALLS="$WORK/calls" ORCHESTRATOR_AUTH_TOKEN=synthetic-operator-token
 four() { printf '{"desiredOpenShell":%s,"appliedOpenShell":%s,"unresolvedBindings":%s,"subscriptionBindings":%s}' "$1" "$2" "$3" "$4"; }
-printf 'FROM x\nLABEL org.phleet.managed-stock-runtime=1\nLABEL org.phleet.managed-stock-subscription=1\nLABEL org.phleet.managed-stock-workspace=1\n' > "$WORK/Dockerfile.new"
+printf 'FROM x\nLABEL org.phleet.managed-stock-runtime=1\nLABEL org.phleet.managed-stock-subscription=1\nLABEL org.phleet.managed-stock-workspace=1\nLABEL org.phleet.managed-stock-subscription-services=1\n' > "$WORK/Dockerfile.new"
+printf 'FROM x\nLABEL org.phleet.managed-stock-runtime=1\nLABEL org.phleet.managed-stock-subscription=1\nLABEL org.phleet.managed-stock-workspace=1\n' > "$WORK/Dockerfile.workspace"
 printf 'FROM x\nLABEL org.phleet.managed-stock-runtime=1\nLABEL org.phleet.managed-stock-subscription=1\n' > "$WORK/Dockerfile.subscription"
 printf 'FROM x\nLABEL org.phleet.managed-stock-runtime=1\n' > "$WORK/Dockerfile.managed"
 printf 'FROM x\n' > "$WORK/Dockerfile.none"
 
 rm -f "$STUB_CALLS"
-expect 0 "workspace- and subscription-capable target passes without a preflight query" bash "$GUARD" --dockerfile "$WORK/Dockerfile.new"
+expect 0 "subscription-services-capable target passes without a preflight query" bash "$GUARD" --dockerfile "$WORK/Dockerfile.new"
 [[ ! -e "$STUB_CALLS" ]] || fail "capable target queried the preflight"
-expect 0 "this repository's orchestrator declares all three capabilities" bash "$GUARD" --dockerfile "$ROOT/src/Fleet.Orchestrator/Dockerfile"
+expect 0 "this repository's orchestrator declares all four capabilities" bash "$GUARD" --dockerfile "$ROOT/src/Fleet.Orchestrator/Dockerfile"
+# #510: an otherwise three-label (pre-services) target never takes the shortcut while any subscription binding exists.
+rm -f "$STUB_CALLS"
+STUB_BODY=$(four 3 3 0 1) expect 1 "pre-services target refuses while subscriptionBindings>0 (no three-label shortcut)" bash "$GUARD" --dockerfile "$WORK/Dockerfile.workspace"
+[[ -e "$STUB_CALLS" ]] || fail "pre-services target skipped the preflight"
+STUB_BODY=$(four 3 3 1 0) expect 0 "pre-services target passes with applied and unresolved API-key bindings it can read" bash "$GUARD" --dockerfile "$WORK/Dockerfile.workspace"
+STUB_FAIL=1 STUB_BODY=$(four 0 0 0 0) expect 1 "pre-services target refuses an unavailable preflight" bash "$GUARD" --dockerfile "$WORK/Dockerfile.workspace"
+STUB_BODY='{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0,"subscriptionBindings":"0"}' expect 1 "pre-services target refuses a noninteger count" bash "$GUARD" --dockerfile "$WORK/Dockerfile.workspace"
+STUB_BODY='{"desiredOpenShell":0,"appliedOpenShell":0,"unresolvedBindings":0,"subscriptionBindings":0,"serviceBindings":0}' expect 1 "pre-services target refuses a wrong key set" bash "$GUARD" --dockerfile "$WORK/Dockerfile.workspace"
 STUB_BODY=$(four 3 3 0 1) expect 1 "old-capability target refuses while subscriptionBindings>0 (no old-label shortcut)" bash "$GUARD" --dockerfile "$WORK/Dockerfile.managed"
 STUB_BODY=$(four 3 3 0 0) expect 1 "old-capability target refuses while any OpenShell binding is applied (#507 layout)" bash "$GUARD" --dockerfile "$WORK/Dockerfile.managed"
 STUB_BODY=$(four 3 0 0 0) expect 0 "old-capability target passes once bindings are handed back and subscriptions drained" bash "$GUARD" --dockerfile "$WORK/Dockerfile.managed"
@@ -59,7 +69,8 @@ rm -f "$STUB_CALLS"
 STUB_BODY=$(four 3 3 0 0) expect 1 "pre-workspace target refuses while an OpenShell binding is applied" bash "$GUARD" --dockerfile "$WORK/Dockerfile.subscription"
 [[ -e "$STUB_CALLS" ]] || fail "pre-workspace target skipped the preflight"
 STUB_BODY=$(four 3 0 1 0) expect 1 "pre-workspace target refuses an unresolved binding" bash "$GUARD" --dockerfile "$WORK/Dockerfile.subscription"
-STUB_BODY=$(four 3 0 0 2) expect 0 "pre-workspace target passes with nothing applied (it still understands subscription state)" bash "$GUARD" --dockerfile "$WORK/Dockerfile.subscription"
+STUB_BODY=$(four 3 0 0 2) expect 1 "pre-workspace target also refuses subscription custody it predates (#510 services)" bash "$GUARD" --dockerfile "$WORK/Dockerfile.subscription"
+STUB_BODY=$(four 3 0 0 0) expect 0 "pre-workspace target passes with nothing applied and subscriptions retired" bash "$GUARD" --dockerfile "$WORK/Dockerfile.subscription"
 STUB_FAIL=1 STUB_BODY=$(four 0 0 0 0) expect 1 "pre-workspace target refuses an unavailable preflight" bash "$GUARD" --dockerfile "$WORK/Dockerfile.subscription"
 STUB_BODY=$(four 0 1 0 0) expect 1 "incapable target still needs every count zero" bash "$GUARD" --dockerfile "$WORK/Dockerfile.none"
 STUB_BODY=$(four 0 0 0 0) expect 0 "incapable target passes with all four counts zero" bash "$GUARD" --dockerfile "$WORK/Dockerfile.none"

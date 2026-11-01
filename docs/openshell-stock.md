@@ -900,7 +900,8 @@ database outage returns `managed_delete_unavailable` (503).
 before anything is stopped, and it is the operator rollback entrypoint (`--image IMAGE`). A target
 without the label needs the operator-authenticated `GET /api/managed-runtime/rollback-preflight` to
 report zero desired, applied and unresolved managed bindings; a managed target without the #507 workspace label needs
-zero applied and unresolved bindings ([managed workspace layout](#managed-workspace-layout-507)). A nonzero, malformed or
+zero applied and unresolved bindings ([managed workspace layout](#managed-workspace-layout-507)), and one without the
+subscription or #510 subscription-services label needs zero subscription bindings ([ordinary services](#ordinary-services-510)). A nonzero, malformed or
 unavailable answer refuses. Ordered rollback:
 1. revoke;
 2. confirm quiescence and no unresolved errors;
@@ -944,7 +945,8 @@ unexpected-resume hold.
 ## Managed Codex subscription branch (#502, unqualified compatibility only)
 
 **Status: source support only, UNQUALIFIED.** This is one compatibility path for a native memory lookup under a
-subscription-backed stock provider. It is not production account isolation: the issuer route/refusal contract
+subscription-backed stock provider; #510 lets it keep an agent's existing [ordinary services](#ordinary-services-510)
+with the same account and billing basis. It is not production account isolation: the issuer route/refusal contract
 in [#501](https://github.com/anurmatov/phleet/issues/501) and the full #493/#498 qualification remain open.
 A positive trial needs separate exact human/operator authority (host, image, model, caller, login owner,
 refresh custody and window, receipts); none of that is implied by merge. Pins are unchanged: OpenShell 0.1.5
@@ -978,15 +980,16 @@ Unknown, duplicate or missing fields refuse. Examples in this repository use pla
 
 **Readiness before any mutation.** Apply requires: exactly one memory MCP endpoint, named `memory` or
 `fleet-memory` at the exact HTTPS memory URL (#505, see [Managed runtime](#managed-runtime-492-default-off)), with that
-name's existing `memory_get` grant and no Telegram bot, journal or other route (`managed_route_unsupported:*`,
-never silently dropped); the binding file; pinned CLI and gateway client trust in the persisted scope; the
+name's existing `memory_get` grant; any other route only as an [ordinary service](#ordinary-services-510) (#510),
+otherwise `managed_route_unsupported:*`, never silently dropped; the binding file; pinned CLI and gateway client trust in the persisted scope; the
 profile hash; the current gateway generation; sole ownership (no other agent's live tuple names the provider
 UUID or workspace/name: `subscription_owner_conflict`); the existing provider found exactly once across every
 `--workspace <providerWorkspace> provider list -o json` page with that UUID, type `codex-subscription-native`
 and only the `CODEX_AUTH_ACCESS_TOKEN` key; and `provider refresh status` ready (`configured`/`refreshed`, no
 recovery action or failure code) with fresh UTC + 120 s strictly before both NEXT_REFRESH and access expiry.
 Any miss is `subscription_provider_unverified` before the old runtime stops. The adapter never creates,
-updates, imports, rotates or deletes a subscription provider; the stock gateway stays the sole refresh owner.
+updates, imports, rotates or deletes the subscription (OAuth) provider and never gives it a service credential; the
+stock gateway stays the sole refresh owner. Only #510 service providers are created or updated, in the same workspace.
 
 **Persisted scopes and cleanup.** The candidate records `SandboxWorkspace` and the subscription tuple (provider
 workspace/UUID, account, owner generation, source SHA-256, expiry) before any effect; Applied/Superseded keep it.
@@ -1014,9 +1017,59 @@ the stock-issued `CODEX_AUTH_ACCESS_TOKEN` handle (exact placeholder syntax; att
 and writes the stock example cache shape with an empty refresh token and the parsing-only ID-token stub
 (0700/0600, no foreign cache overwrite, no host-cache fallback). The config is: forced ChatGPT login and
 workspace and `model_provider = "openai-http"`, the generated defaults unchanged, the exact #498 descriptor, one
-`[features] plugins = false, apps = false` block, then exactly `[mcp_servers.memory]` with
-`enabled_tools = ["memory_get"]`. Any drift exits with a secret-free `stock_enrollment_*` reason before intake.
-The memory receiver keeps its fresh ACL, endpoint/tool/project and session/epoch checks.
+`[features] plugins = false, apps = false` block, then the memory table under its selected name with exactly
+`enabled_tools = ["memory_get"]`, then one table per enrolled #510 route. Any drift exits with a secret-free
+`stock_enrollment_*` reason before intake. The receivers keep their fresh ACL, endpoint/tool/project and
+session/epoch checks.
+
+<a id="ordinary-services-510"></a>
+**Ordinary services (#510, UNQUALIFIED).** A subscription agent keeps its existing first-party services through the
+same stock gateway substitution, service providers, enrollment, receivers and epoch lanes as API-key mode. Its
+ChatGPT account, provider, refresh owner and billing basis do not change, and no grant is created, removed or narrowed.
+
+| Route | Kept when | Workload sees |
+|---|---|---|
+| memory | the selected `memory`/`fleet-memory` endpoint with its `memory_get` grant | native table, `memory_get` only |
+| `fleet-temporal`, `fleet-telegram` MCP | the endpoint exists and `ServiceHosts` names its receiving host | native table, enabled grants ∩ record tools |
+| own Telegram bot | a `TELEGRAM_*_BOT_TOKEN` reference resolves outside | public bot id plus the issued placeholder |
+| journal capture | journal enabled with the bot, and `JournalHost` set | the issued ingest placeholder |
+| `fleet-comms-journal` read MCP | the endpoint path is routable and `JournalHost` set | read placeholder header |
+| `fleet-journal-files` send/fetch | already granted with capture | loopback listener, read and cross-chat placeholders |
+
+Prerequisites are the operator's own, in the persisted provider workspace: each selected service profile
+(`telegram`, `fleet-journal`, `fleet-journal-read`, `fleet-journal-cross-chat`) imported and pinned in the
+selected policy version's `providerProfileHashes`; the receiving and journal hosts in `managed-authority.json`;
+the signer bindings for every selected receiving host. Nothing is created or imported for them except the
+service providers below.
+
+Preflight refuses before the old runtime stops, with no grant edit:
+
+| Condition | Refusal |
+|---|---|
+| bot reference or journal key unresolved | `telegram_bot_token_unresolved`, existing journal key fault |
+| a service or journal host missing | `managed_route_unsupported:mcp:<name>` or `managed_route_unsupported:journal` |
+| an enabled grant on memory, Temporal or Telegram that the saved policy's MCP rules do not allow (memory stays `memory_get` only, so `memory_search`/write grants block) | `managed_route_unsupported:mcp:<name>` |
+| a selected service profile unpinned, or its scoped export digest differs | `provider_profile_unpinned:<p>`, `provider_profile_hash_mismatch:<p>` |
+| a same-named service provider in the workspace that is not this agent's recorded one (other UUID, type or key set), or an unobservable list | `subscription_service_provider_unverified` |
+
+**Service providers.** Each is named `fleet-<agent>-<service>` and lives only in the persisted provider workspace.
+Its value comes from the existing service-secret resolver and goes only into the scoped CLI environment
+(`--credential KEY`). The binding records a `ServiceProviderIds` name→UUID map beside `ServiceProviders`. Before an
+update, the recorded UUID, name, profile type and single credential key must match. A new one is created once,
+only after its name is proven absent on every scoped page, and its UUID is checkpointed from scoped metadata
+before any attach. A foreign or ambiguous collision, or an uncertain create or update, holds as
+`subscription_service_provider_unverified` or `provider_setup_unknown`. Nothing is adopted or retried. A later
+apply reuses only UUIDs recorded in the applied binding or retained history. Old memory-only bindings may lack the
+map. A service-bearing binding whose map is missing or partial is held `subscription_service_provider_unverified`
+at Start or apply, and a clean revoke clears the hold.
+
+**Startup and cleanup.** Fresh create passes the native and service providers together. Revoked or reprovisioned
+reuse revalidates and attaches the complete set while stopped, before the staged boot, so the main process inherits
+every issued handle. Each recorded service identity and profile digest is rechecked before attach and before
+Start/activation; a mismatch refuses or holds without activation. Revoke, Stop, expiry and retirement detach every
+recorded provider name in the persisted workspace. They do this even if `subscription.json` is gone or changed, and
+a service identity fault never suppresses the admission cut, broker revoke or Stop. Service providers are detached,
+never deleted.
 
 **Snapshot custody.** Subscription backups add evidence-only control records:
 
@@ -1061,9 +1114,13 @@ evidence only. Retirement never happens solely from expiry or while the desired 
 `GET /api/managed-runtime/rollback-preflight` now has exactly `desiredOpenShell`, `appliedOpenShell`,
 `unresolvedBindings` and `subscriptionBindings`; the last counts agents with desired subscription or any
 nonretired applied/candidate/superseded subscription tuple (an unreadable record counts). The orchestrator image
-declares `LABEL org.phleet.managed-stock-subscription=1`. A target without it requires `subscriptionBindings=0`;
-a target without the managed label requires all four counts zero. Ordered rollback, all on the
-subscription-capable checkout:
+declares `LABEL org.phleet.managed-stock-subscription=1` and, since #510,
+`LABEL org.phleet.managed-stock-subscription-services=1`. A target without either requires `subscriptionBindings=0`,
+even when its other three labels are present. A target without the managed label requires all four counts zero.
+**Rollback cost (#510):** the count does not separate memory-only subscriptions, and an older image would drop the
+service-provider map when it rewrites a record. Rolling back to a pre-#510 image therefore also retires working
+memory-only subscription agents that image supports; plan their retirement before the first trial. Ordered
+rollback, all on the services-capable checkout:
 1. revoke;
 2. confirm scoped stop/detach and quiescence;
 3. apply the authorized Docker or API target, with the desired mode already changed away from subscription;
@@ -1074,7 +1131,7 @@ subscription-capable checkout:
 
 An older checkout's `upgrade.sh`/guard is unsupported and unprotected while `subscriptionBindings>0`: its
 three-key parser refuses this server's four-key answer, but its managed-label shortcut skips the query, so it is
-not a safety control. `bash scripts/test-stock-subscription-rollout.sh` exercises the guard, snapshot and
+not a safety control. A pre-#510 checkout's guard takes the three-label shortcut onto service custody it cannot read. `bash scripts/test-stock-subscription-rollout.sh` exercises the guard, snapshot and
 refusal rules with synthetic inputs.
 
 **Evidence retention.** Native/cache/output/snapshot/retirement evidence stays under 0700 directories and 0600

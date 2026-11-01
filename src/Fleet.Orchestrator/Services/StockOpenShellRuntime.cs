@@ -208,6 +208,14 @@ public sealed record ManagedBinding(string SandboxName, string SandboxId, Guid E
     /// <summary>Further attached stock providers: the agent's own Telegram bot and journal capture (#492).</summary>
     public IReadOnlyList<string> ServiceProviders { get; init; } = [];
 
+    /// <summary>
+    /// #510: name → UUID of each subscription service provider, recorded from scoped metadata in the persisted provider
+    /// workspace before attach. Keys are only <see cref="ServiceProviders"/> names. Null for API-key bindings and for older
+    /// memory-only subscription bindings, the only records it may be absent from.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, string>? ServiceProviderIds { get; init; }
+
     /// <summary>Every provider attached to this binding, native API key first.</summary>
     public IReadOnlyList<string> AllProviders() => [Provider, .. ServiceProviders];
 
@@ -734,17 +742,7 @@ public sealed class StockOpenShellRuntime(
     private async Task<string?> ApiPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct, bool signerAdmission)
     {
         if (string.IsNullOrEmpty(credentials.Get(agent.ProviderApiKeyEnvRef!))) return "provider_key_reference_unresolved";
-        // The agent's own bot token and derived journal ingest token stay outside in stock providers; the
-        // workload gets only the public bot id and stock placeholders. Missing values refuse here.
-        if (ContainerProvisioningService.HasTelegramBot(agent) && TelegramCredential(agent).Fault is { } telegramFault) return telegramFault;
-        // Tool-send receipts (#394) for a managed agent travel over the epoch's existing control lane
-        // (fleet.group to the agent's own queue, published by Fleet.Telegram as the control principal).
-        if ((JournalCapture(agent) || JournalRead(agent)) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
-        // Only first-party HTTP MCP receivers that verify the outside assertion, and the comms-journal read
-        // MCP (Comms verifies the derived read token resolved outside), are routed; others refuse.
-        if (agent.McpEndpoints.FirstOrDefault(e => !StockServices.IsMemoryMcpName(e.McpName) && e.McpName != StockJournalReadRoute.McpName
-            && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)
-            return "managed_route_unsupported:mcp:" + extra.McpName;
+        if (ServiceRouteFault(agent) is { } routeFault) return routeFault;
         var (memory, memoryFault) = MemoryEndpoint(agent);
         if (memoryFault is not null) return memoryFault;
         // #505: only the selected endpoint's own grants count, never the other accepted name's.
@@ -754,14 +752,7 @@ public sealed class StockOpenShellRuntime(
         if (DescribeConfigDirFault() is { } dirFault) return dirFault;
         if (LoadTemplate() is not { } template) return "managed_authority_template_invalid";
         if (!MemoryDestinationMatches(template, memory!)) return "managed_route_unsupported:mcp:" + memory!.McpName;
-        // A supported service without an operator-configured receiving host has no route in this installation.
-        if (agent.McpEndpoints.FirstOrDefault(e => ServiceByMcpName.TryGetValue(e.McpName, out var service) && TemplateHost(template, service) is null) is { } unrouted)
-            return "managed_route_unsupported:mcp:" + unrouted.McpName;
-        // Journal capture needs the operator's journal listener host as its route.
-        if (JournalCapture(agent) && JournalHost(template) is null) return "managed_route_unsupported:journal";
-        // The read MCP targets the same journal listener host, at the ordinary endpoint's path.
-        if (JournalRead(agent) && (JournalHost(template) is null || JournalReadPath(agent) is null))
-            return "managed_route_unsupported:mcp:" + StockJournalReadRoute.McpName;
+        if (ServiceHostFault(agent, template) is { } hostFault) return hostFault;
         // #503: the saved artifact must bind the fixed signer to exactly this agent's selected receiving hosts.
         if (signerAdmission && SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return signerFault;
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
@@ -780,17 +771,72 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// #502 compatibility-only subscription admission, before any mutation or old-runtime Stop: exactly the native memory
-    /// endpoint with its existing <c>memory_get</c> grant and no other route (extra selections refuse, never dropped), the
-    /// outside binding file, the pinned CLI and gateway client trust in the persisted scope, the restricted profile hash,
-    /// gateway generation, sole ownership, the existing provider (no create/update/import) and its refresh window.
+    /// The outside service credentials and routes both managed auth modes share (#492; #510 for subscription): the agent's
+    /// own bot token and the journal key resolve outside, and only first-party HTTP MCP receivers that verify the outside
+    /// assertion, plus the comms-journal read MCP, are routed. Any other endpoint refuses; nothing is silently dropped.
+    /// </summary>
+    private string? ServiceRouteFault(Agent agent)
+    {
+        // The agent's own bot token and derived journal ingest token stay outside in stock providers; the
+        // workload gets only the public bot id and stock placeholders. Missing values refuse here.
+        if (ContainerProvisioningService.HasTelegramBot(agent) && TelegramCredential(agent).Fault is { } telegramFault) return telegramFault;
+        // Tool-send receipts (#394) for a managed agent travel over the epoch's existing control lane
+        // (fleet.group to the agent's own queue, published by Fleet.Telegram as the control principal).
+        if ((JournalCapture(agent) || JournalRead(agent)) && services.GetService<JournalTokenService>()?.DescribeKeyFault() is { } journalKeyFault) return journalKeyFault;
+        // Only first-party HTTP MCP receivers that verify the outside assertion, and the comms-journal read
+        // MCP (Comms verifies the derived read token resolved outside), are routed; others refuse.
+        if (agent.McpEndpoints.FirstOrDefault(e => !StockServices.IsMemoryMcpName(e.McpName) && e.McpName != StockJournalReadRoute.McpName
+            && !ServiceByMcpName.ContainsKey(e.McpName)) is { } extra)
+            return "managed_route_unsupported:mcp:" + extra.McpName;
+        return null;
+    }
+
+    /// <summary>Every selected service has its operator-configured receiving host, and the journal routes their listener host and path.</summary>
+    private static string? ServiceHostFault(Agent agent, JsonObject template)
+    {
+        // A supported service without an operator-configured receiving host has no route in this installation.
+        if (agent.McpEndpoints.FirstOrDefault(e => ServiceByMcpName.TryGetValue(e.McpName, out var service) && TemplateHost(template, service) is null) is { } unrouted)
+            return "managed_route_unsupported:mcp:" + unrouted.McpName;
+        // Journal capture needs the operator's journal listener host as its route.
+        if (JournalCapture(agent) && JournalHost(template) is null) return "managed_route_unsupported:journal";
+        // The read MCP targets the same journal listener host, at the ordinary endpoint's path.
+        if (JournalRead(agent) && (JournalHost(template) is null || JournalReadPath(agent) is null))
+            return "managed_route_unsupported:mcp:" + StockJournalReadRoute.McpName;
+        return null;
+    }
+
+    /// <summary>
+    /// #510: every enabled grant on each selected signer-bound route (memory under its selected name, Temporal, Telegram) is
+    /// an exact tool the saved policy's one receiver endpoint allows. Memory keeps its get-only rule, so another memory grant
+    /// blocks too. A grant the policy cannot carry refuses <c>managed_route_unsupported:mcp:NAME</c> before Stop; it is never
+    /// pruned and no grant is edited. Journal read and files/send keep their own receiver/listener grant checks.
+    /// </summary>
+    private static string? GrantAdmissionFault(SandboxPolicyVersion policy, JsonObject template, Agent agent, AgentMcpEndpoint memory)
+    {
+        var routes = new List<(string Name, string Host)> { (memory.McpName, template["MemoryHost"]!.GetValue<string>()) };
+        foreach (var (service, route) in ServiceRoutes(template, agent)) routes.Add((StockServices.McpNames[service], route!["Host"]!.GetValue<string>()));
+        foreach (var (name, host) in routes)
+        {
+            var prefix = "mcp__" + name + "__";
+            var granted = agent.Tools.Where(t => t.IsEnabled && t.ToolName.StartsWith(prefix, StringComparison.Ordinal)).Select(t => t.ToolName[prefix.Length..]);
+            if (StockManagedSignerPolicy.AdmittedTools(policy.Yaml, host) is not { } admitted || granted.Any(t => !admitted.Contains(t)))
+                return "managed_route_unsupported:mcp:" + name;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// #502 compatibility-only subscription admission, before any mutation or old-runtime Stop: the native memory endpoint
+    /// with its existing <c>memory_get</c> grant, and (#510) the agent's existing service routes under the API-key branch's
+    /// checks without its native key, each enabled grant admitted by the saved policy (extra or unsupported selections
+    /// refuse, never dropped); the outside binding file, the pinned CLI and gateway client trust in the persisted scope, the
+    /// restricted and selected service profile hashes, gateway generation, sole ownership, the existing native provider (no
+    /// create/update/import) and its refresh window, and each service provider absent or exactly this agent's recorded one.
     /// </summary>
     private async Task<(string? Fault, StockSubscriptionSource? Source)> SubscriptionPreflightAsync(Agent agent, SandboxPolicyVersion policy, CancellationToken ct,
         bool signerAdmission)
     {
-        if (ContainerProvisioningService.HasTelegramBot(agent)) return ("managed_route_unsupported:telegram", null);
-        if (agent.JournalEnabled) return ("managed_route_unsupported:journal", null);
-        if (agent.McpEndpoints.FirstOrDefault(e => !StockServices.IsMemoryMcpName(e.McpName)) is { } extra) return ("managed_route_unsupported:mcp:" + extra.McpName, null);
+        if (ServiceRouteFault(agent) is { } routeFault) return (routeFault, null);
         var (memory, memoryFault) = MemoryEndpoint(agent);
         if (memoryFault is not null) return (memoryFault, null);
         if (!agent.Tools.Any(t => t.IsEnabled && t.ToolName == StockServices.ToolGrant(memory!.McpName, "memory_get")))
@@ -799,8 +845,13 @@ public sealed class StockOpenShellRuntime(
         if (DescribeConfigDirFault() is { } dirFault) return (dirFault, null);
         if (LoadTemplate() is not { } template) return ("managed_authority_template_invalid", null);
         if (!MemoryDestinationMatches(template, memory!)) return ("managed_route_unsupported:mcp:" + memory!.McpName, null);
-        // #503: the same signer admission as API-key apply, here for the native memory route alone.
+        if (ServiceHostFault(agent, template) is { } hostFault) return (hostFault, null);
+        // #503: the same signer admission as API-key apply, for memory plus the selected service routes.
         if (signerAdmission && SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return (signerFault, null);
+        if (signerAdmission && GrantAdmissionFault(policy, template, agent, memory!) is { } grantFault) return (grantFault, null);
+        IReadOnlyDictionary<string, string> recorded;
+        try { recorded = RecordedServiceIds(ManagedRecord.Parse(agent.AppliedRuntimeBinding)); }
+        catch (JsonException) { return ("managed_binding_unreadable", null); }
         var (source, sourceFault) = ReadSource(agent.Name);
         if (sourceFault is not null) return (sourceFault, null);
         if (broker.DescribePreflightFault() is { } brokerFault) return (brokerFault, null);
@@ -819,8 +870,89 @@ public sealed class StockOpenShellRuntime(
         if (generation != source.GatewayGeneration) return (StockSubscriptionBinding.ProviderUnverified, null);
         if (await OwnershipFaultAsync(agent, source, ct) is { } ownerFault) return (ownerFault, null);
         if (await ProviderFaultAsync(source.ProviderWorkspace, source.ProviderName, source.ProviderId, ct) is { } providerFault) return (providerFault, null);
+        if (await ServiceProvidersFaultAsync(agent, source.ProviderWorkspace, recorded, ct) is { } serviceFault) return (serviceFault, null);
         return (null, source);
     }
+
+    /// <summary>
+    /// #510: a selected service provider's stock profile and credential key, and its name for one agent (the one naming rule
+    /// <see cref="ServiceSecrets"/> and subscription revalidation share).
+    /// </summary>
+    private static readonly (string Profile, string Suffix, string Key)[] ServiceKinds =
+    [
+        (TelegramProfile, "telegram", StockCredentials.TelegramBotToken),
+        (JournalProfile, "journal", StockCredentials.JournalIngestToken),
+        (JournalReadProfile, "journal-read", StockCredentials.JournalReadToken),
+        (JournalCrossChatProfile, "journal-cross-chat", StockCredentials.JournalCrossChatToken),
+    ];
+
+    internal static string ServiceProviderName(string agentName, string profile) =>
+        $"fleet-{agentName}-" + ServiceKinds.Single(k => k.Profile == profile).Suffix;
+
+    /// <summary>The (profile, credential key) of one recorded service provider name of this agent; null for any other name.</summary>
+    private static (string Profile, string Key)? ServiceKindOf(string agentName, string provider)
+    {
+        foreach (var kind in ServiceKinds)
+            if (ServiceProviderName(agentName, kind.Profile) == provider) return (kind.Profile, kind.Key);
+        return null;
+    }
+
+    /// <summary>
+    /// #510 (O2): a subscription binding's recorded service custody. A binding without service providers may omit the map
+    /// (older memory-only records); otherwise the map names exactly its service providers with distinct canonical UUIDs.
+    /// Any other shape is <see cref="StockSubscriptionBinding.ServiceProviderUnverified"/>, held and never reused.
+    /// </summary>
+    internal static string? ServiceCustodyFault(ManagedBinding binding)
+    {
+        if (!binding.IsSubscription) return null;
+        var ids = binding.ServiceProviderIds;
+        if (binding.ServiceProviders.Count == 0) return ids is null or { Count: 0 } ? null : StockSubscriptionBinding.ServiceProviderUnverified;
+        return ids is not null && ids.Count == binding.ServiceProviders.Count && binding.ServiceProviders.Distinct(StringComparer.Ordinal).Count() == ids.Count
+            && binding.ServiceProviders.All(name => ids.TryGetValue(name, out var id) && CanonicalUuid(id))
+            && ids.Values.Distinct(StringComparer.Ordinal).Count() == ids.Count
+            ? null : StockSubscriptionBinding.ServiceProviderUnverified;
+    }
+
+    private static bool CanonicalUuid(string? id) => Guid.TryParseExact(id, "D", out var uuid) && uuid != Guid.Empty && uuid.ToString("D") == id;
+
+    /// <summary>
+    /// #510: service provider UUIDs this agent recorded, most recent first: the applied binding, then retained subscription
+    /// history (a held candidate keeps a provider it created and checkpointed). Only canonical entries a binding lists among
+    /// its own service providers count; retired archives are inert and never rehydrated.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> RecordedServiceIds(ManagedRecord record)
+    {
+        var recorded = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var binding in new[] { record.Applied }.OfType<ManagedBinding>().Concat(record.Superseded.Reverse()).Where(b => b.IsSubscription))
+            foreach (var (name, id) in binding.ServiceProviderIds ?? new Dictionary<string, string>())
+                if (binding.ServiceProviders.Contains(name) && CanonicalUuid(id)) recorded.TryAdd(name, id);
+        return recorded;
+    }
+
+    /// <summary>
+    /// #510: each selected service provider in the persisted provider workspace, across every page, is either absent (a new
+    /// one this apply creates once) or exactly this agent's recorded one: same UUID, its profile type and only its credential
+    /// key. A same-named provider without that record is foreign or ambiguous: never adopted, updated or retried.
+    /// </summary>
+    private async Task<string?> ServiceProvidersFaultAsync(Agent agent, string workspace, IReadOnlyDictionary<string, string> recorded, CancellationToken ct)
+    {
+        var selected = SelectedProfiles(agent).Where(p => p != StockSubscriptionBinding.ProfileId).ToList();
+        if (selected.Count == 0) return null;
+        if (await ProviderEntriesAsync(workspace, ct) is not { } entries) return StockSubscriptionBinding.ServiceProviderUnverified;
+        foreach (var profile in selected)
+        {
+            var name = ServiceProviderName(agent.Name, profile);
+            var matches = entries.Where(e => e.Name == name).ToList();
+            var fine = recorded.TryGetValue(name, out var id)
+                ? matches is [var entry] && ServiceEntryMatches(entry, id, profile, ServiceKinds.Single(k => k.Profile == profile).Key)
+                : matches.Count == 0;
+            if (!fine) return StockSubscriptionBinding.ServiceProviderUnverified;
+        }
+        return null;
+    }
+
+    private static bool ServiceEntryMatches(StockProviderEntry entry, string id, string profile, string key) =>
+        entry.Id == id && entry.Type == profile && entry.CredentialKeys.SequenceEqual([key]);
 
     private (StockSubscriptionSource? Source, string? Fault) ReadSource(string agentName) =>
         StockSubscriptionBinding.Read(ConfigDir, agentName, Now, EffectiveUid?.Invoke() ?? CurrentEffectiveUid(), OwnerUid);
@@ -869,22 +1001,8 @@ public sealed class StockOpenShellRuntime(
     /// </summary>
     private async Task<string?> ProviderFaultAsync(string workspace, string name, string providerId, CancellationToken ct)
     {
-        var token = "";
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var matches = new List<StockProviderEntry>();
-        for (var page = 0; ; page++)
-        {
-            if (page >= MaxListPages) return StockSubscriptionBinding.ProviderUnverified;
-            var list = await cli.RunAsync(InWorkspace(workspace, token.Length == 0 ? ["provider", "list", "-o", "json"]
-                : ["provider", "list", "-o", "json", "--page-token", token]), null, LegTimeout, ct);
-            if (list.Missing || list.TimedOut || list.ExitCode != 0
-                || StockSubscriptionBinding.ParseProviderPage(list.Stdout) is not { } parsed) return StockSubscriptionBinding.ProviderUnverified;
-            if (parsed.Entries.Any(e => e.Workspace != workspace)) return StockSubscriptionBinding.ProviderUnverified;
-            matches.AddRange(parsed.Entries.Where(e => e.Name == name));
-            token = parsed.NextToken;
-            if (token.Length == 0) break;
-            if (!seen.Add(token)) return StockSubscriptionBinding.ProviderUnverified;
-        }
+        if (await ProviderEntriesAsync(workspace, ct) is not { } entries) return StockSubscriptionBinding.ProviderUnverified;
+        var matches = entries.Where(e => e.Name == name).ToList();
         if (matches is not [{ } provider] || provider.Id != providerId || provider.Type != StockSubscriptionBinding.ProfileId
             || !provider.CredentialKeys.SequenceEqual([StockSubscriptionBinding.CredentialKey]))
             return StockSubscriptionBinding.ProviderUnverified;
@@ -895,10 +1013,61 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// #502: the outside source and existing provider revalidated against a persisted tuple immediately before attachment
-    /// or activation. Missing/changed source, expiry or provider drift is a named fault; nothing is re-imported.
+    /// Every provider listed inside one persisted workspace, across every paginated page; null when a page is unreadable,
+    /// names another workspace, repeats a token or the page bound is exhausted. Never the ambient workspace.
     /// </summary>
-    private async Task<string?> RevalidateAsync(string agentName, ManagedBinding binding, CancellationToken ct)
+    private async Task<List<StockProviderEntry>?> ProviderEntriesAsync(string workspace, CancellationToken ct)
+    {
+        var token = "";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var entries = new List<StockProviderEntry>();
+        for (var page = 0; page < MaxListPages; page++)
+        {
+            var list = await cli.RunAsync(InWorkspace(workspace, token.Length == 0 ? ["provider", "list", "-o", "json"]
+                : ["provider", "list", "-o", "json", "--page-token", token]), null, LegTimeout, ct);
+            if (list.Missing || list.TimedOut || list.ExitCode != 0
+                || StockSubscriptionBinding.ParseProviderPage(list.Stdout) is not { } parsed) return null;
+            if (parsed.Entries.Any(e => e.Workspace != workspace)) return null;
+            entries.AddRange(parsed.Entries);
+            token = parsed.NextToken;
+            if (token.Length == 0) return entries;
+            if (!seen.Add(token)) return null;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// #502: the outside source and existing provider revalidated against a persisted tuple immediately before attachment
+    /// or activation. Missing/changed source, expiry or provider drift is a named fault; nothing is re-imported. #510: so are
+    /// the binding's recorded service providers and their selected profiles, in the same persisted provider workspace.
+    /// </summary>
+    private async Task<string?> RevalidateAsync(string agentName, ManagedBinding binding, CancellationToken ct) =>
+        await RevalidateNativeAsync(agentName, binding, ct) ?? await ServiceRevalidationFaultAsync(agentName, binding, ct);
+
+    /// <summary>
+    /// #510: the binding's complete recorded service custody, each provider observed exactly (name, UUID, profile type and
+    /// only its credential key), and each service profile's canonical digest equal to the binding policy's pinned value.
+    /// </summary>
+    private async Task<string?> ServiceRevalidationFaultAsync(string agentName, ManagedBinding binding, CancellationToken ct)
+    {
+        if (ServiceCustodyFault(binding) is { } custody) return custody;
+        if (binding.ServiceProviders.Count == 0) return null;
+        var workspace = binding.Subscription!.ProviderWorkspace;
+        var kinds = new List<(string Name, string Profile, string Key)>();
+        foreach (var name in binding.ServiceProviders)
+        {
+            if (ServiceKindOf(agentName, name) is not { } kind) return StockSubscriptionBinding.ServiceProviderUnverified;
+            kinds.Add((name, kind.Profile, kind.Key));
+        }
+        if (await ProviderEntriesAsync(workspace, ct) is not { } entries) return StockSubscriptionBinding.ServiceProviderUnverified;
+        foreach (var (name, profile, key) in kinds)
+            if (entries.Where(e => e.Name == name).ToList() is not [var entry] || !ServiceEntryMatches(entry, binding.ServiceProviderIds![name], profile, key))
+                return StockSubscriptionBinding.ServiceProviderUnverified;
+        return await PinnedProfilesFaultAsync(binding.PolicyVersionId, workspace, kinds.Select(k => k.Profile), ct);
+    }
+
+    /// <summary>#502: the native subscription source, scope, expiry, generation, profile and provider of a persisted tuple.</summary>
+    private async Task<string?> RevalidateNativeAsync(string agentName, ManagedBinding binding, CancellationToken ct)
     {
         if (ScopeFault(binding) is { } scope) return scope;
         if (binding.Subscription!.ExpiresAt <= Now) return StockSubscriptionBinding.Expired;
@@ -917,7 +1086,15 @@ public sealed class StockOpenShellRuntime(
     /// The subscription profile exported in its persisted provider workspace must hash to the pinned value of the
     /// binding's policy version, which must equal the outside source's <c>profileSha256</c>.
     /// </summary>
-    private async Task<string?> SubscriptionProfileFaultAsync(int policyVersionId, string providerWorkspace, string sourceHash, CancellationToken ct)
+    private Task<string?> SubscriptionProfileFaultAsync(int policyVersionId, string providerWorkspace, string sourceHash, CancellationToken ct) =>
+        PinnedProfilesFaultAsync(policyVersionId, providerWorkspace, [StockSubscriptionBinding.ProfileId], ct, sourceHash);
+
+    /// <summary>
+    /// Each profile exported in the persisted provider workspace (never the CLI default) must hash to the pinned value of
+    /// the binding's policy version; the subscription profile's pin must also equal the outside source's hash.
+    /// </summary>
+    private async Task<string?> PinnedProfilesFaultAsync(int policyVersionId, string providerWorkspace, IEnumerable<string> profiles, CancellationToken ct,
+        string? sourceHash = null)
     {
         SandboxPolicyVersion? policy;
         try { policy = await store.LoadPolicyAsync(policyVersionId, ct); }
@@ -926,14 +1103,17 @@ public sealed class StockOpenShellRuntime(
         Dictionary<string, string>? pinned;
         try { pinned = JsonSerializer.Deserialize<Dictionary<string, string>>(string.IsNullOrWhiteSpace(policy.ProviderProfileHashes) ? "{}" : policy.ProviderProfileHashes); }
         catch (JsonException) { return "provider_profile_hashes_invalid"; }
-        const string profile = StockSubscriptionBinding.ProfileId;
-        if (pinned?.TryGetValue(profile, out var hash) != true) return "provider_profile_unpinned:" + profile;
-        if (hash != sourceHash) return StockSubscriptionBinding.ProviderUnverified;
-        var export = await cli.RunAsync(InWorkspace(providerWorkspace, ProfileExport(profile)), null, LegTimeout, ct);
-        if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
-        // #503 W2: the canonical full-document digest, never the raw output (map order varies between exports).
-        if (StockProfileDigest.Compute(export.Stdout) is not { } actual) return "provider_profile_unverifiable:" + profile;
-        return actual == hash ? null : "provider_profile_hash_mismatch:" + profile;
+        foreach (var profile in profiles)
+        {
+            if (pinned?.TryGetValue(profile, out var hash) != true) return "provider_profile_unpinned:" + profile;
+            if (profile == StockSubscriptionBinding.ProfileId && hash != sourceHash) return StockSubscriptionBinding.ProviderUnverified;
+            var export = await cli.RunAsync(InWorkspace(providerWorkspace, ProfileExport(profile)), null, LegTimeout, ct);
+            if (export.Missing || export.TimedOut || export.ExitCode != 0) return "provider_profile_unverifiable:" + profile;
+            // #503 W2: the canonical full-document digest, never the raw output (map order varies between exports).
+            if (StockProfileDigest.Compute(export.Stdout) is not { } actual) return "provider_profile_unverifiable:" + profile;
+            if (actual != hash) return "provider_profile_hash_mismatch:" + profile;
+        }
+        return null;
     }
 
     /// <summary>
@@ -1018,12 +1198,13 @@ public sealed class StockOpenShellRuntime(
             or FormatException or StockIdentityDenied) { return null; }
     }
 
-    /// <summary>The stock provider profiles this agent's apply attaches: the native key, then each outside service.</summary>
+    /// <summary>
+    /// The stock provider profiles this agent's apply attaches: the native key (#502: the restricted subscription profile in
+    /// subscription mode), then each outside service the agent currently selects (#510: in both modes).
+    /// </summary>
     internal static IEnumerable<string> SelectedProfiles(Agent agent)
     {
-        // #502: a subscription agent selects only the restricted subscription profile (no service routes).
-        if (agent.NativeAuthMode == StockSubscriptionBinding.Mode) { yield return StockSubscriptionBinding.ProfileId; yield break; }
-        yield return "openai";
+        yield return agent.NativeAuthMode == StockSubscriptionBinding.Mode ? StockSubscriptionBinding.ProfileId : "openai";
         if (ContainerProvisioningService.HasTelegramBot(agent)) yield return TelegramProfile;
         if (JournalCapture(agent)) yield return JournalProfile;
         if (JournalRead(agent) || JournalFiles(agent)) yield return JournalReadProfile;
@@ -1047,12 +1228,12 @@ public sealed class StockOpenShellRuntime(
         catch (JsonException) { return "provider_profile_hashes_invalid"; }
         if (SelectedProfiles(agent).FirstOrDefault(p => pinned?.ContainsKey(p) != true) is { } unpinned) return "provider_profile_unpinned:" + unpinned;
         // #502: the subscription profile is exported only in the persisted provider workspace, and the outside binding
-        // must name that same pinned hash; other pinned profiles are not selected by a subscription agent.
+        // must name that same pinned hash. #510: so is each selected service profile; unselected pins are not exported.
         if (source is not null)
         {
-            var subscriptionHash = pinned![StockSubscriptionBinding.ProfileId];
-            if (subscriptionHash != source.ProfileSha256) return StockSubscriptionBinding.ProviderUnverified;
-            pinned = new() { [StockSubscriptionBinding.ProfileId] = subscriptionHash };
+            if (pinned![StockSubscriptionBinding.ProfileId] != source.ProfileSha256) return StockSubscriptionBinding.ProviderUnverified;
+            var selected = SelectedProfiles(agent).ToHashSet(StringComparer.Ordinal);
+            pinned = pinned.Where(p => selected.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);
         }
         foreach (var (profile, hash) in pinned ?? [])
         {
@@ -1340,6 +1521,10 @@ public sealed class StockOpenShellRuntime(
     private async Task<(ManagedRecord, string?, int?, Result)> ApplyOpenShellAsync(Agent agent, ManagedRecord record,
         Func<ManagedRecord, Task> checkpoint, CancellationToken ct)
     {
+        // #510 (O2): a live service-bearing subscription binding without its complete name→UUID custody is held before any
+        // effect, never reused; a clean revoke (cleanup by its persisted names) clears the hold.
+        if (record.Applied is { IsSubscription: true } custodial && record.State != "revoked" && ServiceCustodyFault(custodial) is { } custody)
+            return Hold(record, 409, custody);
         // Every prerequisite, including gateway client trust and generated inputs, precedes any old-runtime action.
         var (preflight, source) = await PreflightAsync(agent, ct);
         if (preflight is not null)
@@ -1403,18 +1588,22 @@ public sealed class StockOpenShellRuntime(
         var epoch = Guid.NewGuid();
         // #502: the subscription identity and both workspaces are captured in the candidate BEFORE any effect. #507: so is W.
         var tuple = subscription ? Tuple(source!) : null;
+        // #510: the recorded service providers this candidate keeps (preflight proved them unchanged), selected names only.
+        var serviceIds = subscription ? RecordedServiceIds(record).Where(p => serviceProviders.Contains(p.Key))
+            .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal) : null;
         var candidate = reuse
             ? record.Applied! with
             {
                 Epoch = epoch, PolicyVersionId = policy.Id, PolicySha256 = policy.Sha256, KeyRef = agent.ProviderApiKeyEnvRef ?? "",
                 GatewayGeneration = generation, ServiceProviders = serviceProviders, Subscription = tuple,
                 Provider = subscription ? source!.ProviderName : record.Applied!.Provider, WorkloadWorkspacePath = WorkloadWorkspace,
+                ServiceProviderIds = serviceIds is { Count: > 0 } ? serviceIds : null,
             }
             : new ManagedBinding(SandboxNameFor(agent.Name, epoch), "", epoch, image, policy.Id, policy.Sha256, mode,
                 agent.ProviderApiKeyEnvRef ?? "", subscription ? source!.ProviderName : $"fleet-{agent.Name}-openai", generation)
             {
                 ServiceProviders = serviceProviders, SandboxWorkspace = source?.SandboxWorkspace, Subscription = tuple,
-                WorkloadWorkspacePath = WorkloadWorkspace,
+                WorkloadWorkspacePath = WorkloadWorkspace, ServiceProviderIds = serviceIds is { Count: > 0 } ? serviceIds : null,
             };
         // #502: a reused sandbox rebound to a new outside identity keeps the old tuple as custody history.
         var history = reuse && record.Applied!.IsSubscription && subscription && !SameIdentity(record.Applied, source!)
@@ -1461,14 +1650,58 @@ public sealed class StockOpenShellRuntime(
 
         // Every outside provider exists with its current value before create/attach; values only in the CLI env.
         // #502: a subscription provider is never created, updated, imported or rotated here: the existing one is only
-        // verified in its persisted workspace, immediately before attachment.
+        // verified in its persisted workspace, immediately before attachment. #510: its service providers are ensured in
+        // that same workspace, then the complete recorded set and its profiles are revalidated before any attach.
         async Task<string?> EnsureProvidersAsync()
         {
-            if (subscription) return await RevalidateAsync(agent.Name, candidate, ct);
+            if (subscription)
+            {
+                if (await RevalidateNativeAsync(agent.Name, candidate, ct) is { } nativeFault) return nativeFault;
+                foreach (var service in serviceSecrets)
+                    if (await EnsureServiceProviderAsync(service) is { } serviceFault) return serviceFault;
+                return await ServiceRevalidationFaultAsync(agent.Name, candidate, ct);
+            }
             if (await EnsureProviderAsync(candidate.Provider, "openai", secret!, ct) is { } fault) return fault;
             foreach (var service in serviceSecrets)
                 if (await EnsureProviderAsync(service.Provider, service.Profile, new Dictionary<string, string> { [service.Key] = service.Value }, ct) is { } serviceFault)
                     return serviceFault;
+            return null;
+        }
+
+        // #510: one subscription service provider, only inside the persisted provider workspace, its value only in the CLI
+        // environment and never on the OAuth provider. The recorded one (exact UUID, profile type and credential key) is
+        // updated in place once. A new one is created once after its scoped absence across every page, and its UUID is
+        // checkpointed from scoped metadata before any attach. Foreign, ambiguous or uncertain outcomes hold; no adoption
+        // and no retry.
+        async Task<string?> EnsureServiceProviderAsync(ServiceSecret service)
+        {
+            var workspace = candidate.Subscription!.ProviderWorkspace;
+            if (await ProviderEntriesAsync(workspace, ct) is not { } entries) return StockSubscriptionBinding.ServiceProviderUnverified;
+            var matches = entries.Where(e => e.Name == service.Provider).ToList();
+            var value = new Dictionary<string, string> { [service.Key] = service.Value };
+            if (candidate.ServiceProviderIds?.GetValueOrDefault(service.Provider) is { } recorded)
+            {
+                if (matches is not [var entry] || !ServiceEntryMatches(entry, recorded, service.Profile, service.Key))
+                    return StockSubscriptionBinding.ServiceProviderUnverified;
+                var update = await cli.RunAsync(InWorkspace(workspace, ["provider", "update", service.Provider, "--credential", service.Key]), value, LegTimeout, ct);
+                return update.ExitCode == 0 && !update.TimedOut ? null : "provider_setup_unknown";
+            }
+            if (matches.Count != 0) return StockSubscriptionBinding.ServiceProviderUnverified;
+            var create = await cli.RunAsync(InWorkspace(workspace, ["provider", "create", "--name", service.Provider, "--type", service.Profile,
+                "--credential", service.Key]), value, LegTimeout, ct);
+            if (create.ExitCode != 0 || create.TimedOut) return "provider_setup_unknown";
+            if (await ProviderEntriesAsync(workspace, ct) is not { } after || after.Where(e => e.Name == service.Provider).ToList() is not [var created]
+                || !CanonicalUuid(created.Id) || !ServiceEntryMatches(created, created.Id, service.Profile, service.Key))
+                return StockSubscriptionBinding.ServiceProviderUnverified;
+            candidate = candidate with
+            {
+                ServiceProviderIds = new Dictionary<string, string>(candidate.ServiceProviderIds ?? new Dictionary<string, string>(), StringComparer.Ordinal)
+                {
+                    [service.Provider] = created.Id,
+                },
+            };
+            applying = applying with { Candidate = candidate };
+            await checkpoint(applying);
             return null;
         }
 
@@ -1715,7 +1948,7 @@ public sealed class StockOpenShellRuntime(
         {
             var (token, id, fault) = TelegramCredential(agent);
             if (fault is not null) return ([], null, fault);
-            secrets.Add(new($"fleet-{agent.Name}-telegram", TelegramProfile, StockCredentials.TelegramBotToken, token!));
+            secrets.Add(new(ServiceProviderName(agent.Name, TelegramProfile), TelegramProfile, StockCredentials.TelegramBotToken, token!));
             botId = id;
         }
         if (JournalCapture(agent))
@@ -1724,7 +1957,7 @@ public sealed class StockOpenShellRuntime(
             try { ingest = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, "appsettings.json")))?["Journal"]?["IngestToken"]?.GetValue<string>(); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { ingest = null; }
             if (string.IsNullOrEmpty(ingest)) return ([], null, "journal_token_unresolved");
-            secrets.Add(new($"fleet-{agent.Name}-journal", JournalProfile, StockCredentials.JournalIngestToken, ingest));
+            secrets.Add(new(ServiceProviderName(agent.Name, JournalProfile), JournalProfile, StockCredentials.JournalIngestToken, ingest));
         }
         if (JournalRead(agent) || JournalFiles(agent))
         {
@@ -1745,7 +1978,7 @@ public sealed class StockOpenShellRuntime(
             var read = header ?? files;
             if (string.IsNullOrWhiteSpace(read) || read.Any(char.IsWhiteSpace) || files is not null && files != read)
                 return ([], null, "journal_token_unresolved");
-            secrets.Add(new($"fleet-{agent.Name}-journal-read", JournalReadProfile, StockCredentials.JournalReadToken, read));
+            secrets.Add(new(ServiceProviderName(agent.Name, JournalReadProfile), JournalReadProfile, StockCredentials.JournalReadToken, read));
         }
         if (JournalFiles(agent) && JournalGrants.CrossChatEffective(agent))
         {
@@ -1753,7 +1986,7 @@ public sealed class StockOpenShellRuntime(
             try { cross = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, "appsettings.json")))?["Journal"]?["CrossChatToken"]?.GetValue<string>(); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { cross = null; }
             if (string.IsNullOrWhiteSpace(cross) || cross.Any(char.IsWhiteSpace)) return ([], null, "journal_token_unresolved");
-            secrets.Add(new($"fleet-{agent.Name}-journal-cross-chat", JournalCrossChatProfile, StockCredentials.JournalCrossChatToken, cross));
+            secrets.Add(new(ServiceProviderName(agent.Name, JournalCrossChatProfile), JournalCrossChatProfile, StockCredentials.JournalCrossChatToken, cross));
         }
         return (secrets, botId, null);
     }
@@ -1898,8 +2131,9 @@ public sealed class StockOpenShellRuntime(
             if (binding.Subscription!.ExpiresAt <= Now) return await ExpireAsync(agent.Name, record);
             var (source, sourceFault) = ReadSource(agent.Name);
             if (sourceFault == StockSubscriptionBinding.Expired) return await ExpireAsync(agent.Name, record);
+            // #510 (O2): incomplete recorded service custody is held the same way (cleanup by persisted names, no Start).
             var drift = sourceFault ?? (source!.SourceSha256 != binding.Subscription.SourceSha256 || !SameIdentity(binding, source)
-                ? StockSubscriptionBinding.Changed : null);
+                ? StockSubscriptionBinding.Changed : null) ?? ServiceCustodyFault(binding);
             if (drift is not null) return Hold(record, 409, drift, [.. await RevokeFanoutAsync(agent.Name, record, ct)]);
             if (await RevalidateAsync(agent.Name, binding, ct) is { } unverified) return (record, null, null, Result.Refused(409, unverified));
         }

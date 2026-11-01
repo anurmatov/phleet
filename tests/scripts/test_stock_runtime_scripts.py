@@ -40,18 +40,21 @@ class RolloutGuardTests(unittest.TestCase):
         return subprocess.run(["bash", str(GUARD), *args], env=environment, capture_output=True, text=True)
 
     def dockerfile(self, labelled):
-        # #502/#507: a fully capable target declares the managed, subscription AND workspace-layout capability.
+        # #502/#507/#510: a fully capable target declares the managed, subscription, workspace-layout AND
+        # subscription-services capability.
         path = Path(self.tmp.name, "Dockerfile")
         path.write_text("FROM x\n" + ("LABEL org.phleet.managed-stock-runtime=1\n"
                                        "LABEL org.phleet.managed-stock-subscription=1\n"
-                                       "LABEL org.phleet.managed-stock-workspace=1\n" if labelled else ""))
+                                       "LABEL org.phleet.managed-stock-workspace=1\n"
+                                       "LABEL org.phleet.managed-stock-subscription-services=1\n" if labelled else ""))
         return str(path)
 
     def test_pre_workspace_managed_target_needs_every_openshell_binding_handed_back(self):
         # #507 A12: a managed target from before the HOME/workspace layout never takes the shortcut.
         path = Path(self.tmp.name, "Dockerfile.pre507")
         path.write_text("FROM x\nLABEL org.phleet.managed-stock-runtime=1\nLABEL org.phleet.managed-stock-subscription=1\n")
-        counts = '{{"desiredOpenShell":2,"appliedOpenShell":{0},"unresolvedBindings":{1},"subscriptionBindings":1}}'
+        # #510: it also predates subscription service custody, so subscription bindings must be retired too.
+        counts = '{{"desiredOpenShell":2,"appliedOpenShell":{0},"unresolvedBindings":{1},"subscriptionBindings":0}}'
         for applied, unresolved, code in [(1, 0, 1), (0, 1, 1), (0, 0, 0)]:
             with self.subTest(applied=applied, unresolved=unresolved):
                 result = self.run_guard("--dockerfile", str(path), ORCHESTRATOR_AUTH_TOKEN="t", STUB_CURL_OUT=counts.format(applied, unresolved))

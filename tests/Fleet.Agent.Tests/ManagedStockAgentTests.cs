@@ -230,6 +230,228 @@ public sealed class ManagedStockAgentTests
             () => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
     }
 
+    // #514: synthetic preparation diagnostics, not an Apply or installed-runtime reproduction.
+    [Fact]
+    public void NativePreparation_SamePlaceholderAndBinding_RepreparesAndRegistersUnchangedBytes()
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder));
+        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder);
+
+        f.AssertNativeUnchanged(before);
+    }
+
+    [Fact]
+    public void NativePreparation_ChangedPlaceholderWithFixedBinding_RefusesWithoutReplacingCache()
+    {
+        using var f = new Fixture();
+        const string next = "openshell:resolve:env:v8_OPENAI_API_KEY";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        // B is a supported input and the authority/binding remain valid: only the cache differs.
+        Assert.Equal(b.Epoch, StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => next)!.Epoch);
+        b.RequireBinding(StockEnrollmentAuthority.Load(f.Settings["StockOpenShell:AuthorityFile"]!));
+
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => next)).Message);
+        f.AssertNativeUnchanged(before);
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => next)).Message);
+        f.AssertNativeUnchanged(before);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder);
+    }
+
+    [Theory]
+    [InlineData("epoch")]
+    [InlineData("revoked")]
+    public void NativePreparation_ChangedAuthorityWithFixedPlaceholder_RefusesStaleBindingWithoutWrites(string fault)
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder);
+        var before = f.NativeBytes();
+        var path = f.Settings["StockOpenShell:AuthorityFile"]!;
+        var authority = StockEnrollmentAuthority.Load(path);
+        var changed = fault == "epoch" ? authority with { Epoch = Guid.NewGuid() } : authority with { State = "revoked" };
+        File.WriteAllText(path, JsonSerializer.Serialize(changed));
+        Assert.Throws<StockIdentityDenied>(() => b.RequireBinding(changed));
+
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+
+        // Matching active authority/binding is the crossed control, still with placeholder A.
+        if (fault == "revoked") File.WriteAllText(path, JsonSerializer.Serialize(authority));
+        var current = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, current, f.Root, _ => Placeholder);
+        StockOpenShellEnrollment.RequirePrepared(c, current, f.Home, _ => Placeholder);
+        f.AssertNativeUnchanged(before);
+    }
+
+    [Theory]
+    [InlineData("literal")]
+    [InlineData("malformed")]
+    [InlineData("extra_field")]
+    public void NativePreparation_ForeignOrMalformedCache_RefusesWithoutAdoptingOrReplacingIt(string fault)
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        File.WriteAllText(Path.Combine(f.Home, ".codex", "auth.json"), fault switch
+        {
+            "literal" => "{\"OPENAI_API_KEY\":\"synthetic-private-value\"}",
+            "malformed" => "synthetic-private-invalid-json",
+            _ => JsonSerializer.Serialize(new { OPENAI_API_KEY = Placeholder, tokens = "synthetic-private-value" }),
+        });
+        var before = f.NativeBytes();
+
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+    }
+
+    [Fact]
+    public void NativePreparation_PreparedConfigMismatch_RegistrationRefusesWithoutChangingFiles()
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        File.AppendAllText(Path.Combine(f.Home, ".codex", "config.toml"), "\n# synthetic drift\n");
+        var before = f.NativeBytes();
+
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+    }
+
+    [Fact]
+    public void NativePreparation_RootTomlMismatch_PreparationReturnsDistinctReasonBeforeWrites()
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        File.AppendAllText(f.Root, "\n# synthetic drift\n");
+        var changedRoot = File.ReadAllBytes(f.Root);
+
+        Assert.Equal("stock_enrollment_native_config_mismatch", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+        Assert.Equal(changedRoot, File.ReadAllBytes(f.Root));
+    }
+
+    [Theory]
+    [InlineData("mode")]
+    [InlineData("symlink")]
+    public void NativePreparation_UnsafeNativeFile_RefusesWithoutChangingFilesOrLinkTarget(string fault)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Stock startup requires Linux");
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var auth = Path.Combine(f.Home, ".codex", "auth.json");
+        if (fault == "mode") File.SetUnixFileMode(auth, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.OtherRead);
+        else
+        {
+            File.Delete(auth);
+            File.CreateSymbolicLink(auth, f.Root);
+        }
+        var before = f.NativeBytes();
+        var root = File.ReadAllBytes(f.Root);
+
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+        Assert.Equal(root, File.ReadAllBytes(f.Root));
+        if (fault == "symlink") Assert.Equal(f.Root, new FileInfo(auth).LinkTarget);
+        else Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.OtherRead, File.GetUnixFileMode(auth));
+    }
+
+    [Fact]
+    public void NativePreparation_UnreadableAuthFile_ReturnsBoundedReasonWithoutWrites()
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        using (var locked = new FileStream(Path.Combine(f.Home, ".codex", "auth.json"), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+                StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+            Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+                StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
+        }
+        f.AssertNativeUnchanged(before);
+    }
+
+    [Fact]
+    public void NativePreparation_TemporaryWritePathTooLong_ReturnsBoundedReasonAndRetainsInputs()
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Stock startup requires Linux");
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        var root = File.ReadAllBytes(f.Root);
+        var authorityPath = f.Settings["StockOpenShell:AuthorityFile"]!;
+        var authority = File.ReadAllBytes(authorityPath);
+
+        // Linux PATH_MAX includes the terminator: existing inputs fit, but PrivateWrite's
+        // extra dot + 32-hex GUID + .tmp cannot fit. This fails even when tests run as root.
+        var home = f.Home;
+        while (home.Length < 4053)
+            home = Path.Combine(home, new string('d', Math.Max(1, Math.Min(200, 4053 - home.Length - 1))));
+        var directory = Path.Combine(home, ".codex");
+        Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        foreach (var leaf in new[] { "auth.json", "config.toml" })
+        {
+            var path = Path.Combine(directory, leaf);
+            Assert.True(path.Length < 4096);
+            File.Copy(Path.Combine(f.Home, ".codex", leaf), path);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        Assert.True((Path.Combine(directory, "auth.json") + "." + new string('0', 32) + ".tmp").Length >= 4096);
+        // Establish that admission, binding, private inputs and all reads succeed before the write.
+        Assert.NotNull(StockOpenShellEnrollment.Validate(c, home, () => 10001, f.Root, _ => Placeholder));
+        StockOpenShellEnrollment.RequirePrepared(c, b, home, _ => Placeholder);
+
+        Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, home, b, f.Root, _ => Placeholder)).Message);
+
+        Assert.Equal(before.Auth, File.ReadAllBytes(Path.Combine(directory, "auth.json")));
+        Assert.Equal(before.Config, File.ReadAllBytes(Path.Combine(directory, "config.toml")));
+        Assert.Empty(Directory.GetFiles(directory, "*.tmp"));
+        Assert.Equal(root, File.ReadAllBytes(f.Root));
+        Assert.Equal(authority, File.ReadAllBytes(authorityPath));
+        f.AssertNativeUnchanged(before);
+        StockOpenShellEnrollment.RequirePrepared(c, b, home, _ => Placeholder);
+    }
+
     // ── own Telegram bot and journal capture (#492) ────────────────────────
 
     private const string TelegramPlaceholder = "openshell:resolve:env:v7_TELEGRAM_BOT_TOKEN";
@@ -926,6 +1148,15 @@ public sealed class ManagedStockAgentTests
                 : "{\"mcpServers\":{\"" + memoryName + "\":{\"url\":\"https://memory.example.test/mcp\"},\"fleet-comms-journal\":{\"url\":\"https://" + journalRead.Host + journalRead.Path + "\"}}}");
         }
         public IConfiguration Config() => new ConfigurationBuilder().AddInMemoryCollection(Settings).Build();
+        public (byte[] Auth, byte[] Config) NativeBytes() =>
+            (File.ReadAllBytes(Path.Combine(Home, ".codex", "auth.json")), File.ReadAllBytes(Path.Combine(Home, ".codex", "config.toml")));
+        public void AssertNativeUnchanged((byte[] Auth, byte[] Config) before)
+        {
+            var after = NativeBytes();
+            Assert.Equal(before.Auth, after.Auth);
+            Assert.Equal(before.Config, after.Config);
+            Assert.Empty(Directory.GetFiles(Path.Combine(Home, ".codex"), "*.tmp"));
+        }
         public void Dispose() => Directory.Delete(_dir, true);
     }
 }

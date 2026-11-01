@@ -443,6 +443,42 @@ Explicit `Agent:NativeAuthMode=api_key` and `Agent:ProviderApiKeyEnvRef` prepare
 The reference is never resolved inside the workload, and placeholder syntax is not proof of stock issuance, acknowledged provider attachment, or secret isolation.
 With `StockOpenShell:ManagedEnabled=true` the managed runtime below performs apply; the existing manual profile still requires its original auth input.
 
+### Synthetic preparation diagnostics (#514)
+
+The existing `Fixture` in `tests/Fleet.Agent.Tests/ManagedStockAgentTests.cs`
+exercises preparation and registration checks with synthetic files,
+injected placeholders and crossed authority/binding controls, without a provider or gateway.
+
+| Case | Measured result |
+|---|---|
+| Same placeholder A and matching binding, twice | Preparation and registration accepted, native bytes unchanged |
+| Placeholder A → B, matching binding fixed | Validation accepts B, preparation and registration refuse `stock_enrollment_native_not_prepared`, old native bytes retained and still usable with A |
+| Placeholder A fixed, authority epoch changed or authority revoked | Stale binding refused by both paths as `stock_enrollment_native_not_prepared`, native bytes retained |
+| Matching active binding restored or revalidated, placeholder A fixed | Preparation and registration accepted again, native bytes unchanged |
+| Literal, malformed or extra-field auth cache | Both paths refuse `stock_enrollment_native_not_prepared`, existing bytes retained |
+| Prepared `config.toml` drift | Registration refuses `stock_enrollment_native_not_prepared`, existing bytes retained |
+| Root-TOML drift | Preparation refuses the distinct `stock_enrollment_native_config_mismatch` before native writes |
+| Nonprivate mode or symlink | Both paths refuse `stock_enrollment_native_path_invalid`, bytes and link target retained |
+| Auth-file read blocked by an exclusive synthetic file handle | Both paths refuse `stock_enrollment_native_not_prepared`, native bytes retained |
+| Atomic temporary-write path exceeds Linux `PATH_MAX`, existing native paths still readable | Preparation refuses `stock_enrollment_native_not_prepared`, native bytes, root TOML and authority retained, no temporary file, registration check still succeeds |
+| Installed-image provenance, actual Apply/Stop and real receiver reads | Not exercised by these synthetic controls |
+
+Reproduce the selected cases, checking discovery first:
+
+```sh
+p=tests/Fleet.Agent.Tests
+f='FullyQualifiedName~'
+f+='ManagedStockAgentTests.'
+f+='NativePreparation_'
+dotnet test "$p" --filter "$f" \
+  --list-tests
+dotnet test "$p" --filter "$f"
+```
+
+These results distinguish source refusal paths, not the live re-Apply trigger, a safe
+cache-refresh repair, PR513 A15 acceptance or permission to delete a cache, weaken
+authority checks, reorder revocation or start a runtime.
+
 ## Managed runtime (#492, default off)
 
 `StockOpenShell:ManagedEnabled=false` (`FLEET_STOCK_MANAGED_ENABLED`) keeps every agent on Docker and

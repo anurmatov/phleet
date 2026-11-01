@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -58,7 +59,29 @@ public sealed class ManagedSignerPolicyIntegrationTests : IAsyncLifetime
         _t.Dispose();
     }
 
-    private StockOpenShellRuntime Runtime() => _t.Runtime(cli: _cli, store: _app.Services.GetRequiredService<IManagedBindingStore>());
+    private StockOpenShellRuntime Runtime(ContainerProvisioningService? provisioning = null) =>
+        _t.Runtime(cli: _cli, store: _app.Services.GetRequiredService<IManagedBindingStore>(), provisioning: provisioning);
+
+    /// <summary>
+    /// #512: the real provisioning service over this test's SQLite rows, generating into an owned temporary base
+    /// directory under the fixture's own directory (removed with it). No Docker call is made by managed generation.
+    /// </summary>
+    private ContainerProvisioningService Provisioning()
+    {
+        var baseDir = Directory.CreateDirectory(Path.Combine(_t._dir, "provisioning")).FullName;
+        var env = Path.Combine(baseDir, ".env");
+        File.WriteAllText(env, "FLEET_CTO_AGENT=cto-agent\n");
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Provisioning:BaseDir"] = baseDir,
+            ["Provisioning:EnvFilePath"] = env,
+            ["FleetMemory:McpUrl"] = "http://fleet-memory:3100",
+            ["Docker:SocketPath"] = Path.Combine(baseDir, "absent.sock"),
+        }).Build();
+        return new ContainerProvisioningService(_app.Services.GetRequiredService<IServiceScopeFactory>(),
+            new DockerService(Microsoft.Extensions.Logging.Abstractions.NullLogger<DockerService>.Instance, config), config,
+            new JournalTokenService(config), Microsoft.Extensions.Logging.Abstractions.NullLogger<ContainerProvisioningService>.Instance);
+    }
 
     private async Task<T> WithDb<T>(Func<OrchestratorDbContext, Task<T>> action)
     {
@@ -182,6 +205,58 @@ public sealed class ManagedSignerPolicyIntegrationTests : IAsyncLifetime
         Assert.Equal(ManagedRecord.Parse(before).State, ManagedRecord.Parse(stored.AppliedRuntimeBinding).State);
         Assert.Null(ManagedRecord.Parse(stored.AppliedRuntimeBinding).Candidate);
         Assert.False(File.Exists(_t.AuthorityPath()));
+    }
+
+    /// <summary>
+    /// #512 A10/A13/A16/A17 through the authenticated policy API, the EF store and the real managed generation path: an
+    /// API-key agent holding get/list/search under either accepted name with a saved get-only version refuses with zero
+    /// effects; an appended explicit all-read version, selected as desired only, then applies with its exact saved bytes and
+    /// a bundle carrying exactly those three grants. The old version's bytes and hash stay as saved.
+    /// </summary>
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("fleet-memory")]
+    public async Task ManagedMemoryReads_upgrade_refusal_and_explicit_version_recovery_through_the_real_store_and_generation(string name)
+    {
+        var policy = await Create(SignedPolicy.MemoryOnly);
+        var oldId = await WithDb(db => db.SandboxPolicyVersions.Where(v => v.PolicyId == policy).Select(v => v.Id).SingleAsync());
+        var agent = _t.ManagedAgentWithReads(name, "memory_get", "memory_list", "memory_search");
+        agent.SandboxPolicyVersionId = oldId;
+        await WithDb(async db => { db.Agents.Add(agent); return await db.SaveChangesAsync(); });
+        var grants = await WithDb(db => db.AgentTools.OrderBy(t => t.ToolName).Select(t => t.ToolName + ":" + t.IsEnabled).ToListAsync());
+        _t._host.DockerStates = ["exited"];
+        var runtime = Runtime(Provisioning());
+
+        var refused = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "managed_route_unsupported:mcp:" + name), (refused.Status, refused.Code));
+        Assert.Empty(_cli.Inner.Calls);
+        Assert.Empty(_t._broker.Writes);
+        Assert.False(File.Exists(_t.AuthorityPath()));
+        var unchanged = await Stored();
+        Assert.Equal(("docker", (int?)null, "api_key"), (unchanged.AppliedRuntimeKind, unchanged.AppliedSandboxPolicyVersionId, unchanged.NativeAuthMode));
+
+        // Recovery: append version 2 admitting every existing read grant, select it (desired-only save), then Apply.
+        var reads = SignedPolicy.MemoryReads("memory_get", "memory_list", "memory_search");
+        var appended = await Append(policy, 2, reads);
+        var newId = appended.GetProperty("id").GetInt32();
+        await WithDb(async db => { (await db.Agents.SingleAsync()).SandboxPolicyVersionId = newId; return await db.SaveChangesAsync(); });
+
+        var applied = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(applied.Ok, applied.Message);
+        var create = Assert.Single(_cli.PolicyInputs, p => p.Verb == "create");
+        Assert.Equal(Encoding.UTF8.GetBytes(reads), create.Bytes);
+        var stored = await Stored();
+        Assert.Equal(("openshell", (int?)newId), (stored.AppliedRuntimeKind, stored.AppliedSandboxPolicyVersionId));
+        Assert.Equal(SandboxPolicyValidation.Hash(reads), ManagedRecord.Parse(stored.AppliedRuntimeBinding).Applied!.PolicySha256);
+        Assert.Equal([$"mcp__{name}__memory_get", $"mcp__{name}__memory_list", $"mcp__{name}__memory_search"],
+            ManagedStockRuntimeAdapterTests.BundledMemoryTools(_t._cli));
+        // Grant rows are never pruned or edited; the old version keeps its exact saved bytes and hash.
+        Assert.Equal(grants, await WithDb(db => db.AgentTools.OrderBy(t => t.ToolName).Select(t => t.ToolName + ":" + t.IsEnabled).ToListAsync()));
+        var old = await _client.GetFromJsonAsync<JsonElement>($"/api/sandbox-policies/{policy}/versions/1");
+        Assert.Equal((SignedPolicy.MemoryOnly, SandboxPolicyValidation.Hash(SignedPolicy.MemoryOnly)),
+            (old.GetProperty("yaml").GetString(), old.GetProperty("sha256").GetString()));
     }
 
     /// <summary>Delegates to the adapter fake and records the bytes of every <c>--policy</c> file as the CLI is invoked.</summary>

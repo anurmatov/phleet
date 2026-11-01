@@ -559,7 +559,7 @@ public sealed class ManagedStockAgentTests
     [InlineData("account")]
     [InlineData("provider")]
     [InlineData("extra_route")]
-    [InlineData("no_memory_get")]
+    [InlineData("no_memory_read")]
     public void Subscription_wrong_input_exits_before_registration_and_writes(string fault)
     {
         using var f = SubscriptionFixture();
@@ -575,7 +575,8 @@ public sealed class ManagedStockAgentTests
             case "account": f.Settings["StockOpenShell:SubscriptionAccountId"] = "bad account"; break;
             case "provider": f.Settings["StockOpenShell:SubscriptionProvider"] = "other-codex-sub"; break;
             case "extra_route": f.Settings["StockOpenShell:TelegramBotId"] = "424242"; break;
-            case "no_memory_get": f.Settings["Agent:AllowedTools:0"] = "mcp__memory__memory_search"; break;
+            // #512: any fixed read now suffices, so only a grant set without one refuses.
+            case "no_memory_read": f.Settings["Agent:AllowedTools:0"] = "mcp__memory__memory_store"; break;
         }
         var c = f.Config();
         var error = Assert.Throws<InvalidOperationException>(() =>
@@ -655,7 +656,7 @@ public sealed class ManagedStockAgentTests
     [Theory]
     [InlineData("memory")]
     [InlineData("fleet-memory")]
-    public void Subscription_registers_exactly_memory_get_under_the_workload_name(string name)
+    public void Subscription_registers_exactly_its_selected_name_reads_under_the_workload_name(string name)
     {
         using var f = SubscriptionFixture(name);
         f.Settings["Agent:AllowedTools:1"] = $"mcp__{name}__memory_search";
@@ -664,7 +665,8 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv);
         var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
-        Assert.EndsWith("\n[features]\nplugins = false\napps = false\n" + MemoryTable(name, "[\"memory_get\"]"), config);
+        // #512: no forced get-only replacement; the same selected-name grants as API-key mode.
+        Assert.EndsWith("\n[features]\nplugins = false\napps = false\n" + MemoryTable(name, "[\"memory_get\",\"memory_search\"]"), config);
         Assert.Equal(1, McpTables(config));
     }
 
@@ -722,9 +724,10 @@ public sealed class ManagedStockAgentTests
     }
 
     [Theory]
-    [InlineData("mcp__fleet-memory__memory_search")]
     [InlineData("mcp__memory__memory_get")]
-    public void Subscription_under_the_ordinary_name_needs_its_own_memory_get_grant(string grant)
+    [InlineData("mcp__memory__memory_search")]
+    [InlineData("mcp__fleet-memory__memory_store")]
+    public void Subscription_under_the_ordinary_name_needs_its_own_read_grant(string grant)
     {
         using var f = SubscriptionFixture("fleet-memory");
         f.Settings["Agent:AllowedTools:0"] = grant;
@@ -735,6 +738,121 @@ public sealed class ManagedStockAgentTests
             StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
         }).Message);
         Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
+    }
+
+    // ── #512: explicitly granted read-only memory tools in both managed auth modes ─────────────
+
+    private static Fixture ManagedFixture(string mode, string name) => mode == "subscription" ? SubscriptionFixture(name) : new Fixture(memoryName: name);
+
+    private static Func<string, string?> ManagedEnv(string mode) => mode == "subscription" ? SubscriptionEnv : _ => Placeholder;
+
+    /// <summary>Replaces the configured AllowedTools with exactly these entries.</summary>
+    private static void Grants(Fixture f, params string[] grants)
+    {
+        foreach (var key in f.Settings.Keys.Where(k => k.StartsWith("Agent:AllowedTools:", StringComparison.Ordinal)).ToList()) f.Settings.Remove(key);
+        for (var i = 0; i < grants.Length; i++) f.Settings[$"Agent:AllowedTools:{i}"] = grants[i];
+    }
+
+    // A2–A5, A11: preparation then registration in both auth modes under either accepted name: the native memory table is
+    // exactly the selected-name read grants (deterministic, identical at both stages); the other name's grant never counts.
+    [Theory]
+    [InlineData("api_key", "memory", "memory_get")]
+    [InlineData("api_key", "fleet-memory", "memory_list")]
+    [InlineData("api_key", "memory", "memory_search")]
+    [InlineData("api_key", "fleet-memory", "memory_get", "memory_list", "memory_search")]
+    [InlineData("subscription", "fleet-memory", "memory_get")]
+    [InlineData("subscription", "memory", "memory_list")]
+    [InlineData("subscription", "fleet-memory", "memory_search")]
+    [InlineData("subscription", "memory", "memory_get", "memory_list", "memory_search")]
+    public void ManagedMemoryReads_both_modes_register_exactly_the_selected_name_reads(string mode, string name, params string[] reads)
+    {
+        using var f = ManagedFixture(mode, name);
+        var other = name == "memory" ? "fleet-memory" : "memory";
+        Grants(f, [.. reads.Select(r => $"mcp__{name}__{r}"), $"mcp__{other}__memory_get", $"mcp__{other}__memory_search"]);
+        var env = ManagedEnv(mode);
+        var c = f.Config();
+
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, env);
+        var prepared = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        // Registration: the same validation, then the prepared native profile must equal the deterministic builder's bytes.
+        var registered = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
+        StockOpenShellEnrollment.RequirePrepared(c, registered, f.Home, env);
+
+        Assert.EndsWith(MemoryTable(name, JsonSerializer.Serialize(reads)), prepared);
+        Assert.Equal(1, McpTables(prepared));
+        Assert.Equal(prepared, File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml")));
+    }
+
+    // A11: managed memory grants outside the fixed reads, or none at all under the selected name, refuse before any native
+    // write instead of being filtered away, in both auth modes.
+    [Theory]
+    [InlineData("api_key", "stock_enrollment_mcp_route_invalid", "mcp__memory__memory_list", "mcp__memory__memory_store")]
+    [InlineData("api_key", "stock_enrollment_mcp_route_invalid", "mcp__memory__memory_get", "mcp__memory__memory_unknown")]
+    [InlineData("api_key", "stock_enrollment_memory_tools_missing", "mcp__memory__memory_delete")]
+    [InlineData("api_key", "stock_enrollment_memory_tools_missing", "mcp__fleet-memory__memory_list")]
+    [InlineData("subscription", "stock_enrollment_mcp_route_invalid", "mcp__memory__memory_search", "mcp__memory__memory_update")]
+    [InlineData("subscription", "stock_enrollment_memory_tools_missing", "mcp__memory__memory_store")]
+    [InlineData("subscription", "stock_enrollment_memory_tools_missing", "mcp__fleet-memory__memory_get")]
+    public void ManagedMemoryReads_unsupported_or_empty_managed_memory_grants_refuse_before_any_native_write(string mode, string code, params string[] grants)
+    {
+        using var f = ManagedFixture(mode, "memory");
+        Grants(f, grants);
+        var env = ManagedEnv(mode);
+        var c = f.Config();
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env));
+
+        Assert.Equal(code, refusal.Message);
+        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+    }
+
+    [Fact]
+    public void ManagedMemoryReads_manual_profile_keeps_its_read_intersection()
+    {
+        using var f = new Fixture();
+        f.Settings.Remove("Agent:NativeAuthMode");
+        f.Settings.Remove("Agent:ProviderApiKeyEnvRef");
+        Grants(f, "mcp__memory__memory_get", "mcp__memory__memory_store");
+        Directory.CreateDirectory(Path.Combine(f.Home, ".codex-host"));
+        File.WriteAllText(Path.Combine(f.Home, ".codex-host", "auth.json"), "{\"synthetic_manual\":true}\n");
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => null)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => null);
+
+        Assert.False(StockOpenShellEnrollment.IsManaged(c));
+        Assert.EndsWith(MemoryTable("memory", "[\"memory_get\"]"), File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml")));
+    }
+
+    // A11: registration refuses a native table that no longer matches the current selected-name reads: an edited table, or
+    // reads added after preparation (stale native config) until preparation runs again.
+    [Theory]
+    [InlineData("api_key")]
+    [InlineData("subscription")]
+    public void ManagedMemoryReads_registration_refuses_a_native_table_drifted_from_the_prepared_reads(string mode)
+    {
+        using var f = ManagedFixture(mode, "fleet-memory");
+        Grants(f, "mcp__fleet-memory__memory_list");
+        var env = ManagedEnv(mode);
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, env);
+        var path = Path.Combine(f.Home, ".codex", "config.toml");
+        var good = File.ReadAllText(path);
+        Assert.EndsWith(MemoryTable("fleet-memory", "[\"memory_list\"]"), good);
+
+        File.WriteAllText(path, good.Replace("enabled_tools = [\"memory_list\"]", "enabled_tools = [\"memory_list\",\"memory_get\"]"));
+        Assert.Equal("stock_enrollment_native_not_prepared",
+            Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, env)).Message);
+        File.WriteAllText(path, good);
+        StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, env);
+
+        f.Settings["Agent:AllowedTools:1"] = "mcp__fleet-memory__memory_search";
+        var widened = f.Config();
+        Assert.Equal("stock_enrollment_native_not_prepared",
+            Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(widened, b, f.Home, env)).Message);
+        StockOpenShellEnrollment.PrepareNative(widened, f.Home, b, f.Root, env);
+        Assert.EndsWith(MemoryTable("fleet-memory", "[\"memory_list\",\"memory_search\"]"), File.ReadAllText(path));
     }
 
     [Fact]

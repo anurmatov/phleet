@@ -243,6 +243,97 @@ public class ContainerProvisioningServiceTests
         Assert.Single(tools, t => t == "mcp__fleet-memory__memory_get");
     }
 
+    // ── #512: managed bundle generation adds no implicit memory_get ───────────
+
+    private static List<string> ManagedAllowedTools(Agent agent) =>
+        JsonDocument.Parse(ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent", managed: true)).RootElement
+            .GetProperty("Agent").GetProperty("AllowedTools").EnumerateArray().Select(e => e.GetString()!).ToList();
+
+    private static Agent CodexWithGrants(params (string Tool, bool Enabled)[] grants)
+    {
+        var agent = MinimalAgent("agent1", "codex");
+        foreach (var (tool, enabled) in grants) agent.Tools.Add(new AgentTool { ToolName = tool, IsEnabled = enabled });
+        return agent;
+    }
+
+    [Theory]
+    [InlineData("memory", "memory_list")]
+    [InlineData("memory", "memory_search")]
+    [InlineData("fleet-memory", "memory_list")]
+    [InlineData("fleet-memory", "memory_search")]
+    public void ManagedMemoryReads_managed_generation_lists_exactly_the_saved_memory_grants_under_either_name(string name, string read)
+    {
+        var agent = CodexWithGrants(($"mcp__{name}__{read}", true));
+
+        var tools = ManagedAllowedTools(agent);
+
+        // Exactly the saved enabled memory grant; no implicit get under either accepted name.
+        Assert.Equal([$"mcp__{name}__{read}"], tools.Where(t => t.Contains("memory", StringComparison.Ordinal)));
+        // Unrelated codex defaults are unchanged.
+        Assert.Contains("mcp__fleet-temporal__notify_cto", tools);
+    }
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("fleet-memory")]
+    public void ManagedMemoryReads_explicit_get_is_kept_and_a_disabled_get_is_never_added(string name)
+    {
+        var granted = ManagedAllowedTools(CodexWithGrants(($"mcp__{name}__memory_get", true), ($"mcp__{name}__memory_list", true)));
+        Assert.Equal([$"mcp__{name}__memory_get", $"mcp__{name}__memory_list"], granted.Where(t => t.Contains("memory", StringComparison.Ordinal)));
+
+        var disabled = ManagedAllowedTools(CodexWithGrants(($"mcp__{name}__memory_get", false), ($"mcp__{name}__memory_search", true)));
+        Assert.Equal([$"mcp__{name}__memory_search"], disabled.Where(t => t.Contains("memory", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData("docker")]
+    [InlineData("openshell")]
+    public void ManagedMemoryReads_ordinary_generation_keeps_its_baseline_get_and_bytes(string desiredRuntime)
+    {
+        // A desired runtime selection alone never switches generation into managed mode.
+        var agent = CodexWithGrants(("mcp__memory__memory_list", true));
+        agent.RuntimeKind = desiredRuntime;
+
+        var ordinary = ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent");
+
+        Assert.Equal(ordinary, ContainerProvisioningService.GenerateAppsettingsJson(agent, "cto-agent", managed: false));
+        Assert.Contains("mcp__fleet-memory__memory_get", GetAllowedTools(agent, "cto-agent"));
+        Assert.Contains("mcp__fleet-temporal__notify_cto", GetAllowedTools(agent, "cto-agent"));
+        Assert.Equal(GetAllowedTools(agent, "cto-agent").Where(t => t != "mcp__fleet-memory__memory_get"), ManagedAllowedTools(agent));
+        // The ordinary list helper and the harness input keep the baseline get too.
+        Assert.Contains("mcp__fleet-memory__memory_get", ContainerProvisioningService.AllowedToolsFor(agent, "cto-agent"));
+        Assert.Contains("mcp__fleet-memory__memory_get", ContainerProvisioningService.HarnessInputFor(agent).AllowedTools);
+    }
+
+    /// <summary>
+    /// #512 A16: the actual managed entry point (<see cref="ContainerProvisioningService.GenerateManagedInputsAsync"/>) over
+    /// SQLite rows into an owned temporary base directory, against the ordinary provision of the same rows.
+    /// </summary>
+    [Theory]
+    [InlineData("memory", "memory_list")]
+    [InlineData("memory", "memory_search")]
+    [InlineData("fleet-memory", "memory_list")]
+    [InlineData("fleet-memory", "memory_search")]
+    public async Task ManagedMemoryReads_real_managed_generation_writes_only_the_saved_read_grant(string name, string read)
+    {
+        await using var harness = ProvisioningHarness.Create();
+        await harness.SeedAsync(db =>
+        {
+            var agent = CodexWithGrants(($"mcp__{name}__{read}", true), ($"mcp__{name}__memory_get", false));
+            agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = name, Url = "https://memory.example.test/mcp", TransportType = "http" });
+            db.Agents.Add(agent);
+        });
+
+        var generated = await harness.Service.GenerateManagedInputsAsync("agent1", default);
+
+        Assert.Equal(harness.GeneratedDir("fleet-agent1"), generated);
+        var tools = JsonDocument.Parse(File.ReadAllText(Path.Combine(generated, "appsettings.json"))).RootElement
+            .GetProperty("Agent").GetProperty("AllowedTools").EnumerateArray().Select(e => e.GetString()!).ToList();
+        Assert.Equal([$"mcp__{name}__{read}"], tools.Where(t => t.Contains("memory", StringComparison.Ordinal)));
+        Assert.Contains($"mcp__fleet-temporal__notify_cto", tools);
+        Assert.True(File.Exists(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName)));
+    }
+
     // ── #335: hosted-provider flags and the codex credential bind ─────────────
 
     private static (bool Hosted, JsonElement KeyEnv) GetHostedFlags(Agent agent)

@@ -222,6 +222,96 @@ public sealed class StockIdentityPathTests
         Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Native(NativeCall("memory_get"), session)).StatusCode);
     }
 
+    // ── #512: each fixed read through the same signer and fresh receiver checks ──
+
+    private static string NativeRead(string tool) => tool switch
+    {
+        "memory_list" => """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_list","arguments":{}}}""",
+        "memory_search" => """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_search","arguments":{"query":"synthetic"}}}""",
+        _ => NativeCall(tool),
+    };
+
+    private static async Task<string> NativeSession(Fixture fixture)
+    {
+        var initialized = await fixture.Native(NativeInitialize, null);
+        Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
+        var session = initialized.Headers.GetValues("Mcp-Session-Id").Single();
+        Assert.Equal(HttpStatusCode.Accepted, (await fixture.Native(NativeInitialized, session)).StatusCode);
+        return session;
+    }
+
+    // A2–A6, A12: a currently granted read under the selected name reaches its existing tool; an ungranted read, or one
+    // granted only under the other accepted name, is refused 403 before execution. list/search read the index, which this
+    // fixture does not run: the tool reports an MCP error, never a manufactured empty success (the real data path is the
+    // operator's pre-merge host check).
+    [Theory]
+    [InlineData("memory", "memory_get")]
+    [InlineData("fleet-memory", "memory_get")]
+    [InlineData("memory", "memory_list")]
+    [InlineData("fleet-memory", "memory_list")]
+    [InlineData("memory", "memory_search")]
+    [InlineData("fleet-memory", "memory_search")]
+    public async Task ManagedMemoryReads_only_the_currently_granted_read_reaches_its_tool(string name, string read)
+    {
+        await using var fixture = new Fixture(actualMcp: true) { EndpointName = name, GrantedTools = [read] };
+        var session = await NativeSession(fixture);
+        Assert.Contains(read, await (await fixture.Native(NativeToolsList, session)).Content.ReadAsStringAsync());
+
+        var allowed = await fixture.Native(NativeRead(read), session);
+        Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+        var body = await allowed.Content.ReadAsStringAsync();
+        if (read == "memory_get") Assert.Contains("synthetic-visible-memory", body);
+        else
+        {
+            Assert.Contains("\"isError\":true", body);
+            Assert.DoesNotContain("No memories found", body);
+        }
+        foreach (var ungranted in new[] { "memory_get", "memory_list", "memory_search" }.Where(t => t != read))
+            Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Native(NativeRead(ungranted), session)).StatusCode);
+
+        // The same read granted only under the other accepted name never counts for this endpoint.
+        fixture.GrantName = name == "memory" ? "fleet-memory" : "memory";
+        Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Native(NativeRead(read), session)).StatusCode);
+    }
+
+    // A7/A9/A18 (receiver side): removing an enabled read grant denies the very next request on the open session without
+    // any Apply or re-initialization; writes stay refused at the hook even with every read granted.
+    [Theory]
+    [InlineData("memory_list")]
+    [InlineData("memory_search")]
+    public async Task ManagedMemoryReads_removing_a_read_grant_denies_the_next_request_immediately(string read)
+    {
+        await using var fixture = new Fixture(actualMcp: true) { EndpointName = "memory", GrantedTools = ["memory_get", "memory_list", "memory_search"] };
+        var session = await NativeSession(fixture);
+        Assert.Equal(HttpStatusCode.OK, (await fixture.Native(NativeRead(read), session)).StatusCode);
+
+        fixture.GrantedTools = ["memory_get"];
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Native(NativeRead(read), session)).StatusCode);
+        Assert.Contains("synthetic-visible-memory", await (await fixture.Native(NativeCall("memory_get"), session)).Content.ReadAsStringAsync());
+        foreach (var write in new[] { "memory_store", "memory_update", "memory_delete" })
+            Assert.Equal("tool_unsupported", (await fixture.NativeHook(NativeCall(write), session)).ReasonCode);
+    }
+
+    // A8/A14: a foreign-project get is the uniform denial, and the denial log carries only the fixed tool/reason fields —
+    // no record ID, project, agent or content.
+    [Fact]
+    public async Task ManagedMemoryReads_read_denial_logs_only_fixed_tool_and_reason_fields()
+    {
+        await using var fixture = new Fixture(actualMcp: true);
+        var initialized = await fixture.Send("initialize");
+        var session = initialized.Headers.GetValues("Mcp-Session-Id").Single();
+
+        Assert.Contains("access denied", await (await fixture.Send("tools/call", session, "foreign_project")).Content.ReadAsStringAsync());
+        fixture.ProjectAllowed = false;
+        Assert.Contains("access denied", await (await fixture.Send("tools/call", session)).Content.ReadAsStringAsync());
+
+        var denials = fixture.Logs.Lines.Where(l => l.Contains("denied", StringComparison.Ordinal)).ToList();
+        Assert.Equal(["memory_get: denied (project_not_allowed)", "memory_get: denied (project_not_allowed)"], denials);
+        foreach (var sentinel in new[] { "agent1", "agent2", "alpha", "beta", "00000000-0000-0000-0000-00000000000", "synthetic" })
+            Assert.DoesNotContain(fixture.Logs.Lines, l => l.Contains("denied", StringComparison.Ordinal) && l.Contains(sentinel, StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("plaintext")]
     [InlineData("non_http")]
@@ -401,6 +491,10 @@ public sealed class StockIdentityPathTests
         public string? GrantName;
         /// <summary>#505: plaintext, non_http or duplicate endpoint rows; unavailable or malformed agent config.</summary>
         public string? EndpointVariant, ConfigVariant;
+        /// <summary>#512: the read tools the agent's current grants name (each enabled while <see cref="ToolAllowed"/>).</summary>
+        public string[] GrantedTools = ["memory_get"];
+        /// <summary>#512: every formatted log line the receiver's tools wrote.</summary>
+        public readonly LogSink Logs = new();
         private string FilePath => Path.Combine(_directory, "enrollment.json");
         public Fixture(bool actualMcp = false)
         {
@@ -429,7 +523,9 @@ public sealed class StockIdentityPathTests
             {
                 services.AddRouting(); services.AddHttpContextAccessor();
                 services.AddSingleton(_acl); services.AddSingleton(memory); services.AddSingleton<ReadCounterService>();
-                services.AddMcpServer().WithHttpTransport().WithTools<MemoryGetTool>();
+                services.AddSingleton<AclDeniedCounterService>(); services.AddSingleton<Microsoft.Extensions.Logging.ILoggerProvider>(Logs);
+                // #512: the three fixed reads; list/search read the (here unavailable) index through the existing tools.
+                services.AddMcpServer().WithHttpTransport().WithTools<MemoryGetTool>().WithTools<MemoryListTool>().WithTools<MemorySearchTool>();
             }).Configure(app =>
             {
                 app.Use((context, next) =>
@@ -617,7 +713,7 @@ public sealed class StockIdentityPathTests
                     var endpoint = new { mcpName = fixture.EndpointName, url, transportType = fixture.EndpointVariant == "non_http" ? "sse" : "http" };
                     return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new {
                         name = "agent1", isEnabled = true,
-                        tools = new[] { new { toolName = $"mcp__{fixture.GrantName ?? fixture.EndpointName}__memory_get", isEnabled = fixture.ToolAllowed } },
+                        tools = fixture.GrantedTools.Select(tool => new { toolName = $"mcp__{fixture.GrantName ?? fixture.EndpointName}__{tool}", isEnabled = fixture.ToolAllowed }).ToArray(),
                         mcpEndpoints = fixture.EndpointVariant == "duplicate"
                             ? new[] { endpoint, endpoint with { mcpName = fixture.EndpointName == "memory" ? "fleet-memory" : "memory" } }
                             : new[] { endpoint }
@@ -629,6 +725,25 @@ public sealed class StockIdentityPathTests
             }
         }
     }
+    /// <summary>#512: collects every formatted log line, for the read-denial redaction checks.</summary>
+    private sealed class LogSink : Microsoft.Extensions.Logging.ILoggerProvider
+    {
+        private readonly List<string> _lines = [];
+        public IReadOnlyList<string> Lines { get { lock (_lines) return [.. _lines]; } }
+        public Microsoft.Extensions.Logging.ILogger CreateLogger(string categoryName) => new Logger(this);
+        public void Dispose() { }
+        private sealed class Logger(LogSink sink) : Microsoft.Extensions.Logging.ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+            public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+                Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                lock (sink._lines) sink._lines.Add(formatter(state, exception));
+            }
+        }
+    }
+
     private sealed class CallContext : ServerCallContext
     {
         public CallContext(string token) { UserState["__HttpContext"] = new DefaultHttpContext { Request = { Scheme = "https" } }; Headers.Add("authorization", "Bearer " + token); }

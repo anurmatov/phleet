@@ -1066,10 +1066,13 @@ at Start or apply, and a clean revoke clears the hold.
 **Startup and cleanup.** Fresh create passes the native and service providers together. Revoked or reprovisioned
 reuse revalidates and attaches the complete set while stopped, before the staged boot, so the main process inherits
 every issued handle. Each recorded service identity and profile digest is rechecked before attach and before
-Start/activation; a mismatch refuses or holds without activation. Revoke, Stop, expiry and retirement detach every
-recorded provider name in the persisted workspace. They do this even if `subscription.json` is gone or changed, and
-a service identity fault never suppresses the admission cut, broker revoke or Stop. Service providers are detached,
-never deleted.
+Start/activation; a mismatch refuses or holds without activation. Revoke and every revoke-and-stop hold (expiry,
+source or custody drift, gateway generation change) detach every recorded provider name in the persisted workspace,
+verified against the scoped attachment list. They do this even if `subscription.json` is gone or changed, and a
+service identity fault never suppresses the admission cut, broker revoke or Stop. Retirement requires every one of
+them verified detached. A plain Stop only stops the sandbox and verifies quiescence: it keeps every provider attached,
+so a later Start boots with the same issued handles and never re-attaches, after revalidating the recorded
+identities. Service providers are detached, never deleted.
 
 **Snapshot custody.** Subscription backups add evidence-only control records:
 

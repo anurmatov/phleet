@@ -454,6 +454,38 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.RequirePrepared(c, b, home, _ => Placeholder);
     }
 
+    public static IEnumerable<object[]> NativeHomeBoundaryCases()
+    {
+        foreach (var spelling in new[] { "canonical", "duplicate" })
+            foreach (var root in new[] { "codex", "managed", "epoch" })
+                foreach (var fault in new[] { "mode", "owner" }) yield return [spelling, root, fault];
+        foreach (var spelling in new[] { "duplicate", "trailing", "dot", "dotdot", "leading" })
+            yield return [spelling, "epoch", "none"];
+    }
+
+    [Theory]
+    [MemberData(nameof(NativeHomeBoundaryCases))]
+    public void NativeProfile_NoncanonicalHomeAndUnsafeRoots_RefuseAllEnrollmentPaths(string spelling, string root, string fault)
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        var (home, probe, target) = f.NativeHomeBoundary(spelling, root, fault);
+        var mode = File.GetUnixFileMode(target);
+        var owner = StockNativePathProbe.Read(target).Buffer.Uid;
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, home, b, f.Root, _ => Placeholder, probe)).Message);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, home, _ => Placeholder, probe)).Message);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.ValidateForRegistration(c, home, () => 10001, _ => Placeholder, probe)).Message);
+        f.AssertNativeUnchanged(before);
+        Assert.Equal(mode, File.GetUnixFileMode(target));
+        Assert.Equal(owner, StockNativePathProbe.Read(target).Buffer.Uid);
+    }
+
     [Fact]
     public void EpochProfile_NewEpochAndHandle_PreparesFreshDirectoryAndRetainsEarlierBytes()
     {
@@ -1294,6 +1326,36 @@ public sealed class ManagedStockAgentTests
                 ? "{\"mcpServers\":{\"" + memoryName + "\":{\"url\":\"https://memory.example.test/mcp\"}}}"
                 : "{\"mcpServers\":{\"" + memoryName + "\":{\"url\":\"https://memory.example.test/mcp\"},\"fleet-comms-journal\":{\"url\":\"https://" + journalRead.Host + journalRead.Path + "\"}}}");
         }
+        internal (string Home, StockNativePathProbe.NativeCall Probe, string Target) NativeHomeBoundary(string spelling, string root, string fault)
+        {
+            var target = root switch
+            {
+                "codex" => Path.Combine(Home, ".codex"),
+                "managed" => Path.Combine(Home, ".codex", "managed"),
+                _ => NativeDirectory
+            };
+            if (fault == "mode") File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite
+                | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+            StockNativePathProbe.SyscallResult Probe(string path)
+            {
+                var result = StockNativePathProbe.Read(path);
+                if (fault == "owner" && Path.GetFullPath(path) == target)
+                { var buffer = result.Buffer; buffer.Uid++; return result with { Buffer = buffer }; }
+                return result;
+            }
+            var home = spelling switch
+            {
+                "duplicate" => Home.Replace("/home", "//home", StringComparison.Ordinal),
+                "trailing" => Home + "/",
+                "dot" => Home + "/.",
+                "dotdot" => Home + "/../home",
+                "leading" => "/" + Home,
+                _ => Home
+            };
+            return (home, Probe, target);
+        }
+
         public IConfiguration Config() => new ConfigurationBuilder().AddInMemoryCollection(Settings).Build();
         public (byte[] Auth, byte[] Config) NativeBytes() =>
             (File.ReadAllBytes(Path.Combine(NativeDirectory, "auth.json")), File.ReadAllBytes(Path.Combine(NativeDirectory, "config.toml")));

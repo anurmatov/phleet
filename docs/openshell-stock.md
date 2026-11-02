@@ -321,6 +321,9 @@ with exactly `0700` permissions.
 Manual stock, managed subscription and ordinary Codex retain their existing home
 and auth selection.
 
+Managed API-key HOME must be an absolute canonical path without duplicate separators,
+dot components or a trailing separator; aliases refuse before managed-root comparisons,
+without normalization or permission repair.
 The daemon still refuses inherited `CODEX_HOME`, including an override naming the
 derived directory.
 Immediately before every managed API-key app-server spawn, it revalidates the

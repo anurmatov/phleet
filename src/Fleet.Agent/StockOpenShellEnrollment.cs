@@ -658,7 +658,10 @@ public static class StockOpenShellEnrollment
         try
         {
             binding.RequireBinding(StockEnrollmentAuthority.Load(configuration["StockOpenShell:AuthorityFile"]!));
-            if (binding.Epoch == Guid.Empty || !Path.IsPathFullyQualified(home) || home == "/root")
+            // Root comparisons below must use the same spelling as the component walk.
+            // Refuse aliases rather than changing the HOME validated for the child.
+            if (binding.Epoch == Guid.Empty || !Path.IsPathFullyQualified(home) || home == "/root"
+                || !string.Equals(home, Path.TrimEndingDirectorySeparator(Path.GetFullPath(home)), StringComparison.Ordinal))
                 Deny("stock_enrollment_native_path_invalid");
             var root = Path.Combine(home, ".codex");
             var managed = Path.Combine(root, "managed");

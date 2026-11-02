@@ -61,6 +61,44 @@ public class CodexExecutorTests
                 processStarter ?? System.Diagnostics.Process.Start, environmentReader, adapterHost, runtimeConfiguration: runtimeConfiguration, stockRegistrationValidator: stockRegistrationValidator);
     }
 
+    [Theory]
+    [MemberData(nameof(ManagedStockAgentTests.NativeHomeBoundaryCases), MemberType = typeof(ManagedStockAgentTests))]
+    public async Task ManagedNativeProfile_NoncanonicalHomeAndUnsafeRoots_RefuseBeforeSpawn(string spelling, string root, string fault)
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        const string placeholder = "openshell:resolve:env:v7_OPENAI_API_KEY";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => placeholder);
+        var before = f.NativeBytes();
+        var (home, probe, target) = f.NativeHomeBoundary(spelling, root, fault);
+        var mode = File.GetUnixFileMode(target);
+        var owner = StockNativePathProbe.Read(target).Buffer.Uid;
+        var homeBefore = Environment.GetEnvironmentVariable("HOME");
+        try
+        {
+            Environment.SetEnvironmentVariable("HOME", home);
+            var starts = 0;
+            var validations = 0;
+            var executor = CreateExecutor(nativeAuthMode: "api_key", runtimeConfiguration: c,
+                stockRegistrationValidator: config =>
+                {
+                    validations++;
+                    return StockOpenShellEnrollment.ValidateForRegistration(config, Environment.GetEnvironmentVariable("HOME")!,
+                        () => 10001, _ => placeholder, probe);
+                }, processStarter: _ => { starts++; return null; });
+            Assert.Equal("stock_enrollment_native_path_invalid", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                executor.EnsureProcessReadyForTestsAsync())).Message);
+            Assert.Equal(1, validations);
+            Assert.Equal(0, starts);
+            Assert.Equal(home, Environment.GetEnvironmentVariable("HOME"));
+            f.AssertNativeUnchanged(before);
+            Assert.Equal(mode, File.GetUnixFileMode(target));
+            Assert.Equal(owner, StockNativePathProbe.Read(target).Buffer.Uid);
+        }
+        finally { Environment.SetEnvironmentVariable("HOME", homeBefore); }
+    }
+
     [Fact]
     public async Task ManagedNativeProfile_MissingConfiguration_FailsOnceWithoutStartingOrRetrying()
     {

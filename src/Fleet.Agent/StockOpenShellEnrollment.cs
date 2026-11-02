@@ -42,9 +42,14 @@ public static class StockOpenShellEnrollment
     {
         var binding = Validate(configuration, Environment.GetEnvironmentVariable("HOME") ?? "",
             () => OperatingSystem.IsLinux() ? GetEffectiveUid() : uint.MaxValue, rootFile);
-        if (binding is not null && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CODEX_HOME")))
-            Deny("stock_enrollment_native_config_override");
+        RequireNoNativeHomeOverride(binding, Environment.GetEnvironmentVariable("CODEX_HOME"));
         return binding;
+    }
+
+    internal static void RequireNoNativeHomeOverride(StockBrokerIdentity? binding, string? inheritedHome)
+    {
+        if (binding is not null && !string.IsNullOrEmpty(inheritedHome))
+            Deny("stock_enrollment_native_config_override");
     }
 
     /// <summary>
@@ -82,10 +87,10 @@ public static class StockOpenShellEnrollment
     }
 
     internal static StockBrokerIdentity? ValidateForRegistration(IConfiguration configuration, string home, Func<uint> effectiveUid,
-        Func<string, string?>? environment = null)
+        Func<string, string?>? environment = null, StockNativePathProbe.NativeCall? pathProbe = null)
     {
         var binding = Validate(configuration, home, effectiveUid, CodexRootFile(configuration), environment);
-        if (binding is not null) RequirePrepared(configuration, binding, home, environment);
+        if (binding is not null) RequirePrepared(configuration, binding, home, environment, pathProbe);
         return binding;
     }
 
@@ -242,7 +247,8 @@ public static class StockOpenShellEnrollment
         { throw new InvalidOperationException("stock_enrollment_profile_invalid"); }
     }
 
-    internal static void RequirePrepared(IConfiguration configuration, StockBrokerIdentity binding, string home, Func<string, string?>? environment = null)
+    internal static void RequirePrepared(IConfiguration configuration, StockBrokerIdentity binding, string home, Func<string, string?>? environment = null,
+        StockNativePathProbe.NativeCall? pathProbe = null)
     {
         try
         {
@@ -252,7 +258,7 @@ public static class StockOpenShellEnrollment
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
             var auth = NativeAuthFor(configuration, home, environment ?? Environment.GetEnvironmentVariable);
             var expected = NativeConfig(configuration, authority, environment ?? Environment.GetEnvironmentVariable, root!, auth);
-            var directory = Path.Combine(home, ".codex");
+            var directory = NativeProfileDirectory(configuration, home, binding, pathProbe);
             if (!auth.Manual)
             {
                 RequirePrivateDirectory(directory);
@@ -590,7 +596,8 @@ public static class StockOpenShellEnrollment
     }
 
     internal static void PrepareNative(IConfiguration configuration, string home, StockBrokerIdentity binding,
-        string rootFile = HarnessDefaults.CodexRootTomlContainerPath, Func<string, string?>? environment = null)
+        string rootFile = HarnessDefaults.CodexRootTomlContainerPath, Func<string, string?>? environment = null,
+        StockNativePathProbe.NativeCall? pathProbe = null)
     {
         if (!OperatingSystem.IsLinux()) Deny("stock_enrollment_nonroot_required");
         environment ??= Environment.GetEnvironmentVariable;
@@ -604,12 +611,19 @@ public static class StockOpenShellEnrollment
             var root = HarnessDefaults.Build(AgentHarness.InputFor(options, _ => null)!).CodexRootToml;
             if (StockEnrollmentAuthority.ReadText(rootFile) != root) Deny("stock_enrollment_native_config_mismatch");
             var config = NativeConfig(configuration, authority, environment, root!, native);
-            var directory = Path.Combine(home, ".codex");
+            var directory = NativeProfileDirectory(configuration, home, binding, pathProbe);
             RequireDirectoryAncestors(directory);
             if (!native.Manual)
             {
                 if (Path.Exists(directory)) RequirePrivateDirectory(directory);
-                else Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                else
+                {
+                    if (configuration["Agent:NativeAuthMode"] == "api_key")
+                        foreach (var part in new[] { Path.Combine(home, ".codex"), Path.Combine(home, ".codex", "managed"), directory })
+                            Directory.CreateDirectory(part, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                    else Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
+                NativeProfileDirectory(configuration, home, binding, pathProbe);
                 foreach (var leaf in new[] { "auth.json", "config.toml" })
                     if (Path.Exists(Path.Combine(directory, leaf))) RequirePrivateFile(Path.Combine(directory, leaf));
                 // Never overwrite a foreign existing cache: only this branch's own earlier placeholder cache is replaced.
@@ -625,12 +639,62 @@ public static class StockOpenShellEnrollment
                 : StockEnrollmentAuthority.ReadBounded(Path.Combine(home, ".codex-host", "auth.json"));
             PrivateWrite(Path.Combine(directory, "auth.json"), auth);
             PrivateWrite(Path.Combine(directory, "config.toml"), System.Text.Encoding.UTF8.GetBytes(config));
-            RequirePrepared(configuration, binding, home, environment);
+            RequirePrepared(configuration, binding, home, environment, pathProbe);
         }
         catch (Exception ex) when (ex is StockIdentityDenied or IOException or UnauthorizedAccessException or JsonException
             or ArgumentException or KeyNotFoundException or FormatException || ex is InvalidOperationException
             && !ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
         { throw new InvalidOperationException("stock_enrollment_native_not_prepared"); }
+    }
+
+    /// <summary>The native root derived only from a freshly validated managed API-key binding.</summary>
+    public static string NativeProfileDirectory(IConfiguration configuration, string home, StockBrokerIdentity binding) =>
+        NativeProfileDirectory(configuration, home, binding, null);
+
+    internal static string NativeProfileDirectory(IConfiguration configuration, string home, StockBrokerIdentity binding,
+        StockNativePathProbe.NativeCall? pathProbe)
+    {
+        if (!IsManaged(configuration) || configuration["Agent:NativeAuthMode"] != "api_key") return Path.Combine(home, ".codex");
+        try
+        {
+            binding.RequireBinding(StockEnrollmentAuthority.Load(configuration["StockOpenShell:AuthorityFile"]!));
+            // Root comparisons below must use the same spelling as the component walk.
+            // Refuse aliases rather than changing the HOME validated for the child.
+            if (binding.Epoch == Guid.Empty || !Path.IsPathFullyQualified(home) || home == "/root"
+                || !string.Equals(home, Path.TrimEndingDirectorySeparator(Path.GetFullPath(home)), StringComparison.Ordinal))
+                Deny("stock_enrollment_native_path_invalid");
+            var root = Path.Combine(home, ".codex");
+            var managed = Path.Combine(root, "managed");
+            var selected = Path.Combine(managed, binding.Epoch.ToString("N"));
+            var missing = false;
+            var current = Path.GetPathRoot(selected)!;
+            Check(current, false);
+            foreach (var part in selected[current.Length..].Split(Path.DirectorySeparatorChar))
+            {
+                current = Path.Combine(current, part);
+                Check(current, current == root || current == managed || current == selected);
+            }
+            // Even a dangling link or a directory is legacy state; never inspect its contents.
+            foreach (var leaf in new[] { "auth.json", "config.toml" })
+            {
+                var result = StockNativePathProbe.Probe(Path.Combine(root, leaf), pathProbe);
+                if (result.Status == StockNativePathProbe.State.Unobservable) Deny("stock_enrollment_native_path_invalid");
+                if (result.Status == StockNativePathProbe.State.Present) Deny("stock_enrollment_native_cache_forbidden");
+            }
+            return selected;
+
+            void Check(string path, bool privateRoot)
+            {
+                var result = StockNativePathProbe.Probe(path, pathProbe);
+                if (result.Status == StockNativePathProbe.State.Unobservable) Deny("stock_enrollment_native_path_invalid");
+                if (result.Status == StockNativePathProbe.State.Absent) { missing = true; return; }
+                if (missing || (result.Mode & 0xf000) != 0x4000) Deny("stock_enrollment_native_path_invalid");
+                if (privateRoot && ((result.Mode & 0xfff) != 0x1c0 || result.Owner != GetEffectiveUid()))
+                    Deny("stock_enrollment_native_path_invalid");
+            }
+        }
+        catch (Exception ex) when (ex is StockIdentityDenied or IOException or UnauthorizedAccessException or ArgumentException)
+        { throw new InvalidOperationException("stock_enrollment_native_path_invalid"); }
     }
 
     private static void RequireDirectoryAncestors(string path)

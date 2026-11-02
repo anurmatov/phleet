@@ -8,6 +8,34 @@ namespace Fleet.Agent.Tests;
 public sealed class StockOpenShellEnrollmentTests
 {
     [Fact]
+    public void InheritedNativeHome_IsRefusedEvenWhenItNamesTheDerivedProfile()
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        var c = f.Config();
+        var binding = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root,
+            _ => "openshell:resolve:env:v7_OPENAI_API_KEY")!;
+        var derived = StockOpenShellEnrollment.NativeProfileDirectory(c, f.Home, binding);
+        Assert.Equal("stock_enrollment_native_config_override", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequireNoNativeHomeOverride(binding, derived)).Message);
+        StockOpenShellEnrollment.RequireNoNativeHomeOverride(binding, null);
+        StockOpenShellEnrollment.RequireNoNativeHomeOverride(null, derived); // ordinary selection is unchanged
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("subscription")]
+    public void NonApiNativeProfile_KeepsTheExistingHomeLayout(string? mode)
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        var c = f.Config();
+        var binding = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root,
+            _ => "openshell:resolve:env:v7_OPENAI_API_KEY")!;
+        c["Agent:NativeAuthMode"] = mode;
+        Assert.Equal(Path.Combine(f.Home, ".codex"), StockOpenShellEnrollment.NativeProfileDirectory(c, f.Home, binding));
+        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+    }
+
+    [Fact]
     public void Disabled_DoesNotReadEnrollmentOrChangeRegistration()
     {
         var absent = new ServiceCollection();

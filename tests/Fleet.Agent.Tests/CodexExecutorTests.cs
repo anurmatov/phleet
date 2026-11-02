@@ -1,4 +1,7 @@
 using System.Text.Json.Nodes;
+using Fleet.Agent;
+using Fleet.Shared.Security;
+using Microsoft.Extensions.Configuration;
 using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
@@ -12,6 +15,7 @@ using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent.Tests;
 
+[Collection("stock-native-environment")]
 public class CodexExecutorTests
 {
     private static CodexExecutor CreateExecutor(
@@ -25,7 +29,10 @@ public class CodexExecutorTests
         string? effort = null,
         string? codexOssBaseUrl = null,
         int? contextWindow = null,
-        string? harnessExtra = null)
+        string? harnessExtra = null,
+        IConfiguration? runtimeConfiguration = null,
+        string? nativeAuthMode = null,
+        Func<IConfiguration, StockBrokerIdentity?>? stockRegistrationValidator = null)
     {
         var agentOptions = Options.Create(new AgentOptions
         {
@@ -36,6 +43,7 @@ public class CodexExecutorTests
         });
         if (model is not null)
             agentOptions.Value.Model = model;
+        agentOptions.Value.NativeAuthMode = nativeAuthMode;
         agentOptions.Value.Effort = effort;
         agentOptions.Value.CodexOssBaseUrl = codexOssBaseUrl;
         agentOptions.Value.ContextWindow = contextWindow;
@@ -46,11 +54,214 @@ public class CodexExecutorTests
         });
         var promptBuilder = new PromptBuilder(agentOptions, NullLogger<PromptBuilder>.Instance);
         var resolvedLogger = logger ?? NullLogger<CodexExecutor>.Instance;
-        return processStarter is null && environmentReader is null
+        return processStarter is null && environmentReader is null && runtimeConfiguration is null && stockRegistrationValidator is null && nativeAuthMode is null
             ? new CodexExecutor(agentOptions, telegramOptions, promptBuilder, resolvedLogger, adapterHost)
             : new CodexExecutor(
                 agentOptions, telegramOptions, promptBuilder, resolvedLogger,
-                processStarter ?? System.Diagnostics.Process.Start, environmentReader, adapterHost);
+                processStarter ?? System.Diagnostics.Process.Start, environmentReader, adapterHost, runtimeConfiguration: runtimeConfiguration, stockRegistrationValidator: stockRegistrationValidator);
+    }
+
+    [Theory]
+    [MemberData(nameof(ManagedStockAgentTests.NativeHomeBoundaryCases), MemberType = typeof(ManagedStockAgentTests))]
+    public async Task ManagedNativeProfile_NoncanonicalHomeAndUnsafeRoots_RefuseBeforeSpawn(string spelling, string root, string fault)
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        const string placeholder = "openshell:resolve:env:v7_OPENAI_API_KEY";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => placeholder);
+        var before = f.NativeBytes();
+        var (home, probe, target) = f.NativeHomeBoundary(spelling, root, fault);
+        var mode = File.GetUnixFileMode(target);
+        var owner = StockNativePathProbe.Read(target).Buffer.Uid;
+        var homeBefore = Environment.GetEnvironmentVariable("HOME");
+        try
+        {
+            Environment.SetEnvironmentVariable("HOME", home);
+            var starts = 0;
+            var validations = 0;
+            var executor = CreateExecutor(nativeAuthMode: "api_key", runtimeConfiguration: c,
+                stockRegistrationValidator: config =>
+                {
+                    validations++;
+                    return StockOpenShellEnrollment.ValidateForRegistration(config, Environment.GetEnvironmentVariable("HOME")!,
+                        () => 10001, _ => placeholder, probe);
+                }, processStarter: _ => { starts++; return null; });
+            Assert.Equal("stock_enrollment_native_path_invalid", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                executor.EnsureProcessReadyForTestsAsync())).Message);
+            Assert.Equal(1, validations);
+            Assert.Equal(0, starts);
+            Assert.Equal(home, Environment.GetEnvironmentVariable("HOME"));
+            f.AssertNativeUnchanged(before);
+            Assert.Equal(mode, File.GetUnixFileMode(target));
+            Assert.Equal(owner, StockNativePathProbe.Read(target).Buffer.Uid);
+        }
+        finally { Environment.SetEnvironmentVariable("HOME", homeBefore); }
+    }
+
+    [Fact]
+    public async Task ManagedNativeProfile_MissingConfiguration_FailsOnceWithoutStartingOrRetrying()
+    {
+        var starts = 0;
+        var executor = CreateExecutor(nativeAuthMode: "api_key", processStarter: _ => { starts++; return null; });
+        Assert.Equal("stock_enrollment_runtime_configuration_missing", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.EnsureProcessReadyForTestsAsync())).Message);
+        Assert.Equal(0, starts);
+    }
+
+    [Fact]
+    public async Task ManagedNativeProfile_ProductionRegistrationGate_RefusesRevokedAuthority()
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        var path = f.Settings["StockOpenShell:AuthorityFile"]!;
+        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(StockEnrollmentAuthority.Load(path) with { State = "revoked" }));
+        var starts = 0;
+        // No validator seam: exercise the actual public registration gate from the executor.
+        var executor = CreateExecutor(nativeAuthMode: "api_key", runtimeConfiguration: f.Config(),
+            processStarter: _ => { starts++; return null; });
+        Assert.Equal("stock_enrollment_profile_invalid", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.EnsureProcessReadyForTestsAsync())).Message);
+        Assert.Equal(0, starts);
+    }
+
+    [Theory]
+    [InlineData("valid", null)]
+    [InlineData("home_drift", "stock_enrollment_native_home_mismatch")]
+    [InlineData("revoked", "stock_enrollment_profile_invalid")]
+    [InlineData("epoch_drift", "stock_enrollment_native_path_invalid")]
+    [InlineData("legacy_auth", "stock_enrollment_native_cache_forbidden")]
+    [InlineData("legacy_config", "stock_enrollment_native_cache_forbidden")]
+    public async Task ManagedNativeProfile_EverySpawnRevalidatesAndSelectsOnlyCurrentEpoch(string fault, string? expected)
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        const string placeholder = "openshell:resolve:env:v7_OPENAI_API_KEY";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => placeholder);
+        var homeBefore = Environment.GetEnvironmentVariable("HOME");
+        var codexBefore = Environment.GetEnvironmentVariable("CODEX_HOME");
+        try
+        {
+            Environment.SetEnvironmentVariable("HOME", f.Home);
+            Environment.SetEnvironmentVariable("CODEX_HOME", null);
+            var starts = 0;
+            var validations = 0;
+            System.Diagnostics.ProcessStartInfo? captured = null;
+            var executor = CreateExecutor(nativeAuthMode: "api_key", runtimeConfiguration: c,
+                stockRegistrationValidator: config =>
+                {
+                    validations++;
+                    var binding = StockOpenShellEnrollment.ValidateForRegistration(config, Environment.GetEnvironmentVariable("HOME")!, () => 10001, _ => placeholder);
+                    if (fault == "home_drift") Environment.SetEnvironmentVariable("HOME", Path.Combine(f.Home, "other"));
+                    return binding;
+                },
+                processStarter: psi => { starts++; captured = psi; throw new InvalidOperationException("stock_enrollment_capture_complete"); });
+            if (fault is "revoked" or "epoch_drift")
+            {
+                var path = f.Settings["StockOpenShell:AuthorityFile"]!;
+                File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(fault == "revoked" ? StockEnrollmentAuthority.Load(path) with { State = "revoked" } : StockEnrollmentAuthority.Load(path) with { Epoch = Guid.NewGuid() }));
+            }
+            if (fault.StartsWith("legacy_")) File.WriteAllText(Path.Combine(f.Home, ".codex", fault == "legacy_auth" ? "auth.json" : "config.toml"), "synthetic-foreign");
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => executor.EnsureProcessReadyForTestsAsync());
+            Assert.Equal(expected ?? "stock_enrollment_capture_complete", failure.Message);
+            Assert.Equal(1, validations);
+            Assert.Equal(expected is null ? 1 : 0, starts);
+            if (captured is not null)
+            {
+                Assert.Equal(f.NativeDirectory, captured.Environment["CODEX_HOME"]);
+                Assert.Equal(f.Home, captured.Environment["HOME"]);
+                foreach (var key in HostedModelProviders.KeyEnvVars.Concat(StockCredentials.ServiceKeys)) Assert.False(captured.Environment.ContainsKey(key));
+                Assert.Null(Environment.GetEnvironmentVariable("CODEX_HOME"));
+                // A same-epoch process restart revalidates again and selects the same profile.
+                await Assert.ThrowsAsync<InvalidOperationException>(() => executor.EnsureProcessReadyForTestsAsync());
+                Assert.Equal(2, validations);
+                Assert.Equal(2, starts);
+                Assert.Equal(f.NativeDirectory, captured.Environment["CODEX_HOME"]);
+            }
+        }
+        finally { Environment.SetEnvironmentVariable("HOME", homeBefore); Environment.SetEnvironmentVariable("CODEX_HOME", codexBefore); }
+    }
+
+    [Theory]
+    [InlineData(1)] [InlineData(4)] [InlineData(5)] [InlineData(13)]
+    [InlineData(20)] [InlineData(38)] [InlineData(40)] [InlineData(-1)] [InlineData(-2)]
+    public async Task ManagedNativeProfile_UnobservableLookup_FailsOnceBeforeSpawn(int error)
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        const string placeholder = "openshell:resolve:env:v7_OPENAI_API_KEY";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => placeholder);
+        var starts = 0;
+        var validations = 0;
+        StockNativePathProbe.SyscallResult Probe(string path)
+        {
+            if (path != Path.Combine(f.Home, ".codex", "auth.json")) return StockNativePathProbe.Read(path);
+            if (error == -1) throw new EntryPointNotFoundException();
+            return error == -2 ? new(0, 0, default) : new(-1, error, default);
+        }
+        var executor = CreateExecutor(nativeAuthMode: "api_key", runtimeConfiguration: c,
+            stockRegistrationValidator: config => { validations++; return StockOpenShellEnrollment.ValidateForRegistration(config, f.Home, () => 10001, _ => placeholder, Probe); },
+            processStarter: _ => { starts++; return null; });
+        Assert.Equal("stock_enrollment_native_path_invalid", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.EnsureProcessReadyForTestsAsync())).Message);
+        Assert.Equal(1, validations);
+        Assert.Equal(0, starts);
+    }
+
+    [Theory]
+    [InlineData("auth.json", "file")]
+    [InlineData("auth.json", "directory")]
+    [InlineData("auth.json", "link")]
+    [InlineData("auth.json", "dangling")]
+    [InlineData("config.toml", "file")]
+    [InlineData("config.toml", "directory")]
+    [InlineData("config.toml", "link")]
+    [InlineData("config.toml", "dangling")]
+    public async Task ManagedNativeProfile_LateLegacyEntry_RefusesBeforeSpawn(string leaf, string kind)
+    {
+        using var f = new ManagedStockAgentTests.Fixture();
+        const string placeholder = "openshell:resolve:env:v7_OPENAI_API_KEY";
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => placeholder);
+        var retained = File.ReadAllBytes(Path.Combine(f.NativeDirectory, "auth.json"));
+        var entry = Path.Combine(f.Home, ".codex", leaf);
+        if (kind == "file") File.WriteAllText(entry, "synthetic foreign input");
+        else if (kind == "directory") Directory.CreateDirectory(entry);
+        else File.CreateSymbolicLink(entry, kind == "link" ? f.Root : Path.Combine(f.Home, "missing"));
+        var starts = 0;
+        var validations = 0;
+        var executor = CreateExecutor(nativeAuthMode: "api_key", runtimeConfiguration: c,
+            stockRegistrationValidator: config =>
+            {
+                validations++;
+                return StockOpenShellEnrollment.ValidateForRegistration(config, f.Home, () => 10001, _ => placeholder);
+            }, processStarter: _ => { starts++; return null; });
+        Assert.Equal("stock_enrollment_native_cache_forbidden", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.EnsureProcessReadyForTestsAsync())).Message);
+        Assert.Equal(1, validations);
+        Assert.Equal(0, starts);
+        Assert.Equal(retained, File.ReadAllBytes(Path.Combine(f.NativeDirectory, "auth.json")));
+        Assert.Equal(StockNativePathProbe.State.Present, StockNativePathProbe.Probe(entry).Status);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("subscription")]
+    public async Task NonApiNativeProfile_DoesNotAddChildOverride(string? mode)
+    {
+        var before = Environment.GetEnvironmentVariable("CODEX_HOME");
+        System.Diagnostics.ProcessStartInfo? captured = null;
+        var executor = CreateExecutor(nativeAuthMode: mode, processStarter: psi =>
+        {
+            captured = psi;
+            throw new InvalidOperationException("stock_enrollment_capture_complete");
+        });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executor.EnsureProcessReadyForTestsAsync());
+        Assert.NotNull(captured);
+        Assert.Equal(before, (captured.Environment.TryGetValue("CODEX_HOME", out var inherited) ? inherited : null));
+        Assert.Equal(before, Environment.GetEnvironmentVariable("CODEX_HOME"));
     }
 
     /// <summary>Captures log messages for assertion in tests.</summary>
@@ -1524,3 +1735,6 @@ public class CodexExecutorTests
         }
     }
 }
+
+[CollectionDefinition("stock-native-environment", DisableParallelization = true)]
+public sealed class StockNativeEnvironmentCollection;

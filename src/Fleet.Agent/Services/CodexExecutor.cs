@@ -9,6 +9,8 @@ using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services.HostedProviders;
 using Fleet.Shared;
+using Fleet.Shared.Security;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -74,6 +76,8 @@ public sealed class CodexExecutor : IAgentExecutor
     private volatile bool _restartRequested;
     private volatile bool _turnHasFinalAnswerPhase;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
+    private readonly IConfiguration? _runtimeConfiguration;
+    private readonly Func<IConfiguration, StockBrokerIdentity?>? _stockRegistrationValidator;
 
     private const string CodexBin = "codex";
     internal const string OssBaseUrlEnvVar = "CODEX_OSS_BASE_URL";
@@ -107,8 +111,10 @@ public sealed class CodexExecutor : IAgentExecutor
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger,
         HostedProviderAdapterHost? adapterHost = null,
-        AgentHarness? harness = null)
-        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost, harness: harness)
+        AgentHarness? harness = null,
+        IConfiguration? runtimeConfiguration = null)
+        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost, harness: harness,
+            runtimeConfiguration: runtimeConfiguration)
     {
     }
 
@@ -120,8 +126,12 @@ public sealed class CodexExecutor : IAgentExecutor
         Func<ProcessStartInfo, Process?> processStarter,
         Func<string, string?>? environmentReader = null,
         HostedProviderAdapterHost? adapterHost = null,
-        AgentHarness? harness = null)
+        AgentHarness? harness = null,
+        IConfiguration? runtimeConfiguration = null,
+        Func<IConfiguration, StockBrokerIdentity?>? stockRegistrationValidator = null)
     {
+        _runtimeConfiguration = runtimeConfiguration;
+        _stockRegistrationValidator = stockRegistrationValidator;
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
@@ -779,6 +789,11 @@ public sealed class CodexExecutor : IAgentExecutor
 
                 return;
             }
+            catch (InvalidOperationException ex) when (ex.Message.StartsWith("stock_enrollment_", StringComparison.Ordinal))
+            {
+                await StopInternalAsync();
+                throw;
+            }
             catch (Exception ex)
             {
                 lastError = ex;
@@ -833,6 +848,23 @@ public sealed class CodexExecutor : IAgentExecutor
                     + "the Env Ref can be removed from this agent",
                     OssBaseUrlEnvVar);
             }
+        }
+
+        if (_config.NativeAuthMode == "api_key" || (_runtimeConfiguration?["StockOpenShell:Enabled"] is { } enabled
+            && bool.TryParse(enabled, out var stock) && stock && _runtimeConfiguration["Agent:NativeAuthMode"] == "api_key"))
+        {
+            if (_runtimeConfiguration is null || !bool.TryParse(_runtimeConfiguration["StockOpenShell:Enabled"], out var active)
+                || !active || _runtimeConfiguration["Agent:NativeAuthMode"] != "api_key")
+                throw new InvalidOperationException("stock_enrollment_runtime_configuration_missing");
+            // A new process is a new admission: never retain a native path across epoch changes.
+            var binding = _stockRegistrationValidator is null
+                ? StockOpenShellEnrollment.ValidateForRegistration(_runtimeConfiguration)
+                : _stockRegistrationValidator(_runtimeConfiguration);
+            if (binding is null) throw new InvalidOperationException("stock_enrollment_runtime_configuration_missing");
+            var home = Environment.GetEnvironmentVariable("HOME") ?? "";
+            if (!string.Equals((psi.Environment.TryGetValue("HOME", out var childHome) ? childHome : null), home, StringComparison.Ordinal))
+                throw new InvalidOperationException("stock_enrollment_native_home_mismatch");
+            psi.Environment["CODEX_HOME"] = StockOpenShellEnrollment.NativeProfileDirectory(_runtimeConfiguration, home, binding);
         }
 
         var pending = new ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>>();

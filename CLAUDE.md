@@ -238,6 +238,9 @@ runtime acceptance: an authorized exact-build whole-agent E2E, review and CI rem
 `StockOpenShell:Enabled`, `EnrollmentFile`, `AuthorityFile` and `BrokerPasswordFile` are startup-only;
 `EnrollmentFile` and `AuthorityFile` select the same operator-owned public enrollment record on the workload.
 Default provisioning and the ordinary memory receiver remain unchanged without opt-in configuration.
+Managed API-key native state lives under `<HOME>/.codex/managed/<epoch:N>` with child-only `CODEX_HOME`;
+legacy root auth/config refuse without migration, and manual/subscription selection stays unchanged.
+See [native profile and upgrade rules](docs/openshell-stock.md#managed-api-key-native-profiles-516).
 
 | Stock auth capability | Boundary |
 |---|---|

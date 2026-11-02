@@ -471,6 +471,10 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
                 Directory.CreateDirectory(Path.Combine(legacy, name));
                 File.WriteAllText(Path.Combine(legacy, name, "auth.json"), "{\"synthetic\":\"control\"}");
             }
+        var native = Path.Combine(legacy, ".codex", "managed", "00000000000000000000000000000001");
+        Directory.CreateDirectory(native);
+        File.WriteAllText(Path.Combine(native, "auth.json"), "synthetic-epoch-profile");
+        File.WriteAllText(Path.Combine(native, "config.toml"), "synthetic-epoch-config");
         return legacy;
     }
 
@@ -887,9 +891,15 @@ public sealed class ManagedStockRuntimeApplyReviewTests : IDisposable
         var binding = _t.Binding("fl-1e9ac7000000a409", Guid.NewGuid());
         _t._cli.Sandboxes[binding.SandboxName] = (binding.SandboxId, "Ready");
         _t._store.Add(_t.ManagedAgent(desired: "docker", applied: "openshell", record: new ManagedRecord { State = "applied", Applied = binding }));
+        var profile = _t._cli.Fs(binding.SandboxName, W + "/.codex/managed/00000000000000000000000000000001");
+        Directory.CreateDirectory(profile);
+        var sentinel = Path.Combine(profile, "auth.json");
+        File.WriteAllText(sentinel, "synthetic epoch placeholder");
         var runtime = _t.Runtime();
 
         Assert.True((await runtime.ApplyAsync("agent1", default)).Ok);
+        Assert.Equal("synthetic epoch placeholder", File.ReadAllText(sentinel));
+        Assert.False(Directory.Exists(Path.Combine(_t.DockerWorkspaceDir, ".codex")));
 
         var execs = _t._cli.Timeouts.Where(c => c.Args.Take(2).SequenceEqual(["sandbox", "exec"])).ToList();
         Assert.Equal(runtime.TransferTimeout, Assert.Single(execs, c => c.Args.Contains("python3")).Timeout);

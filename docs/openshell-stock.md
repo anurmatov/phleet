@@ -298,17 +298,103 @@ No Create/Stop/Delete, replacement, takeover or inferred absence is issued. Revo
 and independently verify workload quiescence before resuming legacy intake; preserve
 workspaces, journals and credential references. No destructive cleanup is provided.
 
-Operator cleanup evidence must establish that both the mounted test copy at
+For manual/subscription trials, operator cleanup evidence must establish that both the mounted test copy at
 `/home/agent/.codex-host/auth.json` and the native-home copy written by
 `stock-entrypoint.sh` at `/home/agent/.codex/auth.json` are absent, with the exact
 owned workload stopped. Removing only the mounted copy is not complete cleanup.
 Prove ownership before removing only those temporary test copies, preserve the
 approved donor/reference, and never read, hash, archive or export credential contents.
 This source does not automate that removal or attest that it occurred.
+Managed API-key profiles use the selected epoch directory described below, not the
+root-native copy; retained legacy root files are never a cleanup target of this repair.
 
 Reverting the stock broker transport requires the matching TLS broker fixture and
 exact application images; there is no silent plaintext/TLS retry or runtime switch.
 Both forward qualification and rollback still require independent operator evidence.
+
+## Managed API-key native profiles (#516)
+
+Managed API-key preparation selects `<HOME>/.codex/managed/<validated-epoch:N>`.
+`auth.json` and `config.toml` are private `0600` atomic writes inside that selected
+`0700` directory; `.codex` and `managed` must also be owned by the workload UID
+with exactly `0700` permissions.
+Manual stock, managed subscription and ordinary Codex retain their existing home
+and auth selection.
+
+Managed API-key HOME must be an absolute canonical path without duplicate separators,
+dot components or a trailing separator; aliases refuse before managed-root comparisons,
+without normalization or permission repair.
+The daemon still refuses inherited `CODEX_HOME`, including an override naming the
+derived directory.
+Immediately before every managed API-key app-server spawn, it revalidates the
+current authority/binding, generated root TOML, issued handle and prepared files
+against its actual process HOME, then derives the directory again.
+Only that child's environment receives the derived `CODEX_HOME`; the daemon
+HOME/environment and credential-variable stripping remain unchanged.
+No runtime configuration in managed API-key mode is an immediate bounded refusal,
+not ordinary-provider fallback or a startup retry.
+
+| Condition | Disposition |
+|---|---|
+| Root `.codex/auth.json` or `.codex/config.toml` exists as any entry, including a directory, valid link or dangling link | `stock_enrollment_native_cache_forbidden`; never read, adopt, rename, delete or overwrite it |
+| Linked ancestor, non-directory, wrong owner, nonprivate managed mode or unobservable metadata | `stock_enrollment_native_path_invalid`; no permission repair, alternate existence check or retry |
+| Same-epoch auth differs from the current issued handle, or prepared config drifts | `stock_enrollment_native_not_prepared`; retain existing bytes |
+| Authority, binding, root config or required input fails | Existing bounded enrollment refusal; no ready success or child spawn |
+
+The Linux no-follow `statx` probe distinguishes observed ENOENT from lookup failure.
+Missing entry point, missing requested fields and all other errno values fail
+closed, including access, I/O, interrupted and unsupported-syscall errors.
+No native buffers, paths, auth bytes, issued handles or credential hashes belong
+in diagnostics.
+Only validated missing directories may be created; existing directories are never
+repaired to pass admission.
+
+A new validated epoch and handle prepare a fresh directory without changing earlier
+epoch files.
+Repeated preparation and supported Stop/Start in the same epoch retain its profile;
+a changed handle in that epoch still refuses.
+This does not migrate native sessions or preserve a live thread across re-Apply.
+Old epoch directories are retained local state with revoked placeholders, not a new
+credential authority; native history may be sensitive and is never exported by this
+change.
+They can grow over time: operators inspect disk usage under separately approved
+maintenance; no automatic history copy or garbage collection is provided.
+The entire `.codex` subtree remains excluded from workspace copy/export/pruning.
+
+### Upgrade, verification and rollback
+
+Use a new immutable image identifier, supported revoke and verified workload
+quiescence, then the existing changed-image Apply path to a fresh sandbox.
+Keep the old stopped sandbox and its legacy native files intact; only the filtered
+user workspace transfers.
+Never retag the new image as the old binding image, force an in-place upgrade or
+remove a legacy cache to manufacture success.
+Rollback preserves the previous image, policies, authority/broker custody and native
+state, and requires its own revoke/quiescence decision.
+Old images do not understand the selected epoch profile; reverting an image is not
+proof that an old workload can restart.
+
+Before runtime verification, independently pin the exact pushed source, installed
+assembly, unmodified launcher, CLI, immutable image, saved policy, synthetic receiver
+data, allowed resources, deadline and cleanup reserve on an authorized isolated target.
+Then verify these checks under both supported memory endpoint names:
+
+1. Initial Apply and unchanged re-Apply each return `200/applied`, no candidate/errors,
+   distinct epochs, and a real permitted receiver read.
+2. A no-model app-server initialize using the pinned CLI and temporary trusted synthetic
+   auth reports the current selected profile, without inference, login or billing.
+3. Foreign project/tool reads are denied, grant/project revocation takes effect immediately,
+   and no legacy native-root fallback occurs.
+4. Supported same-epoch Stop/Start keeps its profile; failed or unknown Stop stays held.
+5. Final revoke has no candidate/errors, detached providers and zero exact owned workload/
+   supervisor PIDs, with custody and unrelated state preserved.
+
+Stop positive checks on any failed prerequisite and enter bounded cleanup, never a
+blind retry.
+Exact-head passing CI and independent review are merge prerequisites; source fixtures
+and process capture do not establish exact-image runtime acceptance or waive another
+acceptance matrix.
+Record dated runtime and cleanup evidence in deployment-owned records, not here.
 
 ## Acceptance
 
@@ -442,6 +528,42 @@ Missing MySQL is a failure, not a skip. Runtime integration is a separate slice 
 Explicit `Agent:NativeAuthMode=api_key` and `Agent:ProviderApiKeyEnvRef` prepare a private `auth.json` containing only the standard `OPENAI_API_KEY` placeholder and force Codex API login without a manual auth cache, using the [official OpenAI login-method setting](https://learn.chatgpt.com/docs/auth#enforce-a-login-method-or-workspace).
 The reference is never resolved inside the workload, and placeholder syntax is not proof of stock issuance, acknowledged provider attachment, or secret isolation.
 With `StockOpenShell:ManagedEnabled=true` the managed runtime below performs apply; the existing manual profile still requires its original auth input.
+
+### Synthetic preparation diagnostics (#514)
+
+The existing `Fixture` in `tests/Fleet.Agent.Tests/ManagedStockAgentTests.cs`
+exercises preparation and registration checks with synthetic files,
+injected placeholders and crossed authority/binding controls, without a provider or gateway.
+
+| Case | Measured result |
+|---|---|
+| Same placeholder A and matching binding, twice | Preparation and registration accepted, native bytes unchanged |
+| Placeholder A → B, matching binding fixed | Validation accepts B, preparation and registration refuse `stock_enrollment_native_not_prepared`, old native bytes retained and still usable with A |
+| Placeholder A fixed, authority epoch changed or authority revoked | Stale binding refused by both paths as `stock_enrollment_native_not_prepared`, native bytes retained |
+| Matching active binding restored or revalidated, placeholder A fixed | Preparation and registration accepted again, native bytes unchanged |
+| Literal, malformed or extra-field auth cache | Both paths refuse `stock_enrollment_native_not_prepared`, existing bytes retained |
+| Prepared `config.toml` drift | Registration refuses `stock_enrollment_native_not_prepared`, existing bytes retained |
+| Root-TOML drift | Preparation refuses the distinct `stock_enrollment_native_config_mismatch` before native writes |
+| Nonprivate mode or symlink | Both paths refuse `stock_enrollment_native_path_invalid`, bytes and link target retained |
+| Auth-file read blocked by an exclusive synthetic file handle | Both paths refuse `stock_enrollment_native_not_prepared`, native bytes retained |
+| Atomic temporary-write path exceeds Linux `PATH_MAX`, existing native paths still readable | Preparation refuses `stock_enrollment_native_not_prepared`, native bytes, root TOML and authority retained, no temporary file, registration check still succeeds |
+| Installed-image provenance, actual Apply/Stop and real receiver reads | Not exercised by these synthetic controls |
+
+Reproduce the selected cases, checking discovery first:
+
+```sh
+p=tests/Fleet.Agent.Tests
+f='FullyQualifiedName~'
+f+='ManagedStockAgentTests.'
+f+='NativePreparation_'
+dotnet test "$p" --filter "$f" \
+  --list-tests
+dotnet test "$p" --filter "$f"
+```
+
+These results distinguish source refusal paths, not the live re-Apply trigger, a safe
+cache-refresh repair, PR513 A15 acceptance or permission to delete a cache, weaken
+authority checks, reorder revocation or start a runtime.
 
 ## Managed runtime (#492, default off)
 

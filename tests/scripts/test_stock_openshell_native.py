@@ -31,12 +31,13 @@ class StockNativeStartupTests(unittest.TestCase):
                      "Provider": "codex", "WorkDir": str(work), "AllowedTools": ["mcp__memory__memory_get"]}
             if api:
                 agent.update({"NativeAuthMode": "api_key", "ProviderApiKeyEnvRef": "mixedCaseRef"})
+            epoch = uuid.uuid4()
             authority = app / "authority.json"
             password = app / "password"
             password.write_text("synthetic-password")
             authority.write_text(json.dumps({
                 "State": "revoked" if revoked else "active", "Agent": "agent1", "SandboxId": "synthetic",
-                "Epoch": str(uuid.uuid4()), "ExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                "Epoch": str(epoch), "ExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
                 "GatewayIssuer": "synthetic", "GatewayAudience": "synthetic", "GatewayJwksPath": str(app / "jwks"),
                 "AssertionPrivateKeyPath": str(app / "absent-private"), "AssertionPublicKeyPath": str(app / "public"),
                 "MemoryHost": "memory.example.test", "BrokerHost": "broker.example.test",
@@ -72,15 +73,26 @@ class StockNativeStartupTests(unittest.TestCase):
                 env["OPENAI_API_KEY"] = "openshell:resolve:env:v7_OPENAI_API_KEY"
             result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script], cwd=app,
                                     env=env, capture_output=True, text=True, timeout=10, **identity)
-            config = home / ".codex/config.toml"
-            auth = home / ".codex/auth.json"
+            native = home / ".codex/managed" / epoch.hex if api else home / ".codex"
+            config = native / "config.toml"
+            auth = native / "auth.json"
+            if api:
+                self.assertFalse((home / ".codex/config.toml").exists())
+                self.assertFalse((home / ".codex/auth.json").exists())
             self.assertFalse(list(home.rglob("*.tmp")))
             if result.returncode:
                 self.assertFalse(config.exists(), "refusal must precede native profile writes")
                 self.assertFalse(auth.exists(), "refusal must not copy credentials")
             else:
-                self.assertEqual(0o700, (home / ".codex").stat().st_mode & 0o777)
-                self.assertEqual(0o600, auth.stat().st_mode & 0o777)
+                directories = [home / ".codex"]
+                if api:
+                    directories.extend([home / ".codex/managed", native])
+                for path in directories:
+                    self.assertEqual(0o700, path.stat().st_mode & 0o777)
+                    self.assertEqual(home.stat().st_uid, path.stat().st_uid)
+                for path in [auth, config]:
+                    self.assertEqual(0o600, path.stat().st_mode & 0o777)
+                    self.assertEqual(home.stat().st_uid, path.stat().st_uid)
                 if api:
                     self.assertEqual({"OPENAI_API_KEY": env["OPENAI_API_KEY"]}, json.loads(auth.read_text()))
             return result, config.read_text() if config.exists() else "", (root / "executed").read_text() if (root / "executed").exists() else ""

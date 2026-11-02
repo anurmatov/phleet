@@ -503,22 +503,179 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "sandbox" or "provider" or "policy");
     }
 
-    [Fact]
-    public async Task Ordinary_memory_name_keeps_the_get_only_signer_and_default_off_refusal()
-    {
-        // A version whose memory endpoint also allows memory_search is still refused under either name.
-        _store.Add(ManagedAgent(desired: "openshell", applied: "docker", memoryName: "fleet-memory"));
-        _store.PolicyYaml = SignedPolicy.MemoryOnly.Replace(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_get", "memory_search"));
-        Assert.NotEqual(SignedPolicy.MemoryOnly, _store.PolicyYaml);
-        var refused = await Runtime().ApplyAsync("agent1", default);
-        Assert.Equal((409, StockManagedSignerPolicy.Mismatch), (refused.Status, refused.Code));
-        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "sandbox" or "provider" or "policy");
+    // ── #512: explicitly granted read-only memory tools ──
 
-        // Managed mode off: the ordinary name changes nothing, the runtime stays unavailable.
+    /// <summary>A managed agent whose selected memory endpoint <paramref name="name"/> holds exactly these enabled read grants.</summary>
+    internal Agent ManagedAgentWithReads(string name, params string[] reads)
+    {
+        var agent = ManagedAgent(desired: "openshell", applied: "docker", memoryName: name);
+        agent.Tools.Clear();
+        foreach (var read in reads) agent.Tools.Add(new AgentTool { ToolName = $"mcp__{name}__{read}" });
+        return agent;
+    }
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("fleet-memory")]
+    public async Task ManagedMemoryReads_explicit_read_policy_applies_under_either_name_and_default_off_still_refuses(string name)
+    {
+        _store.Add(ManagedAgentWithReads(name, "memory_get", "memory_search", "memory_list"));
+        _store.PolicyYaml = SignedPolicy.MemoryReads("memory_get", "memory_search", "memory_list");
+        var before = Snapshot(_store.Get("agent1"));
+
+        var applied = await Runtime().ApplyAsync("agent1", default);
+
+        Assert.True(applied.Ok, applied.Message);
+        Assert.Equal(before, Snapshot(_store.Get("agent1")));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(_store.PolicyYaml, File.ReadAllText(create.Args[create.Args.IndexOf("--policy") + 1]));
+
+        // Managed mode off: an explicit read policy changes nothing, the runtime stays unavailable.
         var off = new StockOpenShellRuntime(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build(),
             _cli, Provisioner(), _store, _host, _broker.Credentials, new ServiceCollection().BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance);
         Assert.Equal(StockOpenShellRuntime.Unavailable, (await off.ApplyAsync("agent1", default)).Code);
     }
+
+    // A7: a memory write/unknown grant, or a read the saved policy omits, refuses in both auth modes before any old-runtime
+    // Stop or provider/broker/create/policy-set effect, with grant rows, auth selection and the record unchanged.
+    [Theory]
+    [InlineData("api_key", "memory", "memory_store")]
+    [InlineData("api_key", "fleet-memory", "memory_update")]
+    [InlineData("api_key", "memory", "memory_delete")]
+    [InlineData("api_key", "fleet-memory", "memory_unknown")]
+    [InlineData("api_key", "memory", "memory_list")]
+    [InlineData("api_key", "fleet-memory", "memory_search")]
+    [InlineData("subscription", "memory", "memory_store")]
+    [InlineData("subscription", "fleet-memory", "memory_delete")]
+    [InlineData("subscription", "memory", "memory_search")]
+    [InlineData("subscription", "fleet-memory", "memory_list")]
+    public async Task ManagedMemoryReads_a_grant_the_saved_policy_cannot_carry_refuses_before_any_effect(string mode, string name, string tool)
+    {
+        var agent = ManagedAgentWithReads(name, "memory_get", tool);
+        if (mode == "subscription") { agent.NativeAuthMode = "subscription"; agent.ProviderApiKeyEnvRef = null; }
+        _store.Add(agent);
+        // Writes/unknown tools beside a policy admitting every read; an omitted read beside a get-only policy.
+        _store.PolicyYaml = tool is "memory_list" or "memory_search"
+            ? SignedPolicy.MemoryReads("memory_get") : SignedPolicy.MemoryReads("memory_get", "memory_search", "memory_list");
+        var before = Snapshot(agent);
+        var dockerStops = 0;
+        _host.DockerStates = ["running"];
+
+        var result = await Runtime(dockerStop: _ => { dockerStops++; return Task.FromResult(true); }).ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "managed_route_unsupported:mcp:" + name), (result.Status, result.Code));
+        Assert.Equal(0, dockerStops);
+        Assert.Empty(_broker.Puts);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "sandbox" or "provider" or "policy");
+        var stored = _store.Get("agent1");
+        Assert.Equal(before, Snapshot(stored));
+        Assert.Equal((mode, "none", "docker", (int?)null), (stored.NativeAuthMode, ManagedRecord.Parse(stored.AppliedRuntimeBinding).State,
+            stored.AppliedRuntimeKind, stored.AppliedSandboxPolicyVersionId));
+    }
+
+    // A6 (orchestrator side) and #505: a grant under the other accepted name is neither admitted nor refused for this
+    // endpoint, and a read the policy lists without a selected-name grant adds nothing.
+    [Theory]
+    [InlineData("memory", "fleet-memory")]
+    [InlineData("fleet-memory", "memory")]
+    public async Task ManagedMemoryReads_other_name_grants_never_count_for_the_selected_endpoint(string name, string other)
+    {
+        var agent = ManagedAgentWithReads(name, "memory_list");
+        agent.Tools.Add(new AgentTool { ToolName = $"mcp__{other}__memory_search" });
+        agent.Tools.Add(new AgentTool { ToolName = $"mcp__{name}__memory_search", IsEnabled = false });
+        _store.Add(agent);
+        _store.PolicyYaml = SignedPolicy.MemoryReads("memory_list", "memory_search");
+
+        var applied = await Runtime().ApplyAsync("agent1", default);
+        Assert.True(applied.Ok, applied.Message);
+
+        // Only the other name's grant left: the selected endpoint has no read grant at all.
+        var only = ManagedAgentWithReads(name);
+        only.Tools.Add(new AgentTool { ToolName = $"mcp__{other}__memory_list" });
+        var fresh = new ManagedStockRuntimeAdapterTests();
+        try
+        {
+            fresh._store.Add(only);
+            fresh._store.PolicyYaml = SignedPolicy.MemoryReads("memory_list");
+            var refused = await fresh.Runtime().ApplyAsync("agent1", default);
+            Assert.Equal((409, "managed_memory_grant_missing"), (refused.Status, refused.Code));
+        }
+        finally { fresh.Dispose(); }
+    }
+
+    // A17: a historical API-key selection (get-only saved policy, enabled get/list/search grants) now refuses its next Apply;
+    // appending and selecting an explicit all-read version, then a separate Apply, preserves every grant and the old bytes.
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("fleet-memory")]
+    public async Task ManagedMemoryReads_api_key_get_only_policy_with_extra_reads_refuses_until_an_explicit_version_is_selected(string name)
+    {
+        _store.Add(ManagedAgentWithReads(name, "memory_get", "memory_list", "memory_search"));
+        _store.PolicyYaml = SignedPolicy.MemoryOnly;
+        var before = Snapshot(_store.Get("agent1"));
+        var dockerStops = 0;
+        _host.DockerStates = ["running"];
+        var runtime = Runtime(dockerStop: _ => { dockerStops++; _host.DockerStates = ["exited"]; return Task.FromResult(true); });
+
+        var refused = await runtime.ApplyAsync("agent1", default);
+
+        Assert.Equal((409, "managed_route_unsupported:mcp:" + name), (refused.Status, refused.Code));
+        Assert.Equal(0, dockerStops);
+        Assert.Empty(_broker.Puts);
+        Assert.DoesNotContain(_cli.Calls, c => c.Args[0] is "sandbox" or "provider" or "policy");
+        var stored = _store.Get("agent1");
+        Assert.Equal(before, Snapshot(stored));
+        Assert.Equal(("api_key", "SYNTHETIC_API_KEY", "none", "docker", (int?)null), (stored.NativeAuthMode, stored.ProviderApiKeyEnvRef,
+            ManagedRecord.Parse(stored.AppliedRuntimeBinding).State, stored.AppliedRuntimeKind, stored.AppliedSandboxPolicyVersionId));
+
+        // Recovery: append an explicit all-read version 2, select it (desired only), then a separately requested Apply.
+        _store.PolicyYaml2 = SignedPolicy.MemoryReads("memory_get", "memory_list", "memory_search");
+        stored.SandboxPolicyVersionId = 2;
+        var applied = await runtime.ApplyAsync("agent1", default);
+
+        Assert.True(applied.Ok, applied.Message);
+        Assert.Equal(1, dockerStops);
+        Assert.Equal(("openshell", (int?)2), (_store.Get("agent1").AppliedRuntimeKind, _store.Get("agent1").AppliedSandboxPolicyVersionId));
+        Assert.Equal(before, Snapshot(_store.Get("agent1")));
+        var create = Assert.Single(_cli.Calls, c => c.Args.Take(2).SequenceEqual(["sandbox", "create"]));
+        Assert.Equal(_store.PolicyYaml2, File.ReadAllText(create.Args[create.Args.IndexOf("--policy") + 1]));
+        Assert.Equal(SignedPolicy.MemoryOnly, (await _store.LoadPolicyAsync(1, default))!.Yaml);
+    }
+
+    // A16: the actual managed generation path over DB rows feeds the bundle's AllowedTools exactly the saved enabled read
+    // grants of the selected name, never an implicit get, under either accepted name.
+    [Theory]
+    [InlineData("memory", "memory_list")]
+    [InlineData("memory", "memory_search")]
+    [InlineData("fleet-memory", "memory_list")]
+    [InlineData("fleet-memory", "memory_search")]
+    [InlineData("fleet-memory", "memory_get")]
+    public async Task ManagedMemoryReads_actual_generation_bundles_exactly_the_saved_read_grant(string name, string read)
+    {
+        await using var harness = Services.ProvisioningHarness.Create();
+        // The same rows in the generator's DB (no policy row there; generation never reads the selection).
+        await harness.SeedAsync(db => db.Agents.Add(GeneratorRow(ManagedAgentWithReads(name, read))));
+        _store.Add(ManagedAgentWithReads(name, read));
+        _store.PolicyYaml = SignedPolicy.MemoryReads(read);
+
+        var applied = await Runtime(provisioning: harness.Service).ApplyAsync("agent1", default);
+
+        Assert.True(applied.Ok, applied.Message);
+        Assert.Equal([$"mcp__{name}__{read}"], BundledMemoryTools(_cli));
+    }
+
+    /// <summary>A copy of a managed agent for the generator's SQLite DB, which holds no policy rows to reference.</summary>
+    internal static Agent GeneratorRow(Agent agent)
+    {
+        agent.SandboxPolicyVersionId = null;
+        agent.AppliedSandboxPolicyVersionId = null;
+        return agent;
+    }
+
+    /// <summary>The memory grants in the uploaded workload <c>appsettings.json</c> AllowedTools.</summary>
+    internal static List<string> BundledMemoryTools(FakeCli cli) =>
+        JsonNode.Parse(cli.Uploads.Last(u => u.Remote == "/home/agent/app/appsettings.json").Content!)!["Agent"]!["AllowedTools"]!.AsArray()
+            .Select(t => t!.GetValue<string>()).Where(t => t.Contains("memory", StringComparison.Ordinal)).ToList();
 
     [Fact]
     public async Task Supported_first_party_mcp_grants_apply_with_exactly_their_granted_tools()
@@ -1405,8 +1562,12 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         throw new InvalidOperationException("Fleet.sln not found above the test output");
     }
 
+    /// <param name="provisioning">#512: when set, the runtime's production generation path
+    /// (<see cref="ContainerProvisioningService.GenerateManagedInputsAsync"/>) over that service's DB rows replaces the
+    /// fixed generated-input fixture.</param>
     internal StockOpenShellRuntime Runtime(Func<string, Task<bool>>? dockerStop = null, AgentRegistry? registry = null,
-        IStockCli? cli = null, TimeProvider? clock = null, Func<string, bool>? directorySync = null, IManagedBindingStore? store = null)
+        IStockCli? cli = null, TimeProvider? clock = null, Func<string, bool>? directorySync = null, IManagedBindingStore? store = null,
+        ContainerProvisioningService? provisioning = null)
     {
         Directory.CreateDirectory(_dir);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -1424,6 +1585,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
         File.WriteAllText(Path.Combine(generated, Fleet.Shared.HarnessDefaults.CodexRootTomlFileName), "model = \"synthetic\"\n");
         var services = new ServiceCollection();
         if (registry is not null) services.AddSingleton(registry);
+        if (provisioning is not null) services.AddSingleton(provisioning);
         return new StockOpenShellRuntime(Config(ConfigOverrides), cli ?? _cli, Provisioner(), store ?? _store, _host, _broker.Credentials,
             services.BuildServiceProvider(), NullLogger<StockOpenShellRuntime>.Instance)
         {
@@ -1431,7 +1593,7 @@ public sealed class ManagedStockRuntimeAdapterTests : IDisposable
             FanoutTimeout = TimeSpan.FromSeconds(5),
             StopSettle = TimeSpan.FromSeconds(1),
             Poll = TimeSpan.FromMilliseconds(10),
-            GenerateInputs = (_, _) => Task.FromResult(generated),
+            GenerateInputs = provisioning is null ? (_, _) => Task.FromResult(generated) : null,
             DockerStop = dockerStop ?? (_ => Task.FromResult(true)),
             ProvisionDocker = (name, _) =>
             {
@@ -1999,6 +2161,9 @@ internal static class SignedPolicy
     };
 
     internal static readonly string MemoryOnly = Yaml(Memory);
+
+    /// <summary>#512: the memory-only fixture whose memory endpoint allows exactly these explicit reads.</summary>
+    internal static string MemoryReads(params string[] reads) => MemoryOnly.Replace(Rules("memory_get"), Rules(reads));
 
     /// <summary>The one supported MCP rule form (pinned stock shape): the control methods, then tools/call per exact tool.</summary>
     internal static string Rules(params string[] tools) =>

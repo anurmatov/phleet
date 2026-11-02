@@ -980,7 +980,8 @@ public sealed class ContainerProvisioningService(
     /// Generates appsettings.json, .mcp.json, and settings.json into the agent's
     /// .generated/ workspace directory before the container is started.
     /// </summary>
-    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir, string ctoAgentName)
+    /// <param name="managed">#512: true only from <see cref="GenerateManagedInputsAsync"/>; see <see cref="AllowedToolsFor"/>.</param>
+    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir, string ctoAgentName, bool managed = false)
     {
         var generatedDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
         Directory.CreateDirectory(generatedDir);
@@ -1010,7 +1011,7 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), managed));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
@@ -1307,7 +1308,13 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>The generated <c>Agent.AllowedTools</c> list, which the agent reads as its own.</summary>
-    internal static List<string> AllowedToolsFor(Agent agent, string ctoAgentName)
+    /// <param name="managed">
+    /// #512: true only for a managed stock bundle (<see cref="GenerateManagedInputsAsync"/>), whose native memory table must
+    /// equal the agent's saved enabled memory grants under either accepted endpoint name, so the ordinary automatic
+    /// <c>memory_get</c> is not added there. Explicit saved grants and every other default are unchanged; ordinary
+    /// generation (false) keeps its bytes.
+    /// </param>
+    internal static List<string> AllowedToolsFor(Agent agent, string ctoAgentName, bool managed = false)
     {
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
             .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
@@ -1317,7 +1324,7 @@ public sealed class ContainerProvisioningService(
         // for codex: other providers do not read AllowedTools this way.
         if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase))
         {
-            if (!tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
+            if (!managed && !tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
                 tools.Add("mcp__fleet-memory__memory_get");
 
             if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
@@ -1364,7 +1371,7 @@ public sealed class ContainerProvisioningService(
         Agent agent,
         string ctoAgentName,
         OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null, bool managed = false)
     {
         var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
@@ -1377,7 +1384,7 @@ public sealed class ContainerProvisioningService(
         if (DescribeLocalModelFault(agent) is { } localFault)
             throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
 
-        var tools = AllowedToolsFor(agent, ctoAgentName);
+        var tools = AllowedToolsFor(agent, ctoAgentName, managed);
         var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
         var hosted     = HostedModelProviders.TryResolve(agent.Provider, agent.Model, out var hostedProvider, out _);
 
@@ -1911,7 +1918,7 @@ public sealed class ContainerProvisioningService(
         var envValues = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
         envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
         var projectContexts = await ResolveProjectContextsAsync(agent);
-        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
+        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "", managed: true);
         await GenerateInstructionFilesAsync(agent, baseDir, null);
         await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
         return Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");

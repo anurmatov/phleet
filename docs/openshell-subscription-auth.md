@@ -581,7 +581,8 @@ this amendment.
 existing first-party routes: memory, Temporal and Telegram receivers, the comms-journal read route, and the
 agent-local journal files/send listener, with its own bot and journal capture through stock service providers. They
 appear as further `[mcp_servers.<name>]` tables after the memory table. Each table holds the agent's enabled grants
-that the outside record permits, and memory stays `memory_get` only. These are workload-configured receivers that
+that the outside record permits, and memory stays `memory_get` only (superseded by the #512 read-set amendment
+below). These are workload-configured receivers that
 verify the outside assertion or derived token. They are not the cloud Apps route: `[features] plugins = false,
 apps = false` stays, so `POST /backend-api/ps/mcp` is still never registered or allowed. No issuer endpoint,
 WebSocket permission or subscription endpoint is widened. #498's empty-MCP requirement remains the contract of its
@@ -600,3 +601,30 @@ separate human and operator authority with named candidate, images, custody, pol
 refresh window, a current eligible stopped recovery checkpoint and cleanup authority. While any applicable
 #501/#498 positive-work gate or that CONTROL prerequisite is open, the check is **BLOCKED** before native work.
 Until it runs, delivery is source-only and every live row remains UNRUN.
+
+## #512 native read-set amendment
+
+**Explicit reads replace the forced get-only table.** Refs [#512](https://github.com/anurmatov/phleet/issues/512). The
+#502/#505 memory table is no longer forced to `enabled_tools = ["memory_get"]`. In both managed auth modes it holds
+exactly the agent's enabled read grants under the selected memory name, a nonempty subset of `memory_get`,
+`memory_search` and `memory_list`, in the generated AllowedTools order, for example:
+
+```toml
+[mcp_servers.fleet-memory]
+url = "https://<memory-host>/mcp"
+enabled_tools = ["memory_list","memory_search"]
+```
+
+Managed bundle generation no longer adds the ordinary implicit `mcp__fleet-memory__memory_get`, so a list-only or
+search-only selection stays exactly that under either name. Apply needs at least one read grant under the selected
+name, and each one must be allowed by an explicit `tools/call` rule in the saved policy; an empty set, a memory write or
+an unknown memory grant refuses (`managed_memory_grant_missing`, `managed_route_unsupported:mcp:<name>`,
+`stock_enrollment_memory_tools_missing` or `stock_enrollment_mcp_route_invalid`) and is never filtered away. A
+get-only selection keeps its exact native bytes. The receiver still checks the current endpoint, tool and project
+grants on every request.
+
+**Limits are unchanged.** This is source support only and the path stays **UNQUALIFIED**. It is not issuer
+isolation (#501), CONTROL restore qualification or a #493/#498 pass. The #502 compatibility trial above still names
+exactly one `memory_get`. No A0–A9, T5, A11 or ordinary-agent result is claimed. The operator runbook (upgrade
+refusal, explicit policy recovery and downgrade) is in
+[the stock runbook](openshell-stock.md#explicit-memory-reads-512).

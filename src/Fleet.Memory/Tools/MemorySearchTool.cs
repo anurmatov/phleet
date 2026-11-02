@@ -51,7 +51,7 @@ public sealed class MemorySearchTool(
             var filtered = new List<MemoryDocument>();
             foreach (var d in results)
             {
-                var (allowed, denyReason) = aclCache.CanRead(agentName!, d.Project ?? "");
+                var (allowed, _) = aclCache.CanRead(agentName!, d.Project ?? "");
                 if (allowed)
                 {
                     filtered.Add(d);
@@ -59,9 +59,9 @@ public sealed class MemorySearchTool(
                 else
                 {
                     deniedCounter.Increment(agentName!, "memory_search");
-                    logger.LogInformation(
-                        "memory_search: denied agent '{Agent}' on memory '{MemoryId}' (project '{Project}'): {Reason}",
-                        agentName, d.Id, d.Project, denyReason);
+                    // #512: fixed tool/reason fields only; no record, agent or project identifier (the ACL reason names them).
+                    logger.LogInformation("memory_search: denied ({Reason})",
+                        string.IsNullOrWhiteSpace(d.Project) ? "no_project" : "project_not_allowed");
                 }
             }
             results = filtered.Take(limit).ToList();

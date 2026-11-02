@@ -40,10 +40,11 @@ public sealed class MemoryGetTool(
             try { probe = await memoryService.GetAsync(id); }
             catch (AmbiguousMemoryIdException ex) { return $"memory_get: {ex.Message}"; }
             var project = probe?.Project ?? "";
-            var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
+            var (allowed, _) = aclCache.CanRead(agentName!, project);
             if (!allowed)
             {
-                logger.LogInformation("memory_get: denied agent '{Agent}' on id '{Id}': {Reason}", agentName, id, denyReason);
+                // #512: fixed tool/reason fields only; no record, agent or project identifier (the ACL reason names them).
+                logger.LogInformation("memory_get: denied ({Reason})", string.IsNullOrWhiteSpace(project) ? "no_project" : "project_not_allowed");
                 return "memory_get: access denied.";
             }
 

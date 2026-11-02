@@ -405,7 +405,6 @@ public sealed class StockOpenShellRuntime(
     /// <summary>Profile for the derived cross-chat read token (cross-chat sends from the agent process).</summary>
     public const string JournalCrossChatProfile = "fleet-journal-cross-chat";
     internal static readonly string Instance = Guid.NewGuid().ToString("N");
-    internal static readonly string[] MemoryTools = ["memory_get", "memory_search", "memory_list"];
     /// <summary>Ordinary MCP endpoint name → first-party receiving service that verifies the outside assertion.</summary>
     internal static readonly IReadOnlyDictionary<string, string> ServiceByMcpName =
         StockServices.McpNames.ToDictionary(p => p.Value, p => p.Key, StringComparer.Ordinal);
@@ -745,9 +744,7 @@ public sealed class StockOpenShellRuntime(
         if (ServiceRouteFault(agent) is { } routeFault) return routeFault;
         var (memory, memoryFault) = MemoryEndpoint(agent);
         if (memoryFault is not null) return memoryFault;
-        // #505: only the selected endpoint's own grants count, never the other accepted name's.
-        if (!agent.Tools.Any(t => t.IsEnabled && MemoryTools.Any(m => t.ToolName == StockServices.ToolGrant(memory!.McpName, m))))
-            return "managed_memory_grant_missing";
+        if (!HasMemoryReadGrant(agent, memory!)) return "managed_memory_grant_missing";
         if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return "managed_agent_image_missing";
         if (DescribeConfigDirFault() is { } dirFault) return dirFault;
         if (LoadTemplate() is not { } template) return "managed_authority_template_invalid";
@@ -755,6 +752,9 @@ public sealed class StockOpenShellRuntime(
         if (ServiceHostFault(agent, template) is { } hostFault) return hostFault;
         // #503: the saved artifact must bind the fixed signer to exactly this agent's selected receiving hosts.
         if (signerAdmission && SignerPolicyFault(policy, ExpectedSignerHosts(template, agent)) is { } signerFault) return signerFault;
+        // #512: the same grant admission as subscription apply, so an enabled grant the saved policy cannot carry refuses here
+        // instead of disappearing from the native table (an older get-only policy with list/search grants now refuses).
+        if (signerAdmission && GrantAdmissionFault(policy, template, agent, memory!) is { } grantFault) return grantFault;
         if (broker.DescribePreflightFault() is { } brokerFault) return brokerFault;
         if (await broker.VerifyAccessAsync(ct) is { } accessFault) return accessFault;
         var version = await cli.RunAsync(["--version"], null, LegTimeout, ct);
@@ -806,10 +806,18 @@ public sealed class StockOpenShellRuntime(
     }
 
     /// <summary>
-    /// #510: every enabled grant on each selected signer-bound route (memory under its selected name, Temporal, Telegram) is
-    /// an exact tool the saved policy's one receiver endpoint allows. Memory keeps its get-only rule, so another memory grant
-    /// blocks too. A grant the policy cannot carry refuses <c>managed_route_unsupported:mcp:NAME</c> before Stop; it is never
-    /// pruned and no grant is edited. Journal read and files/send keep their own receiver/listener grant checks.
+    /// #505/#512: at least one enabled fixed read grant under the selected memory endpoint's own name, never the other
+    /// accepted name's. Which reads are callable is the saved policy's and <see cref="GrantAdmissionFault"/>'s decision.
+    /// </summary>
+    private static bool HasMemoryReadGrant(Agent agent, AgentMcpEndpoint memory) =>
+        agent.Tools.Any(t => t.IsEnabled && StockServices.MemoryTools.Any(m => t.ToolName == StockServices.ToolGrant(memory.McpName, m)));
+
+    /// <summary>
+    /// #510 (#512: both auth modes): every enabled grant on each selected signer-bound route (memory under its selected name,
+    /// Temporal, Telegram) is an exact tool the saved policy's one receiver endpoint allows. Memory rules admit only the fixed
+    /// reads, so a memory write or unknown grant blocks, and so does a list/search grant under a policy that omits it. A grant
+    /// the policy cannot carry refuses <c>managed_route_unsupported:mcp:NAME</c> before Stop; it is never pruned and no grant
+    /// is edited. Journal read and files/send keep their own receiver/listener grant checks.
     /// </summary>
     private static string? GrantAdmissionFault(SandboxPolicyVersion policy, JsonObject template, Agent agent, AgentMcpEndpoint memory)
     {
@@ -827,7 +835,7 @@ public sealed class StockOpenShellRuntime(
 
     /// <summary>
     /// #502 compatibility-only subscription admission, before any mutation or old-runtime Stop: the native memory endpoint
-    /// with its existing <c>memory_get</c> grant, and (#510) the agent's existing service routes under the API-key branch's
+    /// with an existing read grant (#512), and (#510) the agent's existing service routes under the API-key branch's
     /// checks without its native key, each enabled grant admitted by the saved policy (extra or unsupported selections
     /// refuse, never dropped); the outside binding file, the pinned CLI and gateway client trust in the persisted scope, the
     /// restricted and selected service profile hashes, gateway generation, sole ownership, the existing native provider (no
@@ -839,8 +847,7 @@ public sealed class StockOpenShellRuntime(
         if (ServiceRouteFault(agent) is { } routeFault) return (routeFault, null);
         var (memory, memoryFault) = MemoryEndpoint(agent);
         if (memoryFault is not null) return (memoryFault, null);
-        if (!agent.Tools.Any(t => t.IsEnabled && t.ToolName == StockServices.ToolGrant(memory!.McpName, "memory_get")))
-            return ("managed_memory_grant_missing", null);
+        if (!HasMemoryReadGrant(agent, memory!)) return ("managed_memory_grant_missing", null);
         if (string.IsNullOrWhiteSpace(config["StockOpenShell:AgentImage"])) return ("managed_agent_image_missing", null);
         if (DescribeConfigDirFault() is { } dirFault) return (dirFault, null);
         if (LoadTemplate() is not { } template) return ("managed_authority_template_invalid", null);

@@ -68,7 +68,10 @@ public static class AgentHostRegistration
         // #460: the harness plan, computed once; the executors apply it and heartbeats report its sha.
         services.AddSingleton<AgentHarness>();
         services.AddSingleton<ClaudeExecutor>();
-        services.AddSingleton<CodexExecutor>();
+        services.AddSingleton(sp => new CodexExecutor(sp.GetRequiredService<IOptions<AgentOptions>>(),
+            sp.GetRequiredService<IOptions<TelegramOptions>>(), sp.GetRequiredService<PromptBuilder>(),
+            sp.GetRequiredService<ILogger<CodexExecutor>>(), sp.GetService<HostedProviderAdapterHost>(),
+            sp.GetRequiredService<AgentHarness>(), configuration));
         services.AddSingleton<GeminiExecutor>();
 
         // Hosted provider (#335 D4/D5). Keyed off the orchestrator-emitted flag, the same value

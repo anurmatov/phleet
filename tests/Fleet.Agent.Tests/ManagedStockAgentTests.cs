@@ -24,16 +24,16 @@ public sealed class ManagedStockAgentTests
         var binding = StockOpenShellEnrollment.Validate(configuration, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(configuration, f.Home, binding, f.Root, _ => Placeholder);
         StockOpenShellEnrollment.RequirePrepared(configuration, binding, f.Home, _ => Placeholder);
-        var auth = File.ReadAllText(Path.Combine(f.Home, ".codex", "auth.json"));
+        var auth = File.ReadAllText(Path.Combine(f.NativeDirectory, "auth.json"));
         using var json = JsonDocument.Parse(auth);
         Assert.Single(json.RootElement.EnumerateObject());
         Assert.Equal(Placeholder, json.RootElement.GetProperty("OPENAI_API_KEY").GetString());
-        Assert.StartsWith("forced_login_method = \"api\"\n", File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml")));
+        Assert.StartsWith("forced_login_method = \"api\"\n", File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml")));
         Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex-host")));
         if (!OperatingSystem.IsWindows())
         {
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.Home, ".codex", "auth.json")));
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.Home, ".codex", "config.toml")));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.NativeDirectory, "auth.json")));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.NativeDirectory, "config.toml")));
         }
     }
 
@@ -62,7 +62,7 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
-        var path = Path.Combine(f.Home, ".codex", "auth.json");
+        var path = Path.Combine(f.NativeDirectory, "auth.json");
         if (OperatingSystem.IsLinux()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.OtherRead);
         else throw new PlatformNotSupportedException("Stock startup requires Linux");
         var bytes = File.ReadAllBytes(path);
@@ -82,7 +82,7 @@ public sealed class ManagedStockAgentTests
     {
         using var f = new Fixture();
         Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(f.Config(), f.Home, () => 10001, f.Root, _ => value));
-        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+        Assert.False(Directory.Exists(f.NativeDirectory));
     }
 
     [Theory]
@@ -106,7 +106,7 @@ public sealed class ManagedStockAgentTests
     {
         using var f = new Fixture();
         var binding = StockOpenShellEnrollment.Validate(f.Config(), f.Home, () => 10001, f.Root, _ => Placeholder)!;
-        var directory = Path.Combine(f.Home, ".codex");
+        var directory = f.NativeDirectory;
         Directory.CreateDirectory(directory);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         if (fault == "manual") Directory.CreateDirectory(Path.Combine(f.Home, ".codex-host"));
@@ -124,8 +124,8 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
-        var auth = Path.Combine(f.Home, ".codex", "auth.json");
-        var config = Path.Combine(f.Home, ".codex", "config.toml");
+        var auth = Path.Combine(f.NativeDirectory, "auth.json");
+        var config = Path.Combine(f.NativeDirectory, "config.toml");
         foreach (var bad in new[] { "{}", "{\"OPENAI_API_KEY\":\"literal\"}", JsonSerializer.Serialize(new { OPENAI_API_KEY = Placeholder, tokens = new { } }) })
         {
             File.WriteAllText(auth, bad);
@@ -150,10 +150,10 @@ public sealed class ManagedStockAgentTests
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, NoEnvironment)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, NoEnvironment);
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, NoEnvironment);
-        Assert.Equal(manual, File.ReadAllText(Path.Combine(f.Home, ".codex", "auth.json")));
+        Assert.Equal(manual, File.ReadAllText(Path.Combine(f.NativeDirectory, "auth.json")));
         if (OperatingSystem.IsLinux()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
-            File.GetUnixFileMode(Path.Combine(f.Home, ".codex")));
-        Assert.DoesNotContain("forced_login_method", File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml")));
+            File.GetUnixFileMode(f.NativeDirectory));
+        Assert.DoesNotContain("forced_login_method", File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml")));
     }
 
     [Theory]
@@ -205,7 +205,7 @@ public sealed class ManagedStockAgentTests
         var record = JsonSerializer.Deserialize<StockEnrollmentAuthority>(File.ReadAllText(path))!;
         File.WriteAllText(path, JsonSerializer.Serialize(record with { State = "revoked" }));
         Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder));
-        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+        Assert.False(Directory.Exists(f.NativeDirectory));
     }
 
     [Theory]
@@ -225,7 +225,7 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
-        File.WriteAllText(Path.Combine(f.Home, ".codex", "auth.json"), "synthetic-private-invalid-json");
+        File.WriteAllText(Path.Combine(f.NativeDirectory, "auth.json"), "synthetic-private-invalid-json");
         Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(
             () => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
     }
@@ -238,7 +238,7 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder));
-        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+        Assert.False(Directory.Exists(f.NativeDirectory));
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
         var before = f.NativeBytes();
 
@@ -312,7 +312,7 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
-        File.WriteAllText(Path.Combine(f.Home, ".codex", "auth.json"), fault switch
+        File.WriteAllText(Path.Combine(f.NativeDirectory, "auth.json"), fault switch
         {
             "literal" => "{\"OPENAI_API_KEY\":\"synthetic-private-value\"}",
             "malformed" => "synthetic-private-invalid-json",
@@ -335,7 +335,7 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
-        File.AppendAllText(Path.Combine(f.Home, ".codex", "config.toml"), "\n# synthetic drift\n");
+        File.AppendAllText(Path.Combine(f.NativeDirectory, "config.toml"), "\n# synthetic drift\n");
         var before = f.NativeBytes();
 
         Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
@@ -370,7 +370,7 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
-        var auth = Path.Combine(f.Home, ".codex", "auth.json");
+        var auth = Path.Combine(f.NativeDirectory, "auth.json");
         if (fault == "mode") File.SetUnixFileMode(auth, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.OtherRead);
         else
         {
@@ -398,7 +398,7 @@ public sealed class ManagedStockAgentTests
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
         var before = f.NativeBytes();
-        using (var locked = new FileStream(Path.Combine(f.Home, ".codex", "auth.json"), FileMode.Open, FileAccess.Read, FileShare.None))
+        using (var locked = new FileStream(Path.Combine(f.NativeDirectory, "auth.json"), FileMode.Open, FileAccess.Read, FileShare.None))
         {
             Assert.Equal("stock_enrollment_native_not_prepared", Assert.Throws<InvalidOperationException>(() =>
                 StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
@@ -424,15 +424,17 @@ public sealed class ManagedStockAgentTests
         // Linux PATH_MAX includes the terminator: existing inputs fit, but PrivateWrite's
         // extra dot + 32-hex GUID + .tmp cannot fit. This fails even when tests run as root.
         var home = f.Home;
-        while (home.Length < 4053)
-            home = Path.Combine(home, new string('d', Math.Max(1, Math.Min(200, 4053 - home.Length - 1))));
-        var directory = Path.Combine(home, ".codex");
+        while (home.Length < 4012)
+            home = Path.Combine(home, new string('d', Math.Max(1, Math.Min(200, 4012 - home.Length - 1))));
+        var directory = Path.Combine(home, ".codex", "managed", b.Epoch.ToString("N"));
+        foreach (var rootPath in new[] { Path.Combine(home, ".codex"), Path.Combine(home, ".codex", "managed") })
+            Directory.CreateDirectory(rootPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         foreach (var leaf in new[] { "auth.json", "config.toml" })
         {
             var path = Path.Combine(directory, leaf);
             Assert.True(path.Length < 4096);
-            File.Copy(Path.Combine(f.Home, ".codex", leaf), path);
+            File.Copy(Path.Combine(f.NativeDirectory, leaf), path);
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
         Assert.True((Path.Combine(directory, "auth.json") + "." + new string('0', 32) + ".tmp").Length >= 4096);
@@ -452,12 +454,153 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.RequirePrepared(c, b, home, _ => Placeholder);
     }
 
+    [Fact]
+    public void EpochProfile_NewEpochAndHandle_PreparesFreshDirectoryAndRetainsEarlierBytes()
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var old = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, old, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        var path = f.Settings["StockOpenShell:AuthorityFile"]!;
+        File.WriteAllText(path, JsonSerializer.Serialize(StockEnrollmentAuthority.Load(path) with { Epoch = Guid.NewGuid() }));
+        const string next = "openshell:resolve:env:v8_OPENAI_API_KEY";
+        var current = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => next)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, current, f.Root, _ => next);
+        StockOpenShellEnrollment.RequirePrepared(c, current, f.Home, _ => next);
+        var selected = StockOpenShellEnrollment.NativeProfileDirectory(c, f.Home, current);
+        Assert.Equal(Path.Combine(f.Home, ".codex", "managed", current.Epoch.ToString("N")), selected);
+        Assert.NotEqual(f.NativeDirectory, selected);
+        f.AssertNativeUnchanged(before);
+        Assert.Contains(next, File.ReadAllText(Path.Combine(selected, "auth.json")));
+        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
+        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "config.toml")));
+    }
+
+    [Theory]
+    [InlineData("auth.json", "file")]
+    [InlineData("config.toml", "file")]
+    [InlineData("auth.json", "directory")]
+    [InlineData("config.toml", "directory")]
+    [InlineData("auth.json", "link")]
+    [InlineData("config.toml", "link")]
+    [InlineData("auth.json", "dangling")]
+    [InlineData("config.toml", "dangling")]
+    public void EpochProfile_LateLegacyEntry_AllEnrollmentPathsRefuseWithoutMutation(string leaf, string kind)
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        var path = Path.Combine(f.Home, ".codex", leaf);
+        if (kind == "file") File.WriteAllText(path, "synthetic-foreign-cache");
+        else if (kind == "directory") Directory.CreateDirectory(path);
+        else File.CreateSymbolicLink(path, kind == "link" ? f.Root : Path.Combine(f.Home, "absent"));
+        Assert.Equal("stock_enrollment_native_cache_forbidden", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        Assert.Equal("stock_enrollment_native_cache_forbidden", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
+        Assert.Equal("stock_enrollment_native_cache_forbidden", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.ValidateForRegistration(c, f.Home, () => 10001, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+        Assert.Equal(StockNativePathProbe.State.Present, StockNativePathProbe.Probe(path).Status);
+        if (kind == "file") Assert.Equal("synthetic-foreign-cache", File.ReadAllText(path));
+    }
+
+    [Theory]
+    [InlineData(1)] [InlineData(4)] [InlineData(5)] [InlineData(13)]
+    [InlineData(20)] [InlineData(38)] [InlineData(40)]
+    [InlineData(-1)] [InlineData(-2)]
+    public void EpochProfile_UnobservableLegacyLookup_AllEnrollmentPathsFailClosed(int error)
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        StockNativePathProbe.SyscallResult Probe(string path)
+        {
+            if (path != Path.Combine(f.Home, ".codex", "auth.json")) return StockNativePathProbe.Read(path);
+            if (error == -1) throw new EntryPointNotFoundException();
+            return error == -2 ? new(0, 0, default) : new(-1, error, default);
+        }
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder, Probe)).Message);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder, Probe)).Message);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.ValidateForRegistration(c, f.Home, () => 10001, _ => Placeholder, Probe)).Message);
+        f.AssertNativeUnchanged(before);
+    }
+
+    [Theory]
+    [InlineData(".codex")]
+    [InlineData("managed")]
+    [InlineData("epoch")]
+    public void EpochProfile_LinkedManagedAncestor_IsNotFollowedOrRepaired(string part)
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var path = part == ".codex" ? Path.Combine(f.Home, ".codex") : part == "managed"
+            ? Path.Combine(f.Home, ".codex", "managed") : f.NativeDirectory;
+        var moved = Path.Combine(f.Home, "retained");
+        Directory.Move(path, moved);
+        Directory.CreateSymbolicLink(path, moved);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        Assert.Equal(moved, new DirectoryInfo(path).LinkTarget);
+    }
+
+    [Fact]
+    public void EpochProfile_ForeignOwnerOrNonprivateDirectory_RefusesWithoutRepair()
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var before = f.NativeBytes();
+        StockNativePathProbe.SyscallResult ForeignOwner(string path)
+        {
+            var result = StockNativePathProbe.Read(path);
+            if (path == f.NativeDirectory) { var buffer = result.Buffer; buffer.Uid++; return result with { Buffer = buffer }; }
+            return result;
+        }
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder, ForeignOwner)).Message);
+        File.SetUnixFileMode(f.NativeDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.OtherRead);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder)).Message);
+        f.AssertNativeUnchanged(before);
+    }
+
     // ── own Telegram bot and journal capture (#492) ────────────────────────
 
     private const string TelegramPlaceholder = "openshell:resolve:env:v7_TELEGRAM_BOT_TOKEN";
     private const string JournalPlaceholder = "openshell:resolve:env:v7_FLEET_JOURNAL_INGEST_TOKEN";
 
     /// <summary>The stock-issued child environment: placeholders only, under the provider credential names.</summary>
+    [Theory]
+    [InlineData("auth.json")]
+    [InlineData("config.toml")]
+    public void EpochProfile_DanglingSelectedFile_IsNotAdoptedOrReplaced(string leaf)
+    {
+        using var f = new Fixture();
+        var c = f.Config();
+        var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
+        StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
+        var path = Path.Combine(f.NativeDirectory, leaf);
+        File.Delete(path);
+        var target = Path.Combine(f.Home, "missing");
+        File.CreateSymbolicLink(path, target);
+        Assert.Equal("stock_enrollment_native_path_invalid", Assert.Throws<InvalidOperationException>(() =>
+            StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
+        Assert.Equal(target, new FileInfo(path).LinkTarget);
+        Assert.False(File.Exists(target));
+    }
+
     private static Func<string, string?> ChildEnvironment(string? telegram = TelegramPlaceholder, string? journal = JournalPlaceholder,
         string? read = null, string? cross = null) => key => key switch
     {
@@ -504,7 +647,7 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.PrepareNative(daemon, f.Home, b, f.Root, env);
         StockOpenShellEnrollment.RequirePrepared(daemon, b, f.Home, env);
         Assert.Contains("\n[mcp_servers.fleet-journal-files]\nurl = \"http://127.0.0.1:8091/journal-files/v1/mcp\"\nenabled_tools = [\"send_attachment\"]\n",
-            File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml")));
+            File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml")));
     }
 
     [Theory]
@@ -678,7 +821,7 @@ public sealed class ManagedStockAgentTests
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, ReadEnvironment())!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, ReadEnvironment());
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, ReadEnvironment());
-        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        var config = File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml"));
         Assert.Contains("\n[mcp_servers.fleet-comms-journal]\nurl = \"https://journal.example.test/journal/v1/mcp\"\nenabled_tools = [\"get_message\"]\n"
             + "http_headers = { Authorization = \"Bearer " + ReadPlaceholder + "\" }\n", config);
         Assert.DoesNotContain("cj1.", config);
@@ -698,7 +841,7 @@ public sealed class ManagedStockAgentTests
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, ReadEnvironment(read))!;
         var refusal = Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, ReadEnvironment(read)));
         Assert.Equal("stock_enrollment_journal_read_placeholder_invalid", refusal.Message);
-        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "config.toml")));
+        Assert.False(File.Exists(Path.Combine(f.NativeDirectory, "config.toml")));
     }
 
     [Fact]
@@ -737,7 +880,7 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv);
 
-        using var auth = JsonDocument.Parse(File.ReadAllText(Path.Combine(f.Home, ".codex", "auth.json")));
+        using var auth = JsonDocument.Parse(File.ReadAllText(Path.Combine(f.NativeDirectory, "auth.json")));
         var root = auth.RootElement;
         Assert.Equal("chatgptAuthTokens", root.GetProperty("auth_mode").GetString());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("OPENAI_API_KEY").ValueKind);
@@ -749,7 +892,7 @@ public sealed class ManagedStockAgentTests
 
         // Forced root keys first, generated defaults unchanged (one [analytics]), the exact descriptor, one [features]
         // block and exactly one native memory table narrowed to memory_get.
-        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        var config = File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml"));
         var defaults = File.ReadAllText(f.Root);
         Assert.Equal("forced_login_method = \"chatgpt\"\nforced_chatgpt_workspace_id = \"" + Account + "\"\nmodel_provider = \"openai-http\"\n"
             + defaults
@@ -764,9 +907,9 @@ public sealed class ManagedStockAgentTests
         Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex-host")));
         if (!OperatingSystem.IsWindows())
         {
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(Path.Combine(f.Home, ".codex")));
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.Home, ".codex", "auth.json")));
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.Home, ".codex", "config.toml")));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(f.NativeDirectory));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.NativeDirectory, "auth.json")));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(f.NativeDirectory, "config.toml")));
         }
         Assert.True(StockOpenShellEnrollment.IsManaged(c));
     }
@@ -807,7 +950,7 @@ public sealed class ManagedStockAgentTests
         });
         Assert.StartsWith("stock_enrollment_", error.Message);
         Assert.DoesNotContain("synthetic-literal", error.Message);
-        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
+        Assert.False(File.Exists(Path.Combine(f.NativeDirectory, "auth.json")));
     }
 
     [Fact]
@@ -817,8 +960,8 @@ public sealed class ManagedStockAgentTests
         var c = f.Config();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, SubscriptionEnv)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
-        var authPath = Path.Combine(f.Home, ".codex", "auth.json");
-        var configPath = Path.Combine(f.Home, ".codex", "config.toml");
+        var authPath = Path.Combine(f.NativeDirectory, "auth.json");
+        var configPath = Path.Combine(f.NativeDirectory, "config.toml");
         var good = File.ReadAllText(authPath);
         var goodConfig = File.ReadAllText(configPath);
         var node = System.Text.Json.Nodes.JsonNode.Parse(good)!;
@@ -869,7 +1012,7 @@ public sealed class ManagedStockAgentTests
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, _ => Placeholder);
-        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        var config = File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml"));
         Assert.EndsWith(MemoryTable(name, "[\"memory_get\",\"memory_search\"]"), config);
         Assert.Equal(1, McpTables(config));
     }
@@ -885,7 +1028,7 @@ public sealed class ManagedStockAgentTests
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, SubscriptionEnv)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, SubscriptionEnv);
-        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        var config = File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml"));
         Assert.EndsWith("\n[features]\nplugins = false\napps = false\n" + MemoryTable(name, "[\"memory_get\"]"), config);
         Assert.Equal(1, McpTables(config));
     }
@@ -921,7 +1064,7 @@ public sealed class ManagedStockAgentTests
         var refusal = Assert.Throws<InvalidOperationException>(() => StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, _ => Placeholder));
 
         Assert.Equal(code, refusal.Message);
-        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+        Assert.False(Directory.Exists(f.NativeDirectory));
     }
 
     [Fact]
@@ -935,7 +1078,7 @@ public sealed class ManagedStockAgentTests
         File.WriteAllText(f.McpPath, "{\"mcpServers\":{\"fleet-memory\":{\"url\":\"https://memory.example.test/mcp\"},\"memory\":{\"url\":\"https://memory.example.test/mcp\"}}}");
         Assert.Equal("stock_enrollment_mcp_route_invalid", Assert.Throws<InvalidOperationException>(
             () => StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder)).Message);
-        Assert.False(Directory.Exists(Path.Combine(f.Home, ".codex")));
+        Assert.False(Directory.Exists(f.NativeDirectory));
         // Prepared under one name, then renamed: registration no longer matches the prepared native table.
         File.WriteAllText(f.McpPath, original);
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, _ => Placeholder);
@@ -956,7 +1099,7 @@ public sealed class ManagedStockAgentTests
             var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, SubscriptionEnv)!;
             StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, SubscriptionEnv);
         }).Message);
-        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
+        Assert.False(File.Exists(Path.Combine(f.NativeDirectory, "auth.json")));
     }
 
     [Fact]
@@ -1030,10 +1173,10 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.RequirePrepared(daemon, b, f.Home, env);
 
         // Unchanged subscription auth custody: forced ChatGPT/account root keys, the descriptor, suppression, the issued handle.
-        var config = File.ReadAllText(Path.Combine(f.Home, ".codex", "config.toml"));
+        var config = File.ReadAllText(Path.Combine(f.NativeDirectory, "config.toml"));
         Assert.StartsWith("forced_login_method = \"chatgpt\"\nforced_chatgpt_workspace_id = \"" + Account + "\"\nmodel_provider = \"openai-http\"\n", config);
         Assert.Contains("\n[features]\nplugins = false\napps = false\n" + MemoryTable("memory", "[\"memory_get\"]"), config);
-        using (var auth = JsonDocument.Parse(File.ReadAllText(Path.Combine(f.Home, ".codex", "auth.json"))))
+        using (var auth = JsonDocument.Parse(File.ReadAllText(Path.Combine(f.NativeDirectory, "auth.json"))))
             Assert.Equal(Handle, auth.RootElement.GetProperty("tokens").GetProperty("access_token").GetString());
         // Every enrolled route, narrowed to the granted tools the record permits; the read route carries only its placeholder.
         Assert.Contains("\n[mcp_servers.fleet-telegram]\nurl = \"https://telegram.example.test/mcp\"\nenabled_tools = [\"send_message\"]\n", config);
@@ -1086,8 +1229,8 @@ public sealed class ManagedStockAgentTests
 
         Assert.StartsWith("stock_enrollment_", refusal.Message);
         Assert.DoesNotContain("synthetic", refusal.Message);
-        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "auth.json")));
-        Assert.False(File.Exists(Path.Combine(f.Home, ".codex", "config.toml")));
+        Assert.False(File.Exists(Path.Combine(f.NativeDirectory, "auth.json")));
+        Assert.False(File.Exists(Path.Combine(f.NativeDirectory, "config.toml")));
     }
 
     [Fact]
@@ -1099,7 +1242,7 @@ public sealed class ManagedStockAgentTests
             .AddInMemoryCollection(StockOpenShellEnrollment.ManagedCredentialOverlay(f.Config(), env)).Build();
         var b = StockOpenShellEnrollment.Validate(c, f.Home, () => 10001, f.Root, env)!;
         StockOpenShellEnrollment.PrepareNative(c, f.Home, b, f.Root, env);
-        var path = Path.Combine(f.Home, ".codex", "config.toml");
+        var path = Path.Combine(f.NativeDirectory, "config.toml");
         var good = File.ReadAllText(path);
         const string telegram = "\n[mcp_servers.fleet-telegram]\nurl = \"https://telegram.example.test/mcp\"\nenabled_tools = [\"send_message\"]\n";
         foreach (var drift in new[] { good.Replace("enabled_tools = [\"send_message\"]", "enabled_tools = [\"send_message\", \"send_photo\"]"),
@@ -1112,9 +1255,12 @@ public sealed class ManagedStockAgentTests
         StockOpenShellEnrollment.RequirePrepared(c, b, f.Home, env);
     }
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private readonly string _dir = Path.Combine(Path.GetTempPath(), "managed-agent-" + Guid.NewGuid().ToString("N"));
+        public Guid Epoch { get; } = Guid.NewGuid();
+        public string NativeDirectory => Settings.GetValueOrDefault("Agent:NativeAuthMode") == "api_key"
+            ? Path.Combine(Home, ".codex", "managed", Epoch.ToString("N")) : Path.Combine(Home, ".codex");
         public string Home => Path.Combine(_dir, "home");
         public string Root => Path.Combine(_dir, "root.toml");
         public Dictionary<string, string?> Settings { get; } = new();
@@ -1124,12 +1270,13 @@ public sealed class ManagedStockAgentTests
         {
             Directory.CreateDirectory(Home);
             File.WriteAllText(Root, HarnessDefaults.Build(AgentHarness.InputFor(new AgentOptions { Name = "agent1", Role = "synthetic", Provider = "codex", WorkDir = _dir }, _ => null)!).CodexRootToml);
+            File.Copy(Root, Path.Combine(_dir, HarnessDefaults.CodexRootTomlFileName));
             var authority = Path.Combine(_dir, "authority.json");
             var password = Path.Combine(_dir, "password");
             File.WriteAllText(password, "synthetic");
             File.WriteAllText(authority, JsonSerializer.Serialize(new StockEnrollmentAuthority
             {
-                State = "active", Agent = "agent1", SandboxId = "synthetic", Epoch = Guid.NewGuid(), ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
+                State = "active", Agent = "agent1", SandboxId = "synthetic", Epoch = Epoch, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
                 GatewayIssuer = "issuer", GatewayAudience = "audience", GatewayJwksPath = Path.Combine(_dir, "jwks"),
                 AssertionPrivateKeyPath = Path.Combine(_dir, "private"), AssertionPublicKeyPath = Path.Combine(_dir, "public"),
                 MemoryHost = "memory.example.test", BrokerHost = "broker.example.test", PolicySha256 = new string('b', 64), StockCommit = StockOpenShellEnrollment.StockCommit,
@@ -1137,7 +1284,7 @@ public sealed class ManagedStockAgentTests
             }));
             foreach (var (key, value) in new Dictionary<string, string?>
             {
-                ["StockOpenShell:Enabled"] = "true", ["StockOpenShell:EnrollmentFile"] = authority,
+                ["StockOpenShell:Enabled"] = "true", ["StockOpenShell:AppRoot"] = _dir, ["StockOpenShell:EnrollmentFile"] = authority,
                 ["StockOpenShell:AuthorityFile"] = authority, ["StockOpenShell:BrokerPasswordFile"] = password,
                 ["Agent:Name"] = "agent1", ["Agent:ShortName"] = "agent1", ["Agent:Role"] = "synthetic", ["Agent:Provider"] = "codex",
                 ["Agent:Model"] = "sol", ["Agent:WorkDir"] = _dir, ["Agent:AllowedTools:0"] = $"mcp__{memoryName}__memory_get",
@@ -1149,13 +1296,13 @@ public sealed class ManagedStockAgentTests
         }
         public IConfiguration Config() => new ConfigurationBuilder().AddInMemoryCollection(Settings).Build();
         public (byte[] Auth, byte[] Config) NativeBytes() =>
-            (File.ReadAllBytes(Path.Combine(Home, ".codex", "auth.json")), File.ReadAllBytes(Path.Combine(Home, ".codex", "config.toml")));
+            (File.ReadAllBytes(Path.Combine(NativeDirectory, "auth.json")), File.ReadAllBytes(Path.Combine(NativeDirectory, "config.toml")));
         public void AssertNativeUnchanged((byte[] Auth, byte[] Config) before)
         {
             var after = NativeBytes();
             Assert.Equal(before.Auth, after.Auth);
             Assert.Equal(before.Config, after.Config);
-            Assert.Empty(Directory.GetFiles(Path.Combine(Home, ".codex"), "*.tmp"));
+            Assert.Empty(Directory.GetFiles(NativeDirectory, "*.tmp"));
         }
         public void Dispose() => Directory.Delete(_dir, true);
     }

@@ -143,6 +143,8 @@ verified memory and broker control/completion to a non-root Codex daemon/native-
 It is a bounded, experimental profile, not automatic provisioning or a general rollout.
 Each deployment needs explicit operator enrollment and its own exact-build runtime qualification;
 CI and source fixtures do not establish that qualification.
+Managed API-key agents use epoch-specific native profiles and a child-only `CODEX_HOME`; see the
+[native profile and upgrade rules](docs/openshell-stock.md#managed-api-key-native-profiles-516).
 The managed Codex **subscription** branch (#502) is experimental and compatibility-only: an outside-owned
 provider binding plus one native memory route, with no tested account isolation, no automatic enrollment or
 login, and no new environment key or tool. API-key and manual paths are unchanged. See the

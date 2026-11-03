@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Fleet.Memory.Configuration;
@@ -306,6 +307,105 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
             : 0;
 
         return stats;
+    }
+
+    /// <summary>What a no-follow lookup observed at a path; anything not proven is <see cref="Unobservable"/>.</summary>
+    internal enum EntryKind { Absent, Directory, File, Link, Special, Unobservable }
+
+    private const string EntryRefused = "memory_stats: linked, special or unobservable entry";
+
+    // Explicit options: the defaults of EnumerationOptions would skip inaccessible and hidden entries.
+    private static readonly EnumerationOptions ScanOptions = new()
+    {
+        IgnoreInaccessible = false, AttributesToSkip = 0, MatchType = MatchType.Simple, RecurseSubdirectories = false,
+    };
+
+    /// <summary>
+    /// #518: per-type active counts and the archived count (key <c>_archived</c>) of the parsed memories whose project
+    /// <paramref name="canRead"/> allows, for ACL-enabled <c>memory_stats</c>; every type row is present, zero included.
+    /// Active records count under their directory's type. Only an observed-absent type or archive directory counts as
+    /// zero. A file without frontmatter or with malformed YAML is not a classifiable record and is left out unnamed and
+    /// uncounted. A linked or special entry is refused before it is followed or opened; that refusal and any lookup,
+    /// enumeration or read failure throw <see cref="IOException"/> or <see cref="UnauthorizedAccessException"/>, so the
+    /// caller reports no totals. Cancellation throws. Reads files only, never the index.
+    /// </summary>
+    public Task<Dictionary<string, int>> GetScopedStatsAsync(Func<string?, bool> canRead, CancellationToken ct) =>
+        GetScopedStatsAsync(canRead, ct, ProbeEntry);
+
+    /// <param name="probe">The no-follow lookup; tests substitute it to reproduce failures a root test user cannot.</param>
+    internal async Task<Dictionary<string, int>> GetScopedStatsAsync(Func<string?, bool> canRead, CancellationToken ct, Func<string, EntryKind> probe)
+    {
+        var stats = new Dictionary<string, int>();
+        foreach (var type in MemoryDocument.ValidTypes)
+            stats[type] = await CountReadableAsync(Path.Combine(_basePath, type), canRead, probe, ct);
+        stats["_archived"] = await CountReadableAsync(Path.Combine(_basePath, "_archived"), canRead, probe, ct);
+        return stats;
+    }
+
+    private static async Task<int> CountReadableAsync(string dir, Func<string?, bool> canRead, Func<string, EntryKind> probe, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        switch (probe(dir))
+        {
+            case EntryKind.Absent: return 0;
+            case EntryKind.Directory: break;
+            default: throw new IOException(EntryRefused);
+        }
+
+        var count = 0;
+        foreach (var path in Directory.EnumerateFileSystemEntries(dir, "*.md", ScanOptions))
+        {
+            ct.ThrowIfCancellationRequested();
+            var kind = probe(path);
+            // A subdirectory is not a memory file; every other scan enumerates files only.
+            if (kind == EntryKind.Directory) continue;
+            if (kind != EntryKind.File) throw new IOException(EntryRefused);
+
+            var text = await File.ReadAllTextAsync(path, ct);
+            MemoryDocument? doc;
+            // Malformed frontmatter can also fail slicing (ArgumentException) before the YAML parse wraps its error.
+            try { doc = ParseMarkdown(text, path); }
+            catch (Exception ex) when (ex is InvalidDataException or ArgumentException) { continue; }
+            if (doc is not null && canRead(doc.Project)) count++;
+        }
+        return count;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    private struct Statx
+    {
+        [FieldOffset(0)] public uint Mask;
+        [FieldOffset(28)] public ushort Mode;
+    }
+
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern int StatxCall(int directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out Statx buffer);
+
+    /// <summary>
+    /// #518: Linux <c>statx</c> with <c>AT_SYMLINK_NOFOLLOW</c>, so a link is reported as a link and never followed (.NET
+    /// file attributes cannot tell a FIFO, socket or device from a regular file). Only ENOENT proves absence; any other
+    /// error, a missing type field or another platform is unobservable, never absence.
+    /// </summary>
+    internal static EntryKind ProbeEntry(string path)
+    {
+        try
+        {
+            if (!OperatingSystem.IsLinux()) return EntryKind.Unobservable;
+            if (StatxCall(-100, path, 0x100, 0x1, out var buffer) != 0)
+                return Marshal.GetLastPInvokeError() == 2 ? EntryKind.Absent : EntryKind.Unobservable;
+            if ((buffer.Mask & 0x1) == 0) return EntryKind.Unobservable;
+            return (buffer.Mode & 0xF000) switch
+            {
+                0x4000 => EntryKind.Directory,
+                0x8000 => EntryKind.File,
+                0xA000 => EntryKind.Link,
+                _ => EntryKind.Special,
+            };
+        }
+        catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException or MarshalDirectiveException)
+        {
+            return EntryKind.Unobservable;
+        }
     }
 
     /// <summary>

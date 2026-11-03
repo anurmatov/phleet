@@ -16,7 +16,11 @@ public sealed class StockIdentityDenied(string reason) : Exception(reason);
 public static class StockServices
 {
     public const string Memory = "memory";
-    public static readonly IReadOnlyList<string> MemoryTools = ["memory_get", "memory_search", "memory_list"];
+    /// <summary>
+    /// The fixed memory reads (ordinal names). #518: <c>memory_stats</c> is the fourth, with ACL-scoped counts at the
+    /// receiver; a policy and grant must still name each one explicitly, nothing is implied.
+    /// </summary>
+    public static readonly IReadOnlyList<string> MemoryTools = ["memory_get", "memory_search", "memory_list", "memory_stats"];
 
     /// <summary>The ordinary name of the memory MCP endpoint, which managed mode accepts as well as <see cref="Memory"/> (#505).</summary>
     public const string OrdinaryMemoryMcpName = "fleet-memory";

@@ -252,6 +252,8 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
     [InlineData("linked_directory")]
     [InlineData("linked_archive")]
     [InlineData("type_path_is_a_file")]
+    [InlineData("type_path_is_a_fifo")]
+    [InlineData("storage_root_missing")]
     public async Task MemoryStats_linked_or_non_directory_entries_are_unavailable_without_partial_totals(string fault)
     {
         var outside = Path.Combine(_dir, "outside");
@@ -271,13 +273,22 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
                 Directory.Move(Path.Combine(Root, "_archived"), Path.Combine(outside, "_archived"));
                 Directory.CreateSymbolicLink(Path.Combine(Root, "_archived"), Path.Combine(outside, "_archived"));
                 break;
+            case "type_path_is_a_fifo":
+                Directory.Delete(Path.Combine(Root, "reference"), true);
+                Assert.Equal(0, MkFifo(Path.Combine(Root, "reference"), 0x180));
+                break;
+            case "storage_root_missing":
+                Directory.Move(Root, Path.Combine(_dir, "moved-root"));
+                break;
             default:
                 Directory.Delete(Path.Combine(Root, "reference"), true);
                 File.WriteAllText(Path.Combine(Root, "reference"), "not a directory");
                 break;
         }
 
-        Assert.Equal("memory_stats: unavailable", await Tool(Acl(populate: new() { ["agent1"] = ["project-a"] })).GetStatsAsync(default));
+        var output = await Task.Run(() => Tool(Acl(populate: new() { ["agent1"] = ["project-a"] })).GetStatsAsync(default))
+            .WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal("memory_stats: unavailable", output);
     }
 
     [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
@@ -305,64 +316,104 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
             Tool(Acl(populate: new() { ["agent1"] = ["project-a"] })).GetStatsAsync(cancelled.Token));
     }
 
-    // Failures a root test user cannot produce with permissions are reproduced through the store's lookup seam: each is an
-    // I/O failure for the tool (unavailable), never an empty or partial count.
-    [Theory]
-    [InlineData("unobservable_type_directory")]
-    [InlineData("unobservable_entry")]
-    [InlineData("enumeration_failure")]
-    [InlineData("read_failure")]
-    [InlineData("entry_vanished")]
-    public async Task MemoryStats_lookup_enumeration_and_read_failures_throw_instead_of_counting(string fault)
+    // ── Replacement after a check: the scan stays on its no-follow handles ────
+
+    /// <summary>Two project-a records outside the storage root that a replaced path could point at.</summary>
+    private string OutsideRecords()
     {
-        var learning = Path.Combine(Root, "learning");
-        var record = Directory.EnumerateFiles(learning, "*synthetic-record-1.md").Single();
-        if (fault == "read_failure") Directory.CreateDirectory(Path.Combine(learning, "2026-01-01_99999999_dir.md"));
-        MemoryFileStore.EntryKind Probe(string path)
-        {
-            switch (fault)
-            {
-                case "unobservable_type_directory" when path == learning:
-                case "unobservable_entry" when path == record:
-                    return MemoryFileStore.EntryKind.Unobservable;
-                case "enumeration_failure" when path == learning:
-                    // The type path became a regular file after the lookup: enumerating it fails.
-                    Directory.Delete(learning, true);
-                    File.WriteAllText(learning, "x");
-                    return MemoryFileStore.EntryKind.Directory;
-                case "read_failure" when path.EndsWith("_dir.md", StringComparison.Ordinal):
-                    // A directory entry misreported as a file: reading it fails.
-                    return MemoryFileStore.EntryKind.File;
-                case "entry_vanished" when path == record:
-                    // The entry disappears between the lookup and the read.
-                    File.Delete(record);
-                    return MemoryFileStore.EntryKind.File;
-                default:
-                    return MemoryFileStore.ProbeEntry(path);
-            }
-        }
-
-        var error = await Record.ExceptionAsync(() => _store.GetScopedStatsAsync(_ => true, default, Probe));
-
-        Assert.True(error is IOException or UnauthorizedAccessException, error?.GetType().Name);
+        var outside = Directory.CreateDirectory(Path.Combine(_dir, "outside")).FullName;
+        foreach (var n in new[] { "eeeeeeee", "ffffffff" })
+            File.WriteAllText(Path.Combine(outside, $"2026-01-01_{n}_outside.md"),
+                $"---\nid: {n}-0000-0000-0000-000000000000\nagent: agent1\ntitle: \"outside\"\nproject: project-a\n---\n\nbody\n");
+        return outside;
     }
 
-    [Fact]
-    public void MemoryStats_probe_reports_type_without_following_and_only_enoent_as_absence()
-    {
-        var learning = Path.Combine(Root, "learning");
-        var record = Directory.EnumerateFiles(learning, "*synthetic-record-1.md").Single();
-        var link = Path.Combine(_dir, "link.md");
-        File.CreateSymbolicLink(link, record);
-        var fifo = Path.Combine(_dir, "fifo.md");
-        Assert.Equal(0, MkFifo(fifo, 0x180));
+    private Task<Dictionary<string, int>> ScanAsync(Action<string> afterOpen) =>
+        _store.GetScopedStatsAsync(project => project == "project-a", default, afterOpen);
 
-        Assert.Equal(MemoryFileStore.EntryKind.Directory, MemoryFileStore.ProbeEntry(learning));
-        Assert.Equal(MemoryFileStore.EntryKind.File, MemoryFileStore.ProbeEntry(record));
-        Assert.Equal(MemoryFileStore.EntryKind.Link, MemoryFileStore.ProbeEntry(link));
-        Assert.Equal(MemoryFileStore.EntryKind.Special, MemoryFileStore.ProbeEntry(fifo));
-        Assert.Equal(MemoryFileStore.EntryKind.Absent, MemoryFileStore.ProbeEntry(Path.Combine(_dir, "absent")));
-        // ENOTDIR (a path through a regular file) is a failed lookup, never absence.
-        Assert.Equal(MemoryFileStore.EntryKind.Unobservable, MemoryFileStore.ProbeEntry(Path.Combine(record, "child")));
+    // A type or archive directory replaced after its handle is open (by a link to outside records, or by a new
+    // directory) never redirects the scan: it lists and reads the directory it opened, and nothing outside counts.
+    [Theory]
+    [InlineData("learning", "link")]
+    [InlineData("learning", "directory")]
+    [InlineData("_archived", "link")]
+    public async Task MemoryStats_a_directory_replaced_after_it_is_opened_never_redirects_the_scan(string replaced, string with)
+    {
+        var outside = OutsideRecords();
+        var path = Path.Combine(Root, replaced);
+        var swapped = false;
+
+        var stats = await ScanAsync(relative =>
+        {
+            if (relative != replaced) return;
+            Directory.Move(path, Path.Combine(_dir, "moved-" + replaced));
+            if (with == "link") Directory.CreateSymbolicLink(path, outside);
+            else
+            {
+                Directory.CreateDirectory(path);
+                foreach (var file in Directory.EnumerateFiles(outside)) File.Copy(file, Path.Combine(path, Path.GetFileName(file)));
+            }
+            swapped = true;
+        });
+
+        // Redirected, learning or the archive would read the two outside project-a records instead of its one.
+        Assert.True(swapped);
+        Assert.Equal((1, 1, 1), (stats["learning"], stats["decision"], stats["_archived"]));
+        Assert.Equal(0, stats.Where(s => s.Key is not ("learning" or "decision" or "_archived")).Sum(s => s.Value));
+    }
+
+    // An entry replaced after it was listed and before it is opened is refused without following or blocking: a link to
+    // an outside record, a FIFO, a socket or a vanished entry each fail the whole scan, never count.
+    [Theory]
+    [InlineData("link")]
+    [InlineData("fifo")]
+    [InlineData("socket")]
+    [InlineData("vanished")]
+    public async Task MemoryStats_an_entry_replaced_after_listing_is_refused_without_following_or_blocking(string with)
+    {
+        var outside = OutsideRecords();
+        var target = Directory.EnumerateFiles(Path.Combine(Root, "learning"), "*synthetic-record-1.md").Single();
+        var relative = "learning/" + Path.GetFileName(target);
+        System.Net.Sockets.Socket? socket = null;
+        try
+        {
+            var error = await Record.ExceptionAsync(() => Task.Run(() => ScanAsync(step =>
+            {
+                if (step != relative) return;
+                File.Delete(target);
+                switch (with)
+                {
+                    case "link": File.CreateSymbolicLink(target, Directory.EnumerateFiles(outside).First()); break;
+                    case "fifo": Assert.Equal(0, MkFifo(target, 0x180)); break;
+                    case "socket":
+                        // Bound at a short path (the 108-byte socket limit), then renamed into place: still a socket.
+                        var shortPath = Path.Combine(Path.GetTempPath(), "s" + Guid.NewGuid().ToString("N")[..8]);
+                        socket = new(System.Net.Sockets.AddressFamily.Unix, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Unspecified);
+                        socket.Bind(new System.Net.Sockets.UnixDomainSocketEndPoint(shortPath));
+                        File.Move(shortPath, target);
+                        break;
+                }
+            })).WaitAsync(TimeSpan.FromSeconds(30)));
+
+            Assert.True(error is IOException or UnauthorizedAccessException, error?.ToString());
+        }
+        finally { socket?.Dispose(); }
+    }
+
+    // The refusal carries a fixed message: no record, path or project for the tool or a log to repeat.
+    [Fact]
+    public async Task MemoryStats_a_refused_replacement_names_no_path_or_record()
+    {
+        var outside = OutsideRecords();
+        var target = Directory.EnumerateFiles(Path.Combine(Root, "learning"), "*synthetic-record-1.md").Single();
+        var error = await Record.ExceptionAsync(() => _store.GetScopedStatsAsync(_ => true, default, step =>
+        {
+            if (step != "learning/" + Path.GetFileName(target)) return;
+            File.Delete(target);
+            File.CreateSymbolicLink(target, Directory.EnumerateFiles(outside).First());
+        }));
+        Assert.IsType<IOException>(error);
+        Assert.DoesNotContain("eeeeeeee", error!.Message);
+        Assert.DoesNotContain(Root, error.Message);
     }
 }

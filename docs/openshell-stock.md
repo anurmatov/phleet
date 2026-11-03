@@ -1520,13 +1520,18 @@ file counts. With ACLs on it never returns them:
 | count | every type directory and `_archived` is scanned; a parsed record counts only when the existing `CanRead(agent, project)` allows its project; active records count under their directory's type |
 | output | every type row (zero included), Total active and Archived; no project names, record IDs, hidden types or denied/skipped/global totals |
 | no frontmatter or malformed YAML | left out, without a name or a count |
-| a link, FIFO, socket or device `*.md` entry, or a linked type/archive directory | refused before it is followed or opened: `memory_stats: unavailable` |
+| a link, FIFO, socket or device `*.md` entry, or a linked type/archive directory | never followed or read: `memory_stats: unavailable` |
 | any lookup, enumeration or read failure | `memory_stats: unavailable`; never a partial, empty or global total |
 | type or archive directory proven absent | that row counts zero |
 | request cancelled | aborted, no output |
 
-The entry-type check uses Linux `statx` without following links (the memory image is Linux). On another platform
-ACL-enabled stats report `memory_stats: unavailable`. Stats read only files, never the index or embedder.
+**Handle-anchored scan.** Each type and archive directory is opened once, relative to the storage root, with
+`O_NOFOLLOW`, then listed and read only through that open handle. Each entry is opened relative to it with
+`O_NOFOLLOW | O_NONBLOCK`, and the opened descriptor must be a regular file (`statx` on the descriptor). A FIFO opens
+without blocking and is then refused, and a socket fails to open. Replacing a directory or file after it was checked
+cannot redirect the scan to a link target or another directory. This uses Linux `openat`/`readdir`/`statx` on x86-64
+and arm64 (the memory image). On any other platform or architecture, ACL-enabled stats report
+`memory_stats: unavailable`. Stats read only files, never the index or embedder.
 
 **Ordinary cache versus managed freshness.**
 

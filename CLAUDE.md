@@ -518,8 +518,10 @@ grant refuses `managed_route_unsupported:mcp:*`). With ACLs enabled, `MemoryStat
 needs an available ACL (`memory_stats: ACL cache unavailable`) and caller, then `MemoryFileStore.GetScopedStatsAsync` counts
 only parsed files `AclCacheService.CanRead` allows. Ordinary callers use the cached map (removals after a refresh, stale kept
 on a failed refresh); managed callers the fresh request-local snapshot, so revocation is next-request. Malformed files are left
-out unnamed; a link, FIFO/socket/device (Linux `statx` no-follow) or any I/O failure is `memory_stats: unavailable`, never a
-partial total. ACL disabled keeps the global file counts. Runbook: `docs/openshell-stock.md` (scoped memory stats).
+out unnamed. The scan is anchored to no-follow handles (Linux x86-64/arm64 `openat`/`readdir`/`statx`; each directory opened
+once, entries opened `O_NOFOLLOW|O_NONBLOCK` and typed on the descriptor), so a replaced path never redirects it; a link,
+FIFO/socket/device or any I/O failure is `memory_stats: unavailable`, never a partial total. ACL disabled keeps the global
+file counts. Runbook: `docs/openshell-stock.md` (scoped memory stats).
 Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
 full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate
 an agent name into one. A fresh name must be proven absent before apply records or creates anything

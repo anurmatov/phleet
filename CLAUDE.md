@@ -473,7 +473,8 @@ subset (`stock-memory`/`stock-temporal`/`stock-telegram` → registration `stock
 create/policy-set effect with 409 `managed_signer_policy_missing`/`_mismatch`/`_scope`. It requires the stored hash
 to be the SHA-256 of the exact saved bytes, the entries to equal memory plus the selected routes, and one enforced
 `host:443` MCP endpoint per receiver with exact MCP rules, never an access preset (pinned stock rejects MCP presets;
-memory allows `tools/call` only for an explicit nonempty subset of `memory_get`/`memory_search`/`memory_list`, #512).
+memory allows `tools/call` only for an explicit nonempty subset of `memory_get`/`memory_search`/`memory_list`/`memory_stats`,
+#512/#518).
 Start/restart/pre-activation check the applied version
 and its outside enrollment (`managed_signer_authority_unavailable`), never desired. Never normalize or inject into
 saved YAML. Cleanup (Stop/revoke/expiry/retirement) never depends on this check. Backups require the registration's
@@ -511,6 +512,14 @@ ordinary generation keeps it. The native memory table is exactly the selected-na
 narrowing); managed unsupported/empty memory grants refuse at enrollment. A planned restart (`signerAdmission:false`) skips
 grant admission and reuses the applied bundle; additions need a new Apply, receiver revocation stays immediate. Read-denial
 logs carry only tool and fixed reason. Runbook: `docs/openshell-stock.md` (explicit memory reads).
+Scoped memory stats (#518): `memory_stats` is the fourth entry of `StockServices.MemoryTools`, so policy, grant admission,
+enrollment and the hook accept it only when named explicitly (no implicit grant; an old three-read policy plus an enabled stats
+grant refuses `managed_route_unsupported:mcp:*`). With ACLs enabled, `MemoryStatsTool` never returns the global counts: it
+needs an available ACL (`memory_stats: ACL cache unavailable`) and caller, then `MemoryFileStore.GetScopedStatsAsync` counts
+only parsed files `AclCacheService.CanRead` allows. Ordinary callers use the cached map (removals after a refresh, stale kept
+on a failed refresh); managed callers the fresh request-local snapshot, so revocation is next-request. Malformed files are left
+out unnamed; a link, FIFO/socket/device (Linux `statx` no-follow) or any I/O failure is `memory_stats: unavailable`, never a
+partial total. ACL disabled keeps the global file counts. Runbook: `docs/openshell-stock.md` (scoped memory stats).
 Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
 full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate
 an agent name into one. A fresh name must be proven absent before apply records or creates anything

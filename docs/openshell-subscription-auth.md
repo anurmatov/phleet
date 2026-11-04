@@ -628,3 +628,29 @@ isolation (#501), CONTROL restore qualification or a #493/#498 pass. The #502 co
 exactly one `memory_get`. No A0–A9, T5, A11 or ordinary-agent result is claimed. The operator runbook (upgrade
 refusal, explicit policy recovery and downgrade) is in
 [the stock runbook](openshell-stock.md#explicit-memory-reads-512).
+
+## #518 fourth-read amendment
+
+**`memory_stats` is the fourth fixed read.** Refs [#518](https://github.com/anurmatov/phleet/issues/518). The #512 table
+rule is unchanged: in both managed auth modes the native memory table is exactly the enabled selected-name grants, now
+a nonempty subset of `memory_get`, `memory_search`, `memory_list` and `memory_stats`, for example:
+
+```toml
+[mcp_servers.memory]
+url = "https://<memory-host>/mcp"
+enabled_tools = ["memory_get","memory_stats"]
+```
+
+Stats appears only when the agent holds an enabled stats grant **and** the saved policy has a `tools/call` rule for it;
+neither implies the other, and nothing adds it implicitly. A stats-only selection is accepted. An enabled stats grant
+beside an older three-read version refuses Apply (`managed_route_unsupported:mcp:<name>`) before any effect, until an
+explicit version is appended and selected; the grant is never pruned.
+
+**Counts are scoped and fresh.** The managed receiver answers stats with the verified identity and a fresh ACL
+snapshot on each request. A removed project reads 0/0 and a removed stats grant or revoked session is refused on the
+very next request; an ACL or config outage is `503` before any count. No project name, record ID or hidden total is
+returned or logged. Ordinary callers keep the existing cached ACL timing instead.
+
+**Limits are unchanged.** Subscription custody, the selected account, the API-key epoch profile and every #502/#512
+limit stay as above; the path stays **UNQUALIFIED**. Older builds refuse a stats-enabled binding rather than fall back,
+so stop and revoke before any downgrade. Runbook: [scoped memory stats](openshell-stock.md#scoped-memory-stats-518).

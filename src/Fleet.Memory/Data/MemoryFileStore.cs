@@ -1,9 +1,11 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Fleet.Memory.Configuration;
 using Fleet.Memory.Models;
 using Microsoft.Extensions.Options;
+using Microsoft.Win32.SafeHandles;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -307,6 +309,216 @@ public sealed partial class MemoryFileStore(IOptions<StorageOptions> storageOpti
 
         return stats;
     }
+
+    private const string EntryRefused = "memory_stats: linked, special or unreadable entry";
+
+    /// <summary>
+    /// #518: per-type active counts and the archived count (key <c>_archived</c>) of the parsed memories whose project
+    /// <paramref name="canRead"/> allows, for ACL-enabled <c>memory_stats</c>; every type row is present, zero included.
+    /// Active records count under their directory's type. The scan holds no-follow handles: each type and archive
+    /// directory is opened once below the storage root and listed and read only through that handle, and each entry is
+    /// opened without following a link and without blocking, then checked to be a regular file on the opened handle.
+    /// Replacing a checked path cannot redirect the scan. Only an observed-absent type or archive directory counts as zero.
+    /// A file without frontmatter or with malformed YAML is not a classifiable record and is left out unnamed. A link or
+    /// special entry, and any lookup, listing or read failure, throws <see cref="IOException"/> or
+    /// <see cref="UnauthorizedAccessException"/>, so the caller reports no totals. Cancellation throws. Files only, never
+    /// the index.
+    /// </summary>
+    public Task<Dictionary<string, int>> GetScopedStatsAsync(Func<string?, bool> canRead, CancellationToken ct) =>
+        GetScopedStatsAsync(canRead, ct, null);
+
+    /// <param name="afterOpen">
+    /// Test seam, null in production: called with the relative path after a directory handle is open (<c>learning</c>)
+    /// and after an entry is listed, before it is opened (<c>learning/NAME.md</c>), so tests can replace it there.
+    /// </param>
+    internal async Task<Dictionary<string, int>> GetScopedStatsAsync(Func<string?, bool> canRead, CancellationToken ct, Action<string>? afterOpen)
+    {
+        ct.ThrowIfCancellationRequested();
+        try
+        {
+            using var root = ScanDirectory.OpenRoot(_basePath);
+            var stats = new Dictionary<string, int>();
+            foreach (var type in MemoryDocument.ValidTypes)
+                stats[type] = await CountReadableAsync(root, type, canRead, afterOpen, ct);
+            stats["_archived"] = await CountReadableAsync(root, "_archived", canRead, afterOpen, ct);
+            return stats;
+        }
+        catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException or MarshalDirectiveException)
+        {
+            throw new IOException(EntryRefused, ex);
+        }
+    }
+
+    private static async Task<int> CountReadableAsync(ScanDirectory root, string name, Func<string?, bool> canRead,
+        Action<string>? afterOpen, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        using var dir = root.OpenChildDirectory(name);
+        if (dir is null) return 0;
+        afterOpen?.Invoke(name);
+
+        var count = 0;
+        foreach (var entry in dir.MarkdownEntries())
+        {
+            ct.ThrowIfCancellationRequested();
+            var relative = name + "/" + Encoding.UTF8.GetString(entry);
+            afterOpen?.Invoke(relative);
+            using var file = dir.OpenRegularFile(entry);
+            // A subdirectory is not a memory file; every other scan enumerates files only.
+            if (file is null) continue;
+
+            var text = await ReadTextAsync(file, ct);
+            MemoryDocument? doc;
+            // Malformed frontmatter can also fail slicing (ArgumentException) before the YAML parse wraps its error.
+            try { doc = ParseMarkdown(text, relative); }
+            catch (Exception ex) when (ex is InvalidDataException or ArgumentException) { continue; }
+            if (doc is not null && canRead(doc.Project)) count++;
+        }
+        return count;
+    }
+
+    /// <summary>The whole regular file behind <paramref name="file"/>, decoded as <see cref="File.ReadAllText(string)"/> does.</summary>
+    private static async Task<string> ReadTextAsync(SafeFileHandle file, CancellationToken ct)
+    {
+        var length = RandomAccess.GetLength(file);
+        if (length > int.MaxValue) throw new IOException(EntryRefused);
+        var buffer = new byte[length];
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var n = await RandomAccess.ReadAsync(file, buffer.AsMemory(read), read, ct);
+            if (n == 0) break;
+            read += n;
+        }
+        using var reader = new StreamReader(new MemoryStream(buffer, 0, read), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync(ct);
+    }
+
+    /// <summary>
+    /// #518: one open directory for the stats scan (Linux x86-64 or arm64 only): children are opened relative to this
+    /// handle with <c>O_NOFOLLOW</c>, listed with <c>readdir</c> on it, and typed with <c>statx</c> on the opened
+    /// descriptor, never by path. Any other platform or architecture refuses.
+    /// </summary>
+    private sealed class ScanDirectory : IDisposable
+    {
+        private const int ReadOnly = 0, NoControllingTty = 0x100, NonBlocking = 0x800, CloseOnExec = 0x80000;
+        private const int CurrentDirectory = -100, EmptyPath = 0x1000, StatxType = 0x1, NoEntry = 2;
+        private IntPtr _dir;
+
+        private ScanDirectory(IntPtr dir) => _dir = dir;
+
+        // O_DIRECTORY / O_NOFOLLOW are architecture-specific; the other flags are the generic Linux values.
+        private static (int Directory, int NoFollow) Flags() =>
+            !OperatingSystem.IsLinux() ? throw new IOException(EntryRefused) : RuntimeInformation.ProcessArchitecture switch
+            {
+                Architecture.X64 => (0x10000, 0x20000),
+                Architecture.Arm64 => (0x4000, 0x8000),
+                _ => throw new IOException(EntryRefused),
+            };
+
+        /// <summary>The configured storage root (an operator path, followed as configured); it must exist.</summary>
+        public static ScanDirectory OpenRoot(string path) =>
+            FromDescriptor(OpenAt(CurrentDirectory, Bytes(path), ReadOnly | Flags().Directory | CloseOnExec))
+                ?? throw new IOException(EntryRefused);
+
+        /// <summary>A child directory without following a link; null only when it is observed absent.</summary>
+        public ScanDirectory? OpenChildDirectory(string name)
+        {
+            var (directory, noFollow) = Flags();
+            var fd = OpenAt(DirFd(_dir), Bytes(name), ReadOnly | directory | noFollow | NonBlocking | CloseOnExec);
+            if (fd < 0 && Marshal.GetLastPInvokeError() == NoEntry) return null;
+            return FromDescriptor(fd) ?? throw new IOException(EntryRefused);
+        }
+
+        /// <summary>
+        /// Opens an entry without following a link and without blocking (a FIFO opens immediately, a socket fails), then
+        /// types the opened descriptor: a regular file is returned, a directory is null, anything else refuses.
+        /// </summary>
+        public SafeFileHandle? OpenRegularFile(byte[] name)
+        {
+            var fd = OpenAt(DirFd(_dir), Terminated(name), ReadOnly | Flags().NoFollow | NonBlocking | NoControllingTty | CloseOnExec);
+            if (fd < 0) throw new IOException(EntryRefused);
+            var file = new SafeFileHandle(fd, ownsHandle: true);
+            if (StatxCall(fd, "", EmptyPath, StatxType, out var status) != 0 || (status.Mask & StatxType) == 0)
+            {
+                file.Dispose();
+                throw new IOException(EntryRefused);
+            }
+            switch (status.Mode & 0xF000)
+            {
+                case 0x8000: return file;
+                case 0x4000: file.Dispose(); return null;
+                default: file.Dispose(); throw new IOException(EntryRefused);
+            }
+        }
+
+        /// <summary>The raw names ending in <c>.md</c>, read through this handle; a listing error refuses.</summary>
+        public List<byte[]> MarkdownEntries()
+        {
+            var names = new List<byte[]>();
+            while (true)
+            {
+                var entry = ReadDir(_dir);
+                if (entry == IntPtr.Zero)
+                {
+                    // readdir signals both the end and an error with null; only errno tells them apart.
+                    if (Marshal.GetLastPInvokeError() != 0) throw new IOException(EntryRefused);
+                    return names;
+                }
+                // struct dirent on 64-bit Linux (glibc and musl): d_name starts at byte 19, NUL-terminated.
+                var name = new List<byte>();
+                for (var i = 0; i < 256 && Marshal.ReadByte(entry, 19 + i) is var b && b != 0; i++) name.Add(b);
+                if (name.Count > 3 && name[^3] == '.' && name[^2] == 'm' && name[^1] == 'd') names.Add([.. name]);
+            }
+        }
+
+        private static ScanDirectory? FromDescriptor(int fd)
+        {
+            if (fd < 0) return null;
+            var dir = FdOpenDir(fd);
+            if (dir != IntPtr.Zero) return new ScanDirectory(dir);
+            Close(fd);
+            return null;
+        }
+
+        public void Dispose()
+        {
+            if (_dir == IntPtr.Zero) return;
+            CloseDir(_dir);
+            _dir = IntPtr.Zero;
+        }
+
+        private static byte[] Bytes(string value) => Terminated(Encoding.UTF8.GetBytes(value));
+        private static byte[] Terminated(byte[] value) => [.. value, 0];
+
+        [DllImport("libc", EntryPoint = "openat", SetLastError = true)]
+        private static extern int OpenAt(int directory, byte[] path, int flags);
+
+        [DllImport("libc", EntryPoint = "fdopendir", SetLastError = true)]
+        private static extern IntPtr FdOpenDir(int fd);
+
+        [DllImport("libc", EntryPoint = "readdir", SetLastError = true)]
+        private static extern IntPtr ReadDir(IntPtr dir);
+
+        [DllImport("libc", EntryPoint = "dirfd")]
+        private static extern int DirFd(IntPtr dir);
+
+        [DllImport("libc", EntryPoint = "closedir")]
+        private static extern int CloseDir(IntPtr dir);
+
+        [DllImport("libc", EntryPoint = "close")]
+        private static extern int Close(int fd);
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    private struct Statx
+    {
+        [FieldOffset(0)] public uint Mask;
+        [FieldOffset(28)] public ushort Mode;
+    }
+
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern int StatxCall(int directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out Statx buffer);
 
     /// <summary>
     /// Parses a memory markdown string.

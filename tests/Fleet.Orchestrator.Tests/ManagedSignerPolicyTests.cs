@@ -261,14 +261,17 @@ public sealed class ManagedSignerPolicyTests
         Assert.Equal(code, StockManagedSignerPolicy.DescribeBindingFault(yaml, hosts));
     }
 
-    // #512 A1: each fixed read alone, any pair and all three explicit tools/call rules save and admit, and AdmittedTools
-    // reports exactly the selected set.
+    // #512 A1 (#518: four fixed reads): each fixed read alone, any pair and all explicit tools/call rules save and admit,
+    // and AdmittedTools reports exactly the selected set.
     [Theory]
     [InlineData("memory_get")]
     [InlineData("memory_list")]
     [InlineData("memory_search")]
+    [InlineData("memory_stats")]
     [InlineData("memory_list", "memory_search")]
+    [InlineData("memory_get", "memory_stats")]
     [InlineData("memory_get", "memory_search", "memory_list")]
+    [InlineData("memory_get", "memory_search", "memory_list", "memory_stats")]
     public void ManagedMemoryReads_each_fixed_read_alone_or_together_saves_and_admits(params string[] reads)
     {
         var yaml = Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules(reads));
@@ -283,9 +286,11 @@ public sealed class ManagedSignerPolicyTests
     [InlineData("memory_store")]
     [InlineData("memory_update")]
     [InlineData("memory_delete")]
-    [InlineData("memory_stats")]
+    [InlineData("memory_unsupported")]
     [InlineData("memory_list", "memory_store")]
     [InlineData("memory_search", "memory_delete")]
+    [InlineData("memory_stats", "memory_unsupported")]
+    [InlineData("memory_get", "memory_search", "memory_list", "memory_stats", "memory_store")]
     public void ManagedMemoryReads_a_write_or_unknown_tool_never_admits(params string[] tools)
     {
         var yaml = Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules(tools));
@@ -297,6 +302,9 @@ public sealed class ManagedSignerPolicyTests
     [InlineData("tool: memory_list", "tool: memory_*")]
     [InlineData("tool: memory_list", "tool: [memory_list, memory_search]")]
     [InlineData("              tool: memory_list\n", "")]
+    [InlineData("tool: memory_list", "tool: Memory_stats")]
+    [InlineData("tool: memory_list", "tool: memory_stat*")]
+    [InlineData("tool: memory_list", "tool: '*'")]
     public void ManagedMemoryReads_case_glob_list_or_missing_tool_refuses_at_save_and_admission(string from, string to)
     {
         var yaml = Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_list")).Replace(from, to);
@@ -311,6 +319,8 @@ public sealed class ManagedSignerPolicyTests
         {
             Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules()), // control methods only, no read
             Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_list", "memory_list")),
+            Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_stats", "memory_stats")),
+            Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_stats") + "          - allow:\n              method: resources/list\n"),
             Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_list") + "          - allow:\n              method: ping\n"),
             Memory(SignedPolicy.Rules("memory_get"), SignedPolicy.Rules("memory_search").Replace("method: tools/list", "method: '*'")),
         })

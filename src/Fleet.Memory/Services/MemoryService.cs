@@ -265,6 +265,13 @@ public sealed class MemoryService(
     public Dictionary<string, int> GetStats() => fileStore.GetStats();
 
     /// <summary>
+    /// #518: ACL-scoped counts for ACL-enabled <c>memory_stats</c>, from the files only (no index or embedding call). See
+    /// <see cref="MemoryFileStore.GetScopedStatsAsync(Func{string?, bool}, CancellationToken)"/> for the failure contract.
+    /// </summary>
+    public Task<Dictionary<string, int>> GetScopedStatsAsync(Func<string?, bool> canRead, CancellationToken ct) =>
+        fileStore.GetScopedStatsAsync(canRead, ct);
+
+    /// <summary>
     /// Indexes a memory file into Qdrant.
     /// Throws <see cref="InvalidDataException"/> if the file cannot be parsed (bad YAML or not a memory file).
     /// Other exceptions indicate infrastructure failures (Qdrant, embedding) and propagate as-is.

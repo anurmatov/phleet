@@ -36,8 +36,8 @@ compatibility branch (#502) is described in [its own section](#managed-codex-sub
 | Native AMQP source | Existing BridgeRelayService → GroupRelayService and RelayCompletionPublisher → BridgeRelayService bind broker-validated user IDs, exact exchange/route/agent/correlation and fresh outside enrollment; heartbeat publishers/receiver use the same epoch vhost |
 | Live memory admission | Reloads the operator file and public key each request, fetches fresh ACLs, and refuses failed ACL fetches instead of admitting on the legacy stale cache |
 
-The only accepted tool calls here are `memory_get`, `memory_search` and
-`memory_list`; writes and unrelated protocols refuse. Existing ACLs decide project
+The only accepted tool calls here are `memory_get`, `memory_search`,
+`memory_list` and `memory_stats` (#518, [scoped counts](#scoped-memory-stats-518)); writes and unrelated protocols refuse. Existing ACLs decide project
 access. This fixed route restriction does not change or create tool grants: the receiver
 also reads the existing orchestrator agent-config endpoint on each request and
 requires the enabled agent, exact memory endpoint and enabled tool-name grant.
@@ -844,7 +844,7 @@ before any old-runtime Stop or external mutation:
 | any MCP endpoint that is not one of these names (including case variants), a routed service or the journal read MCP | `managed_route_unsupported:mcp:<name>` |
 | no memory endpoint | `managed_memory_route_missing` |
 | more than one (a duplicate, or both names) | `managed_memory_route_ambiguous`, never a pick |
-| an enabled read grant under the selected name: any of `memory_get`/`memory_search`/`memory_list`, in both auth modes (#512) | `managed_memory_grant_missing` |
+| an enabled read grant under the selected name: any of `memory_get`/`memory_search`/`memory_list`/`memory_stats`, in both auth modes (#512, #518) | `managed_memory_grant_missing` |
 | transport `http` and URL byte-exactly `https://<MemoryHost>/mcp` from `managed-authority.json` | `managed_route_unsupported:mcp:<name>` |
 
 The ordinary template row (`http://fleet-memory:3100`) is not a managed route, and no plaintext, other host, port,
@@ -1396,7 +1396,7 @@ never changes meaning. Stock may reserialize the policy it stores, so compare it
 | stage | check | refusal |
 |---|---|---|
 | save (create/append) | the subset above, with the existing size/event/depth/alias/tag limits | 400, no row |
-| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset; memory allows `tools/call` only for a nonempty subset of `memory_get`, `memory_search`, `memory_list` (#512) | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
+| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset; memory allows `tools/call` only for a nonempty subset of `memory_get`, `memory_search`, `memory_list`, `memory_stats` (#512, #518) | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
 | apply, API-key and subscription (#512 for API key) | every enabled grant on memory (selected name), Temporal and Telegram is a `tools/call` rule of that receiver's endpoint | 409 `managed_route_unsupported:mcp:<name>`, same point; no grant is pruned |
 | bypass ambiguity | wildcard endpoint hosts, a duplicate, alternate-port, plaintext/TCP or case/trailing-dot variant of a receiving host, extra or unselected signer entries | `managed_signer_policy_scope` |
 | policy file | written from the saved bytes, then read back against the stored hash | `managed_files_failed` |
@@ -1421,7 +1421,7 @@ saved policy lists the read, and the agent holds an enabled grant for it under t
 
 | Piece | Contract |
 |---|---|
-| saved policy | the memory endpoint's `tools/call` rules name a nonempty subset of `memory_get`, `memory_search`, `memory_list`, one rule each; writes, other tools, wildcards and duplicates refuse at save or apply |
+| saved policy | the memory endpoint's `tools/call` rules name a nonempty subset of `memory_get`, `memory_search`, `memory_list` and (#518) `memory_stats`, one rule each; writes, other tools, wildcards and duplicates refuse at save or apply |
 | grants | only enabled `mcp__<selected-name>__memory_*` reads count; a grant under the other accepted name never does |
 | apply, both auth modes | every enabled grant on memory, Temporal or Telegram must be a rule in the saved policy, checked before any old-runtime Stop or provider/broker/create/policy-set effect; grants are never pruned or edited |
 | generated tools | managed bundles list exactly the saved enabled grants; ordinary Docker provisioning still adds its automatic `mcp__fleet-memory__memory_get` for Codex, unchanged |
@@ -1495,6 +1495,86 @@ automatically.
 **Monitoring.** Read denials in `memory_get`, `memory_list` and `memory_search` log only the tool and a fixed reason
 (`project_not_allowed` or `no_project`), never a record ID, project, agent, query or content. The existing
 per-agent denial counters are unchanged.
+
+### Scoped memory stats (#518)
+
+`memory_stats` is the fourth fixed read. It keeps its MCP name, takes no argument and returns the same type rows,
+`**Total active**` and `**Archived**` headings. Like the other reads it is callable in managed mode only when the saved
+policy has a `tools/call` rule for it **and** the agent holds an enabled `mcp__<selected-name>__memory_stats` grant.
+Nothing adds a stats grant or rule implicitly. To add it beside the existing reads, append a version whose memory
+endpoint carries one more rule:
+
+```yaml
+          - allow:
+              method: tools/call
+              tool: memory_stats
+```
+
+**What the counts mean.** With project ACLs off (`Acl:EnableProjectScopedAcl=false`) the tool keeps its old global
+file counts. With ACLs on it never returns them:
+
+| Step | Behavior |
+|---|---|
+| ACL not available | exact text `memory_stats: ACL cache unavailable`, no totals, before any file is read |
+| no caller identity | `memory_stats: agent identity required …`, no totals |
+| count | every type directory and `_archived` is scanned; a parsed record counts only when the existing `CanRead(agent, project)` allows its project; active records count under their directory's type |
+| output | every type row (zero included), Total active and Archived; no project names, record IDs, hidden types or denied/skipped/global totals |
+| no frontmatter or malformed YAML | left out, without a name or a count |
+| a link, FIFO, socket or device `*.md` entry, or a linked type/archive directory | never followed or read: `memory_stats: unavailable` |
+| any lookup, enumeration or read failure | `memory_stats: unavailable`; never a partial, empty or global total |
+| type or archive directory proven absent | that row counts zero |
+| request cancelled | aborted, no output |
+
+**Handle-anchored scan.** Each type and archive directory is opened once, relative to the storage root, with
+`O_NOFOLLOW`, then listed and read only through that open handle. Each entry is opened relative to it with
+`O_NOFOLLOW | O_NONBLOCK`, and the opened descriptor must be a regular file (`statx` on the descriptor). A FIFO opens
+without blocking and is then refused, and a socket fails to open. Replacing a directory or file after it was checked
+cannot redirect the scan to a link target or another directory. This uses Linux `openat`/`readdir`/`statx` on x86-64
+and arm64 (the memory image). On any other platform or architecture, ACL-enabled stats report
+`memory_stats: unavailable`. Stats read only files, never the index or embedder.
+
+**Ordinary cache versus managed freshness.**
+
+| Caller | ACL source | When a project removal applies | ACL outage |
+|---|---|---|---|
+| ordinary (`?agent=`) | the existing cache, refreshed every 5 minutes and on `config.changed` | after the next successful refresh, not guaranteed on the next request | before the first success: `memory_stats: ACL cache unavailable`; after it, a failed refresh keeps the last cached map |
+| managed (stock signer → receiver) | a fresh request-local snapshot plus the current endpoint/tool grants, on every request | the very next request: 0/0 for a removed project, `403` for a removed stats grant or revoked session | `503` from the receiver before the tool runs; no stale fallback |
+
+**Refusals.**
+
+| Situation | Result |
+|---|---|
+| policy rule names an unknown memory tool | apply 409 `managed_signer_policy_mismatch` |
+| policy rule names a case variant or a glob | save `400`; already-stored bytes refuse at apply as `managed_signer_policy_mismatch` |
+| enabled stats grant beside a saved three-read version that does not list it | 409 `managed_route_unsupported:mcp:<name>`, before Stop or any effect |
+| policy lists stats, agent has no selected-name stats grant | stats absent from AllowedTools and the native table; a direct call gets receiver `403` |
+| unknown memory grant in the workload AllowedTools | `stock_enrollment_mcp_route_invalid`, before any native write |
+| unknown tool, write or unsupported method at the hook | `tool_unsupported` / `rpc_unsupported` |
+
+**Upgrade and recovery.** A saved three-read version stays valid on its own. An agent that also holds an enabled stats
+grant refuses its next Apply until an explicit version is selected:
+1. append an immutable version whose memory rules list every enabled memory grant, stats included;
+2. select that exact version (a desired-only save);
+3. run a separately authorized Apply.
+Never prune the stats grant or any other grant to pass admission. The old version stays stored as it was. The API-key
+native profile and subscription custody are unchanged.
+
+**Mixed versions and downgrade.** An older orchestrator refuses a version with a stats rule
+(`managed_signer_policy_mismatch`). An older agent refuses a stats grant at enrollment. An older signer refuses stats
+calls at the hook (`tool_unsupported`). An older memory image also returns the global counts to ordinary ACL-enabled
+callers again. None of these is a compatible fallback. Before switching images:
+1. revoke the affected agent and prove scoped detach, Stop and quiescence;
+2. keep its bindings, policy versions, grants, custody and workspace;
+3. run the current `scripts/check-stock-runtime-rollout.sh --image <exact-target>`.
+The capability labels do not record this extension. A stats-enabled binding therefore stays stopped on an older build
+until a supporting image returns or a compatible selection is separately approved. Nothing resumes automatically.
+
+**Monitoring.** A stats failure logs only the fixed text `memory_stats: unavailable`. Stats log no per-record denial
+and do not touch the per-agent denial counters, so no count of hidden records reaches logs or output.
+
+**Verification before merge or rollout.** Unit and integration tests are not acceptance. The operator check runs the
+exact pushed head and its images on an isolated owned fixture with synthetic data. It drives real scoped stats through
+stock enforcement, the signer and the receiver, plus one legacy three-read regression. CI does not replace it.
 
 ### Gateway registration
 

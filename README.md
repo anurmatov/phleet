@@ -165,6 +165,10 @@ Managed agents (#512) keep exactly the memory reads (`memory_get`, `memory_searc
 and their saved policy lists explicitly, in both auth modes. Existing get-only selections are unchanged. An API-key
 agent whose get-only policy does not list its extra read grants now refuses Apply until an explicit version is
 selected; see [explicit memory reads](docs/openshell-stock.md#explicit-memory-reads-512).
+`memory_stats` (#518) is the fourth fixed read, never implied by policy or grants. With project ACLs enabled it counts
+only the records the caller may read, never the global totals: ordinary callers use the existing cached ACL, managed
+callers a fresh check on each request. An old three-read policy beside an enabled stats grant refuses Apply until an
+explicit version is selected; see [scoped memory stats](docs/openshell-stock.md#scoped-memory-stats-518).
 
 | OpenShell capability | Status |
 |---|---|

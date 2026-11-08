@@ -183,9 +183,10 @@ internal static class SandboxPolicyValidation
                     }
                     if (Get(rule, "endpoints") is { } endpoints) foreach (var e in List(endpoints))
                     {
-                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding", "rules", "mcp");
+                        var endpoint = Map(e, "host", "port", "protocol", "tls", "enforcement", "access", "credential_binding", "rules", "mcp", "allowed_ips");
                         Require(Regex.IsMatch(Scalar(endpoint, "host"), @"^[A-Za-z0-9*_.:-]{1,253}\z"), "Invalid endpoint host.");
                         Require(int.TryParse(PlainScalar(endpoint, "port"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) && port is >= 1 and <= 65535, "Invalid endpoint port.");
+                        AllowedIps(endpoint);
                         Option(endpoint, "protocol", "tcp", "rest", "mcp", "json-rpc", "websocket", "graphql", "sql");
                         Option(endpoint, "tls", ""); // stock automatic TLS is the empty/omitted value, not "auto"
                         Option(endpoint, "enforcement", "enforce", "audit");
@@ -309,6 +310,32 @@ internal static class SandboxPolicyValidation
         foreach (var item in List(Get(mcp, "versions")!)) Require(McpVersionChoices.Contains(Value(item)) && versions.Add(Value(item)), form);
         Require(versions.Count > 0, form);
         return versions;
+    }
+
+    /// <summary>The pinned stock host-gateway aliases (supervisor-network proxy.rs:215–219).</summary>
+    internal static readonly string[] HostGatewayAliases = ["host.openshell.internal", "host.containers.internal", "host.docker.internal"];
+    private static readonly Regex CanonicalHostRoute = new(
+        @"\A(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32\z", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// #520: the optional endpoint <c>allowed_ips</c>, a deliberately narrow subset of the pinned stock field
+    /// (openshell-policy-schema lib.rs:279): 1–32 distinct canonical IPv4 single-host routes <c>a.b.c.d/32</c>, which the
+    /// pinned supervisor checks against every resolved address before it dials. Stock picks its host-gateway modes before
+    /// <c>allowed_ips</c> (supervisor-network proxy/destination.rs:101–109), so a list on a gateway alias — after the native
+    /// lowercase and one-trailing-dot normalization (proxy.rs:3912–3914, 4083–4098) — or on a wildcard host that could match
+    /// one would never be enforced, and is refused. Absent, nothing changes. Shared by save and managed admission.
+    /// </summary>
+    internal static void AllowedIps(YamlMappingNode endpoint)
+    {
+        if (Get(endpoint, "allowed_ips") is not { } node) return;
+        var host = Scalar(endpoint, "host").ToLowerInvariant();
+        if (host.EndsWith('.')) host = host[..^1];
+        Require(!host.Contains('*') && !HostGatewayAliases.Contains(host), "allowed_ips is not enforced for gateway-alias or wildcard hosts.");
+        const string form = "allowed_ips must be a nonempty list of at most 32 distinct canonical IPv4 /32 host routes.";
+        Require(node is YamlSequenceNode { Children.Count: >= 1 and <= 32 }, form);
+        var routes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in ((YamlSequenceNode)node).Children)
+            Require(item is YamlScalarNode { Value: { } route } && CanonicalHostRoute.IsMatch(route) && routes.Add(route), form);
     }
 
     private static void Option(YamlMappingNode map, string key, params string[] choices)

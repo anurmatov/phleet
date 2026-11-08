@@ -121,8 +121,9 @@ internal static class StockManagedSignerPolicy
             // #503 W5: exact MCP rules, never an access preset (pinned stock rejects them) or a stock field outside the saved
             // subset such as mcp.allow_all_known_mcp_methods. #512: memory stays read-only, one tools/call rule per explicitly
             // selected fixed read (McpRules already refuses an empty or duplicate list). W13: the only mcp field is the
-            // bounded versions list.
-            SandboxPolicyValidation.Map(endpoint, "host", "port", "protocol", "tls", "enforcement", "rules", "mcp");
+            // bounded versions list. #520: an optional allowed_ips list passes the same bounded check as save.
+            SandboxPolicyValidation.Map(endpoint, "host", "port", "protocol", "tls", "enforcement", "rules", "mcp", "allowed_ips");
+            SandboxPolicyValidation.AllowedIps(endpoint);
             SandboxPolicyValidation.McpVersions(endpoint);
             var tools = SandboxPolicyValidation.McpRules(endpoint);
             if (service == StockServices.Memory && !tools.IsSubsetOf(StockServices.MemoryTools)) return Mismatch;

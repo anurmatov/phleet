@@ -84,6 +84,32 @@ public sealed class ManagedStockMySqlTests : ManagedStockRuntimeApiTests
         Assert.Empty(await restored.Database.GetPendingMigrationsAsync());
     }
     [Fact]
+    public async Task Allowed_ips_policy_keeps_exact_bytes_and_hash_and_an_invalid_list_writes_no_version()
+    {
+        // #520: exact submitted text, including quoting and spacing, is stored, served and hashed unchanged.
+        const string yaml = "version: 1\nnetwork_policies:\n  api:\n    endpoints:\n      - host: api.example.test\n        port: 443\n"
+            + "        allowed_ips: [\"192.0.2.10/32\",  '192.0.2.11/32']\n    binaries:\n      - path: /usr/bin/codex\n";
+        var created = await Client.PostAsJsonAsync("/api/sandbox-policies", new { name = "Allowed ips", yaml });
+        Assert.Equal(System.Net.HttpStatusCode.Created, created.StatusCode);
+        var id = (await created.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("id").GetInt32();
+        var served = await Client.GetFromJsonAsync<System.Text.Json.JsonElement>($"/api/sandbox-policies/{id}/versions/1");
+        var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(yaml)));
+        Assert.Equal(yaml, served.GetProperty("yaml").GetString());
+        Assert.Equal(sha, served.GetProperty("sha256").GetString());
+        var stored = await WithDb(db => db.SandboxPolicyVersions.AsNoTracking().SingleAsync(v => v.PolicyId == id));
+        Assert.Equal(yaml, stored.Yaml); Assert.Equal(sha, stored.Sha256);
+
+        var invalid = await Client.PostAsJsonAsync($"/api/sandbox-policies/{id}/versions",
+            new { version = 2, yaml = yaml.Replace("'192.0.2.11/32'", "'192.0.2.0/24'") });
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, invalid.StatusCode);
+        var alias = await Client.PostAsJsonAsync($"/api/sandbox-policies/{id}/versions",
+            new { version = 2, yaml = yaml.Replace("api.example.test", "host.docker.internal") });
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, alias.StatusCode);
+        Assert.Equal(1, await WithDb(db => db.SandboxPolicyVersions.CountAsync()));
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, (await Client.PostAsJsonAsync($"/api/sandbox-policies/{id}/versions",
+            new { version = 1, yaml })).StatusCode);
+    }
+    [Fact]
     public async Task Referenced_version_is_retained_by_real_foreign_key()
     {
         var id = await CreatePolicy();

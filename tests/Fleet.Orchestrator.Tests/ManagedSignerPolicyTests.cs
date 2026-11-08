@@ -330,6 +330,124 @@ public sealed class ManagedSignerPolicyTests
         }
     }
 
+    // #520: the optional endpoint allowed_ips list (1–32 distinct canonical IPv4 /32 host routes), shared by save and admission.
+    private static string Api(string host, string? allowedIps) =>
+        $"version: 1\nnetwork_policies:\n  api:\n    endpoints:\n      - host: {host}\n        port: 443\n"
+        + (allowedIps is null ? "" : $"        allowed_ips: {allowedIps}\n") + "    binaries:\n      - path: /usr/bin/codex\n";
+
+    /// <summary>The signed memory fixture whose receiver endpoint also carries <paramref name="allowedIps"/>.</summary>
+    private static string ReceiverWith(string policy, string host, string allowedIps)
+    {
+        var port = $"      - host: {host}\n        port: 443\n";
+        Assert.Contains(port, policy);
+        return policy.Replace(port, port + $"        allowed_ips: {allowedIps}\n");
+    }
+
+    [Theory]
+    [InlineData("[\"192.0.2.10/32\"]")]
+    [InlineData("['192.0.2.10/32', 192.0.2.11/32, \"198.51.100.0/32\"]")]
+    [InlineData("\n          - 192.0.2.10/32\n          - 255.255.255.255/32")]
+    public void Allowed_ips_canonical_host_routes_save_in_block_and_flow_yaml(string list) =>
+        Assert.Null(SandboxPolicyValidation.DescribeFault(Api("api.example.test", list), new()));
+
+    [Fact]
+    public void Allowed_ips_saves_in_json_policy_text()
+    {
+        const string json = "{\"version\": 1, \"network_policies\": {\"api\": {\"endpoints\": [{\"host\": \"api.example.test\", \"port\": 443, "
+            + "\"allowed_ips\": [\"192.0.2.10/32\", \"192.0.2.11/32\"]}], \"binaries\": [{\"path\": \"/usr/bin/codex\"}]}}}\n";
+        Assert.Null(SandboxPolicyValidation.DescribeFault(json, new()));
+        Assert.Null(SandboxPolicyValidation.DescribeFault(json.Replace(", \"allowed_ips\": [\"192.0.2.10/32\", \"192.0.2.11/32\"]", ""), new()));
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("192.0.2.10/32")] // a scalar, not a list
+    [InlineData("{a: 192.0.2.10/32}")]
+    [InlineData("[[192.0.2.10/32]]")]
+    [InlineData("[{ip: 192.0.2.10/32}]")]
+    [InlineData("[example.com]")]
+    [InlineData("[192.0.2.10]")] // bare address
+    [InlineData("[192.0.2.0/24]")]
+    [InlineData("[192.0.2.10/31]")]
+    [InlineData("[2001:db8::1/128]")]
+    [InlineData("['::ffff:192.0.2.10/128']")]
+    [InlineData("[192.000.2.10/32]")]
+    [InlineData("[192.0.2.010/32]")]
+    [InlineData("[' 192.0.2.10/32']")]
+    [InlineData("['192.0.2.10/32 ']")]
+    [InlineData("[256.0.0.1/32]")]
+    [InlineData("[192.0.2/32]")]
+    [InlineData("[192.0.2.10/032]")]
+    [InlineData("[192.0.2.10/32, 192.0.2.10/32]")]
+    [InlineData("[null]")]
+    [InlineData("[~]")]
+    [InlineData("[1]")]
+    public void Allowed_ips_other_shapes_addresses_and_spellings_are_refused(string list)
+    {
+        var fault = SandboxPolicyValidation.DescribeFault(Api("api.example.test", list), new());
+        Assert.NotNull(fault);
+        Assert.Contains("allowed_ips", fault);
+    }
+
+    [Fact]
+    public void Allowed_ips_over_32_entries_is_refused_and_32_saves()
+    {
+        string List(int n) => "[" + string.Join(", ", Enumerable.Range(1, n).Select(i => $"192.0.2.{i}/32")) + "]";
+        Assert.Null(SandboxPolicyValidation.DescribeFault(Api("api.example.test", List(32)), new()));
+        Assert.Contains("allowed_ips", SandboxPolicyValidation.DescribeFault(Api("api.example.test", List(33)), new()));
+    }
+
+    [Fact]
+    public void A_misspelled_allowed_ips_key_is_still_an_unknown_field() =>
+        Assert.NotNull(SandboxPolicyValidation.DescribeFault(Api("api.example.test", "[192.0.2.10/32]").Replace("allowed_ips:", "allowed_ip:"), new()));
+
+    // Pinned stock picks its host-gateway modes before allowed_ips (supervisor-network proxy/destination.rs:101–109); its
+    // alias test lowercases, strips one trailing dot and compares to proxy.rs:215–219. A wildcard host could match an alias.
+    [Theory]
+    [InlineData("host.openshell.internal")]
+    [InlineData("host.containers.internal")]
+    [InlineData("host.docker.internal")]
+    [InlineData("Host.Docker.Internal")]
+    [InlineData("host.docker.internal.")]
+    [InlineData("HOST.OPENSHELL.INTERNAL.")]
+    [InlineData("'*.docker.internal'")] // quoted: a plain scalar starting with * is a YAML alias
+    [InlineData("'*'")]
+    public void Allowed_ips_on_gateway_alias_or_wildcard_hosts_is_refused_and_absence_is_unchanged(string host)
+    {
+        var fault = SandboxPolicyValidation.DescribeFault(Api(host, "[\"192.0.2.10/32\"]"), new());
+        Assert.NotNull(fault);
+        Assert.Contains("allowed_ips is not enforced for gateway-alias or wildcard hosts", fault);
+        Assert.Null(SandboxPolicyValidation.DescribeFault(Api(host, null), new()));
+    }
+
+    [Fact]
+    public void Receiver_allowed_ips_is_admitted_when_valid_and_a_mismatch_when_not()
+    {
+        var valid = ReceiverWith(SignedPolicy.MemoryOnly, SignedPolicy.Memory.Host, "[\"192.0.2.10/32\"]");
+        Assert.Null(SandboxPolicyValidation.DescribeFault(valid, new()));
+        Assert.Null(StockManagedSignerPolicy.DescribeBindingFault(valid, MemoryHosts));
+        var all = SignedPolicy.Yaml(SignedPolicy.Memory, SignedPolicy.Temporal, SignedPolicy.Telegram);
+        foreach (var (_, host) in new[] { SignedPolicy.Memory, SignedPolicy.Temporal, SignedPolicy.Telegram })
+            all = ReceiverWith(all, host, "['192.0.2.10/32']");
+        Assert.Null(StockManagedSignerPolicy.DescribeBindingFault(all, AllHosts));
+        foreach (var bad in new[] { "[]", "[192.0.2.0/24]", "[192.0.2.10]", "[192.0.2.10/32, 192.0.2.10/32]" })
+            Assert.Equal(StockManagedSignerPolicy.Mismatch,
+                StockManagedSignerPolicy.DescribeBindingFault(ReceiverWith(SignedPolicy.MemoryOnly, SignedPolicy.Memory.Host, bad), MemoryHosts));
+    }
+
+    [Fact]
+    public void Admission_refuses_allowed_ips_only_on_an_otherwise_admissible_gateway_alias_receiver()
+    {
+        // One lowercase alias with no trailing dot in the expected map, the signer binding and the :443 MCP endpoint passes
+        // ValidateShape's IsExactHost, so the only difference between the two calls below is the added allowed_ips.
+        const string alias = "host.docker.internal";
+        var hosts = new Dictionary<string, string> { ["memory"] = alias };
+        var policy = SignedPolicy.Yaml(("memory", alias));
+        Assert.Null(StockManagedSignerPolicy.DescribeBindingFault(policy, hosts));
+        Assert.Equal(StockManagedSignerPolicy.Mismatch,
+            StockManagedSignerPolicy.DescribeBindingFault(ReceiverWith(policy, alias, "[\"192.0.2.10/32\"]"), hosts));
+    }
+
     [Fact]
     public void A_route_map_without_memory_never_admits_an_unsigned_policy()
     {

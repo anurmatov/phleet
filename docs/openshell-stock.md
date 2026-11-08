@@ -487,8 +487,13 @@ versions list or `/versions/{version}`. Version IDs, not “latest”, are store
 Supported YAML is a bounded subset of the pinned [stock authored schema](https://github.com/NVIDIA/OpenShell/blob/bdb956f2cd65a635f1294fccf1d138d263bf650f/crates/openshell-policy-schema/src/lib.rs):
 `version: 1`, `filesystem_policy` (absolute read-only/read-write paths and include_workdir),
 `process` (named user/group), `landlock`, and `network_policies` (binary paths, host/port,
-protocol, automatic TLS, enforcement/access presets and credential_binding), plus the one bounded
+protocol, automatic TLS, enforcement/access presets, credential_binding and an optional `allowed_ips`), plus the one bounded
 `network_middlewares` signer subset described in [Managed signer policy binding](#managed-signer-policy-binding-503).
+`allowed_ips` (#520) is a nonempty list of at most 32 distinct canonical IPv4 single-host routes such as `192.0.2.10/32`;
+IPv6, ranges, bare addresses and hostnames return 400. For an exact, non-alias host the pinned supervisor rejects an empty
+answer or any resolved address outside the list before it dials. Stock picks its host-gateway modes first, so the field is
+refused on `host.openshell.internal`, `host.containers.internal` and `host.docker.internal` (any case, one trailing dot)
+and on wildcard hosts, where it would never be enforced. Saved bytes are never rewritten; omit the field for today's behavior.
 Advanced rules, any other middleware, aliases, anchors, tags and unknown fields return 400, never silently
 lose fields. Each explicit credential binding requires its pinned profile content hash. These
 operator-supplied hashes are persisted immutably; this save-only release does not contact a gateway
@@ -1396,7 +1401,7 @@ never changes meaning. Stock may reserialize the policy it stores, so compare it
 | stage | check | refusal |
 |---|---|---|
 | save (create/append) | the subset above, with the existing size/event/depth/alias/tag limits | 400, no row |
-| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset; memory allows `tools/call` only for a nonempty subset of `memory_get`, `memory_search`, `memory_list`, `memory_stats` (#512, #518) | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
+| apply, API-key and subscription | stored hash = SHA-256 of the exact saved bytes; signer entries exactly equal memory (`MemoryHost`) plus each selected first-party route; each receiver host has exactly one `host:443` `protocol: mcp`, `enforcement: enforce`, automatic-TLS endpoint in a rule with binaries, with the exact MCP rules and no access preset, plus an optional `allowed_ips` checked exactly as at save (#520); memory allows `tools/call` only for a nonempty subset of `memory_get`, `memory_search`, `memory_list`, `memory_stats` (#512, #518) | 409 `managed_signer_policy_missing` / `_mismatch` / `_scope`, before any old-runtime Stop, provider/broker change, create or policy-set |
 | apply, API-key and subscription (#512 for API key) | every enabled grant on memory (selected name), Temporal and Telegram is a `tools/call` rule of that receiver's endpoint | 409 `managed_route_unsupported:mcp:<name>`, same point; no grant is pruned |
 | bypass ambiguity | wildcard endpoint hosts, a duplicate, alternate-port, plaintext/TCP or case/trailing-dot variant of a receiving host, extra or unselected signer entries | `managed_signer_policy_scope` |
 | policy file | written from the saved bytes, then read back against the stored hash | `managed_files_failed` |

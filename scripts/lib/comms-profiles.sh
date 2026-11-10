@@ -8,6 +8,32 @@ _comms_env_get() {
   done < "$1"
 }
 
+# FLEET_SECRETS_ENABLED exactly as the orchestrator reads it (SecretProxySettings): true or false in
+# any letter case, with surrounding blanks and one pair of quotes ignored, as Compose strips them
+# before the orchestrator sees the value. Prints true or false. Anything else prints nothing and
+# returns 1, so setup and upgrade refuse before a lifecycle change rather than start an orchestrator
+# that expects a forwarder nobody started (or the reverse).
+fleet_secrets_enabled() {
+  local value
+  value=$(_comms_env_get "$1" FLEET_SECRETS_ENABLED)
+  value=${value%$'\r'}
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ ${#value} -ge 2 ]]; then
+    case "$value" in
+      \"*\"|\'*\') value=${value:1:${#value}-2} ;;
+    esac
+  fi
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+  case "$value" in
+    ''|false) printf false ;;
+    true) printf true ;;
+    *) return 1 ;;
+  esac
+}
+
 comms_env_set() {
   local file="$1" key="$2" value="$3" tmp
   if [[ "${COMMS_DRY_RUN:-false}" == true ]]; then

@@ -1,6 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 
+# Two modes.
+#   (no argument)   The container holds the GitHub App key: mint installation tokens into /tmp and
+#                   route gh and git to the right one per repository owner.
+#   --placeholder   The container holds no key and no token. GH_TOKEN is a fleet-secrets
+#                   placeholder; the forwarder mints tokens outside the container and swaps one in
+#                   on the way to GitHub. Only the gh wrapper and the git credential helper are
+#                   installed: no key file, no token files, no cron refresh.
+PLACEHOLDER_MODE=0
+if [ "${1:-}" = "--placeholder" ]; then
+    PLACEHOLDER_MODE=1
+    echo "[gh-auth] Placeholder mode: GitHub credentials stay outside this container"
+fi
+
+if [ "$PLACEHOLDER_MODE" -eq 0 ]; then
 APP_ID="${GITHUB_APP_ID_OVERRIDE:-${GITHUB_APP_ID:-}}"
 
 # Ensure PEM is available at /tmp/github-app-key.pem (handles cron re-runs)
@@ -96,6 +110,7 @@ fi
 
 echo -n "$PRIMARY_TOKEN" > /tmp/.github-token-primary
 echo "[gh-auth] Primary account: $PRIMARY_ACCOUNT"
+fi  # PLACEHOLDER_MODE -eq 0
 
 # Install a transparent gh wrapper (idempotent — only runs on first startup, not on cron refreshes).
 # The wrapper routes GH_TOKEN by --repo, then a gh api repos endpoint, then git remote owner,
@@ -175,6 +190,18 @@ if [ -z "$OWNER" ]; then
     OWNER=$(echo "$REMOTE" | sed -n 's|.*github\.com[:/]\([^/]*\)/.*|\1|p')
 fi
 
+# Placeholder mode: GH_TOKEN is a fleet-secrets placeholder, not a token. The forwarder swaps it for
+# the installation token of the account named after the dot. The owner rides along because most gh
+# commands call GraphQL, whose URL names no repository. A hint from an outer gh call is dropped first.
+PLACEHOLDER="${GH_TOKEN:-}"
+PLACEHOLDER="${PLACEHOLDER%%.*}"
+if [[ "$PLACEHOLDER" =~ ^fleet_placeholder_[A-Za-z0-9_-]{43}$ ]]; then
+    if [[ "$OWNER" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]; then
+        exec env GH_TOKEN="${PLACEHOLDER}.${OWNER}" "$(dirname "$0")/gh-real" "$@"
+    fi
+    exec env GH_TOKEN="$PLACEHOLDER" "$(dirname "$0")/gh-real" "$@"
+fi
+
 TOKEN_FILE="/tmp/.github-token-${OWNER}"
 if [ -z "$OWNER" ] || [ ! -f "$TOKEN_FILE" ]; then
     TOKEN_FILE="/tmp/.github-token-primary"
@@ -201,6 +228,16 @@ while IFS='=' read -r key value; do
     eval "req_${key}=${value}"
 done
 
+# Placeholder mode: hand git the fleet-secrets placeholder. The request URL names the owner, so the
+# forwarder picks the installation itself.
+PLACEHOLDER="${GH_TOKEN:-}"
+PLACEHOLDER="${PLACEHOLDER%%.*}"
+if [[ "$PLACEHOLDER" =~ ^fleet_placeholder_[A-Za-z0-9_-]{43}$ ]]; then
+    echo "username=x-access-token"
+    echo "password=$PLACEHOLDER"
+    exit 0
+fi
+
 # Extract owner from path (e.g. "your-org/your-repo.git" -> "your-org")
 OWNER=$(echo "${req_path:-}" | cut -d'/' -f1)
 TOKEN_FILE="/tmp/.github-token-${OWNER}"
@@ -218,6 +255,12 @@ HELPER
 chmod +x /tmp/.github-credential-helper.sh
 
 git config --global credential.helper '!/tmp/.github-credential-helper.sh'
+
+if [ "$PLACEHOLDER_MODE" -eq 1 ]; then
+    # gh reads GH_TOKEN from the environment on every call; there is nothing to log in with.
+    echo "[gh-auth] Placeholder mode: gh wrapper and git credential helper installed"
+    exit 0
+fi
 
 # Auth gh CLI with the primary token — retry up to 3 times with 5s delay
 GH_AUTH_OK=0

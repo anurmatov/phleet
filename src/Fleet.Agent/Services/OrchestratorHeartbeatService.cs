@@ -4,7 +4,6 @@ using System.Text.Json.Serialization;
 using Fleet.Agent.Configuration;
 using Fleet.Journal.Client;
 using Fleet.Shared;
-using Fleet.Shared.Security;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -27,7 +26,6 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
     private const string OrchestratorExchange = "fleet.orchestrator";
     private const int HeartbeatIntervalSeconds = 30;
 
-    private readonly StockBrokerIdentity? _stockBroker;
     private readonly AgentOptions _agentConfig;
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TaskManager _taskManager;
@@ -49,11 +47,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         IFleetConnectionState connectionState,
         ILogger<OrchestratorHeartbeatService> logger,
         JournalDrainer? journal = null, TurnBindingPublisher? turnBindings = null,
-        AgentHarness? harness = null, StockBrokerIdentity? stockBroker = null)
+        AgentHarness? harness = null)
     {
-        _stockBroker = stockBroker;
-        Connect = (factory, ct) => _stockBroker is null
-            ? RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, logger, ct) : factory.CreateConnectionAsync(ct);
         _harness = harness;
         _journal = journal;
         _turnBindings = turnBindings;
@@ -64,11 +59,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         _logger = logger;
     }
 
-    internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> Connect { get; init; }
-
     public async Task StartAsync(CancellationToken ct)
     {
-        if (_stockBroker is not null && string.IsNullOrEmpty(_rabbitConfig.Host)) throw new StockIdentityDenied("broker_target");
         if (string.IsNullOrEmpty(_rabbitConfig.Host))
         {
             _logger.LogDebug("RabbitMQ not configured — orchestrator heartbeat disabled");
@@ -87,10 +79,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
                 NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
             };
 
-            _stockBroker?.Configure(factory);
-            if (_stockBroker is not null && _stockBroker.Agent != _agentConfig.ShortName)
-                throw new StockIdentityDenied("broker_agent_mismatch");
-            _connection = await Connect(factory, ct);
+            _connection = await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
             _connection.ConnectionShutdownAsync += (_, args) =>
             {
                 _logger.LogWarning("Orchestrator heartbeat RabbitMQ connection lost (reason: {Reason})", args.ReplyText);
@@ -121,10 +110,6 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             // Immediate heartbeat on state change (task started or completed)
             _taskManager.OnStatusChanged += () => _ = PublishHeartbeatFireAndForgetAsync();
         }
-        catch (Exception) when (_stockBroker is not null)
-        {
-            throw new StockIdentityDenied("broker_startup_denied");
-        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "OrchestratorHeartbeatService failed to start — heartbeats disabled");
@@ -145,10 +130,6 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         {
             await PublishAsync("heartbeat", CancellationToken.None);
         }
-        catch (Exception) when (_stockBroker is not null)
-        {
-            _logger.LogWarning("Stock heartbeat denied");
-        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to publish heartbeat");
@@ -160,7 +141,6 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         if (_channel is null)
             return;
 
-        _stockBroker?.Current();
         var (status, currentTask, currentTaskId) = GetAgentStatus();
         var shortName = _agentConfig.ShortName.ToLowerInvariant();
         var buildCommit = Environment.GetEnvironmentVariable("FLEET_BUILD_COMMIT");
@@ -194,7 +174,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             CurrentTask: currentTask,
             CurrentTaskId: currentTaskId,
             Version: buildCommit,
-            ContainerName: _stockBroker is null ? containerName : null,
+            ContainerName: containerName,
             Role: _agentConfig.Role,
             Model: _agentConfig.Model,
             Projects: _agentConfig.Projects,
@@ -208,8 +188,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             PlanSha256: _harness?.Plan?.PlanSha256);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
-        var props = _stockBroker?.Properties() ?? new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
-        props.Expiration = "60000";
+        var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent, Expiration = "60000" };
 
         var routingKey = $"{messageType}.{shortName}";
         await _channel.BasicPublishAsync(

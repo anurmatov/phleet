@@ -72,9 +72,9 @@ test('AC-D1: every field of the old modal is in exactly one section, the one the
     assert.equal(homes.length, 1, `${label} (${key}) is in ${homes.length} sections`)
     assert.equal(homes[0].section, section, label)
   }
-  // The #491 save-only runtime fields and the two #460 harness fields are explicit additions.
+  // The only additions are the two #460 Part 3 fields.
   const added = placed.map(p => p.key).filter(k => !Object.values(TODAY).some(t => t.key === k))
-  assert.deepEqual(added, ['runtimeKind', 'sandboxPolicyVersionId', 'nativeAuthMode', 'providerApiKeyEnvRef', 'effectiveHarness', 'harnessExtra'])
+  assert.deepEqual(added, ['effectiveHarness', 'harnessExtra'])
   assert.deepEqual(CONFIG_SECTIONS.map(s => s.label), ['General', 'Model & runtime', 'Instructions & projects', 'Tools & MCP', 'Telegram', 'Advanced'])
 })
 

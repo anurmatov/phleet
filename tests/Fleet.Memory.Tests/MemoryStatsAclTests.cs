@@ -95,7 +95,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
         }
     }
 
-    /// <summary>An ordinary (non-managed) ACL cache; <paramref name="populate"/> stands in for its first successful fetch.</summary>
+    /// <summary>An ACL cache; <paramref name="populate"/> stands in for its first successful fetch.</summary>
     private AclCacheService Acl(bool enabled = true, Dictionary<string, List<string>>? populate = null, bool allowNoProject = false)
     {
         var acl = new AclCacheService(Options.Create(new AclOptions { EnableProjectScopedAcl = enabled, AclAllowNoProject = allowNoProject }),

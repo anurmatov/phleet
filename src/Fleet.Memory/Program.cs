@@ -68,26 +68,7 @@ app.Services.GetRequiredService<MemorySizeGuidance>().LogStartup(
         ? embeddingConfig.Ollama.Model
         : Path.GetFileNameWithoutExtension(embeddingConfig.Onnx.ModelPath));
 
-// An explicit dedicated receiver mode, never silently enabled for existing memory installs.
-// The operator must prevent the workload from reaching the separate legacy receiver.
-var stockAuthorityFile = builder.Configuration["StockOpenShell:AuthorityFile"];
-if (!string.IsNullOrEmpty(stockAuthorityFile))
-{
-    if (!Path.IsPathFullyQualified(stockAuthorityFile)
-        || !builder.Configuration.GetValue<bool>("Acl:EnableProjectScopedAcl"))
-        throw new InvalidOperationException("stock_memory_requires_authority_and_acl");
-    var acl = app.Services.GetRequiredService<AclCacheService>();
-    app.Use(next =>
-    {
-        var receiver = new StockMemoryIdentityMiddleware(stockAuthorityFile, next,
-            app.Services.GetRequiredService<ILogger<StockMemoryIdentityMiddleware>>(),
-            builder.Configuration["StockOpenShell:AuthorityDirectory"]);
-        return context => receiver.InvokeAsync(context, acl);
-    });
-}
-
-if (string.IsNullOrEmpty(stockAuthorityFile)) app.MapMcp();
-else app.MapMcp("/mcp");
+app.MapMcp();
 
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-memory" }));
 

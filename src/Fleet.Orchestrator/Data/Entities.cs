@@ -14,15 +14,6 @@ public class Agent
     public required string ContainerName { get; set; }
     public bool IsEnabled { get; set; } = true;
 
-    // Desired selection only. Applied fields are owned by verified runtime apply, never a save/heartbeat.
-    [MaxLength(16)] public string RuntimeKind { get; set; } = "docker";
-    public int? SandboxPolicyVersionId { get; set; }
-    [MaxLength(16)] public string? NativeAuthMode { get; set; }
-    [MaxLength(128)] public string? ProviderApiKeyEnvRef { get; set; }
-    [MaxLength(16)] public string AppliedRuntimeKind { get; set; } = "docker";
-    public int? AppliedSandboxPolicyVersionId { get; set; }
-    public string? AppliedRuntimeBinding { get; set; }
-
     // Behavior
     public string PermissionMode { get; set; } = "acceptEdits";
     public int MaxTurns { get; set; } = 50;
@@ -242,7 +233,63 @@ public class AgentEnvRef
     public int AgentId { get; set; }
     public required string EnvKeyName { get; set; }
 
+    /// <summary>
+    /// Lowercase hex SHA-256 of the placeholder the agent's container holds for this key, when the key
+    /// has a <see cref="SecretBinding"/>. Minted on every provision and cleared on deprovision; null
+    /// means no running container holds a placeholder for it. The placeholder itself is never stored.
+    /// </summary>
+    public string? PlaceholderSha256 { get; set; }
+
     public Agent Agent { get; set; } = null!;
+}
+
+// ─── Secret bindings ──────────────────────────────────────────────────────────
+
+/// <summary>
+/// A <c>.env</c> key that agents hold only as a placeholder. <c>fleet-secrets</c> swaps the placeholder
+/// for the real value on a request to one of <see cref="Hosts"/>, in <see cref="HeaderName"/>, and
+/// nowhere else. A key without a row here is delivered to the container as before.
+/// </summary>
+public class SecretBinding
+{
+    public int Id { get; set; }
+
+    /// <summary>The <c>.env</c> key; agents reference it as an Env Ref.</summary>
+    public required string EnvKeyName { get; set; }
+
+    /// <summary><c>static</c> or <c>github_app</c> (<see cref="Fleet.Shared.SecretBindingRules"/>).</summary>
+    public string Kind { get; set; } = Fleet.Shared.SecretBindingRules.KindStatic;
+
+    /// <summary>Exact lowercase host names, comma-separated.</summary>
+    public required string Hosts { get; set; }
+
+    /// <summary>The one request header the secret may be injected into.</summary>
+    public string HeaderName { get; set; } = Fleet.Shared.SecretBindingRules.DefaultHeader;
+
+    /// <summary>
+    /// Environment variable names that carry the placeholder in the container, comma-separated. Null
+    /// means <see cref="EnvKeyName"/> itself.
+    /// </summary>
+    public string? ExposeAs { get; set; }
+
+    /// <summary>GitHub App only: the <c>.env</c> key that holds the App id.</summary>
+    public string? AppIdEnvKey { get; set; }
+
+    /// <summary>
+    /// False (the default): only the operator, through REST or the dashboard, may attach this key to an
+    /// agent. True: the <c>manage_agent_env_refs</c> MCP tool may attach it too.
+    /// </summary>
+    public bool AgentAttachable { get; set; }
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    public IReadOnlyList<string> HostList =>
+        Hosts.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    public IReadOnlyList<string> ExposeAsList => string.IsNullOrWhiteSpace(ExposeAs)
+        ? [EnvKeyName]
+        : ExposeAs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 }
 
 // ─── Project Contexts ─────────────────────────────────────────────────────────
@@ -576,24 +623,4 @@ public class CredentialsAudit
 
     [MaxLength(255)]
     public string Actor { get; set; } = "CEO";
-}
-
-public class SandboxPolicy
-{
-    public int Id { get; set; }
-    [MaxLength(100)] public required string Name { get; set; }
-    public List<SandboxPolicyVersion> Versions { get; set; } = [];
-}
-
-public class SandboxPolicyVersion
-{
-    public int Id { get; set; }
-    public int PolicyId { get; set; }
-    [System.Text.Json.Serialization.JsonIgnore]
-    public SandboxPolicy Policy { get; set; } = null!;
-    public int Version { get; set; }
-    public required string Yaml { get; set; }
-    [MaxLength(64)] public required string Sha256 { get; set; }
-    public string ProviderProfileHashes { get; set; } = "{}";
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

@@ -22,7 +22,7 @@ public sealed class MemoryStatsTool(
             return Format(memoryService.GetStats());
 
         // #518: with ACLs enabled the counts are scoped to the caller's readable projects and never fall back to the
-        // global counts. Fail closed before any scan: the ordinary cached ACL or the managed fresh request-local snapshot.
+        // global counts. Fail closed before any scan when the cached ACL has never loaded.
         if (!aclCache.IsAvailable)
             return "memory_stats: ACL cache unavailable";
 

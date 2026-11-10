@@ -33,19 +33,6 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<string>("AgentsJson")
                         .HasColumnType("longtext");
 
-                    b.Property<string>("AppliedRuntimeBinding")
-                        .HasColumnType("longtext");
-
-                    b.Property<string>("AppliedRuntimeKind")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)")
-                        .HasDefaultValue("docker");
-
-                    b.Property<int?>("AppliedSandboxPolicyVersionId")
-                        .HasColumnType("int");
-
                     b.Property<bool>("AutoMemoryEnabled")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("tinyint(1)")
@@ -145,10 +132,6 @@ namespace Fleet.Orchestrator.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
 
-                    b.Property<string>("NativeAuthMode")
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)");
-
                     b.Property<string>("OutputStyle")
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
@@ -173,10 +156,6 @@ namespace Fleet.Orchestrator.Migrations
                         .HasColumnType("varchar(20)")
                         .HasDefaultValue("claude");
 
-                    b.Property<string>("ProviderApiKeyEnvRef")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
                     b.Property<string>("RequestReceivedMessage")
                         .HasMaxLength(500)
                         .HasColumnType("varchar(500)");
@@ -185,16 +164,6 @@ namespace Fleet.Orchestrator.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
-
-                    b.Property<string>("RuntimeKind")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)")
-                        .HasDefaultValue("docker");
-
-                    b.Property<int?>("SandboxPolicyVersionId")
-                        .HasColumnType("int");
 
                     b.Property<string>("ShortName")
                         .IsRequired()
@@ -229,14 +198,10 @@ namespace Fleet.Orchestrator.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("AppliedSandboxPolicyVersionId");
-
                     b.HasIndex("IsEnabled");
 
                     b.HasIndex("Name")
                         .IsUnique();
-
-                    b.HasIndex("SandboxPolicyVersionId");
 
                     b.ToTable("agents", (string)null);
                 });
@@ -292,6 +257,10 @@ namespace Fleet.Orchestrator.Migrations
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("varchar(200)");
+
+                    b.Property<string>("PlaceholderSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
 
                     b.HasKey("Id");
 
@@ -1032,7 +1001,7 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("repositories", (string)null);
                 });
 
-            modelBuilder.Entity("Fleet.Orchestrator.Data.SandboxPolicy", b =>
+            modelBuilder.Entity("Fleet.Orchestrator.Data.SecretBinding", b =>
                 {
                     b.Property<int>("Id")
                         .ValueGeneratedOnAdd()
@@ -1040,55 +1009,55 @@ namespace Fleet.Orchestrator.Migrations
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("varchar(100)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Name")
-                        .IsUnique();
-
-                    b.ToTable("sandbox_policies", (string)null);
-                });
-
-            modelBuilder.Entity("Fleet.Orchestrator.Data.SandboxPolicyVersion", b =>
-                {
-                    b.Property<int>("Id")
+                    b.Property<bool>("AgentAttachable")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false);
 
-                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+                    b.Property<string>("AppIdEnvKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
 
-                    b.Property<int>("PolicyId")
-                        .HasColumnType("int");
-
-                    b.Property<string>("ProviderProfileHashes")
+                    b.Property<string>("EnvKeyName")
                         .IsRequired()
-                        .HasColumnType("longtext");
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
 
-                    b.Property<string>("Sha256")
+                    b.Property<string>("ExposeAs")
+                        .HasMaxLength(1024)
+                        .HasColumnType("varchar(1024)");
+
+                    b.Property<string>("HeaderName")
                         .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("varchar(64)");
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasDefaultValue("Authorization");
 
-                    b.Property<int>("Version")
-                        .HasColumnType("int");
-
-                    b.Property<string>("Yaml")
+                    b.Property<string>("Hosts")
                         .IsRequired()
-                        .HasColumnType("longtext");
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasDefaultValue("static");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("PolicyId", "Version")
+                    b.HasIndex("EnvKeyName")
                         .IsUnique();
 
-                    b.ToTable("sandbox_policy_versions", (string)null);
+                    b.ToTable("secret_bindings", (string)null);
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowDefinition", b =>
@@ -1185,19 +1154,6 @@ namespace Fleet.Orchestrator.Migrations
                         .IsUnique();
 
                     b.ToTable("workflow_definition_versions", (string)null);
-                });
-
-            modelBuilder.Entity("Fleet.Orchestrator.Data.Agent", b =>
-                {
-                    b.HasOne("Fleet.Orchestrator.Data.SandboxPolicyVersion", null)
-                        .WithMany()
-                        .HasForeignKey("AppliedSandboxPolicyVersionId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("Fleet.Orchestrator.Data.SandboxPolicyVersion", null)
-                        .WithMany()
-                        .HasForeignKey("SandboxPolicyVersionId")
-                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.AgentCredentialMount", b =>
@@ -1370,17 +1326,6 @@ namespace Fleet.Orchestrator.Migrations
                     b.Navigation("ProjectContext");
                 });
 
-            modelBuilder.Entity("Fleet.Orchestrator.Data.SandboxPolicyVersion", b =>
-                {
-                    b.HasOne("Fleet.Orchestrator.Data.SandboxPolicy", "Policy")
-                        .WithMany("Versions")
-                        .HasForeignKey("PolicyId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Policy");
-                });
-
             modelBuilder.Entity("Fleet.Orchestrator.Data.WorkflowDefinitionVersion", b =>
                 {
                     b.HasOne("Fleet.Orchestrator.Data.WorkflowDefinition", "WorkflowDefinition")
@@ -1426,11 +1371,6 @@ namespace Fleet.Orchestrator.Migrations
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.ProjectContext", b =>
-                {
-                    b.Navigation("Versions");
-                });
-
-            modelBuilder.Entity("Fleet.Orchestrator.Data.SandboxPolicy", b =>
                 {
                     b.Navigation("Versions");
                 });

@@ -25,40 +25,7 @@ export interface JournalHeartbeat {
   bindingFailed?: number
 }
 
-/** #492 read-only applied-binding/lifecycle summary from the persisted managed record. */
-export interface ManagedStatus {
-  state: string
-  errors: string[]
-  admissionState: string
-  pending: boolean
-  operation: string | null
-  appliedSandboxId: string | null
-  appliedSandboxName: string | null
-  epoch: string | null
-  policyVersionId: number | null
-  policySha256: string | null
-  gatewayGeneration: string | null
-  providers: string[]
-  /** #492 §7/§11: last observed Docker IDs of the workload and native supervisor (absent on older servers). */
-  workloadContainerId?: string | null
-  supervisorContainerId?: string | null
-  /** running · stopped · removed · unobservable; null when never observed. */
-  containerStatus?: string | null
-  containersObservedAt?: string | null
-  /** Gateway backup last-success stamp; null when unconfigured or missing (unknown, never fresh). */
-  backupLastSuccessAt?: string | null
-  /** unknown · failed · recorded */
-  backupState?: string | null
-  backupAgeSeconds?: number | null
-}
-
 export interface AgentState {
-  runtimeKind?: string
-  appliedRuntimeKind?: string
-  runtimePending?: boolean
-  managedState?: string | null
-  managedErrors?: string[] | null
-  managed?: ManagedStatus | null
   agentName: string
   displayName: string | null
   shortName: string | null
@@ -156,10 +123,6 @@ export interface McpEndpointEntry {
 }
 
 export interface CreateForm {
-  runtimeKind?: string
-  sandboxPolicyVersionId?: string
-  nativeAuthMode?: string
-  providerApiKeyEnvRef?: string
   name: string
   displayName: string
   role: string
@@ -198,14 +161,6 @@ export interface CreateForm {
 }
 
 export interface AgentConfig {
-  runtimeKind?: string
-  sandboxPolicyVersionId?: number | null
-  nativeAuthMode?: string | null
-  providerApiKeyEnvRef?: string | null
-  appliedRuntimeKind?: string
-  appliedSandboxPolicyVersionId?: number | null
-  runtimePending?: boolean
-
   agentName: string
   model: string
   memoryLimitMb: number
@@ -257,10 +212,6 @@ export interface AgentConfig {
 }
 
 export interface ConfigEdits {
-  runtimeKind?: string
-  sandboxPolicyVersionId?: string
-  nativeAuthMode?: string
-  providerApiKeyEnvRef?: string
   model: string
   memoryLimitMb: string
   isEnabled: boolean
@@ -395,7 +346,7 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'sandbox-policies' | 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
+export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
 
 // ── Memory types ──────────────────────────────────────────────────────────────
 

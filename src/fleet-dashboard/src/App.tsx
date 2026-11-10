@@ -1,4 +1,3 @@
-import { revokeOutcome } from './managedStock'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import type {
   AgentState,
@@ -41,7 +40,6 @@ import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeo
 import { contextWindowEditValue } from './contextWindow'
 import { localModelEditValues } from './localModel'
 import { configSaveBody } from './agentConfigSave'
-import { savedRuntimeSelection } from './managedStock'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -64,7 +62,6 @@ import EpicGrantsView from './components/EpicGrantsView'
 import OutputStylesView from './components/OutputStylesView'
 import CredentialsView from './components/CredentialsView'
 import MemoryView from './components/MemoryView'
-import SandboxPoliciesView from './components/SandboxPoliciesView'
 import { MemoryIdCacheProvider } from './context/MemoryIdCacheContext'
 import SetupBanner from './components/SetupBanner'
 
@@ -243,7 +240,7 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['sandbox-policies', 'agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
+  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
   // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
@@ -750,19 +747,6 @@ export default function App() {
     setReprovisionAllState('idle')
   }
 
-  const [revokeFeedback, setRevokeFeedback] = useState<Record<string, { ok: boolean; text: string; pending?: boolean }>>({})
-
-  function handleRevoke(agentName: string) {
-    if (revokeFeedback[agentName]?.pending) return
-    if (!window.confirm(`Revoke the managed runtime for ${agentName}? Its admission, provider, broker identity and sandbox are stopped; nothing is replaced.`)) return
-    // Pending while the request is in flight: the card disables revoke and shows "Revoking…".
-    setRevokeFeedback(prev => ({ ...prev, [agentName]: { ok: true, text: 'Revoking…', pending: true } }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/revoke`, { method: 'POST' })
-      .then(async r => { const body = await r.json().catch(() => null); setRevokeFeedback(prev => ({ ...prev, [agentName]: revokeOutcome(r.status, body) })) })
-      .catch(() => setRevokeFeedback(prev => ({ ...prev, [agentName]: { ok: false, text: 'Request failed' } })))
-      .finally(() => setTimeout(() => setRevokeFeedback(prev => { if (prev[agentName]?.pending) return prev; const next = { ...prev }; delete next[agentName]; return next }), 8000))
-  }
-
   function handleStop(agentName: string) {
     const ss = stopStates[agentName] ?? 'idle'
     if (ss === 'pending') return
@@ -880,10 +864,6 @@ export default function App() {
           ...localModelEditValues(cfg),
           contextWindow: contextWindowEditValue(cfg.contextWindow),
           harnessExtra: cfg.harnessExtra ?? '',
-          runtimeKind: cfg.runtimeKind,
-          sandboxPolicyVersionId: cfg.runtimeKind === undefined ? undefined : cfg.sandboxPolicyVersionId == null ? '' : String(cfg.sandboxPolicyVersionId),
-          nativeAuthMode: cfg.nativeAuthMode ?? '',
-          providerApiKeyEnvRef: cfg.providerApiKeyEnvRef ?? '',
           instructions: cfg.instructions ?? [],
         })
       })
@@ -960,16 +940,7 @@ export default function App() {
         if (andReprovision) return apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' }).then(r2 => { if (!r2.ok) throw new Error('Reprovision failed') })
       })
       .then(() => {
-        setConfigData(prev => prev ? {
-          ...prev, projects,
-          runtimeKind: configEdits.runtimeKind,
-          sandboxPolicyVersionId: Number(configEdits.sandboxPolicyVersionId) || null,
-          nativeAuthMode: configEdits.nativeAuthMode || null,
-          providerApiKeyEnvRef: configEdits.providerApiKeyEnvRef || null,
-          runtimePending: (configEdits.runtimeKind ?? 'docker') !== (prev.appliedRuntimeKind ?? 'docker')
-            || (Number(configEdits.sandboxPolicyVersionId) || null) !== (prev.appliedSandboxPolicyVersionId ?? null),
-          harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra,
-        } : prev)
+        setConfigData(prev => prev ? { ...prev, projects, harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra } : prev)
         setConfigSaveState('success')
         setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
         setTimeout(() => setConfigSaveState('idle'), 4000)
@@ -1669,8 +1640,7 @@ export default function App() {
         mcpEndpoints: createForm.mcpEndpoints,
         telegramUsers: createForm.telegramUsers.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
         telegramGroups: createForm.telegramGroups.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        ...savedRuntimeSelection(createForm),
-        provision: createForm.runtimeKind === 'openshell' ? false : !!createTemplateName,
+        provision: !!createTemplateName,
       }
       const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const data = await r.json().catch(() => ({}))
@@ -1831,7 +1801,6 @@ export default function App() {
             reprovisionMsg={reprovisionMsg}
             stopStates={stopStates}
             stopMsg={stopMsg}
-            revokeFeedback={revokeFeedback}
             startStates={startStates}
             startMsg={startMsg}
             cancelStates={cancelStates}
@@ -1867,7 +1836,6 @@ export default function App() {
             onReprovisionCancel={name => setAgentReprovisionState(name, 'idle')}
             onStop={handleStop}
             onStart={handleStart}
-            onRevoke={handleRevoke}
             onCancel={handleCancel}
             onCancelConfirm={handleCancelConfirm}
             onCancelCancel={name => setAgentCancelState(name, 'idle')}
@@ -2089,7 +2057,6 @@ export default function App() {
           />
         )}
 
-        {activeView === 'sandbox-policies' && <SandboxPoliciesView />}
         {activeView === 'output-styles' && (
           <OutputStylesView
             initialStyle={viewParam}

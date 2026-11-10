@@ -44,8 +44,6 @@ jobs:
       - name: Entrypoint codex config.toml
         run: bash tests/entrypoint-codex/run.sh
 
-      # Includes #507's in-sandbox workspace copy helper (test_stock_workspace_copy.py); the runner is non-root,
-      # so its unreadable-source rows execute rather than skip.
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
 
@@ -88,28 +86,6 @@ jobs:
           # Built-image run (issue AC4): the dashboard image itself, no mounts.
           docker build -f src/fleet-dashboard/Dockerfile -t dashproxy-test:pr .
           DASHBOARD_IMAGE=dashproxy-test:pr bash tests/dashboard-proxy/run.sh
-
-      # #492: the orchestrator Dockerfile carries the managed-runtime label and the opt-in stock CLI
-      # install. Build it like the dashboard image above (local tag, never pushed) and prove the built
-      # image passes the rollout guard on its label alone (no preflight token in CI).
-      - name: Orchestrator image builds and declares managed bindings
-        run: |
-          docker build -f src/Fleet.Orchestrator/Dockerfile -t orchestrator-test:pr .
-          env -u ORCHESTRATOR_AUTH_TOKEN bash scripts/check-stock-runtime-rollout.sh --image orchestrator-test:pr
-          # #507: the image carries the exact public workspace copy helper the managed adapter uploads.
-          docker run --rm --entrypoint cat orchestrator-test:pr /app/stock-workspace-copy.py | cmp - scripts/stock-workspace-copy.py
-
-      # #503 W6/W7: the opt-in image (real pinned CLI, digests checked) carries the git and ssh that the pinned
-      # `sandbox upload` spawns, the default image does not, the CLI's default upload planning passes for the
-      # adapter's source shapes, and ssh carries a pinned-option subsystem upload into a throwaway sshd.
-      # Local tags and a private network only; no gateway, credential or native upload.
-      - name: Opt-in orchestrator image upload transport
-        run: bash scripts/test-stock-upload-transport.sh orchestrator-test:pr
-
-      # #502: focused inert subscription rollback guard and snapshot regressions (stub preflight, synthetic
-      # files only; no runtime, deployment or credential authority).
-      - name: Subscription rollout guard and snapshot regressions
-        run: bash scripts/test-stock-subscription-rollout.sh
 
   # `npm test` is `node --test` over TypeScript sources, which needs Node >= 22.18 (type stripping
   # on by default) — the image build uses node:20 and only type-checks the tests.
@@ -769,67 +745,6 @@ jobs:
       - name: Build the image
         run: docker build -t fleet:agent-ci .
 
-      - name: Build the opt-in stock image from restrictive context modes
-        run: |
-          set -euo pipefail
-          restore_context_modes() {
-            chmod 0755 entrypoint.sh stock-entrypoint.sh
-            chmod 0644 gh-auth.sh scripts/acceptance_plan.py
-            find skills -type d -exec chmod 0755 {} +
-            find skills -type f -exec chmod 0644 {} +
-          }
-          trap restore_context_modes EXIT
-          chmod 0600 entrypoint.sh stock-entrypoint.sh gh-auth.sh
-          find skills -type d -exec chmod 0700 {} +
-          find skills -type f -exec chmod 0600 {} +
-          chmod 0600 scripts/acceptance_plan.py
-          docker build --target stock-agent -t fleet:stock-agent-ci .
-
-      - name: Stock and default image identity and workspace
-        run: |
-          set -euo pipefail
-          [ "$(docker image inspect fleet:stock-agent-ci --format '{{.Config.User}}')" = "10001:10001" ]
-          [ "$(docker image inspect fleet:stock-agent-ci --format '{{.Config.WorkingDir}}')" = "/home/agent" ]
-          [ "$(docker image inspect fleet:agent-ci --format '{{.Config.User}}')" = "" ]
-          [ "$(docker image inspect fleet:agent-ci --format '{{.Config.WorkingDir}}')" = "/app" ]
-          # No credentials, mounts, enrollment or product entrypoint: filesystem probes only.
-          docker run --rm --network none --entrypoint sh fleet:stock-agent-ci -c '
-            set -eu
-            test "$(id -u)" = 10001
-            test "$(id -g)" = 10001
-            test "$PWD" = /home/agent
-            test ! -w /app
-            test -r /app/Fleet.Agent.dll
-            for script in /app/entrypoint.sh /app/stock-entrypoint.sh /app/gh-auth.sh; do
-              test -r "$script"
-              test -x "$script"
-              bash -n "$script"
-            done
-            test -r /app/skills/fleet-review/SKILL.md
-            find /app/skills -type f -exec cat {} + > /dev/null
-            test -r /opt/fleet/acceptance_plan.py
-            python3 /opt/fleet/acceptance_plan.py --help > /dev/null
-            # #507: the managed user tree is the real, empty, owned workspace child of HOME; the OCI root stays HOME.
-            test -d /home/agent/workspace
-            test ! -L /home/agent/workspace
-            test "$(stat -c %u:%g /home/agent/workspace)" = 10001:10001
-            test -z "$(ls -A /home/agent/workspace)"
-            for directory in "$PWD" /workspace /home/agent/workspace; do
-              probe=$(mktemp "$directory/workspace-probe.XXXXXX")
-              printf "owned workspace probe\n" > "$probe"
-              cp "$probe" "$probe.copy"
-              cmp "$probe" "$probe.copy"
-              rm "$probe" "$probe.copy"
-            done
-          '
-          docker run --rm --network none --entrypoint sh fleet:agent-ci -c '
-            set -eu
-            test "$(id -u)" = 0
-            test "$PWD" = /app
-            test -r /app/Fleet.Agent.dll
-            test ! -e /home/agent/workspace
-          '
-
       - name: mc runs and reports the pinned release
         run: docker run --rm --entrypoint mc fleet:agent-ci --version
 
@@ -914,9 +829,21 @@ jobs:
           echo "ffmpeg and font install: $(echo $pkgs | wc -w) packages, $((kib / 1024)) MiB installed"
           EOF
 
+      # Secret placeholders, end to end and with synthetic fixtures only: the real fleet-secrets image,
+      # a fake HTTPS upstream, and this agent image as the client. It proves what unit tests cannot:
+      # that the image trusts the forwarder's CA, and that its curl, git, gh, node and python reach a
+      # bound host with a placeholder and never hold the value, a token or the App key. Run once with
+      # the light client image as well, so a failure says whether the agent image is the cause.
+      - name: Secret placeholders end to end (agent image)
+        run: |
+          set -euo pipefail
+          docker build -t fleet:secrets-ci -f src/Fleet.SecretProxy/Dockerfile .
+          PROXY_IMAGE=fleet:secrets-ci AGENT_IMAGE=fleet:agent-ci bash tests/secret-proxy/run.sh
+          PROXY_IMAGE=fleet:secrets-ci bash tests/secret-proxy/run.sh
+
       - name: Clean up
         if: always()
-        run: docker image rm -f fleet:agent-ci fleet:stock-agent-ci || true
+        run: docker image rm -f fleet:agent-ci fleet:secrets-ci fleet-secrets-e2e:client || true
 
   # The journal object-store provisioner runs inside the pinned MinIO client image, and that image
   # has no `sed`, `awk`, `grep` or `envsubst`. This job is what stops init.sh from ever again

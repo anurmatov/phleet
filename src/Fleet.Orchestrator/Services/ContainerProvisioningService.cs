@@ -1,4 +1,3 @@
-using Fleet.Orchestrator.Helpers;
 using System.Text.Json;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
@@ -17,15 +16,16 @@ public sealed class ContainerProvisioningService(
     IConfiguration config,
     JournalTokenService journalTokens,
     ILogger<ContainerProvisioningService> logger,
-    StockRuntimeMutationHold? mutationHold = null)
+    SecretProxySettings? secretSettings = null,
+    SecretProxyStateWriter? secretState = null)
 {
-    public StockRuntimeMutationHold RuntimeHold { get; } = mutationHold ?? new(config);
+    private readonly SecretProxySettings _secretSettings = secretSettings ?? SecretProxySettings.Disabled;
 
     private const string DefaultAgentImage = "fleet:agent";
     internal const string JournalMcpServerName = "fleet-comms-journal";
     internal const string JournalFilesServerName = "fleet-journal-files";
     internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
-    internal static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
+    private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
     private static IEnumerable<string> SendWarnings(Agent agent)
     {
         if (JournalGrants.HasSendGrant(agent) && !JournalGrants.SendEffective(agent))
@@ -75,22 +75,20 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionPreview.NotFound(agentName);
 
-        if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } blocker)
-        {
-            if (StockOpenShellRuntime.Owns(agent) && Managed() is { Enabled: true } runtime)
-                blocker = await runtime.DescribePreflightFaultAsync(agent, ct) ?? "managed_apply_ready";
-            return new ProvisionPreview(agentName, agent.ContainerName, "", new ContainerSpec("", 0, [], [], []), null,
-                [$"desired={agent.RuntimeKind}; applied={agent.AppliedRuntimeKind}; policy={agent.SandboxPolicyVersionId}; {blocker}"]);
-        }
-
         var envFile = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
         var envValues = LoadEnvFile(envFile);
 
-        var desired = BuildDesiredSpec(agent, envValues);
+        // A preview mints nothing: a bound key shows a fixed marker where a provision puts a placeholder.
+        var bindings = await db.SecretBindings.AsNoTracking().ToListAsync(ct);
+        var (secretPlan, secretFault) = SecretGrantPlanner.Plan(
+            agent, bindings, _secretSettings, secretState?.CaPresent ?? false, () => SecretPlaceholders.PreviewValue);
+
+        var desired = BuildDesiredSpec(agent, envValues, bindings, secretPlan ?? SecretPlan.None);
         var (actual, resolvedContainerName) = await InspectActualAsync(agent.ContainerName, ct);
         var diffs   = actual is null
             ? ["container not found — not running"]
             : ComputeDiff(desired, actual);
+        if (secretFault is not null) diffs = [.. diffs, secretFault];
 
         if (FilesWarning(agent) is { } warning) diffs = [.. diffs, warning];
         diffs = [.. diffs, .. SendWarnings(agent)];
@@ -104,28 +102,47 @@ public sealed class ContainerProvisioningService(
 
     // ── spec generation ────────────────────────────────────────────────────────
 
-    private ContainerSpec BuildDesiredSpec(Agent agent, Dictionary<string, string> envValues)
+    private ContainerSpec BuildDesiredSpec(
+        Agent agent, Dictionary<string, string> envValues, IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets)
     {
         var containerName = agent.ContainerName;
 
         var whisperServiceUrl = config["Provisioning:WhisperServiceUrl"] ?? "";
         var kokoroServiceUrl  = config["Provisioning:KokoroServiceUrl"]  ?? "";
-        var env      = BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl);
+        var env      = BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl, bindings, secrets);
         var binds    = BuildBinds(agent);
         var networks = BuildNetworks(agent);
         var memBytes = (long)agent.MemoryLimitMb * 1024 * 1024;
         var image    = agent.Image ?? config["Provisioning:AgentImage"] ?? DefaultAgentImage;
 
-        return new ContainerSpec(image, memBytes, env, binds, networks);
+        // Bound secrets: the CA the agent trusts, and its place on the internal secrets network.
+        if (secrets.Bind is { } caBind)
+            binds.Add(caBind);
+        if (secrets.Address is not null && !networks.Contains(SecretProxyNetwork.NetworkName, StringComparer.Ordinal))
+            networks.Add(SecretProxyNetwork.NetworkName);
+
+        return new ContainerSpec(image, memBytes, env, binds, networks)
+        {
+            ExtraHosts = [.. secrets.ExtraHosts],
+            SecretNetworkAddress = secrets.Address,
+        };
     }
 
-    private static List<string> BuildEnv(Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl, string kokoroServiceUrl)
+    /// <param name="bindings">Every secret binding. A bound key is never written here, whatever <paramref name="secrets"/> holds.</param>
+    /// <param name="secrets">The agent's placeholder plan, or <see cref="SecretPlan.None"/>.</param>
+    internal static List<string> BuildEnv(
+        Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl, string kokoroServiceUrl,
+        IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets)
     {
         var env = new List<string>();
 
         // Secret refs from DB — resolve values from .env if available
         foreach (var envRef in agent.EnvRefs.OrderBy(e => e.EnvKeyName))
         {
+            // A bound secret never enters the container. Its placeholder is added below, from the plan.
+            if (SecretGrantPlanner.IsBound(bindings, envRef.EnvKeyName))
+                continue;
+
             var value = envValues.TryGetValue(envRef.EnvKeyName, out var v) ? v : "<secret>";
             // Only *_BOT_TOKEN-shaped TELEGRAM_* keys map to the Telegram__BotToken ASP.NET config key.
             // Other TELEGRAM_* keys (e.g. TELEGRAM_USER_ID, TELEGRAM_GROUP_ID) pass through as-is
@@ -148,8 +165,10 @@ public sealed class ContainerProvisioningService(
         env.Add($"GIT_USER_NAME={gitName}");
         env.Add($"GIT_USER_EMAIL={gitEmail}");
 
-        // GitHub App PEM — inject for all agents when present in .env (base64-encoded)
-        if (envValues.TryGetValue("GITHUB_APP_PEM", out var githubAppPem))
+        // GitHub App PEM — inject for all agents when present in .env (base64-encoded), unless the key
+        // is a bound secret: then no agent holds it, and those granted it hold a placeholder instead.
+        if (envValues.TryGetValue("GITHUB_APP_PEM", out var githubAppPem)
+            && !SecretGrantPlanner.IsBound(bindings, "GITHUB_APP_PEM"))
             env.Add($"GITHUB_APP_PEM={githubAppPem}");
 
         // Claude auto-memory — disable when agent uses fleet-memory instead
@@ -169,6 +188,8 @@ public sealed class ContainerProvisioningService(
         // could shrink. The claude child inherits it; ClaudeExecutor strips only its own list.
         if (agent.ContextWindow is int window && ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
             env.Add($"{ContextWindow.EnvVar}={window}");
+
+        env.AddRange(secrets.Env);
 
         return env;
     }
@@ -380,18 +401,7 @@ public sealed class ContainerProvisioningService(
         string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
-        => await ProvisionCoreAsync(agentName, imageOverride, instructionVersionOverrides, managedTransition: false, ct);
-
-    private async Task<ProvisionResult> ProvisionCoreAsync(
-        string agentName,
-        string? imageOverride,
-        IReadOnlyDictionary<string, int>? instructionVersionOverrides,
-        bool managedTransition,
-        CancellationToken ct)
     {
-        if (RuntimeHold.Denies(agentName))
-            return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
-
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
@@ -414,13 +424,6 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
-        // The managed adapter owns both runtime-switch directions; it calls back with managedTransition
-        // only while it still holds the agent, for the Docker leg of OpenShell→Docker.
-        if (!managedTransition && StockOpenShellRuntime.Owns(agent))
-            return await DispatchManagedApplyAsync(agentName, ct) ?? ProvisionResult.Fail(agentName, StockOpenShellRuntime.Unavailable);
-        if (!managedTransition && AgentPatchHelpers.RuntimeApplyFault(agent) is { } runtimeFault)
-            return ProvisionResult.Fail(agentName, runtimeFault);
-
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
         // #386: PV1, before Docker is called or any file is generated.
@@ -428,6 +431,16 @@ public sealed class ContainerProvisioningService(
             return ProvisionResult.Fail(agentName, providerFault);
         if (DescribeJournalProvisioningFault(agent) is { } journalFault)
             return ProvisionResult.Fail(agentName, journalFault);
+
+        // Bound secrets: decided before Docker is called or any file is generated. A fault here means
+        // the agent would otherwise start without a way to use a secret it is meant to hold.
+        var secretBindings = await db.SecretBindings.AsNoTracking().ToListAsync(ct);
+        var (secretPlan, secretFault) = SecretGrantPlanner.Plan(
+            agent, secretBindings, _secretSettings, secretState?.CaPresent ?? false, SecretPlaceholders.Create);
+        if (secretPlan is null)
+            return ProvisionResult.Fail(agentName, secretFault!);
+        if (secretPlan.HasGrants && secretState is null)
+            return ProvisionResult.Fail(agentName, "secret_proxy_state_unavailable: the forwarder state cannot be written from this host");
 
         // Guard: bypassPermissions is rejected — fleet containers run as root and Claude CLI
         // refuses --dangerously-skip-permissions for root processes, which crashes the agent immediately.
@@ -478,7 +491,7 @@ public sealed class ContainerProvisioningService(
                 agent.ContextWindow, agentName);
         }
 
-        var spec      = BuildDesiredSpec(agent, envValues);
+        var spec      = BuildDesiredSpec(agent, envValues, secretBindings, secretPlan);
 
         // Apply image override if provided (e.g. CI uses a PR-specific image tag)
         if (!string.IsNullOrEmpty(imageOverride))
@@ -499,6 +512,11 @@ public sealed class ContainerProvisioningService(
         var logMaxSize = config["Provisioning:ContainerLogMaxSize"];
         var logMaxFile = config["Provisioning:ContainerLogMaxFile"];
 
+        // The forwarder must know the new placeholders before the container that holds them starts,
+        // and must forget the previous container's: record their hashes, then rewrite its state.
+        if (await RecordSecretGrantsAsync(db, agent.Id, secretPlan, ct) is { } recordFault)
+            return ProvisionResult.Fail(agentName, recordFault);
+
         var containerId = await docker.CreateContainerAsync(
             agent.ContainerName,
             spec.Image,
@@ -509,7 +527,8 @@ public sealed class ContainerProvisioningService(
             GetEffectiveHostPort(agent),
             ct,
             logMaxSize,
-            logMaxFile);
+            logMaxFile,
+            spec.ExtraHosts);
 
         if (containerId is null)
             return ProvisionResult.Fail(agentName, "Docker API failed to create container — check orchestrator logs");
@@ -518,6 +537,20 @@ public sealed class ContainerProvisioningService(
         var extraNetworks = spec.Networks.Skip(1).ToList();
         foreach (var network in extraNetworks)
         {
+            if (network == SecretProxyNetwork.NetworkName && spec.SecretNetworkAddress is { } secretAddress)
+            {
+                // Not optional: without its fixed address here the agent cannot use any bound secret.
+                if (await docker.ConnectToNetworkAsync(network, containerId, ct, secretAddress))
+                    continue;
+                await docker.RemoveContainerAsync(agent.ContainerName, ct);
+                var cleanupFault = await RecordSecretGrantsAsync(db, agent.Id, SecretPlan.None, ct);
+                return ProvisionResult.Fail(agentName,
+                    $"secret_proxy_network_unavailable: could not attach '{agent.ContainerName}' to {network} at {secretAddress}. "
+                    + "Check that fleet-secrets is running, that the network exists with the configured subnet, "
+                    + "and that no other container holds that address."
+                    + (cleanupFault is null ? "" : $" Also: {cleanupFault}"));
+            }
+
             var ok = await docker.ConnectToNetworkAsync(network, containerId, ct);
             if (!ok)
                 logger.LogWarning(
@@ -542,9 +575,6 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public async Task<ProvisionResult> DeprovisionAsync(string agentName, CancellationToken ct = default)
     {
-        if (RuntimeHold.Denies(agentName))
-            return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
-
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
@@ -555,19 +585,6 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionResult.Fail(agentName, "agent not found in DB");
 
-        if (agent.AppliedRuntimeKind != "docker")
-        {
-            if (Managed() is not { Enabled: true } runtime) return ProvisionResult.Fail(agentName, StockOpenShellRuntime.Unavailable);
-            var managedStop = await runtime.StopAsync(agentName, ct);
-            return new ProvisionResult(agentName, managedStop.Ok, managedStop.Message);
-        }
-        return await DeprovisionContainerAsync(agent, ct);
-    }
-
-    /// <summary>Stops and removes <paramref name="agent"/>'s Docker container; no DB read.</summary>
-    private async Task<ProvisionResult> DeprovisionContainerAsync(Agent agent, CancellationToken ct)
-    {
-        var agentName = agent.Name;
         var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
         if (existing is null)
             return ProvisionResult.Fail(agentName,
@@ -585,52 +602,87 @@ public sealed class ContainerProvisioningService(
             return ProvisionResult.Fail(agentName,
                 $"failed to remove container '{agent.ContainerName}' — check orchestrator logs");
 
+        // The container is gone, and its placeholders with it: the forwarder forgets them now. If it
+        // could not be told, that is not a clean deprovision: say so rather than report success while
+        // the old grants may still be honoured.
+        if (await RecordSecretGrantsAsync(db, agent.Id, SecretPlan.None, ct) is { } revokeFault)
+            return ProvisionResult.Fail(agentName,
+                $"container '{agent.ContainerName}' stopped and removed, but its secret grants were not revoked at fleet-secrets: {revokeFault}");
+
         return ProvisionResult.Ok(agentName, $"container '{agent.ContainerName}' stopped and removed");
     }
 
     /// <summary>
-    /// Review A2: the inspection behind <c>DELETE /api/agents/{name}</c>. <c>KeepRow</c> non-null means the agent
-    /// row must stay: an applied openshell binding or an unresolved candidate/held record exists and no clean revoke
-    /// has succeeded, or the runtime hold denies the Docker mutation. Otherwise the guard owns the rest: it locks the
-    /// exact inspected binding and only then deprovisions the inspected runtime (best-effort Docker; a cleanly revoked
-    /// managed binding was already stopped by its revoke, so nothing is stopped and no managed Stop result is ignored).
+    /// The fault a reprovision of this agent would hit in its bound secrets, or null. Reads only,
+    /// apart from one refresh of the forwarder state: it runs before the old container is removed,
+    /// so a refusal leaves a working agent working.
     /// </summary>
-    public async Task<(string? KeepRow, ManagedDeleteGuard? Guard)> PrepareDeleteAsync(string agentName, CancellationToken ct = default)
+    private async Task<string?> DescribeSecretPlanFaultAsync(string agentName, CancellationToken ct)
     {
-        Agent? agent;
-        using (var scope = scopeFactory.CreateScope())
-            agent = await scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents
-                .AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        if (agent is null) return (null, null);
-        if (DescribeManagedDeleteFault(agent) is { } managedFault) return (managedFault, null);
-        var isDocker = agent.AppliedRuntimeKind == "docker";
-        if (isDocker && RuntimeHold.Denies(agentName)) return (StockRuntimeMutationHold.Reason, null);
-        // Review A2/D1: nothing is persisted here, and nothing is deprovisioned until the guard holds the exact
-        // inspected binding. The runtime acted on is the inspected one, never a fresh lookup that could find a
-        // concurrently applied replacement.
-        return (null, new ManagedDeleteGuard(agent.Id, agent.AppliedRuntimeBinding, agent.AppliedRuntimeKind, async token =>
-        {
-            if (BeforeDeprovision is not null) await BeforeDeprovision();
-            return isDocker ? await DeprovisionContainerAsync(agent, token) : ProvisionResult.Ok(agentName, "managed binding revoked");
-        }));
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents.Include(a => a.EnvRefs).AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        if (agent is null)
+            return null; // ProvisionAsync reports the missing agent.
+
+        var bindings = await db.SecretBindings.AsNoTracking().ToListAsync(ct);
+        // Nothing is minted here: only the faults matter.
+        var (plan, fault) = SecretGrantPlanner.Plan(
+            agent, bindings, _secretSettings, secretState?.CaPresent ?? false, () => SecretPlaceholders.PreviewValue);
+        if (plan is null)
+            return fault;
+
+        // The swap publishes twice: the old placeholders are revoked, then the new ones granted. If
+        // the state cannot be written, either step would fail after the container is already gone.
+        var publishes = plan.HasGrants || agent.EnvRefs.Any(r => r.PlaceholderSha256 is not null);
+        if (!publishes)
+            return null;
+        if (secretState is null)
+            return "secret_proxy_state_unavailable: the forwarder state cannot be written from this host";
+        return await secretState.WriteAsync(ct, failClosed: false) is { } stateFault
+            ? $"{stateFault}: the fleet-secrets state cannot be written, so this agent's placeholders could not be "
+              + "revoked or replaced. Its container was left running. Check the secret-proxy/state directory under the fleet base directory."
+            : null;
     }
 
-    /// <summary>Test seam: runs once the delete guard holds the inspected binding, before any deprovision (review A2/D1).</summary>
-    internal Func<Task>? BeforeDeprovision { get; set; }
-
-    /// <summary>Null only when no managed state would be dropped untracked with the agent row.</summary>
-    internal static string? DescribeManagedDeleteFault(Agent agent)
+    /// <summary>
+    /// Stores the SHA-256 of each placeholder in <paramref name="plan"/> on the agent's Env Refs,
+    /// clears every other one, and rewrites the forwarder state. Returns the fault, or null. With no
+    /// stored hash and no grant it touches nothing, so an agent without bound secrets costs nothing.
+    /// </summary>
+    private async Task<string?> RecordSecretGrantsAsync(
+        OrchestratorDbContext db, int agentId, SecretPlan plan, CancellationToken ct)
     {
-        ManagedRecord record;
-        try { record = ManagedRecord.Parse(agent.AppliedRuntimeBinding); }
-        catch (System.Text.Json.JsonException) { return "managed_binding_unreadable"; }
-        // #502 review F2: desired subscription or any nonretired subscription tuple keeps the row (and its rollback count
-        // and custody history) until a verified, archived retirement; a clean revoke alone is not retirement.
-        if (agent.NativeAuthMode == StockSubscriptionBinding.Mode || record.SubscriptionTuples().Any()) return "managed_subscription_not_retired";
-        // A clean, finished revoke (a retired Docker handoff is recorded the same way) leaves nothing live.
-        if (record is { State: "revoked", Operation: null, Candidate: null, Errors.Count: 0 }) return null;
-        if (record.Unresolved) return "managed_state_unresolved";
-        return agent.AppliedRuntimeKind == "docker" ? null : "managed_binding_not_revoked";
+        var references = await db.AgentEnvRefs.Where(r => r.AgentId == agentId).ToListAsync(ct);
+        var changed = false;
+        foreach (var reference in references)
+        {
+            var hash = plan.Grants.FirstOrDefault(g => g.EnvKeyName == reference.EnvKeyName) is { } grant
+                ? SecretPlaceholders.Hash(grant.Placeholder)
+                : null;
+            if (reference.PlaceholderSha256 == hash)
+                continue;
+            reference.PlaceholderSha256 = hash;
+            changed = true;
+        }
+
+        if (!changed)
+            return null;
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (SecretStatePublicationException ex)
+        {
+            // The hashes are saved but fleet-secrets was not told (the save interceptor's write
+            // failed and the old state was withdrawn). Not a success, whichever way the change went.
+            return ex.Message;
+        }
+
+        if (secretState is null)
+            return null;
+        return await secretState.WriteAsync(ct) is { } fault ? new SecretStatePublicationException(fault).Message : null;
     }
 
     /// <summary>
@@ -643,15 +695,8 @@ public sealed class ContainerProvisioningService(
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
     {
-        if (RuntimeHold.Denies(agentName))
-            return ProvisionResult.Fail(agentName, StockRuntimeMutationHold.Reason);
-
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
-
-        if (await DispatchManagedApplyAsync(agentName, ct) is { } managed) return managed;
-        if (await DescribeManagedRuntimeFaultAsync(agentName, ct) is { } runtimeFault)
-            return ProvisionResult.Fail(agentName, runtimeFault);
 
         // #386: PV1 likewise keep the old container.
         if (await DescribeProviderPreflightFaultAsync(agentName, ct) is { } providerFault)
@@ -665,6 +710,12 @@ public sealed class ContainerProvisioningService(
         // P1 (#382) likewise: a codex local agent with no reachable server keeps its old container.
         if (await DescribeCodexServerUrlFaultAsync(agentName, ct) is { } serverUrlFault)
             return ProvisionResult.Fail(agentName, serverUrlFault);
+
+        // Bound secrets likewise. Everything ProvisionAsync would refuse for (forwarder off or
+        // misconfigured, no CA, no address, conflicting names, a state that cannot be written) is
+        // found here, while the old container is still running.
+        if (await DescribeSecretPlanFaultAsync(agentName, ct) is { } secretFault)
+            return ProvisionResult.Fail(agentName, secretFault);
 
         var deprovision = await DeprovisionAsync(agentName, ct);
         if (!deprovision.Success)
@@ -712,16 +763,12 @@ public sealed class ContainerProvisioningService(
             .Select(a => new { a.Name, a.ContainerName })
             .ToListAsync(ct);
 
-        var results = new List<ProvisionResult>();
-        foreach (var held in agents.Where(a => RuntimeHold.Denies(a.Name)))
-            results.Add(ProvisionResult.Fail(held.Name, StockRuntimeMutationHold.Reason));
-        agents = agents.Where(a => !RuntimeHold.Denies(a.Name)).ToList();
-        if (agents.Count == 0 && results.Count > 0) return results;
-
         // 2. Fetch set of currently running container names from Docker
         var runningNames = await docker.ListRunningContainerNamesAsync(ct);
         if (runningNames is null)
-            return [.. results, ProvisionResult.Fail("(all)", "Docker API unavailable — cannot list running containers")];
+            return [ProvisionResult.Fail("(all)", "Docker API unavailable — cannot list running containers")];
+
+        var results = new List<ProvisionResult>();
 
         foreach (var agent in agents)
         {
@@ -866,7 +913,13 @@ public sealed class ContainerProvisioningService(
                 foreach (var n in netsEl.EnumerateObject())
                     networks.Add(n.Name);
 
-            return (new ContainerSpec(image, memory, env, binds, networks), resolvedName);
+            var extraHosts = new List<string>();
+            if (root.GetProperty("HostConfig").TryGetProperty("ExtraHosts", out var hostsEl)
+                && hostsEl.ValueKind == JsonValueKind.Array)
+                foreach (var h in hostsEl.EnumerateArray())
+                    extraHosts.Add(h.GetString() ?? "");
+
+            return (new ContainerSpec(image, memory, env, binds, networks) { ExtraHosts = extraHosts }, resolvedName);
         }
         catch (Exception ex)
         {
@@ -932,6 +985,14 @@ public sealed class ContainerProvisioningService(
         foreach (var k in actualEnvKeys.Except(desiredEnvKeys))
             diffs.Add($"env extra: '{k}'");
 
+        // Host steering of bound secrets: a host points at the forwarder only after a reprovision.
+        var desiredHosts = new HashSet<string>(desired.ExtraHosts, StringComparer.OrdinalIgnoreCase);
+        var actualHosts  = new HashSet<string>(actual.ExtraHosts,  StringComparer.OrdinalIgnoreCase);
+        foreach (var h in desiredHosts.Except(actualHosts))
+            diffs.Add($"host entry missing: '{h}'");
+        foreach (var h in actualHosts.Except(desiredHosts))
+            diffs.Add($"host entry extra: '{h}'");
+
         return diffs;
     }
 
@@ -980,8 +1041,7 @@ public sealed class ContainerProvisioningService(
     /// Generates appsettings.json, .mcp.json, and settings.json into the agent's
     /// .generated/ workspace directory before the container is started.
     /// </summary>
-    /// <param name="managed">#512: true only from <see cref="GenerateManagedInputsAsync"/>; see <see cref="AllowedToolsFor"/>.</param>
-    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir, string ctoAgentName, bool managed = false)
+    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir, string ctoAgentName)
     {
         var generatedDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
         Directory.CreateDirectory(generatedDir);
@@ -1011,7 +1071,7 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), managed));
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
@@ -1308,13 +1368,7 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>The generated <c>Agent.AllowedTools</c> list, which the agent reads as its own.</summary>
-    /// <param name="managed">
-    /// #512: true only for a managed stock bundle (<see cref="GenerateManagedInputsAsync"/>), whose native memory table must
-    /// equal the agent's saved enabled memory grants under either accepted endpoint name, so the ordinary automatic
-    /// <c>memory_get</c> is not added there. Explicit saved grants and every other default are unchanged; ordinary
-    /// generation (false) keeps its bytes.
-    /// </param>
-    internal static List<string> AllowedToolsFor(Agent agent, string ctoAgentName, bool managed = false)
+    internal static List<string> AllowedToolsFor(Agent agent, string ctoAgentName)
     {
         var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
             .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
@@ -1324,7 +1378,7 @@ public sealed class ContainerProvisioningService(
         // for codex: other providers do not read AllowedTools this way.
         if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase))
         {
-            if (!managed && !tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
+            if (!tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
                 tools.Add("mcp__fleet-memory__memory_get");
 
             if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
@@ -1371,7 +1425,7 @@ public sealed class ContainerProvisioningService(
         Agent agent,
         string ctoAgentName,
         OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null, bool managed = false)
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
     {
         var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
@@ -1384,7 +1438,7 @@ public sealed class ContainerProvisioningService(
         if (DescribeLocalModelFault(agent) is { } localFault)
             throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
 
-        var tools = AllowedToolsFor(agent, ctoAgentName, managed);
+        var tools = AllowedToolsFor(agent, ctoAgentName);
         var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
         var hosted     = HostedModelProviders.TryResolve(agent.Provider, agent.Model, out var hostedProvider, out _);
 
@@ -1642,7 +1696,7 @@ public sealed class ContainerProvisioningService(
         return id;
     }
 
-    internal static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
+    private static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
         e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
         && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
 
@@ -1859,79 +1913,6 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public static int GetEffectiveHostPort(Agent agent) => agent.HostPort ?? (8080 + agent.Id);
 
-    private StockOpenShellRuntime? Managed()
-    {
-        using var scope = scopeFactory.CreateScope();
-        return scope.ServiceProvider.GetService<StockOpenShellRuntime>();
-    }
-
-    /// <summary>
-    /// Null when the agent is not managed or OpenShell→Docker finished and the Docker path should
-    /// continue; otherwise the managed apply outcome. Never falls back to Docker on a managed failure.
-    /// </summary>
-    private async Task<ProvisionResult?> DispatchManagedApplyAsync(string name, CancellationToken ct)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name, ct);
-        if (agent is null || !StockOpenShellRuntime.Owns(agent)) return null;
-        if (Managed() is not { Enabled: true } runtime) return ProvisionResult.Fail(name, StockOpenShellRuntime.Unavailable);
-        var result = await runtime.ApplyAsync(name, ct);
-        return new ProvisionResult(name, result.Ok, result.Message);
-    }
-
-    /// <summary>
-    /// The Docker leg of an OpenShell→Docker apply, called by the managed adapter while it still holds
-    /// the agent's operation. Removes a leftover stopped container of the exact name, then provisions.
-    /// </summary>
-    internal async Task<(bool Ok, string Message)> ProvisionDockerTransitionAsync(string agentName, CancellationToken ct)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        if (agent is null) return (false, "agent not found in DB");
-        var existing = await docker.ListContainersByNameAsync(agent.ContainerName, ct);
-        if (existing is null) return (false, "docker_observation_failed");
-        if (existing.Any(c => c.State is not ("exited" or "created" or "dead"))) return (false, "docker_container_running");
-        if (existing.Count > 0 && !await docker.RemoveContainerAsync(agent.ContainerName, ct)) return (false, "docker_remove_failed");
-        var result = await ProvisionCoreAsync(agentName, null, null, managedTransition: true, ct);
-        return (result.Success, result.Message);
-    }
-
-    /// <summary>
-    /// The ordinary generated config, instructions and project contexts for a managed bundle, written
-    /// to the same <c>.generated</c> directory the Docker path uses. Returns that directory.
-    /// </summary>
-    internal async Task<string> GenerateManagedInputsAsync(string agentName, CancellationToken ct)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-        var agent = await db.Agents
-            .Include(a => a.Tools).Include(a => a.Projects).Include(a => a.McpEndpoints).Include(a => a.EnvRefs)
-            .Include(a => a.TelegramUsers).Include(a => a.TelegramGroups).Include(a => a.Networks)
-            .Include(a => a.Instructions).ThenInclude(ai => ai.Instruction).ThenInclude(i => i.Versions)
-            .Include(a => a.CredentialMounts).ThenInclude(m => m.CredentialFile)
-            .AsSplitQuery().AsNoTracking()
-            .FirstOrDefaultAsync(a => a.Name == agentName, ct)
-            ?? throw new InvalidOperationException("agent_not_found");
-        var baseDir = config["Provisioning:BaseDir"] ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
-        var envValues = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
-        envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
-        var projectContexts = await ResolveProjectContextsAsync(agent);
-        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "", managed: true);
-        await GenerateInstructionFilesAsync(agent, baseDir, null);
-        await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
-        return Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
-    }
-
-    private async Task<string?> DescribeManagedRuntimeFaultAsync(string name, CancellationToken ct)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name, ct);
-        return agent is null ? "agent not found in DB" : AgentPatchHelpers.RuntimeApplyFault(agent);
-    }
-
     /// <summary>
     /// Returns the base URL for proxying HTTP requests to an agent.
     /// Prefers container-name routing on the Docker network when a container name is available.
@@ -1939,9 +1920,6 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public string GetAgentBaseUrl(Agent agent)
     {
-        if (agent.AppliedRuntimeKind != "docker") throw new InvalidOperationException("managed_runtime_unavailable");
-        if (RuntimeHold.Denies(agent.Name)) throw new InvalidOperationException(StockRuntimeMutationHold.Reason);
-
         if (!string.IsNullOrWhiteSpace(agent.ContainerName))
             return $"http://{agent.ContainerName}:8080";
 
@@ -1959,7 +1937,14 @@ public record ContainerSpec(
     long MemoryBytes,
     List<string> Env,
     List<string> Binds,
-    List<string> Networks);
+    List<string> Networks)
+{
+    /// <summary><c>host:address</c> entries: bound hosts pointed at <c>fleet-secrets</c>.</summary>
+    public List<string> ExtraHosts { get; init; } = [];
+
+    /// <summary>The agent's fixed address on the secrets network, when it holds a bound secret.</summary>
+    public string? SecretNetworkAddress { get; init; }
+}
 
 public record ProvisionPreview(
     string AgentName,
@@ -2005,57 +1990,4 @@ internal sealed record ProjectContextAssignment(string ProjectName, string Conte
 internal sealed record ProjectContextPlan(IReadOnlyList<ProjectContextAssignment> Assignments)
 {
     public static readonly ProjectContextPlan Empty = new([]);
-}
-
-/// <summary>
-/// Review A2/D1/D2: the inspected binding and runtime kind of an agent row about to be deleted, and the deprovision
-/// of that inspected runtime. One transaction first compare-and-sets that exact binding (taking the row lock), then
-/// deprovisions, then deletes the row. A concurrent apply/Start/revoke claim CAS either already changed the binding
-/// (conflict, before any stop/remove) or waits on the lock and then finds no row. Nothing is written outside the
-/// transaction: a failure or crash rolls back and leaves the binding as it was, so the delete stays retryable.
-/// </summary>
-public sealed record ManagedDeleteGuard(int AgentId, string? Binding, string? Kind, Func<CancellationToken, Task<ProvisionResult>> Deprovision)
-{
-    public const string Changed = "managed_state_changed_during_delete";
-    public const string Unavailable = "managed_delete_unavailable";
-
-    /// <summary>
-    /// Fault null when the row was deleted, with the deprovision result; otherwise <see cref="Changed"/> (409) or
-    /// <see cref="Unavailable"/> (503) and nothing was deprovisioned under a changed binding.
-    /// </summary>
-    public async Task<(string? Fault, ProvisionResult? Deprovision)> DeleteAsync(OrchestratorDbContext db, Agent tracked, CancellationToken ct = default)
-    {
-        if (tracked.Id != AgentId) return (Changed, null);
-        try
-        {
-            return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
-            {
-                await using var tx = await db.Database.BeginTransactionAsync(ct);
-                var marker = (string.IsNullOrEmpty(Binding) ? new ManagedRecord() : ManagedRecord.Parse(Binding))
-                    with { Operation = "delete:" + Guid.NewGuid().ToString("N"), UpdatedAt = DateTimeOffset.UtcNow };
-                var locked = await db.Agents
-                    .Where(a => a.Id == AgentId && a.AppliedRuntimeBinding == Binding && a.AppliedRuntimeKind == Kind)
-                    .ExecuteUpdateAsync(u => u.SetProperty(a => a.AppliedRuntimeBinding, marker.Serialize()), ct);
-                if (locked != 1)
-                {
-                    await tx.RollbackAsync(ct);
-                    return ((string?)Changed, (ProvisionResult?)null);
-                }
-                // The row stays locked until commit or rollback, so the runtime is deprovisioned only under the
-                // inspected binding; an exception from it rolls the transaction back too.
-                var deprovision = await Deprovision(ct);
-                db.Agents.Remove(tracked);
-                await db.SaveChangesAsync(ct);
-                await tx.CommitAsync(ct);
-                return (null, deprovision);
-            });
-        }
-        catch (Exception ex) when (ex is System.Data.Common.DbException or DbUpdateException or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException
-            or InvalidOperationException or TimeoutException)
-        {
-            // The transaction rolled back: the binding is unchanged and the row is kept. A DB outage is not a conflict.
-            db.ChangeTracker.Clear();
-            return (Unavailable, null);
-        }
-    }
 }

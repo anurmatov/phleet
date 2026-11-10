@@ -257,12 +257,6 @@ services:
       dockerfile: src/Fleet.Telegram/Dockerfile
     image: fleet:telegram
     container_name: fleet-telegram
-    # Managed stock OpenShell (#492, default off): to enable this service's control lane, mount ONLY the
-    # authority directory, read-only (records + <agent>.control.password), and set
-    # StockOpenShell__AuthorityDirectory=/var/lib/fleet-openshell-client/managed/authority. Observer passwords
-    # live in the orchestrator-only managed/observer sibling and are never mounted here.
-    # volumes:
-    #   - ${FLEET_BASE_DIR}/openshell-client/managed/authority:/var/lib/fleet-openshell-client/managed/authority:ro
     environment:
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
@@ -296,12 +290,6 @@ services:
       dockerfile: src/Fleet.Bridge/Dockerfile
     image: fleet:bridge
     container_name: fleet-bridge
-    # Managed stock OpenShell (#492, default off): to enable this service's control lane, mount ONLY the
-    # authority directory, read-only (records + <agent>.control.password), and set
-    # StockOpenShell__AuthorityDirectory=/var/lib/fleet-openshell-client/managed/authority. Observer passwords
-    # live in the orchestrator-only managed/observer sibling and are never mounted here.
-    # volumes:
-    #   - ${FLEET_BASE_DIR}/openshell-client/managed/authority:/var/lib/fleet-openshell-client/managed/authority:ro
     ports:
       - "3300:3300"
     environment:
@@ -349,11 +337,6 @@ services:
       - ${FLEET_BASE_DIR}/.gemini-credentials.json:/root/.gemini/oauth_creds.json
       # #488: durable record of workflow failures not yet delivered (used only when the notifier is on).
       - ${FLEET_BASE_DIR}/temporal-bridge:/var/lib/fleet-temporal-bridge
-      # Managed stock OpenShell (#492, default off): for managed delegation mount ONLY the authority directory,
-      # read-only (records + <agent>.control.password), and set
-      # StockOpenShell__AuthorityDirectory=/var/lib/fleet-openshell-client/managed/authority. Observer passwords
-      # live in the orchestrator-only managed/observer sibling and are never mounted here.
-      # - ${FLEET_BASE_DIR}/openshell-client/managed/authority:/var/lib/fleet-openshell-client/managed/authority:ro
     environment:
       - RabbitMq__Host=rabbitmq
       - TemporalBridge__TemporalAddress=temporal-server:7233
@@ -366,9 +349,6 @@ services:
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq
-      # Managed stock OpenShell (#492): the same switch the orchestrator reads, default off. When true,
-      # workflow delegation to a managed agent needs StockOpenShell__AuthorityDirectory and refuses by name without it.
-      - StockOpenShell__ManagedEnabled=${FLEET_STOCK_MANAGED_ENABLED:-false}
       # Dynamic keys fetched from orchestrator at startup and live-updated on config.changed events.
       # FLEET_CTO_AGENT       — CTO agent name for UWE {{config.CtoAgent}} and {{config.EscalationTarget}} template expressions
       # FLEET_GROUP_CHAT_ID   — Telegram group chat ID for activity directives (replaces static TemporalBridge__GroupChatId)
@@ -424,10 +404,6 @@ services:
     build:
       context: .
       dockerfile: src/Fleet.Orchestrator/Dockerfile
-      # #492: the pinned stock CLI for managed mode; both empty (default-off) installs no CLI.
-      args:
-        OPENSHELL_CLI_URL: ${OPENSHELL_CLI_URL:-}
-        OPENSHELL_CLI_SHA256: ${OPENSHELL_CLI_SHA256:-}
     image: fleet:orchestrator
     container_name: fleet-orchestrator
     ports:
@@ -440,12 +416,6 @@ services:
       # via the Docker socket and passes host paths (workspaces, memories, env file)
       # as bind mounts — those paths must resolve identically on the host.
       - ${FLEET_BASE_DIR}:${FLEET_BASE_DIR}
-      # #492 managed runtime client trust, authority records and broker CA (0700, created by setup/upgrade).
-      - ${FLEET_BASE_DIR}/openshell-client:/var/lib/fleet-openshell-client
-      # #492 §16 gateway backup stamps for the status view, read-only. Dormant unless FLEET_STOCK_BACKUP_DIR
-      # is set (BackupDir below stays empty); an unmounted configured dir reports "unmounted". The bind
-      # source is pre-created 0700 by setup/upgrade when absent (an existing dir is left untouched).
-      - ${FLEET_STOCK_BACKUP_DIR:-${FLEET_BASE_DIR}/openshell-backup}:/var/lib/fleet-stock-backup:ro
     env_file:
       - .env
     environment:
@@ -470,19 +440,11 @@ services:
       - EpicGrants__AutonomyEnabled=${FLEET_AUTONOMY_ENABLED:-false}
       - EpicDriverWatcher__Enabled=${FLEET_EPIC_WATCHER_ENABLED:-false}
       - EpicDriverWatcher__IntervalSeconds=${FLEET_EPIC_WATCHER_INTERVAL_SECONDS:-300}
-      # Managed stock OpenShell (#492): off unless FLEET_STOCK_MANAGED_ENABLED=true. Client trust,
-      # authority records and broker CA live in the private 0700 openshell-client directory.
-      - StockOpenShell__ManagedEnabled=${FLEET_STOCK_MANAGED_ENABLED:-false}
-      - StockOpenShell__ConfigDir=/var/lib/fleet-openshell-client
-      # Host operator uid that setup/upgrade created openshell-client as (the container itself runs as root).
-      - StockOpenShell__ConfigDirOwnerUid=${FLEET_STOCK_CONFIG_DIR_UID:-}
-      - StockOpenShell__BrokerCaFile=/var/lib/fleet-openshell-client/broker-ca.pem
-      - StockOpenShell__AgentImage=${FLEET_STOCK_AGENT_IMAGE:-}
-      - StockOpenShell__GatewayContainer=${FLEET_STOCK_GATEWAY_CONTAINER:-openshell-gateway}
-      - StockOpenShell__BrokerManagementUrl=${FLEET_STOCK_BROKER_MANAGEMENT_URL:-}
-      - StockOpenShell__BrokerAdminUserRef=${FLEET_STOCK_BROKER_ADMIN_USER_REF:-}
-      - StockOpenShell__BrokerAdminPasswordRef=${FLEET_STOCK_BROKER_ADMIN_PASSWORD_REF:-}
-      - StockOpenShell__BackupDir=${FLEET_STOCK_BACKUP_DIR:+/var/lib/fleet-stock-backup}
+      # Secret placeholders: off unless FLEET_SECRETS_ENABLED=true. The subnet and address must equal
+      # the fleet-secrets-net definition and the fleet-secrets service below.
+      - SecretProxy__Enabled=${FLEET_SECRETS_ENABLED:-false}
+      - SecretProxy__Subnet=${FLEET_SECRETS_SUBNET:-10.213.96.0/22}
+      - SecretProxy__Address=${FLEET_SECRETS_ADDRESS:-10.213.96.2}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:
@@ -500,6 +462,37 @@ services:
       start_period: 15s
     networks:
       - fleet-net
+
+  # Secret placeholders, only with `--profile secrets` (setup.sh and upgrade.sh add the profile when
+  # FLEET_SECRETS_ENABLED=true). An agent that holds a bound secret reaches this service at its fixed
+  # address on the internal fleet-secrets-net; the service reaches the bound hosts through fleet-net.
+  # No host port, ever.
+  #   state/  written by the orchestrator (bindings, their current values, grant hashes); read-only here
+  #   ca/     the local CA, created on first start; its key never leaves this directory
+  fleet-secrets:
+    profiles: ["secrets"]
+    build:
+      context: .
+      dockerfile: src/Fleet.SecretProxy/Dockerfile
+    image: fleet:secrets
+    container_name: fleet-secrets
+    volumes:
+      - ${FLEET_BASE_DIR}/secret-proxy/state:/var/lib/fleet-secrets/state:ro
+      - ${FLEET_BASE_DIR}/secret-proxy/ca:/var/lib/fleet-secrets/ca
+    environment:
+      - SecretProxy__ListenAddress=${FLEET_SECRETS_ADDRESS:-10.213.96.2}
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      fleet-net: {}
+      fleet-secrets-net:
+        ipv4_address: ${FLEET_SECRETS_ADDRESS:-10.213.96.2}
 
   # ── Fleet.Comms — first-party client API (OPT-IN) ──────────────────────────
   #
@@ -862,43 +855,6 @@ services:
     networks:
       - fleet-net
 
-  # Managed stock OpenShell gateway (#492), only with `--profile openshell`. Pin the exact stock image
-  # by digest; copy deploy/openshell/gateway.toml.example to ${FLEET_BASE_DIR}/openshell/gateway.toml.
-  # The mTLS listener (8443 in the example TOML) has two required paths and no public listener:
-  # - the orchestrator's stock CLI reaches https://openshell-gateway:8443 over mTLS on fleet-net
-  #   (the gateway cert needs that DNS SAN);
-  # - the trusted host-network (network_mode=host) supervisor calls back to the gateway's loopback
-  #   endpoint https://127.0.0.1:8443 through the loopback-only host binding below (never 0.0.0.0;
-  #   the cert needs the 127.0.0.1 IP SAN). temporal-ui owns host 8080, so 8443 does not clash.
-  # The Docker socket is the explicit trusted-control exception and is never mounted into a
-  # workload. restart "no": a gateway restart must be planned (owned sandboxes stopped first).
-  openshell-gateway:
-    profiles: ["openshell"]
-    # Dormant defaults keep every default-off `docker compose` command valid; upgrade validates the
-    # real values when the managed runtime is enabled, and an unset image cannot be pulled.
-    image: ${FLEET_STOCK_GATEWAY_IMAGE:-openshell-gateway-image-not-configured}
-    container_name: openshell-gateway
-    networks:
-      - fleet-net
-    ports:
-      # Loopback only: the host-network supervisor's callback. Host and container port are equal so
-      # the supervisor's default loopback endpoint matches the gateway listener.
-      - "127.0.0.1:8443:8443"
-    restart: "no"
-    user: "1000:1000"
-    group_add: ["${FLEET_DOCKER_GID:-nogroup}"]
-    command: []
-    environment:
-      OPENSHELL_GATEWAY_CONFIG: /etc/openshell/gateway.toml
-      OPENSHELL_DB_URL: "sqlite:/var/lib/openshell/gateway.db?mode=rwc"
-      XDG_DATA_HOME: /var/lib/openshell
-      HOME: /var/lib/openshell
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Same path inside and out (0700, owner 1000): the gateway hands these paths to the Docker driver.
-      - /var/lib/openshell:/var/lib/openshell
-      - ${FLEET_BASE_DIR}/openshell/gateway.toml:/etc/openshell/gateway.toml:ro
-
 volumes:
   qdrant_data:
   # Device registrations, enrollment state and tokens. Losing this volume locks the owner out of
@@ -918,6 +874,17 @@ networks:
   fleet-net:
     name: fleet-net
     driver: bridge
+  # Created only with the `secrets` profile. Internal: it carries agent-to-forwarder traffic and
+  # nothing else. The subnet is fixed because the forwarder and every granted agent have a fixed
+  # address on it; set FLEET_SECRETS_SUBNET (and FLEET_SECRETS_ADDRESS) if it overlaps a network on
+  # this host.
+  fleet-secrets-net:
+    name: fleet-secrets-net
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${FLEET_SECRETS_SUBNET:-10.213.96.0/22}
   # `internal: true` is the load-bearing line. Docker creates no gateway, publishes no port and
   # installs no masquerade rule for an internal network, so nothing in it can reach the internet
   # and nothing on the internet can reach it. That is what makes "no ports: block" a property of

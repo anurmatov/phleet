@@ -136,43 +136,9 @@ The rest of this README is the plumbing — configuration, deployment, troublesh
 - `fleet-bridge` — RabbitMQ relay
 - `fleet-dashboard` — web UI at http://localhost:3700
 
-## Stock OpenShell integration (manual opt-in)
-
-The [manual stock whole-agent profile](docs/openshell-stock.md) connects outside enrollment,
-verified memory and broker control/completion to a non-root Codex daemon/native-client path.
-It is a bounded, experimental profile, not automatic provisioning or a general rollout.
-Each deployment needs explicit operator enrollment and its own exact-build runtime qualification;
-CI and source fixtures do not establish that qualification.
-Managed API-key agents use epoch-specific native profiles and a child-only `CODEX_HOME`; see the
-[native profile and upgrade rules](docs/openshell-stock.md#managed-api-key-native-profiles-516).
-The managed Codex **subscription** branch (#502) is experimental and compatibility-only: an outside-owned
-provider binding plus one native memory route, with no tested account isolation, no automatic enrollment or
-login, and no new environment key or tool. API-key and manual paths are unchanged. See the
-[subscription runbook](docs/openshell-stock.md#managed-codex-subscription-branch-502-unqualified-compatibility-only).
-Since #510 that branch can keep an agent's existing bot, journal and first-party MCP routes through scoped stock
-service providers, with the same account, billing basis and grants. Any grant the saved policy cannot carry blocks the
-migration instead of being dropped. It is still **UNQUALIFIED** source support; see
-[ordinary services](docs/openshell-stock.md#ordinary-services-510).
-Managed apply (#503) needs a saved policy that binds the fixed `stock-memory` signer to exactly the agent's
-first-party receiving hosts. It is one restricted subset, with no arbitrary middleware, and the saved bytes and
-hash stay the effective policy. Registering that signer in the gateway makes it a startup dependency of every
-sandbox on that gateway. This adds no runtime qualification; see the
-[signer binding runbook](docs/openshell-stock.md#managed-signer-policy-binding-503).
-Managed workloads (#507) keep their user tree in HOME's `workspace` child, inside the stock CLI's copy root; older
-`/workspace` bindings are carried there only after proof, through a filtered in-sandbox snapshot, and never rewritten in
-place. See the [workspace layout runbook](docs/openshell-stock.md#managed-workspace-layout-507).
-Managed agents (#512) keep exactly the memory reads (`memory_get`, `memory_search`, `memory_list`) they are granted
-and their saved policy lists explicitly, in both auth modes. Existing get-only selections are unchanged. An API-key
-agent whose get-only policy does not list its extra read grants now refuses Apply until an explicit version is
-selected; see [explicit memory reads](docs/openshell-stock.md#explicit-memory-reads-512).
-`memory_stats` (#518) is the fourth fixed read, never implied by policy or grants. With project ACLs enabled it counts
-only the records the caller may read, never the global totals: ordinary callers use the existing cached ACL, managed
-callers a fresh check on each request. An old three-read policy beside an enabled stats grant refuses Apply until an
-explicit version is selected; see [scoped memory stats](docs/openshell-stock.md#scoped-memory-stats-518).
-
-| OpenShell capability | Status |
-|---|---|
-| Isolated Codex subscriptions | **UNQUALIFIED** at stock 0.1.5 / Codex 0.164.0; [separate docs/profile qualification](docs/openshell-subscription-auth.md), no migration; the managed subscription branch (#502) and its ordinary-service routes (#510) are compatibility-only and unqualified |
+Optional, only with `FLEET_SECRETS_ENABLED=true`: `fleet-secrets` — swaps placeholders for bound
+secrets on the way to their hosts, on its own internal `fleet-secrets-net`
+([docs/secret-placeholders.md](docs/secret-placeholders.md)).
 
 ## Platform support
 
@@ -244,6 +210,7 @@ docker build -t fleet:orchestrator -f src/Fleet.Orchestrator/Dockerfile .
 docker build -t fleet:memory -f src/Fleet.Memory/Dockerfile .
 docker build -t fleet:temporal-bridge -f Dockerfile.temporal .
 docker build -t fleet:bridge -f src/Fleet.Bridge/Dockerfile .
+docker build -t fleet:secrets -f src/Fleet.SecretProxy/Dockerfile .
 docker build -t fleet:dashboard \
   --build-arg VITE_AUTH_TOKEN=your-token \
   -f src/fleet-dashboard/Dockerfile .
@@ -342,6 +309,20 @@ prompt. Project cards, per-assignment `full` / `card` modes and project routes w
 **[docs/upgrading/remove-project-context-cards.md](docs/upgrading/remove-project-context-cards.md)**
 before deploying.
 
+### Secret placeholders (optional)
+
+Off by default. With `FLEET_SECRETS_ENABLED=true`, a `.env` key you give a **secret binding** is
+never written into an agent container. The agent holds a placeholder, and the `fleet-secrets` service
+swaps it for the real value only on an HTTPS request to the hosts you named. A bound GitHub App key
+stays out of every container too: the service mints the installation tokens itself. Bindings are
+made in the dashboard (**Credentials → Secret bindings**) or over REST with the operator token.
+See **[docs/secret-placeholders.md](docs/secret-placeholders.md)** for setup, the GitHub App
+binding and the security limits.
+
+An install that ran the stock OpenShell (managed sandbox runtime) build must follow
+**[docs/upgrading/remove-managed-runtime.md](docs/upgrading/remove-managed-runtime.md)** before
+deploying: that integration was removed.
+
 ## Troubleshooting
 
 ### Agents start returning "unauthorized" from Claude / Codex
@@ -420,12 +401,3 @@ MIT — see [LICENSE](LICENSE).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-### Saved sandbox policies
-
-The dashboard can save/list immutable stock policy versions and select an agent's desired
-runtime/version and API-key reference (or the unqualified subscription mode, which takes none). Saving does not activate or migrate a runtime, change
-applied bindings, or grant service access. Managed apply is default-off and requires separate
-operator configuration and authorization; saving a selection does not enable it.
-See [saved policies and errors](docs/openshell-stock.md#saved-managed-policies-no-activation).
-See [managed runtime](docs/openshell-stock.md#managed-runtime-492-default-off) for apply prerequisites and limits.

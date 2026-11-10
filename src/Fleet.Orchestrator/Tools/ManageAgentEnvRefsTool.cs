@@ -34,8 +34,20 @@ public sealed class ManageAgentEnvRefsTool(IServiceScopeFactory scopeFactory)
                 if (agent.EnvRefs.Any(r => r.EnvKeyName.Equals(env_key_name, StringComparison.OrdinalIgnoreCase)))
                     return $"Env ref '{env_key_name}' already exists for agent '{agent_name}'.";
 
+                // A bound secret is granted by the operator, unless its binding says agents may. The
+                // comparison ignores case so a differently-cased name cannot slip past the binding.
+                var binding = (await db.SecretBindings.AsNoTracking().ToListAsync())
+                    .FirstOrDefault(b => b.EnvKeyName.Equals(env_key_name, StringComparison.OrdinalIgnoreCase));
+                if (binding is not null && (!binding.AgentAttachable || binding.EnvKeyName != env_key_name))
+                    return $"Env ref '{env_key_name}' is a bound secret that only the operator can attach "
+                         + "(dashboard, or PUT /api/agents/{name}/config). Nothing was changed.";
+
                 agent.EnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = env_key_name });
-                await db.SaveChangesAsync();
+                try { await db.SaveChangesAsync(); }
+                catch (Fleet.Orchestrator.Services.SecretStatePublicationException ex)
+                {
+                    return $"Env ref '{env_key_name}' was saved for agent '{agent_name}', but NOT published: {ex.Message}";
+                }
                 return $"Added env ref '{env_key_name}' to agent '{agent_name}'.";
             }
 
@@ -46,7 +58,12 @@ public sealed class ManageAgentEnvRefsTool(IServiceScopeFactory scopeFactory)
                     return $"Env ref '{env_key_name}' not found for agent '{agent_name}'.";
 
                 db.AgentEnvRefs.Remove(existing);
-                await db.SaveChangesAsync();
+                try { await db.SaveChangesAsync(); }
+                catch (Fleet.Orchestrator.Services.SecretStatePublicationException ex)
+                {
+                    // Never "Removed": the grant is gone from the database but was not revoked at the forwarder.
+                    return $"Env ref '{env_key_name}' was deleted for agent '{agent_name}', but the revocation was NOT published: {ex.Message}";
+                }
                 return $"Removed env ref '{env_key_name}' from agent '{agent_name}'.";
             }
 

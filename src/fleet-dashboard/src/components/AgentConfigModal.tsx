@@ -9,7 +9,6 @@ import { crossChatDisabledReason, editedTools } from '../journalCrossChat'
 import { effortChoices, effortOptions, isLocalHarness, switchProvider } from '../localModel'
 import { apiFetch } from '../utils'
 import ModelSelector from './ModelSelector'
-import { RuntimeSelection } from './SandboxPoliciesView'
 import FieldHint from './FieldHint'
 import LocalModelFields from './LocalModelFields'
 import InstructionPicker from './InstructionPicker'
@@ -127,9 +126,6 @@ export default function AgentConfigModal({
   const selectedStyle = outputStyles.find(s => s.name === configEdits?.outputStyle) ?? null
 
   const provider = configEdits?.provider ?? configData?.provider ?? 'claude'
-  const selectionRequiresApply = (configEdits?.runtimeKind ?? 'docker') !== 'docker'
-    || (configData?.appliedRuntimeKind ?? 'docker') !== 'docker'
-    || (Number(configEdits?.sandboxPolicyVersionId) || null) !== (configData?.appliedSandboxPolicyVersionId ?? null)
   const isClaude = provider === 'claude'
   const isCodex = provider === 'codex'
   const hasLocalMode = isLocalHarness(provider)
@@ -178,7 +174,6 @@ export default function AgentConfigModal({
                   </div>
                 </SectionPanel>
                 <SectionPanel {...panel('model')}>
-                  <RuntimeSelection config={configData} edits={configEdits} onChange={onEditsChange} />
                   <div className="config-field">
                     <label className="config-label">Provider</label>
                     <select
@@ -563,7 +558,7 @@ export default function AgentConfigModal({
                   </button>
                   <button
                     className={`config-save-reprovision-btn${configReprovisionConfirm ? ' confirming' : ''}`}
-                    disabled={configSaveState === 'saving' || selectionRequiresApply}
+                    disabled={configSaveState === 'saving'}
                     onClick={() => { if (configReprovisionConfirm) { onSave(true) } else { onReprovisionConfirmToggle() } }}
                   >
                     {configReprovisionConfirm ? 'confirm reprovision?' : 'Save & Reprovision'}

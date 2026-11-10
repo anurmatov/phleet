@@ -214,7 +214,10 @@ stops being served at once.
 
 ## Faults at provision time
 
-All are raised before Docker is called. None falls back to delivering the value.
+All are raised before Docker is called. None falls back to delivering the value. A reprovision
+checks every one of them, and that the forwarder state can be written, before it stops the old
+container, so a refusal leaves a working agent working. The one exception is
+`secret_proxy_network_unavailable`, which only Docker can report: by then the old container is gone.
 
 | Fault | Meaning |
 |---|---|

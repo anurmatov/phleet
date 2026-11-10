@@ -264,7 +264,9 @@ agent's `GH_TOKEN` is a placeholder (`entrypoint.sh` → `gh-auth.sh --placehold
 appends `.owner` as the installation hint).
 
 MUST NOT: deliver a bound key any other way (every fault refuses the provision instead:
-`secret_proxy_disabled`, `secret_proxy_ca_missing`, `secret_proxy_network_unavailable`, …); add an
+`secret_proxy_disabled`, `secret_proxy_ca_missing`, `secret_proxy_network_unavailable`, …; a
+reprovision finds them in `DescribeSecretPlanFaultAsync`, before `DeprovisionAsync`, so a refusal
+keeps the old container); add an
 MCP tool that writes a binding (REST behind the operator token only; `manage_agent_env_refs` refuses
 a bound key unless `AgentAttachable`); delete a binding while an agent references its key; log or
 return a value or a placeholder. Revocation is the state file: `SecretStateSaveInterceptor` rewrites

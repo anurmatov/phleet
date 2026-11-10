@@ -328,6 +328,159 @@ public class SecretPlaceholderProvisioningTests
         Assert.Empty(harness.CreateBodies);
     }
 
+    // ── A reprovision that would be refused leaves the old container running ──
+
+    private static void AssertOldContainerUntouched(ProvisioningHarness harness)
+    {
+        Assert.DoesNotContain(harness.DockerRequests, r => r.StartsWith("DELETE ", StringComparison.Ordinal));
+        Assert.DoesNotContain(harness.DockerRequests, r => r.EndsWith("/stop", StringComparison.Ordinal));
+        Assert.Empty(harness.CreateBodies);
+    }
+
+    [Fact]
+    public async Task Reprovision_WithTheForwarderDisabled_RefusesBeforeTheOldContainerIsRemoved()
+    {
+        await using var harness = await StartAsync(enabled: false);
+        harness.ContainerExists = true;
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith("secret_proxy_disabled", result.Message);
+        AssertOldContainerUntouched(harness);
+    }
+
+    [Theory]
+    [InlineData("SecretProxy:Enabled", "yes", "secret_proxy_setting_invalid")]
+    [InlineData("SecretProxy:Subnet", "10.213.96.0/30", "secret_proxy_subnet_invalid")]
+    [InlineData("SecretProxy:Address", "10.213.96.200", "secret_proxy_address_invalid")]
+    public async Task Reprovision_WithAMisconfiguredForwarder_RefusesBeforeTheOldContainerIsRemoved(string key, string value, string fault)
+    {
+        await using var harness = ProvisioningHarness.Create(new Dictionary<string, string?>(Enabled) { [key] = value });
+        File.AppendAllText(harness.EnvFile, $"{BoundKey}={BoundValue}\n");
+        await harness.SeedAsync(db =>
+        {
+            db.SecretBindings.Add(Binding());
+            db.Agents.Add(NewAgent("agent1", BoundKey));
+        });
+        harness.ContainerExists = true;
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith(fault, result.Message);
+        AssertOldContainerUntouched(harness);
+    }
+
+    [Fact]
+    public async Task Reprovision_WithoutTheCa_RefusesBeforeTheOldContainerIsRemoved()
+    {
+        await using var harness = await StartAsync(withCa: false);
+        harness.ContainerExists = true;
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith("secret_proxy_ca_missing", result.Message);
+        AssertOldContainerUntouched(harness);
+    }
+
+    [Fact]
+    public async Task Reprovision_WithConflictingExposures_RefusesBeforeTheOldContainerIsRemoved()
+    {
+        await using var harness = await StartAsync(seed: db =>
+        {
+            db.SecretBindings.Add(new SecretBinding { EnvKeyName = "FIRST_KEY", Hosts = Host, ExposeAs = "SHARED_NAME" });
+            db.SecretBindings.Add(new SecretBinding { EnvKeyName = "SECOND_KEY", Hosts = "other.example.test", ExposeAs = "SHARED_NAME" });
+            db.Agents.Add(NewAgent("agent1", "FIRST_KEY", "SECOND_KEY"));
+        });
+        harness.ContainerExists = true;
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith("secret_expose_conflict", result.Message);
+        AssertOldContainerUntouched(harness);
+    }
+
+    [Fact]
+    public async Task Reprovision_WhenTheStateCannotBeWritten_RefusesBeforeTheOldContainerIsRemoved_AndKeepsItsGrant()
+    {
+        // The running container holds a working placeholder. A swap would have to revoke it and
+        // publish a new one; neither can be published, so nothing is touched, not even the state.
+        await using var harness = await StartAsync();
+        await harness.Service.ProvisionAsync("agent1");
+        var grant = State(harness).Grants.Single();
+        var requestsBefore = harness.DockerRequests.Count;
+        harness.ContainerExists = true;
+        ForceWriteFailure(harness);
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith("secret_proxy_state_write_failed", result.Message);
+        Assert.Contains("left running", result.Message);
+        Assert.DoesNotContain(harness.DockerRequests.Skip(requestsBefore), r => r.StartsWith("DELETE ", StringComparison.Ordinal));
+        Assert.DoesNotContain(harness.DockerRequests.Skip(requestsBefore), r => r.EndsWith("/stop", StringComparison.Ordinal));
+        Assert.Single(harness.CreateBodies);
+        Assert.Equal(grant, State(harness).Grants.Single());
+    }
+
+    [Fact]
+    public async Task Reprovision_WhenAnAgentLosesItsLastBoundSecret_StillChecksThatTheRevocationCanBePublished()
+    {
+        await using var harness = await StartAsync();
+        await harness.Service.ProvisionAsync("agent1");
+        await harness.MutateAsync(async db =>
+            db.AgentEnvRefs.Remove(await db.AgentEnvRefs.SingleAsync(r => r.EnvKeyName == PlainKey)));
+        // The bound reference stays in the database with its hash, but its binding is deleted: the
+        // next provision delivers nothing through the forwarder and must revoke the old placeholder.
+        await harness.MutateAsync(async db => db.SecretBindings.Remove(await db.SecretBindings.SingleAsync()));
+        var requestsBefore = harness.DockerRequests.Count;
+        harness.ContainerExists = true;
+        ForceWriteFailure(harness);
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith("secret_proxy_state_write_failed", result.Message);
+        Assert.DoesNotContain(harness.DockerRequests.Skip(requestsBefore), r => r.StartsWith("DELETE ", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Reprovision_WithNothingWrong_ReplacesTheContainer_AndItsPlaceholder()
+    {
+        await using var harness = await StartAsync();
+        await harness.Service.ProvisionAsync("agent1");
+        var first = ValueOf(harness.CreateBodies[0], BoundKey);
+        harness.ContainerExists = true;
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains(harness.DockerRequests, r => r.StartsWith("DELETE ", StringComparison.Ordinal));
+        var second = ValueOf(harness.CreateBodies[1], BoundKey);
+        Assert.NotEqual(first, second);
+        Assert.Equal(SecretPlaceholders.Hash(second), State(harness).Grants.Single().PlaceholderSha256);
+    }
+
+    [Fact]
+    public async Task Reprovision_OfAnAgentWithoutBoundSecrets_DoesNotTouchTheForwarderState()
+    {
+        await using var harness = await StartAsync(seed: db =>
+        {
+            db.SecretBindings.Add(Binding());
+            db.Agents.Add(NewAgent("agent1", PlainKey));
+        });
+        harness.ContainerExists = true;
+        ForceWriteFailure(harness);
+
+        var result = await harness.Service.ReprovisionAsync("agent1");
+
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(harness.SecretState.StatePath!));
+    }
+
     // ── Revocation ────────────────────────────────────────────────────────────
 
     [Fact]

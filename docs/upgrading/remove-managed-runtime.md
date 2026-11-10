@@ -49,7 +49,11 @@ What the new build does on its first start:
 4. Stop and remove what the integration left on the host, in this order. Each is separate from the
    ordinary fleet stack and none is touched by the new build:
    - sandbox workloads and their supervisors (containers created by the gateway);
-   - the gateway container (`docker compose --profile openshell down` on the old compose file);
+   - the gateway container, and only it: `docker rm -f openshell-gateway` (the default name; yours
+     if you set `FLEET_STOCK_GATEWAY_CONTAINER`) (or, in the fleet
+     directory with the old compose file, `docker compose --profile openshell rm --stop --force
+     openshell-gateway`). Never `docker compose down` here: with or without a profile it stops and
+     removes every service of the stack and its networks, not just the gateway;
    - the identity signer, if you ran one;
    - per-epoch broker vhosts and users named `stock-<epoch>` (RabbitMQ management);
    - the gateway state directory, the `openshell-client` directory under the fleet base directory

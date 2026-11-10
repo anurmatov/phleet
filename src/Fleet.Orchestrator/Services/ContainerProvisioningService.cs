@@ -613,6 +613,39 @@ public sealed class ContainerProvisioningService(
     }
 
     /// <summary>
+    /// The fault a reprovision of this agent would hit in its bound secrets, or null. Reads only,
+    /// apart from one refresh of the forwarder state: it runs before the old container is removed,
+    /// so a refusal leaves a working agent working.
+    /// </summary>
+    private async Task<string?> DescribeSecretPlanFaultAsync(string agentName, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agent = await db.Agents.Include(a => a.EnvRefs).AsNoTracking().FirstOrDefaultAsync(a => a.Name == agentName, ct);
+        if (agent is null)
+            return null; // ProvisionAsync reports the missing agent.
+
+        var bindings = await db.SecretBindings.AsNoTracking().ToListAsync(ct);
+        // Nothing is minted here: only the faults matter.
+        var (plan, fault) = SecretGrantPlanner.Plan(
+            agent, bindings, _secretSettings, secretState?.CaPresent ?? false, () => SecretPlaceholders.PreviewValue);
+        if (plan is null)
+            return fault;
+
+        // The swap publishes twice: the old placeholders are revoked, then the new ones granted. If
+        // the state cannot be written, either step would fail after the container is already gone.
+        var publishes = plan.HasGrants || agent.EnvRefs.Any(r => r.PlaceholderSha256 is not null);
+        if (!publishes)
+            return null;
+        if (secretState is null)
+            return "secret_proxy_state_unavailable: the forwarder state cannot be written from this host";
+        return await secretState.WriteAsync(ct, failClosed: false) is { } stateFault
+            ? $"{stateFault}: the fleet-secrets state cannot be written, so this agent's placeholders could not be "
+              + "revoked or replaced. Its container was left running. Check the secret-proxy/state directory under the fleet base directory."
+            : null;
+    }
+
+    /// <summary>
     /// Stores the SHA-256 of each placeholder in <paramref name="plan"/> on the agent's Env Refs,
     /// clears every other one, and rewrites the forwarder state. Returns the fault, or null. With no
     /// stored hash and no grant it touches nothing, so an agent without bound secrets costs nothing.
@@ -677,6 +710,12 @@ public sealed class ContainerProvisioningService(
         // P1 (#382) likewise: a codex local agent with no reachable server keeps its old container.
         if (await DescribeCodexServerUrlFaultAsync(agentName, ct) is { } serverUrlFault)
             return ProvisionResult.Fail(agentName, serverUrlFault);
+
+        // Bound secrets likewise. Everything ProvisionAsync would refuse for (forwarder off or
+        // misconfigured, no CA, no address, conflicting names, a state that cannot be written) is
+        // found here, while the old container is still running.
+        if (await DescribeSecretPlanFaultAsync(agentName, ct) is { } secretFault)
+            return ProvisionResult.Fail(agentName, secretFault);
 
         var deprovision = await DeprovisionAsync(agentName, ct);
         if (!deprovision.Success)

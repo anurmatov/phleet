@@ -156,7 +156,11 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             if (ContainerExists && request.Method == HttpMethod.Post && path.EndsWith("/stop", StringComparison.Ordinal))
                 return new HttpResponseMessage(HttpStatusCode.NoContent);
             if (request.Method == HttpMethod.Delete && path.Contains("/containers/", StringComparison.Ordinal))
+            {
+                // Removed: a provision that follows sees no container, as after a real deprovision.
+                ContainerExists = false;
                 return new HttpResponseMessage(HttpStatusCode.NoContent);
+            }
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
     }

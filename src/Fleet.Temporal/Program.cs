@@ -4,7 +4,6 @@ using Fleet.Temporal.Engine;
 using Fleet.Temporal.Mcp;
 using Fleet.Temporal.Services;
 using Fleet.Temporal.Workflows.Fleet;
-using Fleet.Shared.Security;
 using RabbitMQ.Client;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -16,11 +15,6 @@ var builder = WebApplication.CreateBuilder(args);
 // Configuration
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.Section));
 builder.Services.Configure<TemporalBridgeOptions>(builder.Configuration.GetSection(TemporalBridgeOptions.Section));
-builder.Services.PostConfigure<TemporalBridgeOptions>(o =>
-{
-    o.StockAuthorityDirectory = builder.Configuration["StockOpenShell:AuthorityDirectory"] ?? "";
-    o.StockManagedEnabled = bool.TryParse(builder.Configuration["StockOpenShell:ManagedEnabled"], out var managedEnabled) && managedEnabled;
-});
 builder.Services.Configure<FleetMemoryOptions>(builder.Configuration.GetSection(FleetMemoryOptions.Section));
 builder.Services.Configure<FleetWorkflowOptions>(builder.Configuration.GetSection(FleetWorkflowOptions.Section));
 builder.Services.PostConfigure<FleetWorkflowOptions>(o => o.OrchestratorUrl = builder.Configuration["TemporalBridge:OrchestratorUrl"] ?? "");
@@ -101,8 +95,8 @@ builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>()
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup
 builder.Services.AddHostedService<PeerConfigHostedService>();
 
-// RabbitMQ listener — feeds agent responses into the registry (#492: never in a dedicated stock receiver)
-StockReceiverStartup.AddReplyConsumer(builder.Services, builder.Configuration);
+// RabbitMQ listener — feeds agent responses into the registry
+builder.Services.AddHostedService<TemporalRelayListener>();
 
 // Namespace initializer — creates configured Temporal namespaces on startup if they don't exist
 builder.Services.AddHostedService<NamespaceInitializer>();
@@ -119,14 +113,15 @@ builder.Services.AddSingleton<ITemporalClientFactory>(sp => sp.GetRequiredServic
 builder.Services.AddSingleton<IWorkflowFailureSource, TemporalWorkflowFailureSource>();
 builder.Services.AddSingleton<IFailureNotificationSender, TemporalFailureNotificationSender>();
 builder.Services.AddSingleton<WorkflowFailureNotifier>();
-// #492: a dedicated stock receiver runs no workflow machinery, so it never polls or notifies failures either.
-StockReceiverStartup.AddFailureNotifierHost(builder.Services, builder.Configuration);
+builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowFailureNotifier>());
 
 var temporalOpts = builder.Configuration
     .GetSection(TemporalBridgeOptions.Section)
     .Get<TemporalBridgeOptions>() ?? new TemporalBridgeOptions();
-// #492: a dedicated stock receiver starts no namespace workers (their activities wait on replies it never consumes).
-var configuredNamespaces = StockReceiverStartup.WorkerNamespaces(builder.Configuration, temporalOpts.Namespaces);
+var configuredNamespaces = temporalOpts.Namespaces
+    .Where(ns => !string.IsNullOrWhiteSpace(ns))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
 
 // Case-insensitive data converter — ensures camelCase JSON from agents maps correctly to PascalCase C# records
 var caseInsensitiveDataConverter = DataConverter.Default with
@@ -186,11 +181,7 @@ else
 var fleetWorkflowOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetWorkflowOptions>>().Value;
 FleetWorkflowConfig.Initialize(fleetWorkflowOptions);
 
-// #492: dedicated receiver for managed stock workloads, engaged exactly like fleet-memory's (only when
-// StockOpenShell:AuthorityFile is set). The verified outside assertion then supplies ?agent=, so the
-// existing caller checks run for the record's agent. Unset leaves the ordinary MCP route unchanged.
-if (app.UseStockServiceIdentity(app.Configuration, "temporal")) app.MapMcp("/mcp");
-else app.MapMcp();
+app.MapMcp();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-temporal-bridge" }));
 // #488: pending/parked failure notices (identity and attempt counts, no content).
 app.MapGet("/workflow-failures", (WorkflowFailureNotifier notifier) => Results.Ok(notifier.Snapshot()));

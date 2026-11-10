@@ -1,4 +1,3 @@
-using Fleet.Orchestrator.Helpers;
 using System.ComponentModel;
 using System.Text;
 using Fleet.Orchestrator.Data;
@@ -24,8 +23,6 @@ public sealed class RestartAgentWithVersionTool(
         [Description("Version number to use")] int version_number,
         [Description("If true, pins the version in DB so future reprovisioning also uses it. Default: false (temporary override only).")] bool pin = false)
     {
-        if (provisioning.RuntimeHold.Denies(agent_name)) return StockRuntimeMutationHold.Reason;
-
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
@@ -36,8 +33,6 @@ public sealed class RestartAgentWithVersionTool(
 
         if (agent is null)
             return $"Agent '{agent_name}' not found in DB.";
-
-        if (AgentPatchHelpers.RuntimeApplyFault(agent) is { } blocker) return blocker;
 
         // Validate instruction exists and the requested version exists
         var instruction = await db.Instructions

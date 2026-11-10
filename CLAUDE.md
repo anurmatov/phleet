@@ -9,6 +9,7 @@ src/
 ├── Fleet.Temporal/     — workflow orchestration bridge (MCP server)
 ├── Fleet.Bridge/       — RabbitMQ relay for inter-agent messaging
 ├── Fleet.Memory/       — semantic memory MCP server (Qdrant + embeddings)
+├── Fleet.SecretProxy/  — fleet-secrets: swaps placeholders for bound secrets on the way to bound hosts
 ├── Fleet.Shared/       — shared utilities
 └── fleet-dashboard/    — React SPA for agent monitoring and lifecycle management
 Dockerfile              — agent image (multi-stage)
@@ -41,6 +42,7 @@ docker build -t fleet:memory -f src/Fleet.Memory/Dockerfile .
 docker build -t fleet:orchestrator -f src/Fleet.Orchestrator/Dockerfile .
 docker build -t fleet:temporal-bridge -f Dockerfile.temporal .
 docker build -t fleet:bridge -f src/Fleet.Bridge/Dockerfile .
+docker build -t fleet:secrets -f src/Fleet.SecretProxy/Dockerfile .
 docker build -t fleet:dashboard \
   --build-arg VITE_AUTH_TOKEN=your-token \
   -f src/fleet-dashboard/Dockerfile .
@@ -229,24 +231,6 @@ passed through, Codex `sol`/`terra`/`luna` mapped in `HarnessDefaults.CodexModel
 Codex does not resolve them) — plus a **custom…** free-text entry (#465); dated ids keep working, never rewritten. The dashboard dialog is sectioned and shows the effective settings
 and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
-## Stock OpenShell enrollment
-
-See `docs/openshell-stock.md`: the manual opt-in profile connects the stock authenticated HTTP hook,
-dedicated memory identity/session/ACL receiver, epoch-bound AMQP control/completion
-and a non-root Codex daemon/native-client profile. Source fixtures do not establish
-runtime acceptance: an authorized exact-build whole-agent E2E, review and CI remain required.
-`StockOpenShell:Enabled`, `EnrollmentFile`, `AuthorityFile` and `BrokerPasswordFile` are startup-only;
-`EnrollmentFile` and `AuthorityFile` select the same operator-owned public enrollment record on the workload.
-Default provisioning and the ordinary memory receiver remain unchanged without opt-in configuration.
-Managed API-key native state lives under `<HOME>/.codex/managed/<epoch:N>` with child-only `CODEX_HOME`;
-legacy root auth/config refuse without migration, and manual/subscription selection stays unchanged.
-See [native profile and upgrade rules](docs/openshell-stock.md#managed-api-key-native-profiles-516).
-
-| Stock auth capability | Boundary |
-|---|---|
-| Isolated Codex subscriptions | **UNQUALIFIED**; [docs/profile trial contract](docs/openshell-subscription-auth.md) pins stock 0.1.5 / Codex 0.164.0 and retains all A0–A9/operator gates, without changing API-key/manual behavior |
-| Subscription ordinary services (#510) | **UNQUALIFIED** source support; existing bot/journal/first-party MCP routes on the managed subscription branch, no account/billing/grant change |
-
 ## Project contexts
 
 Every assignment renders the project's canonical context (the version row `CurrentVersion` points
@@ -256,6 +240,53 @@ Cards, `full`/`card` modes and routes were removed in #346. `ContextRemovalPrefl
 with a card or card assignment lacks canonical content; `Program.cs` then exits 1 before
 `app.Run()`. The Temporal delegate `repo` field stays for replay and the agent ignores it. Upgrade
 runbook: `docs/upgrading/remove-project-context-cards.md`.
+
+## Secret placeholders
+
+Off by default (`FLEET_SECRETS_ENABLED=false` → orchestrator `SecretProxy__Enabled`; selects the
+`secrets` compose profile). A `.env` key with a row in `secret_bindings` is a **bound secret** and is
+never written into a container: `ContainerProvisioningService.BuildEnv` skips it whatever else is
+true, and `SecretGrantPlanner.Plan` (the only place that decides delivery) gives the agent a
+placeholder (`SecretPlaceholders`, `fleet_placeholder_` + 43 base64url characters, minted on every
+provision, only its SHA-256 stored in `agent_env_refs.PlaceholderSha256`; the prefix must never take
+a vendor key's shape, which is what secret scanners match), `/etc/hosts` entries pointing each bound
+host at `fleet-secrets`, the forwarder's CA at `/usr/local/share/ca-certificates/fleet-secrets.crt`
+and a fixed address on the internal `fleet-secrets-net` (subnet base + 16 + agent id). An unbound key
+is delivered as before, and an agent with no bound key gets byte-identical Docker input.
+
+`Fleet.SecretProxy` (`fleet-secrets`) honours a placeholder only for a current grant, from that
+agent's address, to one of the binding's hosts, in the binding's header. It never writes a value into
+a URL or a body, never follows a redirect, and refuses before any upstream call. It reads one file,
+`secret-proxy/state/state.json` (`SecretProxyState`, written atomically by `SecretProxyStateWriter`),
+on every request and fails closed when it is missing or invalid; it has no database access and does
+not read `.env`. Kind `github_app` keeps the App key there too: it mints installation tokens, and the
+agent's `GH_TOKEN` is a placeholder (`entrypoint.sh` → `gh-auth.sh --placeholder`; the `gh` wrapper
+appends `.owner` as the installation hint).
+
+MUST NOT: deliver a bound key any other way (every fault refuses the provision instead:
+`secret_proxy_disabled`, `secret_proxy_ca_missing`, `secret_proxy_network_unavailable`, …); add an
+MCP tool that writes a binding (REST behind the operator token only; `manage_agent_env_refs` refuses
+a bound key unless `AgentAttachable`); delete a binding while an agent references its key; log or
+return a value or a placeholder. Revocation is the state file: `SecretStateSaveInterceptor` rewrites
+it when a save touches a binding, an Env Ref or deletes an agent, and `SecretProxyStateService`
+repeats it every 10 s (which is also what applies a value rotated in `.env`). The `fleet:secrets`
+image uses the released .NET base, not `10.0-preview`: on the preview base upstream certificate
+validation failed in the harness, cause not established. Tests: `tests/Fleet.SecretProxy.Tests/`,
+`SecretPlaceholderProvisioningTests`, `SecretBindingEndpointsTests`, and the Docker harness
+`bash tests/secret-proxy/run.sh` (`AGENT_IMAGE=fleet:agent` for the real image). See
+`docs/secret-placeholders.md` (limits, GitHub App, faults).
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `FLEET_SECRETS_ENABLED` | `false` | Turns placeholders on; a bound key refuses to provision while off |
+| `FLEET_SECRETS_SUBNET` | `10.213.96.0/22` | `fleet-secrets-net`; change only if it overlaps a host network |
+| `FLEET_SECRETS_ADDRESS` | `10.213.96.2` | The forwarder's fixed address in that subnet |
+
+The stock OpenShell integration (manual enrollment, managed sandbox runtime, saved sandbox policies,
+identity signer, epoch broker lanes) was removed. `ManagedRuntimeRemovalPreflight` runs in `DbSeeder`
+before migration `RemoveManagedStockRuntime` and blocks, migrating nothing, while any agent's selected
+or applied runtime is not `docker` or its stored runtime record is not `none`/`revoked`; `Program.cs`
+then exits 1. Upgrade runbook: `docs/upgrading/remove-managed-runtime.md`.
 
 ## Provider CLI Pins
 
@@ -447,83 +478,3 @@ isolated-stack verification and rollout remain separate from source/CI evidence.
 |---|---|---|
 | `FLEET_EPIC_WATCHER_ENABLED` | `false` | `EpicDriverWatcher__Enabled` |
 | `FLEET_EPIC_WATCHER_INTERVAL_SECONDS` | `300` | `EpicDriverWatcher__IntervalSeconds` |
-
-### Save-only managed runtime selection (#491)
-
-`SandboxPolicyEndpoints` authenticates reads and writes with the operator token. Policies and
-versions are append-only; agent saves update desired selection only. Never write applied bindings
-from config or heartbeats, resolve a reference to a credential during save, or provision Docker as
-fallback for unavailable managed apply. Existing manual stock profiles/grants remain separate.
-The focused tests are `ManagedStockRuntime` and real-MySQL `ManagedStockMySql` (missing DB fails).
-See `docs/openshell-stock.md` for the explicitly supported authored YAML subset and rollback limits.
-Managed apply/lifecycle (#492) is `StockOpenShellRuntime` behind the same entry points, default off
-(`FLEET_STOCK_MANAGED_ENABLED=false`): applied binding only for Start/Stop/cancel, CAS per agent,
-unknown outcomes held as `needs_attention`, never a Docker fallback. `upgrade.sh` runs
-`scripts/check-stock-runtime-rollout.sh` before stopping anything.
-The managed subscription branch (#502, `nativeAuthMode=subscription`, no API-key reference) is UNQUALIFIED and
-compatibility-only: outside-owned `<ConfigDir>/managed/<agent>/subscription.json`, existing stock provider only
-(never created/updated/imported), every resource call scoped to the persisted `--workspace`, expiry is
-revoke-and-stop (the 10 s monitor skips held records), retirement is archive-then-CAS, and the rollback preflight
-adds `subscriptionBindings` with the `org.phleet.managed-stock-subscription=1` label. Pins stay OpenShell 0.1.5
-`bdb956f2` / Codex 0.164.0 `6aaac694`; run the NEW guard before any checkout switch. Runbook:
-`docs/openshell-stock.md` (subscription section); native contract: `docs/openshell-subscription-auth.md`.
-Managed signer binding (#503, `StockManagedSignerPolicy`): saved YAML may carry only the fixed `network_middlewares`
-subset (`stock-memory`/`stock-temporal`/`stock-telegram` → registration `stock-memory`, orders 0/10/20,
-`fail_closed`, one exact lowercase host). Apply (both auth modes) refuses before any old-runtime Stop or provider/broker/
-create/policy-set effect with 409 `managed_signer_policy_missing`/`_mismatch`/`_scope`. It requires the stored hash
-to be the SHA-256 of the exact saved bytes, the entries to equal memory plus the selected routes, and one enforced
-`host:443` MCP endpoint per receiver with exact MCP rules, never an access preset (pinned stock rejects MCP presets;
-memory allows `tools/call` only for an explicit nonempty subset of `memory_get`/`memory_search`/`memory_list`/`memory_stats`,
-#512/#518).
-Start/restart/pre-activation check the applied version
-and its outside enrollment (`managed_signer_authority_unavailable`), never desired. Never normalize or inject into
-saved YAML. Cleanup (Stop/revoke/expiry/retirement) never depends on this check. Backups require the registration's
-CA under STATE_DIR (`coverage_incomplete: signer_tls_ca`) and record `SNAPSHOT_MODE`. Eligibility is
-`--restore-eligibility` (control) or `--plain-restore-eligibility` (live zero-custody preflight), with no downgrade;
-`--require-subscription-recovery` always warns with exit 3. The signer registration is a gateway-wide startup
-dependency; real startup/negotiation stays operator-only (C11/C18 UNRUN).
-Provider profile pins (`providerProfileHashes`, subscription.json `profileSha256`) are `StockProfileDigest`
-canonical full-document digests of `profile export NAME -o json`. Operators compute them with
-`scripts/stock-profile-digest.sh`, and both sides are kept equal by a shared fixture. Never use a raw-output hash: the
-stock CLI's map order varies between identical exports.
-Managed workspace layout (#507): the user tree is `W = WorkloadHome/workspace` (generated `Agent:WorkDir`, persisted
-`ManagedBinding.workloadWorkspacePath`), because the pinned CLI downloads only inside the stock root. A binding without the
-field is legacy `/workspace` only after proof; anything else refuses `workspace_layout_unverified`. Every carry-out uploads
-`scripts/stock-workspace-copy.py` (image `/app/stock-workspace-copy.py`), copies one filtered tree into
-`HOME/.phleet-workspace-transfer/<op>/data`, downloads that and checks its manifest; `PrivateWorkspaceEntries` is the one
-exclusion list. Every CLI child and the report's `git` get command-scope `core.fsmonitor=false`/`core.hooksPath=/dev/null`
-(`ProcessStockCli.NeutralizeGit`) so a copied user repository never runs a command; Docker is written only while its container
-is stopped, and its excluded entries' metadata must be identical across the mirror (private `<op>.excluded.json`). Pre-#507 managed images need `appliedOpenShell=0` in the rollout guard (`org.phleet.managed-stock-workspace=1`).
-Operator regression: `scripts/test-stock-workspace-transfer.sh`. Runbook: `docs/openshell-stock.md` (workspace layout).
-Subscription ordinary services (#510, UNQUALIFIED): the subscription branch keeps an agent's existing bot, journal capture/read/
-files and Temporal/Telegram MCP routes through the API-key branch's service checks (no native key). Every enabled grant on a
-signer-bound route must be in the saved policy's MCP rules (memory: its listed fixed reads, #512), else `managed_route_unsupported:mcp:*`
-before Stop; grants are never pruned or edited. Service providers live only in the persisted provider workspace, never on the
-OAuth provider; the binding records `ServiceProviderIds` (name→UUID, absent only on old memory-only records). A new one is
-created once after scoped absence and checkpointed before attach; foreign/ambiguous/uncertain → `subscription_service_provider_unverified`
-or `provider_setup_unknown` hold, no adoption or retry. Images carry `org.phleet.managed-stock-subscription-services=1`; a
-target without it needs `subscriptionBindings=0` (memory-only subscriptions retire too). Pins unchanged. Runbook:
-`docs/openshell-stock.md` (ordinary services).
-Explicit memory reads (#512): in both auth modes Apply runs `GrantAdmissionFault`, so every enabled grant on memory
-(selected name), Temporal and Telegram must be a saved `tools/call` rule; an older API-key get-only policy with list/search
-grants refuses until an explicit version is appended and selected (never prune grants). Only `GenerateManagedInputsAsync`
-passes `managed: true` down to `AllowedToolsFor`, which then skips the implicit Codex `mcp__fleet-memory__memory_get`;
-ordinary generation keeps it. The native memory table is exactly the selected-name read grants (no subscription get-only
-narrowing); managed unsupported/empty memory grants refuse at enrollment. A planned restart (`signerAdmission:false`) skips
-grant admission and reuses the applied bundle; additions need a new Apply, receiver revocation stays immediate. Read-denial
-logs carry only tool and fixed reason. Runbook: `docs/openshell-stock.md` (explicit memory reads).
-Scoped memory stats (#518): `memory_stats` is the fourth entry of `StockServices.MemoryTools`, so policy, grant admission,
-enrollment and the hook accept it only when named explicitly (no implicit grant; an old three-read policy plus an enabled stats
-grant refuses `managed_route_unsupported:mcp:*`). With ACLs enabled, `MemoryStatsTool` never returns the global counts: it
-needs an available ACL (`memory_stats: ACL cache unavailable`) and caller, then `MemoryFileStore.GetScopedStatsAsync` counts
-only parsed files `AclCacheService.CanRead` allows. Ordinary callers use the cached map (removals after a refresh, stale kept
-on a failed refresh); managed callers the fresh request-local snapshot, so revocation is next-request. Malformed files are left
-out unnamed. The scan is anchored to no-follow handles (Linux x86-64/arm64 `openat`/`readdir`/`statx`; each directory opened
-once, entries opened `O_NOFOLLOW|O_NONBLOCK` and typed on the descriptor), so a replaced path never redirects it; a link,
-FIFO/socket/device or any I/O failure is `memory_stats: unavailable`, never a partial total. ACL disabled keeps the global
-file counts. Runbook: `docs/openshell-stock.md` (scoped memory stats).
-Generated sandbox names (`StockOpenShellRuntime.SandboxNameFor`) are `fl-` plus 16 hex characters of a hash of the
-full agent name and epoch: bounded to the pinned 19-character stock limit, but not guaranteed unique. Never truncate
-an agent name into one. A fresh name must be proven absent before apply records or creates anything
-(`sandbox_name_not_proven_absent`). After create, the sandbox is adopted only with exactly that epoch's
-`fleet.agent`/`fleet.epoch` labels (`sandbox_owner_unverified` otherwise, with no cleanup of it).

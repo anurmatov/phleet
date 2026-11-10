@@ -19,8 +19,10 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
       FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
-unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS FLEET_STOCK_MANAGED_ENABLED
+unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
 unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED
+# Secret placeholders (fleet-secrets): likewise, .env decides.
+unset FLEET_SECRETS_ENABLED FLEET_SECRETS_SUBNET FLEET_SECRETS_ADDRESS
 # The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
 # generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
 # way; it is additive.
@@ -38,7 +40,6 @@ unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACK
       FLEET_COMMS_MEDIA_STORE FLEET_COMMS_SEAWEEDFS_SIGNING_KEY
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
-source "$SCRIPT_DIR/scripts/lib/stock-managed-preflight.sh"
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -96,23 +97,14 @@ add_missing_env_var() {
   ok "Added ${key}=${value} to .env"
 }
 add_missing_env_var FLEET_EPIC_WATCHER_ENABLED false
-mkdir -p "$FLEET_BASE_DIR/openshell-client" && chmod 700 "$FLEET_BASE_DIR/openshell-client"
-# #492 W5: the read-only gateway backup bind source too, resolved like compose (a shell export, then
-# .env, then the default). Created only when absent; an existing path's owner and mode are never changed.
-STOCK_BACKUP_SRC=${FLEET_STOCK_BACKUP_DIR:-$(read_env_var "$ENV_FILE" FLEET_STOCK_BACKUP_DIR)}; STOCK_BACKUP_SRC=${STOCK_BACKUP_SRC:-$FLEET_BASE_DIR/openshell-backup}
-[[ -e "$STOCK_BACKUP_SRC" || -L "$STOCK_BACKUP_SRC" ]] || mkdir -p -m 700 "$STOCK_BACKUP_SRC"
 add_missing_env_var FLEET_EPIC_WATCHER_INTERVAL_SECONDS 300
 add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
 add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
-add_missing_env_var FLEET_STOCK_MANAGED_ENABLED false
-# Review A7: the authorized (host operator) owner of openshell-client; an existing value is kept. Only
-# when managed is enabled, so a default-off upgrade leaves .env byte-for-byte unchanged (review C1).
-if [[ "$(stock_managed_state "$ENV_FILE")" == true ]]; then
-  add_missing_env_var FLEET_STOCK_CONFIG_DIR_UID "$(id -u)"
-fi
+# Secret placeholders: added off when missing, never changed when present.
+add_missing_env_var FLEET_SECRETS_ENABLED false
 
 # ── Stop services ────────────────────────────────────────────────────────────
 section "[1/4] Stopping services..."
@@ -124,6 +116,10 @@ comms_backfill_store_key "$ENV_FILE"
 resolved=$(comms_resolve_profiles "$ENV_FILE")
 COMMS_PROFILE_ARGS=()
 [[ -z "$resolved" ]] || read -r -a COMMS_PROFILE_ARGS <<< "$resolved"
+# fleet-secrets is an opt-in profile too. It rides in the same argument list so every lifecycle
+# command below selects it; with the default (false) nothing here changes.
+SECRETS_ENABLED=$(read_env_var "$ENV_FILE" "FLEET_SECRETS_ENABLED")
+[[ "$SECRETS_ENABLED" != true ]] || COMMS_PROFILE_ARGS+=(--profile secrets)
 MEDIA_ENDPOINT=$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_ENDPOINT)
 MEDIA_STORE=off
 if [[ "$COMMS_ENABLED" == true && -n "$MEDIA_ENDPOINT" ]]; then
@@ -147,33 +143,6 @@ case "$MEDIA_STORE" in
     fi
     ;;
 esac
-
-# #492: an enabled managed runtime needs a digest-pinned gateway image and a numeric docker group id
-# for the optional openshell profile; validated here instead of failing every default-off compose run.
-# Parsed like the services (case-insensitive, quotes stripped); an invalid value is not treated as off.
-if [[ "$(stock_managed_state "$ENV_FILE")" != false ]]; then
-  [[ "$(read_env_var "$ENV_FILE" FLEET_STOCK_GATEWAY_IMAGE)" == *@sha256:* ]] \
-    || { fail "FLEET_STOCK_GATEWAY_IMAGE must name the pinned stock gateway image by @sha256 digest"; exit 1; }
-  [[ "$(read_env_var "$ENV_FILE" FLEET_DOCKER_GID)" =~ ^[0-9]+$ ]] \
-    || { fail "FLEET_DOCKER_GID must be the host docker group id"; exit 1; }
-fi
-# #492: an enabled managed runtime also needs HTTPS broker management with the operator CA, resolvable
-# credential refs, the stock CLI's mTLS client cert/key and python3 sqlite3. Default-off returns at once.
-stock_managed_preflight "$ENV_FILE" "$FLEET_BASE_DIR/openshell-client" \
-  || { fail "managed runtime is enabled but its prerequisites are incomplete; see docs/openshell-stock.md"; exit 1; }
-# #492 §16: an enabled managed runtime also needs a fresh, successful gateway backup before any upgrade.
-stock_backup_freshness "$ENV_FILE" "$SCRIPT_DIR" \
-  || { fail "managed runtime gateway backup is missing, failed or stale; run scripts/backup-stock-gateway.sh first"; exit 1; }
-# #492 A3: an enabled managed runtime builds the orchestrator with the pinned stock CLI (.env
-# OPENSHELL_CLI_URL/OPENSHELL_CLI_SHA256, validated above). Default-off passes no build args.
-ORCH_CLI_ARGS=$(stock_cli_build_args "$ENV_FILE") \
-  || { fail "managed runtime needs the pinned stock CLI build args; see docs/openshell-stock.md"; exit 1; }
-
-# #492: after the other preflights and before anything is stopped or replaced, refuse an orchestrator that cannot read managed
-# bindings while any exist. An unavailable preflight refuses; it is never read as "none".
-ORCHESTRATOR_AUTH_TOKEN=$(read_env_var "$ENV_FILE" ORCHESTRATOR_AUTH_TOKEN) \
-  bash "$SCRIPT_DIR/scripts/check-stock-runtime-rollout.sh" --dockerfile "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" \
-  || { fail "managed runtime rollout guard refused this orchestrator replacement"; exit 1; }
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
@@ -225,10 +194,7 @@ build_image() {
 }
 
 build_image "fleet:agent"           "$SCRIPT_DIR/Dockerfile"                        "$SCRIPT_DIR"
-build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR" "$ORCH_CLI_ARGS"
-# #492 A3: never start a managed orchestrator without the pinned stock CLI. Default-off: no check.
-stock_cli_image_check "$ENV_FILE" fleet:orchestrator \
-  || { fail "the built fleet:orchestrator image lacks the pinned stock CLI; services were not started"; exit 1; }
+build_image "fleet:orchestrator"    "$SCRIPT_DIR/src/Fleet.Orchestrator/Dockerfile" "$SCRIPT_DIR"
 build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
@@ -240,6 +206,9 @@ build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"
 # time on every upgrade, and an image built for a service that never starts is pure cost.
 if [[ "$COMMS_ENABLED" == "true" ]]; then
   build_image "fleet:comms"         "$SCRIPT_DIR/src/Fleet.Comms/Dockerfile"        "$SCRIPT_DIR"
+fi
+if [[ "$SECRETS_ENABLED" == "true" ]]; then
+  build_image "fleet:secrets"       "$SCRIPT_DIR/src/Fleet.SecretProxy/Dockerfile"  "$SCRIPT_DIR"
 fi
 
 ok "All images built"
@@ -306,8 +275,29 @@ else
     warn "  POST /api/agents/<name>/reprovision, or the dashboard's Reprovision action."
   fi
 
+  if [[ "$SECRETS_ENABLED" == "true" ]]; then
+    # Owner-only: the state directory holds the bound secret values, the CA directory its key.
+    mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca"
+    chmod 700 "$FLEET_BASE_DIR/secret-proxy" "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" 2>/dev/null || true
+  fi
+
   (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env "${COMMS_PROFILE_ARGS[@]}" up -d)
   ok "Services started"
+
+  if [[ "$SECRETS_ENABLED" == "true" ]]; then
+    # An agent that holds a bound secret cannot be provisioned until the forwarder has created its CA.
+    echo -n "  Waiting for the fleet-secrets CA ... "
+    for _ in $(seq 1 20); do
+      [[ -s "$FLEET_BASE_DIR/secret-proxy/ca/ca.crt" ]] && break
+      sleep 3
+    done
+    if [[ -s "$FLEET_BASE_DIR/secret-proxy/ca/ca.crt" ]]; then
+      ok "ready"
+    else
+      echo; fail "fleet-secrets did not create its CA — check: docker logs fleet-secrets"; exit 1
+    fi
+    warn "Secret placeholders are on: reprovision each agent that references a bound secret."
+  fi
 
   # Bounded wait for readiness. "Upgrade completed" while the auth boundary is 503-ing every
   # request is a success message about a broken service.

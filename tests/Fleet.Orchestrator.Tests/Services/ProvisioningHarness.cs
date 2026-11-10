@@ -12,8 +12,8 @@ namespace Fleet.Orchestrator.Tests.Services;
 
 /// <summary>
 /// Runs the real <see cref="ContainerProvisioningService.ProvisionAsync"/> end to end: SQLite for the
-/// DB, a temp directory for <c>Provisioning:BaseDir</c>, and a fake Docker API that reports only
-/// <see cref="ExistingContainers"/> and accepts create/start. What it produces on disk is exactly what a live
+/// DB, a temp directory for <c>Provisioning:BaseDir</c>, and a fake Docker API that reports no
+/// existing container and accepts create/start. What it produces on disk is exactly what a live
 /// provision writes under <c>workspaces/&lt;container&gt;/.generated/</c>.
 /// </summary>
 internal sealed class ProvisioningHarness : IAsyncDisposable
@@ -35,14 +35,24 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     /// <summary>The JSON body of every <c>/containers/create</c> call; its <c>HostConfig.Binds</c> are the binds.</summary>
     public IReadOnlyList<string> CreateBodies => _dockerApi.CreateBodies;
 
-    /// <summary>Containers the fake Docker API reports as existing; stop succeeds and remove deletes them.</summary>
-    public ISet<string> ExistingContainers => _dockerApi.Existing;
+    /// <summary>The JSON body of every <c>/networks/{name}/connect</c> call, with the network name.</summary>
+    public IReadOnlyList<(string Network, string Body)> NetworkConnects => _dockerApi.NetworkConnects;
 
-    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig, Action<IServiceCollection>? extraServices)
+    /// <summary>Makes every network connect fail, as when <c>fleet-secrets-net</c> does not exist.</summary>
+    public bool FailNetworkConnect { set => _dockerApi.FailNetworkConnect = value; }
+
+    /// <summary>Whether the fake Docker reports the container as existing (needed to deprovision).</summary>
+    public bool ContainerExists { set => _dockerApi.ContainerExists = value; }
+
+    public SecretProxySettings SecretSettings { get; }
+    public SecretProxyStateWriter SecretState { get; }
+    public string EnvFile { get; }
+
+    private ProvisioningHarness(IReadOnlyDictionary<string, string?>? extraConfig)
     {
         BaseDir = Path.Combine(Path.GetTempPath(), $"prov-harness-{Guid.NewGuid():N}");
         Directory.CreateDirectory(BaseDir);
-        var envFile = Path.Combine(BaseDir, ".env");
+        var envFile = EnvFile = Path.Combine(BaseDir, ".env");
         File.WriteAllText(envFile, $"FLEET_CTO_AGENT={CtoAgent}\n");
 
         _connection = new SqliteConnection("Data Source=:memory:");
@@ -50,7 +60,6 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
 
         var services = new ServiceCollection();
         services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
-        extraServices?.Invoke(services);
         Services = services.BuildServiceProvider();
 
         using (var scope = Services.CreateScope())
@@ -70,13 +79,17 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             NullLogger<DockerService>.Instance,
             new HttpClient(_dockerApi) { BaseAddress = new Uri("http://localhost") });
 
+        // Off unless a test sets SecretProxy:Enabled; then exactly what Program.cs registers.
+        SecretSettings = SecretProxySettings.FromConfiguration(config);
+        SecretState = new SecretProxyStateWriter(
+            Services.GetRequiredService<IServiceScopeFactory>(), config, SecretSettings, Logs.For<SecretProxyStateWriter>());
+
         Service = new ContainerProvisioningService(
             Services.GetRequiredService<IServiceScopeFactory>(), docker, config,
-            new JournalTokenService(config), Logs.For<ContainerProvisioningService>());
+            new JournalTokenService(config), Logs.For<ContainerProvisioningService>(), SecretSettings, SecretState);
     }
 
-    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null,
-        Action<IServiceCollection>? extraServices = null) => new(extraConfig, extraServices);
+    public static ProvisioningHarness Create(IReadOnlyDictionary<string, string?>? extraConfig = null) => new(extraConfig);
 
     public async Task SeedAsync(Action<OrchestratorDbContext> seed)
     {
@@ -104,13 +117,15 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
         try { Directory.Delete(BaseDir, recursive: true); } catch { /* best effort */ }
     }
 
-    /// <summary>Only <see cref="Existing"/> containers exist; create and start succeed.</summary>
+    /// <summary>No container exists; create and start succeed.</summary>
     private sealed class FakeDockerApi : HttpMessageHandler
     {
         public int RequestCount { get; private set; }
         public List<string> Requests { get; } = [];
         public List<string> CreateBodies { get; } = [];
-        public HashSet<string> Existing { get; } = new(StringComparer.Ordinal);
+        public List<(string Network, string Body)> NetworkConnects { get; } = [];
+        public bool FailNetworkConnect { get; set; }
+        public bool ContainerExists { get; set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -127,19 +142,21 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
             }
             if (request.Method == HttpMethod.Post && path.EndsWith("/start", StringComparison.Ordinal))
                 return new HttpResponseMessage(HttpStatusCode.NoContent);
-            foreach (var name in Existing)
+            if (request.Method == HttpMethod.Post && path.EndsWith("/connect", StringComparison.Ordinal) && path.Contains("/networks/", StringComparison.Ordinal))
             {
-                var container = $"/containers/{name}";
-                if (request.Method == HttpMethod.Get && path.EndsWith(container + "/json", StringComparison.Ordinal))
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json") };
-                if (request.Method == HttpMethod.Post && path.EndsWith(container + "/stop", StringComparison.Ordinal))
-                    return new HttpResponseMessage(HttpStatusCode.NoContent);
-                if (request.Method == HttpMethod.Delete && path.EndsWith(container, StringComparison.Ordinal))
-                {
-                    Existing.Remove(name);
-                    return new HttpResponseMessage(HttpStatusCode.NoContent);
-                }
+                var network = Uri.UnescapeDataString(path.Split('/')[^2]);
+                NetworkConnects.Add((network, request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct)));
+                return new HttpResponseMessage(FailNetworkConnect ? HttpStatusCode.NotFound : HttpStatusCode.OK);
             }
+            if (ContainerExists && request.Method == HttpMethod.Get && path.EndsWith("/json", StringComparison.Ordinal))
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"Id":"0123456789abcdef0123","State":{"Status":"running"}}""", System.Text.Encoding.UTF8, "application/json"),
+                };
+            if (ContainerExists && request.Method == HttpMethod.Post && path.EndsWith("/stop", StringComparison.Ordinal))
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            if (request.Method == HttpMethod.Delete && path.Contains("/containers/", StringComparison.Ordinal))
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
     }

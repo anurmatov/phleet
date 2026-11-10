@@ -22,27 +22,29 @@ builder.Services.Configure<EpicGrantOptions>(builder.Configuration.GetSection(Ep
 var connectionString = builder.Configuration.GetConnectionString("OrchestratorDb");
 if (!string.IsNullOrEmpty(connectionString))
 {
-    builder.Services.AddDbContext<OrchestratorDbContext>(opts =>
+    builder.Services.AddDbContext<OrchestratorDbContext>((sp, opts) =>
         opts.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 0)),
             mysql => mysql.EnableRetryOnFailure(
                 maxRetryCount: 5,
                 maxRetryDelay: TimeSpan.FromSeconds(10),
-                errorNumbersToAdd: null)));
+                errorNumbersToAdd: null))
+            // A saved binding or Env Ref change reaches the fleet-secrets state file at once.
+            .AddInterceptors(sp.GetRequiredService<SecretStateSaveInterceptor>()));
 }
+
+// Secret placeholders: bound .env keys reach agents only as placeholders that fleet-secrets resolves.
+// Default off (FLEET_SECRETS_ENABLED); settings are read once, here.
+builder.Services.AddSingleton(sp => SecretProxySettings.FromConfiguration(sp.GetRequiredService<IConfiguration>()));
+builder.Services.AddSingleton<SecretProxyStateWriter>();
+builder.Services.AddSingleton<SecretStateSaveInterceptor>();
+builder.Services.AddHostedService<SecretProxyStateService>();
 
 // Core services
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TaskHistoryStore>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
-builder.Services.AddSingleton<StockRuntimeMutationHold>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
-// #492 managed stock OpenShell: one thin adapter behind the existing lifecycle entry points.
-builder.Services.AddSingleton<IStockCli, ProcessStockCli>();
-builder.Services.AddSingleton<StockBrokerProvisioner>();
-builder.Services.AddSingleton<IManagedBindingStore, EfManagedBindingStore>();
-builder.Services.AddSingleton<IStockHostView, DockerStockHostView>();
-builder.Services.AddSingleton<StockOpenShellRuntime>();
 builder.Services.AddSingleton<JournalTokenService>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());
 builder.Services.AddSingleton<CommsJournalStatusProxy>();
@@ -65,8 +67,6 @@ builder.Services.AddSingleton<AgentConfigPublisherService>();
 builder.Services.AddSingleton<HeartbeatConsumerService>();
 builder.Services.AddSingleton<IRabbitMqStatus>(sp => sp.GetRequiredService<HeartbeatConsumerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HeartbeatConsumerService>());
-// A distinct hosted service/connection must never replace the default-vhost consumer.
-builder.Services.AddHostedService<StockHeartbeatObserverService>();
 
 builder.Services.AddHostedService<AgentStateMonitorService>();
 
@@ -205,8 +205,6 @@ if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
     });
 }
 
-app.UseStockLegacyRuntimeGuard(app.Configuration);
-
 // Config API auth — ORCHESTRATOR_CONFIG_TOKEN gates /api/config/* (all methods).
 // Separate from ORCHESTRATOR_AUTH_TOKEN so peers can read config without full admin access.
 // Fails CLOSED: if ORCHESTRATOR_CONFIG_TOKEN is not configured all /api/config/* requests
@@ -344,7 +342,6 @@ app.MapGet("/api/agents/{name}/history", (string name, TaskHistoryStore taskHist
 // REST: agent config read/write lives in Endpoints/AgentConfigEndpoints.cs so the
 // production handlers can be exercised over real HTTP by the endpoint tests (#357).
 app.MapAgentConfigEndpoints();
-app.MapSandboxPolicyEndpoints();
 // REST: GET /api/agents/{name}/effective-harness — the computed harness plan and drift (#460).
 app.MapAgentHarnessEndpoints();
 app.MapJournalCrossChatAuthorization();
@@ -354,6 +351,9 @@ app.MapCommsJournalEndpoints();
 // Mapped from Endpoints/OutputStyleEndpoints.cs so the endpoint tests exercise the same
 // handlers a live orchestrator serves rather than a copy of them.
 app.MapOutputStyleEndpoints();
+
+// Secret bindings: which .env keys agents hold only as placeholders, and the hosts each may reach.
+app.MapSecretBindingEndpoints();
 
 // REST: the /api/instructions surface — list, detail, new version, rollback, create and
 // toggle-active. Mapped from Endpoints/InstructionEndpoints.cs for the same reason (#346).
@@ -593,21 +593,11 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
     if (agent is null)
         return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
 
-    // Review A2: managed state (applied openshell binding, unresolved candidate/held record) keeps the row until revoked.
-    var (keepRow, guard) = await provisioning.PrepareDeleteAsync(name);
-    if (keepRow is not null)
-        return Results.Conflict(new { error = keepRow, message = $"Agent '{name}' was not deleted: revoke its managed runtime first" });
+    // Best-effort deprovision — if container doesn't exist that's fine, proceed with DB delete
+    var deprovision = await provisioning.DeprovisionAsync(name);
 
-    // Review A2/D1/D2: in one transaction, lock the exact inspected binding, then deprovision the inspected runtime
-    // (best-effort Docker — a missing container is fine), then delete the row. A concurrent change is a 409 before
-    // any stop/remove and a DB outage a 503, both keeping the row and its binding unchanged.
-    if (guard is null)
-        return Results.Conflict(new { error = ManagedDeleteGuard.Changed, message = $"Agent '{name}' was not deleted: its managed state changed concurrently" });
-    var (deleteFault, deprovision) = await guard.DeleteAsync(db, agent);
-    if (deleteFault is not null)
-        return deleteFault == ManagedDeleteGuard.Unavailable
-            ? Results.Json(new { error = deleteFault, message = $"Agent '{name}' was not deleted: the database is unavailable" }, statusCode: 503)
-            : Results.Conflict(new { error = deleteFault, message = $"Agent '{name}' was not deleted: its managed state changed concurrently" });
+    db.Agents.Remove(agent);
+    await db.SaveChangesAsync();
 
     // agent_project_access is keyed by name, not by a foreign key, so deleting the agent leaves its
     // rows behind. Deleting an agent unassigns every project, so the same hook applies: the rows it
@@ -619,7 +609,7 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
 
     return Results.Ok(new
     {
-        message = deprovision is { Success: true }
+        message = deprovision.Success
             ? $"Agent '{name}' deleted and container removed"
             : $"Agent '{name}' deleted (container was not running)"
     });
@@ -1989,8 +1979,4 @@ record CreateAgentRequest(
     bool? MountDockerSock,
     string? LocalBaseUrl = null,
     int? ContextWindow = null,
-    string? HarnessExtra = null,
-    string? RuntimeKind = null,
-    int? SandboxPolicyVersionId = null,
-    string? NativeAuthMode = null,
-    string? ProviderApiKeyEnvRef = null);
+    string? HarnessExtra = null);

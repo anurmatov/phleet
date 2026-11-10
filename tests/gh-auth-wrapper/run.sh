@@ -148,3 +148,32 @@ rm "$WORK/.github-token-primary"
 check 'missing primary' outside '' pr list
 check 'missing primary api' outside '' api user
 echo "PASS $COUNT routing and argv cases"
+# Placeholder mode (fleet-secrets): GH_TOKEN is a synthetic placeholder, never a token. The wrapper
+# keeps it and appends the owner it routed to; no token file is read. Skipped for a wrapper fixture
+# that predates the mode.
+if grep -q 'PLACEHOLDER=' "$WORK/bin/gh"; then
+    PH=fleet_placeholder_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    rm -f "$WORK"/.github-token-*
+    check_placeholder() {
+        local label="$1" cwd="$2" presented="$3" expected="$4"
+        shift 4
+        (cd "$WORK/$cwd"; GH_TOKEN="$presented" ARGV_CAPTURE="$WORK/argv" "$WORK/bin/gh" "$@") > "$WORK/selected"
+        printf 'SELECTED=%s\n' "$expected" > "$WORK/expected-selected"
+        cmp -s "$WORK/expected-selected" "$WORK/selected" || fail_assert "placeholder $label: selected token"
+        COUNT=$((COUNT + 1))
+        echo "PASS placeholder $label"
+    }
+    check_placeholder 'api endpoint owner' outside "$PH" "$PH.owner-b" api repos/owner-b/r/issues
+    check_placeholder 'repo flag owner' outside "$PH" "$PH.owner-b" pr list --repo owner-b/r
+    check_placeholder 'cwd owner' owner-a "$PH" "$PH.owner-a" pr list
+    check_placeholder 'graphql inside a checkout' owner-b "$PH" "$PH.owner-b" api graphql -f query=q
+    check_placeholder 'no owner' outside "$PH" "$PH" api user
+    check_placeholder 'invalid owner is not a hint' outside "$PH" "$PH" api 'repos/owner.x/r'
+    check_placeholder 'host-qualified repo is not a hint' outside "$PH" "$PH" pr list --repo github.com/owner-b/r
+    check_placeholder 'outer hint is replaced' owner-a "$PH.owner-b" "$PH.owner-a" pr list
+    check_placeholder 'outer hint is dropped' outside "$PH.owner-b" "$PH" api user
+    # Anything that is not exactly a placeholder takes the token-file path, which is now empty.
+    check_placeholder 'short value is not a placeholder' outside 'fleet_placeholder_short' '' api user
+    check_placeholder 'real-looking token is not a placeholder' outside 'ghs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' '' api user
+    echo "PASS $COUNT routing and argv cases (with placeholder mode)"
+fi

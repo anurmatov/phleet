@@ -29,6 +29,10 @@ public static class DbSeeder
         if ((await db.Database.GetAppliedMigrationsAsync()).Any())
             await RemovedProviderGuard.EnsureAsync(db);
 
+        // Before RemoveManagedStockRuntime drops the managed-runtime columns: refuse, having migrated
+        // nothing, while any agent still depends on that runtime (ManagedRuntimeRemovalBlockedException).
+        await ManagedRuntimeRemovalPreflight.EnsureAsync(db, logger);
+
         // The #346 preflight runs before RemoveProjectContextCards when it is pending; it throws
         // ContextRemovalBlockedException, having migrated nothing, when a project would lose its only text.
         logger?.LogInformation("Running database migrations...");

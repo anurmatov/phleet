@@ -11,7 +11,7 @@ builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(Tel
 // Services
 builder.Services.AddSingleton<BridgeRelayService>();
 builder.Services.AddSingleton<TelegramNotifier>();
-builder.Services.AddPeerConfiguration(builder.Configuration);
+builder.Services.AddHostedService<PeerConfigHostedService>();
 
 // MCP Server
 builder.Services
@@ -27,6 +27,6 @@ await relay.InitializeAsync(CancellationToken.None);
 
 app.MapMcp();
 
-app.MapGet("/health", async (CancellationToken ct) => Results.Ok(await relay.HealthAsync(ct)));
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-bridge" }));
 
 app.Run();

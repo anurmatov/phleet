@@ -3,8 +3,6 @@ using System.Text;
 using System.Text.Json;
 using Fleet.Bridge.Configuration;
 using Fleet.Shared;
-using Fleet.Shared.Security;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
@@ -18,7 +16,6 @@ namespace Fleet.Bridge.Services;
 /// </summary>
 public sealed class BridgeRelayService : IAsyncDisposable
 {
-    private readonly StockBrokerIdentity? _stockBroker;
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly ILogger<BridgeRelayService> _logger;
 
@@ -51,86 +48,20 @@ public sealed class BridgeRelayService : IAsyncDisposable
     public BridgeRelayService(
         IOptions<BridgeOptions> bridgeConfig,
         IOptions<RabbitMqOptions> rabbitConfig,
-        ILogger<BridgeRelayService> logger, IConfiguration? configuration = null)
-        : this(bridgeConfig, rabbitConfig, logger, configuration is null ? null
-            : StockBrokerIdentity.Optional(configuration["StockOpenShell:AuthorityFile"],
-                configuration["StockOpenShell:BrokerPasswordFile"], "control"))
+        ILogger<BridgeRelayService> logger)
     {
-        var directory = configuration?["StockOpenShell:AuthorityDirectory"];
-        if (string.IsNullOrEmpty(directory)) return;
-        // Managed lanes keep this ordinary connection for ordinary targets; a process-wide single-file
-        // stock identity has no ordinary connection, so the two modes never combine.
-        if (_stockBroker is not null || !Path.IsPathFullyQualified(directory)) throw new StockIdentityDenied("broker_configuration");
-        Lanes = new BridgeControlLanes(directory, bridgeConfig.Value.TimeoutSeconds, _rabbitConfig.Exchange, logger)
-        { ForwardWorkflowReply = ForwardWorkflowReplyAsync };
-    }
-
-    /// <summary>One relay bound to an explicit epoch identity: the single-file process or a managed lane.</summary>
-    internal BridgeRelayService(IOptions<BridgeOptions> bridgeConfig, IOptions<RabbitMqOptions> rabbitConfig,
-        ILogger<BridgeRelayService> logger, StockBrokerIdentity? stockBroker)
-    {
-        _stockBroker = stockBroker;
         var opts = bridgeConfig.Value;
         TargetAgent = opts.TargetAgent;
         BridgeChatId = opts.BridgeChatId;
         _timeoutSeconds = opts.TimeoutSeconds;
         _rabbitConfig = rabbitConfig.Value;
         _logger = logger;
-        Connect = (factory, ct) => _stockBroker is null
-            ? RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct) : factory.CreateConnectionAsync(ct);
     }
-
-    internal Func<ConnectionFactory, CancellationToken, Task<IConnection>> Connect { get; init; }
-
-    /// <summary>
-    /// Managed lane only (#492): forwards an admitted typed workflow reply to the existing Temporal receiver
-    /// route on the ordinary connection. Null on the ordinary and single-file relays.
-    /// </summary>
-    internal Func<RelayMessage, Task>? ForwardWorkflowReply { get; init; }
-
-    /// <summary>Managed lane: first backoff before a failed forward is requeued; doubles per consecutive failure.</summary>
-    internal TimeSpan ForwardRetryDelay { get; init; } = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan MaxForwardRetryDelay = TimeSpan.FromSeconds(30);
-
-    /// <summary>Ordinary relay: bound on a workflow reply forward's publish and broker confirm (#492 V5).</summary>
-    internal TimeSpan ForwardConfirmTimeout { get; set; } = TimeSpan.FromSeconds(10);
-    private int _forwardFailures;
-    private readonly CancellationTokenSource _stopping = new();
-
-    private const string ResponseType = "response";
-    private const string PartialResponseType = "partial-response";
-
-    private volatile bool _lost;
-
-    /// <summary>Stock relay only: its broker connection shut down outside disposal and is never recovered here.</summary>
-    internal bool Lost { get => _lost; private set => _lost = value; }
-
-    /// <summary>Per-agent managed control lanes; null unless <c>StockOpenShell:AuthorityDirectory</c> is set.</summary>
-    internal BridgeControlLanes? Lanes { get; }
 
     public bool IsEnabled => _rabbitConfig.Host.Length > 0;
 
-    /// <summary>
-    /// Body of the existing <c>/health</c> endpoint. With managed lanes it lists, content-free, every lane that
-    /// is lost, held or refused (#492 X2) and reports <c>degraded</c> while any is, still with HTTP 200 so no
-    /// probe restarts the Bridge on its own: recovery stays the manual step in docs/openshell-stock.md.
-    /// </summary>
-    internal async Task<object> HealthAsync(CancellationToken ct)
-    {
-        if (Lanes is null) return new { status = "healthy", service = "fleet-bridge" };
-        var lanes = await Lanes.StatusAsync(ct);
-        return new
-        {
-            status = lanes is { Count: 0 } ? "healthy" : "degraded",
-            service = "fleet-bridge",
-            stockLanes = lanes?.Select(l => new { agent = l.Agent, epoch = l.Epoch, state = l.State, attempts = l.Attempts })
-                .ToArray<object>() ?? (object)"unknown"
-        };
-    }
-
     public async Task InitializeAsync(CancellationToken ct)
     {
-        if (_stockBroker is not null && !IsEnabled) throw new StockIdentityDenied("broker_target");
         if (!IsEnabled || _initialized)
             return;
 
@@ -146,27 +77,14 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
             };
 
-            _stockBroker?.Configure(factory);
-            _connection = await Connect(factory, ct);
+            _connection = await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
             _connection.ConnectionShutdownAsync += (_, args) =>
             {
-                if (_stockBroker is null)
-                    _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
-                else
-                {
-                    // No auto-recovery: a lost managed lane is marked so its owner holds and replaces it (#492 V2).
-                    if (!_stopping.IsCancellationRequested) Lost = true;
-                    _logger.LogWarning("Stock broker connection lost; manual reconciliation required");
-                }
+                _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
                 return Task.CompletedTask;
             };
 
-            // With managed lanes the ordinary publish channel uses publisher confirms with tracking, so a
-            // workflow reply forward (mandatory) completes only once the broker has routed and confirmed it;
-            // the lane acknowledges the reply only after that (#492 R4).
-            _publishChannel = await _connection.CreateChannelAsync(Lanes is null ? null
-                : new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true),
-                ct);
+            _publishChannel = await _connection.CreateChannelAsync(cancellationToken: ct);
             _consumeChannel = await _connection.CreateChannelAsync(cancellationToken: ct);
 
             await _publishChannel.ExchangeDeclareAsync(
@@ -183,20 +101,11 @@ public sealed class BridgeRelayService : IAsyncDisposable
 
             var consumer = new AsyncEventingBasicConsumer(_consumeChannel);
             consumer.ReceivedAsync += OnMessageReceived;
-            // A managed lane acknowledges each delivery itself: a workflow reply only after a confirmed
-            // forward, so a failed forward is retained on this same consumer (#492 R4).
-            await _consumeChannel.BasicConsumeAsync(queueName, autoAck: ForwardWorkflowReply is null, consumer: consumer,
+            await _consumeChannel.BasicConsumeAsync(queueName, autoAck: true, consumer: consumer,
                 cancellationToken: ct);
 
             _initialized = true;
             _logger.LogInformation("BridgeRelayService initialized on exchange {Exchange}", _rabbitConfig.Exchange);
-            // Managed lanes are the sole consumers of their epoch reply queues; open the current ones so a
-            // workflow reply is read without waiting for a bridge ask to that agent.
-            if (Lanes is not null) await Lanes.OpenActiveAsync(ct);
-        }
-        catch (Exception) when (_stockBroker is not null)
-        {
-            throw new StockIdentityDenied("broker_startup_denied");
         }
         catch (Exception ex)
         {
@@ -209,21 +118,6 @@ public sealed class BridgeRelayService : IAsyncDisposable
     /// </summary>
     public async Task<string> AskAsync(string question, string agentName, string? project, int? timeoutSeconds, CancellationToken ct)
     {
-        if (Lanes is not null)
-        {
-            // agentName only labels the caller; the destination (and so the lane) is TargetAgent.
-            // A managed target never falls back to this ordinary connection.
-            BridgeControlLanes.Route route;
-            try { route = await Lanes.RouteAsync(TargetAgent, connect: true, ct); }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return "Request cancelled."; }
-            if (route.Managed)
-            {
-                if (route.Lane is null) return BridgeControlLanes.Denied;
-                route.Lane.BridgeChatId = BridgeChatId;
-                return await route.Lane.AskAsync(question, agentName, project, timeoutSeconds, ct);
-            }
-        }
-
         if (!_initialized || _publishChannel is null)
             return "Error: Bridge relay service is not connected to RabbitMQ.";
 
@@ -246,10 +140,9 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 CorrelationId: correlationId);
 
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
-            var props = _stockBroker?.Properties() ?? new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
+            var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
 
             var target = TargetAgent.ToLowerInvariant();
-            if (_stockBroker is not null && target != _stockBroker.Agent) throw new StockIdentityDenied("broker_target");
             await _publishChannel.BasicPublishAsync(
                 _rabbitConfig.Exchange, routingKey: target, mandatory: false,
                 basicProperties: props, body: body, cancellationToken: ct);
@@ -266,7 +159,6 @@ public sealed class BridgeRelayService : IAsyncDisposable
             if (completedTask == tcs.Task)
                 return await tcs.Task;
 
-            if (_stockBroker is not null) return "Error: stock control outcome unconfirmed; manual reconciliation required.";
             return $"Timeout: Acto did not respond within {(int)timeout.TotalSeconds} seconds. He may be busy with another task.";
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -275,12 +167,7 @@ public sealed class BridgeRelayService : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            if (_stockBroker is not null) return "Error: stock control outcome unconfirmed; manual reconciliation required.";
             return $"Timeout: Acto did not respond within the configured timeout.";
-        }
-        catch (Exception) when (_stockBroker is not null)
-        {
-            return "Error: stock control admission denied.";
         }
         catch (Exception ex)
         {
@@ -298,9 +185,6 @@ public sealed class BridgeRelayService : IAsyncDisposable
     /// </summary>
     public async Task<string> CheckStatusAsync(CancellationToken ct)
     {
-        if (_stockBroker is not null) return "Error: stock status route is not enrolled.";
-        if (Lanes is not null && (await Lanes.RouteAsync(TargetAgent, connect: false, ct)).Managed)
-            return "Error: stock status route is not enrolled.";
         if (!_initialized || _publishChannel is null)
             return "Error: Bridge relay service is not connected to RabbitMQ.";
 
@@ -347,143 +231,48 @@ public sealed class BridgeRelayService : IAsyncDisposable
         }
     }
 
-    private async Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
+    private Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
     {
-        // Managed lane only (#492 R4): null = retained for redelivery, false = refused, true = handled.
-        bool? settle = false;
-        try { settle = await ReceiveAsync(ea); }
-        catch (Exception) when (_stockBroker is not null)
+        try
         {
-            _logger.LogWarning("Stock broker completion denied");
+            var json = Encoding.UTF8.GetString(ea.Body.Span);
+            var message = JsonSerializer.Deserialize<RelayMessage>(json);
+            if (message is null)
+                return Task.CompletedTask;
+
+            _logger.LogInformation("Bridge received message type={Type}, correlationId={CorrelationId}, from={Sender}",
+                message.Type, message.CorrelationId, message.Sender);
+
+            if (message.Type == "bridge-response" && message.CorrelationId is not null)
+            {
+                if (_pendingRequests.TryRemove(message.CorrelationId, out var tcs))
+                    tcs.TrySetResult(message.Text);
+                else
+                    _logger.LogWarning("No pending request for correlationId={CorrelationId}", message.CorrelationId);
+            }
+            else if (message.Type == "status-response")
+            {
+                // Status responses don't have correlationId — resolve the first pending status check
+                foreach (var kvp in _pendingRequests)
+                {
+                    if (_pendingRequests.TryRemove(kvp.Key, out var statusTcs))
+                    {
+                        statusTcs.TrySetResult(message.Text);
+                        break;
+                    }
+                }
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing bridge response");
         }
-        if (ForwardWorkflowReply is not null) await SettleAsync(ea.DeliveryTag, settle);
-    }
 
-    /// <summary>
-    /// Settles a managed-lane delivery on this same consumer: handled is acknowledged, refused is rejected
-    /// without requeue, and a reply whose forward failed is requeued after a bounded backoff (at most
-    /// 30 s) so it is redelivered (not re-executed) once forwarding recovers. The backoff runs off the
-    /// consumer callback, so a stuck reply never delays this lane's bridge responses (#492 V5); the delivery
-    /// stays unacked meanwhile. A delivery left unacked by a closed channel is returned to the queue by the broker.
-    /// </summary>
-    private async Task SettleAsync(ulong tag, bool? settle)
-    {
-        try
-        {
-            if (settle is null)
-            {
-                var failures = Interlocked.Increment(ref _forwardFailures);
-                var delay = TimeSpan.FromTicks(Math.Min(ForwardRetryDelay.Ticks * (1L << Math.Min(failures - 1, 5)),
-                    MaxForwardRetryDelay.Ticks));
-                if (delay <= TimeSpan.Zero) await _consumeChannel!.BasicNackAsync(tag, multiple: false, requeue: true);
-                else _ = RequeueAfterAsync(tag, delay);
-            }
-            else if (settle.Value) await _consumeChannel!.BasicAckAsync(tag, multiple: false);
-            else await _consumeChannel!.BasicRejectAsync(tag, requeue: false);
-        }
-        catch (Exception)
-        {
-            _logger.LogWarning("Stock reply settlement deferred to the broker; manual reconciliation required");
-        }
-    }
-
-    private async Task RequeueAfterAsync(ulong tag, TimeSpan delay)
-    {
-        try
-        {
-            await Task.Delay(delay, _stopping.Token);
-            await _consumeChannel!.BasicNackAsync(tag, multiple: false, requeue: true);
-        }
-        catch (OperationCanceledException) { } // closing: the broker requeues the unacked delivery
-        catch (Exception)
-        {
-            _logger.LogWarning("Stock reply settlement deferred to the broker; manual reconciliation required");
-        }
-    }
-
-    private async Task<bool?> ReceiveAsync(BasicDeliverEventArgs ea)
-    {
-        if (_stockBroker is not null)
-        {
-            _stockBroker.RequireDelivery(ea.BasicProperties.UserId, "workload", ea.Exchange, _rabbitConfig.Exchange,
-                ea.RoutingKey, "bridge");
-            if (ea.Body.Length > 262144) throw new StockIdentityDenied("broker_size");
-        }
-        var json = Encoding.UTF8.GetString(ea.Body.Span);
-        var message = JsonSerializer.Deserialize<RelayMessage>(json);
-        if (message is null)
-            return false;
-        if (_stockBroker is not null && message.Type is ResponseType or PartialResponseType)
-        {
-            // Typed workflow reply (#492): validated workload user-id, fleet.group/bridge route, this lane's
-            // agent, sandbox and epoch, a session nonce and a TaskId; Temporal checks the live correlation.
-            if (ForwardWorkflowReply is null || message.Sender != _stockBroker.Agent || message.Epoch != _stockBroker.Epoch
-                || message.Sandbox != _stockBroker.Sandbox || !Guid.TryParseExact(message.CorrelationId, "N", out _)
-                || message.TaskId is not { Length: > 0 and <= 512 })
-                throw new StockIdentityDenied("broker_route_denied");
-            try { await ForwardWorkflowReply(message); }
-            catch (Exception)
-            {
-                // Transient forward failure: keep the admitted reply on this lane for redelivery.
-                _logger.LogWarning("Verified stock workflow reply forward failed; retained for redelivery");
-                return null;
-            }
-            Interlocked.Exchange(ref _forwardFailures, 0);
-            _logger.LogInformation("Verified stock workflow reply forwarded");
-            return true;
-        }
-        if (_stockBroker is not null && (message.Sender != _stockBroker.Agent || message.Type != "bridge-response"
-            || !Guid.TryParseExact(message.CorrelationId, "N", out _)))
-            throw new StockIdentityDenied("broker_route_denied");
-
-        _logger.LogInformation("Bridge received message type={Type}, correlationId={CorrelationId}, from={Sender}",
-            message.Type, message.CorrelationId, message.Sender);
-
-        if (message.Type == "bridge-response" && message.CorrelationId is not null)
-        {
-            if (_pendingRequests.TryRemove(message.CorrelationId, out var tcs))
-                tcs.TrySetResult(message.Text);
-            else
-                _logger.LogWarning("No pending request for correlationId={CorrelationId}", message.CorrelationId);
-        }
-        else if (message.Type == "status-response")
-        {
-            // Status responses don't have correlationId — resolve the first pending status check
-            foreach (var kvp in _pendingRequests)
-            {
-                if (_pendingRequests.TryRemove(kvp.Key, out var statusTcs))
-                {
-                    statusTcs.TrySetResult(message.Text);
-                    break;
-                }
-            }
-        }
-        return true;
-    }
-
-    /// <summary>Publishes an admitted managed workflow reply to <c>temporal-bridge</c> on the ordinary connection.</summary>
-    private async Task ForwardWorkflowReplyAsync(RelayMessage reply)
-    {
-        if (!_initialized || _publishChannel is null) throw new StockIdentityDenied("broker_forward_unavailable");
-        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(reply));
-        // Confirmed and mandatory: an unrouted, nacked, failed or unconfirmed-in-time publish throws, so the
-        // lane keeps the reply for redelivery (#492 V5).
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
-        timeout.CancelAfter(ForwardConfirmTimeout);
-        await _publishChannel.BasicPublishAsync(_rabbitConfig.Exchange, routingKey: "temporal-bridge", mandatory: true,
-            basicProperties: new BasicProperties { DeliveryMode = DeliveryModes.Persistent }, body: body,
-            cancellationToken: timeout.Token);
+        return Task.CompletedTask;
     }
 
     public async ValueTask DisposeAsync()
     {
-        _stopping.Cancel();
-        if (Lanes is not null) await Lanes.DisposeAsync();
-
         // Cancel all pending requests
         foreach (var (_, tcs) in _pendingRequests)
             tcs.TrySetCanceled();
@@ -497,7 +286,6 @@ public sealed class BridgeRelayService : IAsyncDisposable
             await _connection.CloseAsync();
     }
 
-    internal sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
-        string Type = "directive", string? CorrelationId = null, string? TaskId = null,
-        Guid? Epoch = null, string? Sandbox = null);
+    private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
+        string Type = "directive", string? CorrelationId = null, string? TaskId = null);
 }

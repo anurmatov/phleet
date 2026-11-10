@@ -1,16 +1,4 @@
 #!/bin/bash
-# Stock enrollment is opt-in. Refuse before credential copying, MCP/tool setup, dependency
-# probes or intake. Normal starts with no enrollment key retain their existing startup order.
-if ! STOCK_PROFILE=$(dotnet /app/Fleet.Agent.dll --contentRoot /app --validate-stock-enrollment); then
-    exit 1
-fi
-if [ "$STOCK_PROFILE" = stock ]; then
-    exec /app/stock-entrypoint.sh
-elif [ -n "$STOCK_PROFILE" ]; then
-    echo stock_enrollment_mode_invalid >&2
-    exit 1
-fi
-
 # Read provider from generated appsettings (default: claude). A missing, null or empty value means
 # claude; any other value is used verbatim and must name a known provider (PV1, below).
 PROVIDER=$(node -e "try{const p=require('/app/appsettings.json').Agent.Provider;console.log(p===undefined||p===null||p===''?'claude':String(p))}catch{console.log('claude')}" 2>/dev/null || echo "claude")
@@ -59,6 +47,23 @@ for _HOSTED_VAR in ZAI_CODING_PLAN_API_KEY; do
     unset "$_HOSTED_VAR"
 done
 unset _HOSTED_VAR
+
+# Secret placeholders. When this agent holds a bound secret, the orchestrator mounts the fleet-secrets
+# CA here and points each bound host at fleet-secrets in /etc/hosts. Trust the CA before anything
+# talks to one of those hosts. A failure is fatal: every bound host would fail TLS, and the agent
+# would look healthy while none of its credentials worked.
+FLEET_SECRETS_CA=/usr/local/share/ca-certificates/fleet-secrets.crt
+if [ -e "$FLEET_SECRETS_CA" ]; then
+    if [ ! -f "$FLEET_SECRETS_CA" ] || [ ! -s "$FLEET_SECRETS_CA" ]; then
+        echo "ERROR: $FLEET_SECRETS_CA is not a certificate file. Start fleet-secrets so it creates its CA, then reprovision." >&2
+        exit 1
+    fi
+    if ! update-ca-certificates > /dev/null 2>&1; then
+        echo "ERROR: could not add the fleet-secrets CA to the system trust store." >&2
+        exit 1
+    fi
+    echo "Secret placeholders: trusting the fleet-secrets CA."
+fi
 
 if [ "$PROVIDER" = "gemini" ]; then
     # Gemini auth — OAuth credentials mounted writable directly as ~/.gemini/oauth_creds.json.
@@ -278,11 +283,17 @@ git config --global safe.directory '*'
 # GitHub App auth (opt-in: only runs if GITHUB_APP_ID / GITHUB_APP_ID_OVERRIDE + PEM available)
 # Prefer GITHUB_APP_PEM_OVERRIDE over GITHUB_APP_PEM so per-agent override takes effect at startup.
 _GITHUB_PEM_B64="${GITHUB_APP_PEM_OVERRIDE:-${GITHUB_APP_PEM:-}}"
-if [ -n "${_GITHUB_PEM_B64:-}" ]; then
+if [[ "${GH_TOKEN:-}" =~ ^fleet_placeholder_[A-Za-z0-9_-]{43}$ ]]; then
+    # The App key is a bound secret: this container holds a placeholder, not a key or a token.
+    # fleet-secrets mints installation tokens outside and swaps one in on the way to GitHub.
+    /app/gh-auth.sh --placeholder
+elif [ -n "${_GITHUB_PEM_B64:-}" ]; then
     echo "$_GITHUB_PEM_B64" | base64 -d > /tmp/github-app-key.pem
     chmod 600 /tmp/github-app-key.pem
 fi
-if [ -n "${GITHUB_APP_ID_OVERRIDE:-${GITHUB_APP_ID:-}}" ] && [ -f /tmp/github-app-key.pem ]; then
+if [[ "${GH_TOKEN:-}" =~ ^fleet_placeholder_[A-Za-z0-9_-]{43}$ ]]; then
+    :
+elif [ -n "${GITHUB_APP_ID_OVERRIDE:-${GITHUB_APP_ID:-}}" ] && [ -f /tmp/github-app-key.pem ]; then
     /app/gh-auth.sh
     # Refresh token every 45min (installation tokens expire after 1h).
     # Pass override vars so cron refreshes honour the same App identity as startup.

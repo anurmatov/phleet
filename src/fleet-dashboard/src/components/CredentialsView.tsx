@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiFetch } from '../utils'
+import SecretBindingsSection from './SecretBindingsSection'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -527,6 +528,9 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
           )
         }
       </section>
+
+      {/* ── Secret bindings ─────────────────────────────────────────────────── */}
+      <SecretBindingsSection onToast={showToast} />
 
       {/* ── Connections ─────────────────────────────────────────────────────── */}
       <section className="cred-section">

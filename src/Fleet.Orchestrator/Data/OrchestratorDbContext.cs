@@ -6,29 +6,6 @@ namespace Fleet.Orchestrator.Data;
 
 public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> options) : DbContext(options)
 {
-    public DbSet<SandboxPolicy> SandboxPolicies => Set<SandboxPolicy>();
-    public DbSet<SandboxPolicyVersion> SandboxPolicyVersions => Set<SandboxPolicyVersion>();
-
-    private void CheckImmutablePolicies()
-    {
-        ChangeTracker.DetectChanges();
-        if (ChangeTracker.Entries().Any(e => (e.Entity is SandboxPolicyVersion or SandboxPolicy)
-                && e.State is EntityState.Modified or EntityState.Deleted))
-            throw new InvalidOperationException("Sandbox policies are append-only; save a new version.");
-    }
-
-    public override int SaveChanges(bool acceptAllChangesOnSuccess)
-    {
-        CheckImmutablePolicies();
-        return base.SaveChanges(acceptAllChangesOnSuccess);
-    }
-
-    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
-    {
-        CheckImmutablePolicies();
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-    }
-
     public DbSet<Agent> Agents => Set<Agent>();
     public DbSet<AgentTool> AgentTools => Set<AgentTool>();
     public DbSet<AgentProject> AgentProjects => Set<AgentProject>();
@@ -37,6 +14,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<InstructionVersion> InstructionVersions => Set<InstructionVersion>();
     public DbSet<AgentInstruction> AgentInstructions => Set<AgentInstruction>();
     public DbSet<AgentEnvRef> AgentEnvRefs => Set<AgentEnvRef>();
+    public DbSet<SecretBinding> SecretBindings => Set<SecretBinding>();
     public DbSet<AgentTelegramUser> AgentTelegramUsers => Set<AgentTelegramUser>();
     public DbSet<AgentTelegramGroup> AgentTelegramGroups => Set<AgentTelegramGroup>();
     public DbSet<AgentNetwork> AgentNetworks => Set<AgentNetwork>();
@@ -73,26 +51,6 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.Entity<SandboxPolicy>(e =>
-        {
-            e.ToTable("sandbox_policies");
-            e.HasIndex(p => p.Name).IsUnique();
-        });
-        modelBuilder.Entity<SandboxPolicyVersion>(e =>
-        {
-            e.ToTable("sandbox_policy_versions");
-            e.HasIndex(v => new { v.PolicyId, v.Version }).IsUnique();
-            e.HasOne(v => v.Policy).WithMany(p => p.Versions).HasForeignKey(v => v.PolicyId).OnDelete(DeleteBehavior.Restrict);
-            e.Property(v => v.Yaml).HasColumnType("longtext");
-            e.Property(v => v.ProviderProfileHashes).HasColumnType("longtext");
-        });
-        modelBuilder.Entity<Agent>(e =>
-        {
-            e.Property(a => a.RuntimeKind).HasDefaultValue("docker");
-            e.Property(a => a.AppliedRuntimeKind).HasDefaultValue("docker");
-            e.HasOne<SandboxPolicyVersion>().WithMany().HasForeignKey(a => a.SandboxPolicyVersionId).OnDelete(DeleteBehavior.Restrict);
-            e.HasOne<SandboxPolicyVersion>().WithMany().HasForeignKey(a => a.AppliedSandboxPolicyVersionId).OnDelete(DeleteBehavior.Restrict);
-        });
         modelBuilder.Entity<Agent>(e =>
         {
             e.ToTable("agents");
@@ -243,10 +201,27 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.HasKey(x => x.Id);
             e.Property(x => x.EnvKeyName).HasMaxLength(200).IsRequired();
             e.HasIndex(x => new { x.AgentId, x.EnvKeyName }).IsUnique();
+            e.Property(x => x.PlaceholderSha256).HasMaxLength(64);
             e.HasOne(x => x.Agent)
              .WithMany(a => a.EnvRefs)
              .HasForeignKey(x => x.AgentId)
              .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SecretBinding>(e =>
+        {
+            e.ToTable("secret_bindings");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.EnvKeyName).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Kind).HasMaxLength(16).IsRequired().HasDefaultValue(Fleet.Shared.SecretBindingRules.KindStatic);
+            e.Property(x => x.Hosts).HasMaxLength(2048).IsRequired();
+            e.Property(x => x.HeaderName).HasMaxLength(128).IsRequired().HasDefaultValue(Fleet.Shared.SecretBindingRules.DefaultHeader);
+            e.Property(x => x.ExposeAs).HasMaxLength(1024);
+            e.Property(x => x.AppIdEnvKey).HasMaxLength(200);
+            e.Property(x => x.AgentAttachable).HasDefaultValue(false);
+            e.Ignore(x => x.HostList);
+            e.Ignore(x => x.ExposeAsList);
+            e.HasIndex(x => x.EnvKeyName).IsUnique();
         });
 
         // Project Context tables

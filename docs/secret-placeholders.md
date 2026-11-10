@@ -245,6 +245,12 @@ container, so a refusal leaves a working agent working. The one exception is
 All three are read at startup. A change needs `./upgrade.sh`, and a changed subnet also needs every
 granted agent reprovisioned.
 
+`FLEET_SECRETS_ENABLED` is `true` or `false`, in any letter case, with or without quotes. `setup.sh`,
+`upgrade.sh` and the orchestrator read it the same way, so the scripts start the forwarder for
+exactly the values the orchestrator enables it for. Any other value (`yes`, `1`, `on`) is refused:
+the scripts stop before changing anything, and the orchestrator reports
+`secret_proxy_setting_invalid`. It is never read as off.
+
 Replacing the CA: stop `fleet-secrets`, remove both files in `secret-proxy/ca/`, start it, then
 reprovision every agent that holds a placeholder. With only one of the two files present the
 forwarder refuses to start rather than silently create a new CA.

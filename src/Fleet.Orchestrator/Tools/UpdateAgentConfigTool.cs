@@ -371,6 +371,8 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
                 db, aclNotifier, agent.Name, agent.Projects.Select(p => p.ProjectName));
         }
 
-        return $"Agent '{agent_name}' updated:\n{changes}Note: restart the agent container for changes to take effect.";
+        // Settings are written into the container when it is provisioned. A restart re-runs the same
+        // container with the old ones, so it is not what applies a saved change.
+        return $"Agent '{agent_name}' updated:\n{changes}Note: reprovision the agent for provision-time changes to take effect; a restart does not apply them.";
     }
 }

@@ -29,7 +29,12 @@ public sealed class SecretProxySettings
 
     public static SecretProxySettings FromConfiguration(IConfiguration config)
     {
+        // The same reading as fleet_secrets_enabled in scripts/lib/comms-profiles.sh, which decides
+        // whether setup and upgrade start the forwarder: true or false in any letter case, blanks and
+        // one pair of quotes ignored. The two must agree, or one side waits for the other.
         var raw = (config["SecretProxy:Enabled"] ?? "").Trim();
+        if (raw.Length >= 2 && ((raw[0] == '"' && raw[^1] == '"') || (raw[0] == '\'' && raw[^1] == '\'')))
+            raw = raw[1..^1].Trim();
         if (raw.Length == 0 || string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase))
             return Disabled;
         if (!string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase))

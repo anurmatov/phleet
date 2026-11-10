@@ -20,6 +20,32 @@ fixture $'FLEET_COMMS_ENABLED=true\nFLEET_COMMS_MEDIA_ENDPOINT=http://store\nFLE
 code=0; output=$(comms_resolve_profiles "$FILE" 2>&1) || code=$?
 [[ $code == 2 && "$output" == 'invalid FLEET_COMMS_MEDIA_STORE=bad; expected seaweedfs or minio' ]]
 echo 'PASS invalid store'
+# FLEET_SECRETS_ENABLED is read the way the orchestrator reads it (SecretProxySettings): any letter
+# case, blanks and one pair of quotes ignored; anything else is refused, never taken as off.
+secrets() {
+  fixture "$2"
+  local code=0 output
+  output=$(fleet_secrets_enabled "$FILE") || code=$?
+  [[ "$output" == "$3" && "$code" == "$4" ]] || { echo "FAIL secrets $1: got '$output' rc=$code" >&2; exit 1; }
+  echo "PASS secrets $1"
+}
+secrets 'absent key' $'FLEET_COMMS_ENABLED=false\n' false 0
+secrets 'empty value' $'FLEET_SECRETS_ENABLED=\n' false 0
+secrets 'false' $'FLEET_SECRETS_ENABLED=false\n' false 0
+secrets 'FALSE' $'FLEET_SECRETS_ENABLED=FALSE\n' false 0
+secrets 'true' $'FLEET_SECRETS_ENABLED=true\n' true 0
+secrets 'TRUE' $'FLEET_SECRETS_ENABLED=TRUE\n' true 0
+secrets 'True' $'FLEET_SECRETS_ENABLED=True\n' true 0
+secrets 'double-quoted' $'FLEET_SECRETS_ENABLED="true"\n' true 0
+secrets 'single-quoted uppercase' $'FLEET_SECRETS_ENABLED=\'TRUE\'\n' true 0
+secrets 'surrounding blanks' $'FLEET_SECRETS_ENABLED=  true \n' true 0
+secrets 'CRLF line ending' $'FLEET_SECRETS_ENABLED=true\r\n' true 0
+secrets 'no final newline' 'FLEET_SECRETS_ENABLED=true' true 0
+for invalid in yes 1 on tru '"true' 'true # note' 'truefalse'; do
+  secrets "invalid: $invalid" "FLEET_SECRETS_ENABLED=$invalid"$'\n' '' 1
+done
+[[ "$(fleet_secrets_enabled "$DIR/no-such-file")" == false ]]
+echo 'PASS secrets missing file'
 for input in 'FLEET_COMMS_MEDIA_ENDPOINT=http://comms-minio:9000' 'FLEET_COMMS_MINIO_ROOT_USER=legacy-user'; do
   fixture "$input" # Deliberately no final newline.
   [[ "$(comms_backfill_store_key "$FILE")" == 'recorded FLEET_COMMS_MEDIA_STORE=minio' ]]

@@ -96,6 +96,11 @@ add_missing_env_var() {
   printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
   ok "Added ${key}=${value} to .env"
 }
+# Secret placeholders: read once, the way the orchestrator reads it, and before .env is touched or
+# anything is pulled, stopped or built. A value that is neither true nor false would start an
+# orchestrator and a stack that disagree about whether the forwarder exists.
+SECRETS_ENABLED=$(fleet_secrets_enabled "$ENV_FILE") \
+  || { fail "FLEET_SECRETS_ENABLED in .env must be true or false. Nothing was changed."; exit 1; }
 add_missing_env_var FLEET_EPIC_WATCHER_ENABLED false
 add_missing_env_var FLEET_EPIC_WATCHER_INTERVAL_SECONDS 300
 add_missing_env_var FLEET_EPIC_GRANTS_ENABLED false
@@ -118,7 +123,6 @@ COMMS_PROFILE_ARGS=()
 [[ -z "$resolved" ]] || read -r -a COMMS_PROFILE_ARGS <<< "$resolved"
 # fleet-secrets is an opt-in profile too. It rides in the same argument list so every lifecycle
 # command below selects it; with the default (false) nothing here changes.
-SECRETS_ENABLED=$(read_env_var "$ENV_FILE" "FLEET_SECRETS_ENABLED")
 [[ "$SECRETS_ENABLED" != true ]] || COMMS_PROFILE_ARGS+=(--profile secrets)
 MEDIA_ENDPOINT=$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_ENDPOINT)
 MEDIA_STORE=off

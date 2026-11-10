@@ -285,7 +285,7 @@ validation failed in the harness, cause not established. Tests: `tests/Fleet.Sec
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `FLEET_SECRETS_ENABLED` | `false` | Turns placeholders on; a bound key refuses to provision while off |
+| `FLEET_SECRETS_ENABLED` | `false` | Turns placeholders on; a bound key refuses to provision while off. `fleet_secrets_enabled` (`scripts/lib/comms-profiles.sh`) and `SecretProxySettings` MUST read it identically (any case, quotes stripped, anything else refused) |
 | `FLEET_SECRETS_SUBNET` | `10.213.96.0/22` | `fleet-secrets-net`; change only if it overlaps a host network |
 | `FLEET_SECRETS_ADDRESS` | `10.213.96.2` | The forwarder's fixed address in that subnet |
 

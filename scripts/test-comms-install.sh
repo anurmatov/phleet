@@ -133,7 +133,43 @@ printf 'synthetic certificate\n' > "$DIR/fleet/secret-proxy/ca/ca.crt"
 : > "$CALLS"
 bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1
 grep -q 'reprovision each agent that references a bound secret' "$DIR/output"
-sed -i.bak 's/^FLEET_SECRETS_ENABLED=true$/FLEET_SECRETS_ENABLED=false/' "$ENV"
+# The orchestrator accepts true in any letter case, and Compose strips quotes before it sees the
+# value. The scripts must select the forwarder for exactly the same values, or the orchestrator
+# would expect a forwarder that was never started.
+for spelling in TRUE True '"true"' "'TRUE'"; do
+  sed -i.bak "s/^FLEET_SECRETS_ENABLED=.*$/FLEET_SECRETS_ENABLED=$spelling/" "$ENV"
+  : > "$CALLS"
+  bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1
+  grep -Eq '^compose .* --profile secrets down$' "$CALLS"
+  grep -Eq '^compose .* --profile secrets up -d$' "$CALLS"
+  grep -Eq '^build .* -t fleet:secrets ' "$CALLS"
+  grep -qxF "FLEET_SECRETS_ENABLED=$spelling" "$ENV"
+done
+echo 'PASS upgrade selects the secrets profile for TRUE, True and quoted true, as the orchestrator does'
+# A value that is neither true nor false is refused before .env is touched and before any pull,
+# stop, build or start. It is never read as "off".
+for invalid in yes 1 on enabled; do
+  sed -i.bak "s/^FLEET_SECRETS_ENABLED=.*$/FLEET_SECRETS_ENABLED=$invalid/" "$ENV"
+  cp "$ENV" "$DIR/before"
+  : > "$CALLS"
+  rc=0; bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]]
+  grep -q 'FLEET_SECRETS_ENABLED in .env must be true or false' "$DIR/output"
+  cmp "$ENV" "$DIR/before"
+  ! grep -Eq '^build |^compose |^network |^image ' "$CALLS"
+done
+echo 'PASS upgrade refuses an invalid FLEET_SECRETS_ENABLED before any change'
+# setup.sh reads the same value the same way, before it asks or writes anything.
+sed -i.bak "s/^FLEET_SECRETS_ENABLED=.*$/FLEET_SECRETS_ENABLED=yes/" "$ENV"
+cp "$ENV" "$DIR/before"
+: > "$CALLS"
+rc=0; printf 'n\n' | bash "$DIR/setup.sh" --comms > "$DIR/output" 2>&1 || rc=$?
+[[ "$rc" == 1 ]]
+grep -q 'FLEET_SECRETS_ENABLED in .env must be true or false' "$DIR/output"
+cmp "$ENV" "$DIR/before"
+! grep -Eq '^build |^compose |^network |^image ' "$CALLS"
+echo 'PASS setup refuses an invalid FLEET_SECRETS_ENABLED before any prompt or change'
+sed -i.bak 's/^FLEET_SECRETS_ENABLED=.*$/FLEET_SECRETS_ENABLED=false/' "$ENV"
 : > "$CALLS"
 bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1
 ! grep -Eq 'profile secrets|fleet:secrets' "$CALLS"

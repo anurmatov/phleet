@@ -47,6 +47,43 @@ public class UpdateAgentConfigWarmupTimeoutTests
         Assert.Equal(seconds, Current(name).WarmupTimeoutSeconds);
     }
 
+    // A saved change is written into the container at provision time. The tool must point the caller
+    // at a reprovision: a restart re-runs the same container with the old settings.
+    [Fact]
+    public async Task SavedWarmupChange_TellsTheCallerToReprovision_NotToRestart()
+    {
+        Seed("guidance-warmup");
+
+        var result = await CreateTool("guidance-warmup").UpdateAgentConfigAsync("agent1", warmup_timeout_seconds: 180);
+
+        Assert.Equal(180, Current("guidance-warmup").WarmupTimeoutSeconds);
+        Assert.Contains("reprovision the agent", result);
+        Assert.Contains("a restart does not apply them", result);
+        Assert.DoesNotContain("restart the agent container", result);
+    }
+
+    [Fact]
+    public async Task SavedModelChange_TellsTheCallerToReprovision_NotToRestart()
+    {
+        Seed("guidance-model");
+
+        var result = await CreateTool("guidance-model").UpdateAgentConfigAsync("agent1", model: "synthetic-model-2");
+
+        Assert.Equal("synthetic-model-2", Current("guidance-model").Model);
+        Assert.Contains("reprovision the agent", result);
+        Assert.DoesNotContain("restart the agent container", result);
+    }
+
+    [Fact]
+    public async Task NothingChanged_GivesNoApplyGuidance()
+    {
+        Seed("guidance-none");
+
+        var result = await CreateTool("guidance-none").UpdateAgentConfigAsync("agent1");
+
+        Assert.Equal("No changes specified for agent 'agent1'.", result);
+    }
+
     [Theory]
     [InlineData(9)]
     [InlineData(601)]

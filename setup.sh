@@ -272,6 +272,11 @@ configure_comms() {
 
 _configure_comms() {
   COMMS_PROFILE_ARGS=()
+  # Secret placeholders: read the way the orchestrator reads it, before any prompt, any write to .env
+  # and any lifecycle change. A value that is neither true nor false would start an orchestrator and
+  # a stack that disagree about whether the forwarder exists.
+  SECRETS_ENABLED=$(fleet_secrets_enabled "$ENV_FILE") \
+    || { fail "FLEET_SECRETS_ENABLED in .env must be true or false. Nothing was changed."; exit 1; }
   comms_backfill_store_key "$ENV_FILE"
   _comms_enabled=$(read_env_var "$ENV_FILE" "FLEET_COMMS_ENABLED")
   if [[ -z "$_comms_enabled" ]] || { $COMMS_ONLY && [[ "$_comms_enabled" == false ]]; }; then
@@ -427,7 +432,7 @@ _configure_comms() {
   COMMS_PROFILE_ARGS=()
   [[ -z "$resolved" ]] || read -r -a COMMS_PROFILE_ARGS <<< "$resolved"
   # fleet-secrets (secret placeholders) is an opt-in profile too; with the default it adds nothing.
-  [[ "$(read_env_var "$ENV_FILE" "FLEET_SECRETS_ENABLED")" != true ]] || COMMS_PROFILE_ARGS+=(--profile secrets)
+  [[ "$SECRETS_ENABLED" != true ]] || COMMS_PROFILE_ARGS+=(--profile secrets)
   _media_store=off
   if [[ "$_comms_enabled" == true && -n "$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_ENDPOINT)" ]]; then
     _media_store=$(read_env_var "$ENV_FILE" FLEET_COMMS_MEDIA_STORE)
@@ -1064,7 +1069,7 @@ else
   if [[ "$_comms_enabled" == true ]]; then
     build_image "fleet:comms" "$SCRIPT_DIR/src/Fleet.Comms/Dockerfile" "$SCRIPT_DIR"
   fi
-  if [[ "$(read_env_var "$ENV_FILE" "FLEET_SECRETS_ENABLED")" == true ]]; then
+  if [[ "$SECRETS_ENABLED" == true ]]; then
     build_image "fleet:secrets" "$SCRIPT_DIR/src/Fleet.SecretProxy/Dockerfile" "$SCRIPT_DIR"
   fi
   ok "All images built"
@@ -1122,7 +1127,7 @@ else
       fi
     fi
 
-    if [[ "$(read_env_var "$ENV_FILE" "FLEET_SECRETS_ENABLED")" == true ]]; then
+    if [[ "$SECRETS_ENABLED" == true ]]; then
       # Owner-only: the state directory holds the bound secret values, the CA directory its key.
       mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca"
       chmod 700 "$FLEET_BASE_DIR/secret-proxy" "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" 2>/dev/null || true

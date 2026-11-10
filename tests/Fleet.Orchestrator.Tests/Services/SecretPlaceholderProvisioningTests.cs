@@ -281,6 +281,56 @@ public class SecretPlaceholderProvisioningTests
         Assert.Empty(harness.CreateBodies);
     }
 
+    // The same spellings scripts/lib/comms-profiles.sh (fleet_secrets_enabled) accepts and refuses:
+    // setup and upgrade start the forwarder for exactly the values the orchestrator enables it for.
+    [Theory]
+    [InlineData("true")]
+    [InlineData("TRUE")]
+    [InlineData("True")]
+    [InlineData(" true ")]
+    [InlineData("\"true\"")]
+    [InlineData("'TRUE'")]
+    public void EnabledSetting_AcceptsTrueInAnyLetterCase_WithBlanksAndOnePairOfQuotes(string value)
+    {
+        var settings = SecretProxySettings.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["SecretProxy:Enabled"] = value }).Build());
+
+        Assert.True(settings.Enabled);
+        Assert.Null(settings.Fault);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("false")]
+    [InlineData("FALSE")]
+    [InlineData("\"false\"")]
+    public void EnabledSetting_IsOff_ForFalseOrNothing_WithNoFault(string? value)
+    {
+        var settings = SecretProxySettings.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["SecretProxy:Enabled"] = value }).Build());
+
+        Assert.False(settings.Enabled);
+        Assert.Null(settings.Fault);
+    }
+
+    [Theory]
+    [InlineData("yes")]
+    [InlineData("1")]
+    [InlineData("on")]
+    [InlineData("tru")]
+    [InlineData("\"true")]
+    [InlineData("true # note")]
+    [InlineData("truefalse")]
+    public void EnabledSetting_IsAFault_ForAnythingElse_NeverSilentlyOff(string value)
+    {
+        var settings = SecretProxySettings.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["SecretProxy:Enabled"] = value }).Build());
+
+        Assert.False(settings.Enabled);
+        Assert.StartsWith("secret_proxy_setting_invalid", settings.Fault);
+    }
+
     [Fact]
     public async Task MissingCa_RefusesTheProvision_BeforeDocker()
     {

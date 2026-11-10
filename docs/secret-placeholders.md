@@ -163,7 +163,9 @@ success, and a state that stops being refreshed stops being honoured:
    working at once, and so does everything else until the next write succeeds (the background pass
    retries every 10 seconds).
 3. **If it cannot even delete the file,** the forwarder's age bound ends it: a state older than
-   120 seconds is refused whole. The same bound applies when the orchestrator is down.
+   120 seconds is refused whole. The same bound applies when the orchestrator is down, and when it
+   is up but cannot read its database: the background pass then reports a fault and retries every
+   10 seconds, the orchestrator keeps running, and the state it could not rebuild simply ages out.
 
 So a revocation is in force when the call returns success, and otherwise within 120 seconds at the
 latest. The bound is `SecretProxy__MaxStateAgeSeconds` on the `fleet-secrets` service (30 to 86400).
@@ -208,8 +210,8 @@ stops being served at once.
   a hard-coded address, a tool with its own resolver) carries only the placeholder, which is worth
   nothing outside the secrets network. The request fails; nothing leaks.
 - **Availability.** While `fleet-secrets` is down, granted agents cannot reach their bound hosts,
-  and the same holds once the orchestrator has been down, or unable to write the state, for longer
-  than the age bound (120 seconds by default). Every other destination is unaffected, because only
+  and the same holds once the orchestrator has been down, unable to reach its database or unable to
+  write the state for longer than the age bound (120 seconds by default). Every other destination is unaffected, because only
   bound hosts are steered.
 
 ## Faults at provision time

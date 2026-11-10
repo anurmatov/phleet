@@ -98,9 +98,13 @@ public sealed class SecretProxyStateWriter(
             {
                 fault = await BuildAndReplaceAsync(path, ct);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Data.Common.DbException
-                                       or InvalidOperationException or NotSupportedException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
+                // Every failure is a fault, not only the ones foreseen: a database that stays down
+                // surfaces as EF's RetryLimitExceededException, which is none of IOException,
+                // DbException or InvalidOperationException. An exception that escaped here would stop
+                // the orchestrator from the background refresh, and would bypass the withdrawal below
+                // on the path that enforces a revocation. Only the caller's own cancellation passes.
                 logger.LogError("SecretProxy state not written ({Error})", ex.GetType().Name);
                 fault = "secret_proxy_state_write_failed";
             }
@@ -295,8 +299,14 @@ public sealed class SecretProxyStateService(
     SecretProxyStateWriter writer, SecretProxySettings settings, ILogger<SecretProxyStateService> logger)
     : BackgroundService
 {
-    internal static readonly TimeSpan Interval = TimeSpan.FromSeconds(SecretProxyState.HeartbeatSeconds);
+    /// <summary>The pause between two refreshes. Tests shorten it.</summary>
+    internal TimeSpan Interval { get; init; } = TimeSpan.FromSeconds(SecretProxyState.HeartbeatSeconds);
 
+    /// <summary>
+    /// Never ends in an exception: an unhandled one in a hosted service stops the whole orchestrator,
+    /// and a state that cannot be refreshed right now (the database is down, the directory is full)
+    /// is exactly when the next pass matters. A failed pass is retried after the usual pause.
+    /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (settings.Fault is { } fault)
@@ -312,9 +322,22 @@ public sealed class SecretProxyStateService(
                 // No change of its own to enforce, so a failure here does not withdraw the state: the
                 // forwarder's age bound ends a state that can no longer be refreshed.
                 await writer.WriteAsync(stoppingToken, failClosed: false);
-                await Task.Delay(Interval, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                // The writer turns its own failures into a fault. This is for whatever it did not.
+                logger.LogError("SecretProxy state refresh failed ({Error}); it is retried", ex.GetType().Name);
+            }
+
+            try
+            {
+                await Task.Delay(Interval, stoppingToken);
+            }
+            catch (OperationCanceledException)
             {
                 break;
             }

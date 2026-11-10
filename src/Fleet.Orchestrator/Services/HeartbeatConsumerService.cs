@@ -204,9 +204,15 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
 
     public async ValueTask DisposeAsync()
     {
-        if (_channel is not null)
-            await _channel.CloseAsync();
-        if (_connection is not null)
-            await _connection.CloseAsync();
+        // The connection is closed even when closing the channel throws, and the status then says so.
+        try
+        {
+            if (_channel is not null) await _channel.CloseAsync();
+        }
+        finally
+        {
+            if (_connection is not null) await _connection.CloseAsync();
+            IsConnected = false;
+        }
     }
 }

@@ -35,8 +35,9 @@ EXAMPLE_API_KEY=fleet_placeholder_…  HTTPS  checks the grant, the source      
    `fleet-secrets`, which answers TLS with a certificate from its local CA, validates the
    placeholder and relays the request to the real host with the real value.
 5. **State.** The orchestrator writes one file, `secret-proxy/state/state.json` under the fleet
-   base directory: the bindings with their current `.env` values, and the grant hashes. The
-   forwarder reads it on every request. It has no database access and does not read `.env`.
+   base directory: the bindings with their current `.env` values, and the grant hashes. It rewrites
+   the file every 10 seconds, changed or not. The forwarder reads it on every request and refuses
+   it once it is older than 120 seconds. It has no database access and does not read `.env`.
 
 The forwarder honours a placeholder only when all of these hold:
 
@@ -143,10 +144,31 @@ Then attach `GITHUB_APP_PEM` as an Env Ref to each agent that should use GitHub,
 | Delete an agent | When the call returns |
 | Change the value in `.env` | Within 10 seconds, with no agent restart |
 | Remove the value from `.env` | Within 10 seconds; requests then get 503 `secret_unavailable` |
+| Any of the above while the state cannot be written | The call fails; in force at once if the old state could be withdrawn, else within 120 seconds |
 
 The save itself rewrites the state file, and the forwarder reads the file on every request, including
-on a connection that was already open. A background pass every 10 seconds repairs a missed write and
+on a connection that was already open. A background pass every 10 seconds keeps the file fresh and
 is what picks up `.env` edits. A request already in flight completes.
+
+### When the state cannot be written
+
+The file is the only way a revocation reaches the forwarder, so a failed write is never reported as
+success, and a state that stops being refreshed stops being honoured:
+
+1. **The call fails.** The change is in the database, but REST answers 503 with
+   `fault: secret_proxy_state_write_failed`, `saved: true`, `enforced: false`; the MCP tool says the
+   change was "NOT published"; a deprovision reports that the grants were not revoked.
+2. **The old state is withdrawn.** The orchestrator deletes the state file, and with no state the
+   forwarder refuses every request to every bound host. The grant that was just removed stops
+   working at once, and so does everything else until the next write succeeds (the background pass
+   retries every 10 seconds).
+3. **If it cannot even delete the file,** the forwarder's age bound ends it: a state older than
+   120 seconds is refused whole. The same bound applies when the orchestrator is down.
+
+So a revocation is in force when the call returns success, and otherwise within 120 seconds at the
+latest. The bound is `SecretProxy__MaxStateAgeSeconds` on the `fleet-secrets` service (30 to 86400).
+Lowering it tightens that worst case and shortens how long the orchestrator may be down before
+agents lose their bound hosts.
 
 Deleting a binding is refused (409, with the agent names) while any agent references its key,
 because the next provision of that agent would otherwise write the value itself into its container.
@@ -185,8 +207,10 @@ stops being served at once.
 - **Steering can be bypassed, harmlessly.** A request that does not reach the forwarder (a proxy,
   a hard-coded address, a tool with its own resolver) carries only the placeholder, which is worth
   nothing outside the secrets network. The request fails; nothing leaks.
-- **Availability.** While `fleet-secrets` is down, granted agents cannot reach their bound hosts.
-  Every other destination is unaffected, because only bound hosts are steered.
+- **Availability.** While `fleet-secrets` is down, granted agents cannot reach their bound hosts,
+  and the same holds once the orchestrator has been down, or unable to write the state, for longer
+  than the age bound (120 seconds by default). Every other destination is unaffected, because only
+  bound hosts are steered.
 
 ## Faults at provision time
 
@@ -242,8 +266,12 @@ end-to-end harness. The cause was not established.
   the placeholder, which it rejects. Add the bound hosts to `NO_PROXY` for that agent.
 - **`docker logs fleet-secrets`** has one line per request: host, method class, agent, key, status
   and a fixed reason. It never contains a URL, a header value, a placeholder or a secret.
-- **Health:** `docker exec fleet-secrets curl -s http://127.0.0.1:8080/health` reports
-  `"state":"loaded"` or a fixed fault such as `state_missing`.
+- **Every bound host refuses with `secret_state_unavailable`, or TLS to it fails.** The forwarder
+  has no usable state. `docker exec fleet-secrets curl -s http://127.0.0.1:8080/health` names why:
+  `state_missing` (never written, or withdrawn after a failed write), `state_stale` (not refreshed
+  within the age bound: is the orchestrator running?), or `state_unreadable`. The orchestrator log
+  has the matching `SecretProxy state …` line.
+- **Health:** the same command reports `"state":"loaded"` when all is well.
 
 ## Tests
 

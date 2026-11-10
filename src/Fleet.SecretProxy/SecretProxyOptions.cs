@@ -19,6 +19,12 @@ public sealed class SecretProxyOptions
     /// <summary>Loopback-only health listener. 0 disables it.</summary>
     public int HealthPort { get; set; } = 8080;
 
+    /// <summary>
+    /// A state older than this is refused whole (30 to 86400). The orchestrator refreshes the file
+    /// every few seconds; when it stops, grants it could no longer revoke expire here.
+    /// </summary>
+    public int MaxStateAgeSeconds { get; set; } = Fleet.Shared.SecretProxyState.DefaultMaxAgeSeconds;
+
     /// <summary>Where GitHub App installation tokens are minted. HTTPS only.</summary>
     public string GitHubApiBaseUrl { get; set; } = "https://api.github.com";
 }

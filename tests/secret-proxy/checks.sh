@@ -89,11 +89,18 @@ restored)
     expect "restored grant and value work again" "$(status -H "Authorization: Bearer $EXAMPLE_API_KEY" $API/v1/whoami)" 200
     ;;
 
-stateless)
+stateless|stale)
+    # No usable state: the forwarder has no certificate to offer (a new connection fails its
+    # handshake) and answers 503 on a connection that was already open.
     code=$(status -H "Authorization: Bearer $EXAMPLE_API_KEY" $API/v1/whoami)
     case "$code" in
-        503|curl-exit-*|000*) pass "no state: refused ($code)" ;;
-        *) fail "no state: expected a refusal, got $code" ;;
+        503|curl-exit-*|000*) pass "state missing or too old: refused ($code)" ;;
+        *) fail "state missing or too old: expected a refusal, got $code" ;;
+    esac
+    code=$(status -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user)
+    case "$code" in
+        503|curl-exit-*|000*) pass "... and for the other grant ($code)" ;;
+        *) fail "the other grant was still honoured: $code" ;;
     esac
     ;;
 

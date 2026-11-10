@@ -1,5 +1,6 @@
 using System.Net;
 using Fleet.Shared;
+using Microsoft.Extensions.Configuration;
 using static Fleet.SecretProxy.Tests.ProxyHarness;
 
 namespace Fleet.SecretProxy.Tests;
@@ -200,6 +201,88 @@ public sealed class RevocationTests
         using var client = proxy.CreateClient();
         using var response = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    // ── A state that stops being refreshed stops being honoured ───────────────
+
+    [Fact]
+    public async Task StateOlderThanTheAgeBound_IsRefusedWhole_OnAnOpenConnection_AndForNewOnes()
+    {
+        // The orchestrator revoked a grant but could neither rewrite nor remove the file (or is down):
+        // the file still lists the grant. Nothing changes on disk; only time passes.
+        await using var proxy = await StartAsync();
+        using var client = proxy.CreateClient();
+        using var fresh = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
+        Assert.Equal(HttpStatusCode.OK, fresh.StatusCode);
+
+        proxy.Time.Advance(TimeSpan.FromSeconds(SecretProxyState.DefaultMaxAgeSeconds));
+        using var atTheBound = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
+        Assert.Equal(HttpStatusCode.OK, atTheBound.StatusCode);
+
+        proxy.Time.Advance(TimeSpan.FromSeconds(1));
+        using var stale = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
+        using var staleWithoutPlaceholder = await client.SendAsync(Get($"https://{HostA}/public"));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, stale.StatusCode);
+        Assert.Equal("secret_state_unavailable", Code(stale));
+        Assert.Equal("secret_state_unavailable", Code(staleWithoutPlaceholder));
+        Assert.Equal(2, proxy.Upstream.Calls.Count);
+        Assert.Contains("state_stale", proxy.Logs.All);
+        using var newConnection = proxy.CreateClient();
+        await Assert.ThrowsAsync<HttpRequestException>(() => newConnection.SendAsync(Get($"https://{HostA}/public")));
+    }
+
+    [Fact]
+    public async Task RefreshedState_IsHonouredAgain_AndARefreshThatDropsTheGrantRevokesIt()
+    {
+        await using var proxy = await StartAsync();
+        using var client = proxy.CreateClient();
+        // Open the connection while the state is fresh; a stale state refuses new handshakes outright.
+        using var opened = await client.SendAsync(Get($"https://{HostA}/public"));
+        Assert.Equal(HttpStatusCode.OK, opened.StatusCode);
+        proxy.Time.Advance(TimeSpan.FromHours(1));
+        using var stale = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
+        Assert.Equal("secret_state_unavailable", Code(stale));
+
+        // The same grants with a current timestamp: what the orchestrator's refresh writes.
+        proxy.WriteState(proxy.DefaultState());
+        using var refreshed = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
+        Assert.Equal(HttpStatusCode.OK, refreshed.StatusCode);
+
+        var state = proxy.DefaultState();
+        proxy.WriteState(state with { Grants = [.. state.Grants.Where(g => g.Key != KeyA)] });
+        using var revoked = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
+        Assert.Equal("secret_grant_unknown", Code(revoked));
+        Assert.Equal(2, proxy.Upstream.Calls.Count);
+    }
+
+    [Fact]
+    public async Task StateStampedInTheFuture_IsNotTreatedAsStale()
+    {
+        // A small clock difference between writer and reader must not refuse a state that was just written.
+        await using var proxy = await StartAsync();
+        using var client = proxy.CreateClient();
+        proxy.WriteState(proxy.DefaultState() with { GeneratedAtUtc = proxy.Time.GetUtcNow().AddSeconds(30) });
+
+        using var response = await client.SendAsync(Get($"https://{HostA}/v1/items", "Bearer " + proxy.PlaceholderA));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("29")]
+    [InlineData("0")]
+    [InlineData("86401")]
+    public void AgeBoundOutsideItsRange_IsAStartupFault(string seconds)
+    {
+        var error = Assert.Throws<InvalidOperationException>(() => SecretProxyApp.Build([], builder =>
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["SecretProxy:MaxStateAgeSeconds"] = seconds,
+                ["SecretProxy:ListenAddress"] = Loopback,
+            })));
+
+        Assert.Contains("secret_proxy_max_state_age_invalid", error.Message);
     }
 
     [Fact]

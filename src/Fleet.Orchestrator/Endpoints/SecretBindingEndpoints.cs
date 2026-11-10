@@ -30,6 +30,27 @@ public static class SecretBindingEndpoints
         string? AppIdEnvKey,
         bool? AgentAttachable);
 
+    /// <summary>
+    /// Turns <see cref="SecretStatePublicationException"/> from any REST handler into a 503 that
+    /// names the fault. The change is in the database but not in force at <c>fleet-secrets</c>, so no
+    /// handler may answer 200 for it, whichever route saved it (a binding, an agent's Env Refs, an
+    /// agent delete).
+    /// </summary>
+    public static IApplicationBuilder UseSecretStateFaults(this IApplicationBuilder app) =>
+        app.Use(async (context, next) =>
+        {
+            try
+            {
+                await next(context);
+            }
+            catch (SecretStatePublicationException ex) when (!context.Response.HasStarted)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                await context.Response.WriteAsJsonAsync(new { error = ex.Message, fault = ex.Fault, saved = true, enforced = false });
+            }
+        });
+
     public static IEndpointRouteBuilder MapSecretBindingEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/secret-bindings", async (

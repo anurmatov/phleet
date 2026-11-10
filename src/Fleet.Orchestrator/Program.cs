@@ -167,6 +167,9 @@ if (!string.IsNullOrEmpty(connectionString))
 // WebSocket support
 app.UseWebSockets();
 
+// A committed change that could not be published to fleet-secrets is a 503, never a 200.
+app.UseSecretStateFaults();
+
 // Rate limiting middleware
 app.UseRateLimiter();
 

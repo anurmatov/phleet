@@ -72,16 +72,18 @@ KEY_LINE="$(sed -n 2p "$WORK/fixture/app.pem")"
 KEY_B64="$(head -c 48 "$WORK/fixture/app.pem.b64")"
 [ "${#KEY_LINE}" -ge 40 ] && [ "${#KEY_B64}" -eq 48 ] || fail_infra "key fixture has the wrong shape"
 
-# write_state <static value | ""> <grants: both | github | none>
+# write_state <static value | ""> <grants: both | github | none> [age in seconds, default 0]
+# The forwarder refuses a state that is too old, so every call stamps the current time unless an
+# age is given.
 write_state() {
     tool "
 set -e
-value='$1'; grants='$2'
+value='$1'; grants='$2'; age='${3:-0}'
 static_grant='{\"agent\":\"agent1\",\"sourceIp\":\"$AGENT_IP\",\"key\":\"EXAMPLE_API_KEY\",\"placeholderSha256\":\"'\$(cat fixture/placeholder.static.sha256)'\"}'
 github_grant='{\"agent\":\"agent1\",\"sourceIp\":\"$AGENT_IP\",\"key\":\"GITHUB_APP_PEM\",\"placeholderSha256\":\"'\$(cat fixture/placeholder.github.sha256)'\"}'
 case \$grants in both) list=\"\$static_grant,\$github_grant\" ;; github) list=\"\$github_grant\" ;; none) list='' ;; esac
-jq -n --arg value \"\$value\" --arg pem \"\$(cat fixture/app.pem.b64)\" --argjson grants \"[\$list]\" '{
-  version: 1, generatedAtUtc: \"2026-01-01T00:00:00+00:00\",
+jq -n --arg value \"\$value\" --arg pem \"\$(cat fixture/app.pem.b64)\" --argjson grants \"[\$list]\" --argjson age \"\$age\" '{
+  version: 1, generatedAtUtc: ((now - \$age) | todate),
   bindings: [
     {key: \"EXAMPLE_API_KEY\", kind: \"static\", hosts: [\"api.example.test\"], header: \"Authorization\", value: \$value, appId: null},
     {key: \"GITHUB_APP_PEM\", kind: \"github_app\", hosts: [\"api.github.com\", \"github.com\"], header: \"Authorization\", value: \$pem, appId: \"424242\"}
@@ -106,7 +108,7 @@ docker run -d --name "$ID-upstream" --network "$ID-egress" --ip "$UPSTREAM_IP" -
 add_upstream=(); for h in "${HOSTS[@]}"; do add_upstream+=(--add-host "$h:$UPSTREAM_IP"); done
 docker create --name "$ID-proxy" --network "$ID-egress" "${add_upstream[@]}" \
     -e SSL_CERT_FILE=/fixture/public-ca.crt -e SSL_CERT_DIR=/nonexistent \
-    -e "SecretProxy__ListenAddress=$PROXY_IP" \
+    -e "SecretProxy__ListenAddress=$PROXY_IP" -e SecretProxy__MaxStateAgeSeconds=600 \
     -v "$WORK/state:/var/lib/fleet-secrets/state:ro" -v "$WORK/ca:/var/lib/fleet-secrets/ca" -v "$WORK/fixture:/fixture:ro" \
     "$PROXY_IMAGE" > /dev/null
 docker network connect --ip "$PROXY_IP" "$ID-secrets" "$ID-proxy"
@@ -147,6 +149,7 @@ phase() {
 
 start_client "$ID-agent" "$AGENT_IP"
 phase "$ID-agent" setup
+write_state "$STATIC_SECRET" both
 phase "$ID-agent" granted
 
 # ── Revocation, rotation, loss of state: each takes effect on the next request ───────────────────
@@ -160,10 +163,17 @@ tool 'rm -f state/state.json'
 phase "$ID-agent" stateless
 write_state "$STATIC_SECRET" both
 phase "$ID-agent" restored
+# A state the orchestrator stopped refreshing: same grants, an hour old. Nothing was revoked in the
+# file, and it is refused all the same.
+write_state "$STATIC_SECRET" both 3600
+phase "$ID-agent" stale
+write_state "$STATIC_SECRET" both
+phase "$ID-agent" restored
 
 # ── The same placeholders from another container ─────────────────────────────────────────────────
 start_client "$ID-foreign" "$FOREIGN_IP"
 phase "$ID-foreign" setup
+write_state "$STATIC_SECRET" both
 phase "$ID-foreign" foreign
 
 # ── What actually reached the upstream, and what the forwarder logged ────────────────────────────

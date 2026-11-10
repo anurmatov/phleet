@@ -21,10 +21,13 @@ public static class SecretProxyApp
             throw new InvalidOperationException("secret_proxy_listen_address_invalid: SecretProxy:ListenAddress must be an IP address.");
         if (!Uri.TryCreate(options.GitHubApiBaseUrl, UriKind.Absolute, out var gitHubApi) || gitHubApi.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException("secret_proxy_github_api_invalid: SecretProxy:GitHubApiBaseUrl must be an https URL.");
+        if (options.MaxStateAgeSeconds is < 30 or > 86400)
+            throw new InvalidOperationException("secret_proxy_max_state_age_invalid: SecretProxy:MaxStateAgeSeconds must be 30 to 86400.");
 
         builder.Services.AddSingleton(options);
         builder.Services.TryAddSingleton(TimeProvider.System);
-        builder.Services.AddSingleton<StateStore>();
+        builder.Services.AddSingleton(sp => new StateStore(
+            options, sp.GetRequiredService<ILogger<StateStore>>(), sp.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton(sp => CertificateAuthority.LoadOrCreate(
             options.CaDirectory, sp.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(CertificateAuthority).FullName!)));
         builder.Services.AddSingleton(_ => upstream ?? new HttpMessageInvoker(CreateUpstreamHandler(), disposeHandler: true));

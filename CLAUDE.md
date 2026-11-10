@@ -269,7 +269,12 @@ MCP tool that writes a binding (REST behind the operator token only; `manage_age
 a bound key unless `AgentAttachable`); delete a binding while an agent references its key; log or
 return a value or a placeholder. Revocation is the state file: `SecretStateSaveInterceptor` rewrites
 it when a save touches a binding, an Env Ref or deletes an agent, and `SecretProxyStateService`
-repeats it every 10 s (which is also what applies a value rotated in `.env`). The `fleet:secrets`
+rewrites it every 10 s whether or not it changed (which keeps it fresh and applies a value rotated in
+`.env`). MUST NOT report success for a change the file does not carry: a failed write withdraws
+(deletes) the old state and throws `SecretStatePublicationException` after the commit (REST 503 via
+`UseSecretStateFaults`, an explicit MCP answer, a failed deprovision), and the forwarder refuses a
+state older than `SecretProxy:MaxStateAgeSeconds` (default 120), which is what ends a state the
+orchestrator can neither replace nor remove. Do not skip an unchanged write: the timestamp is the lease. The `fleet:secrets`
 image uses the released .NET base, not `10.0-preview`: on the preview base upstream certificate
 validation failed in the harness, cause not established. Tests: `tests/Fleet.SecretProxy.Tests/`,
 `SecretPlaceholderProvisioningTests`, `SecretBindingEndpointsTests`, and the Docker harness

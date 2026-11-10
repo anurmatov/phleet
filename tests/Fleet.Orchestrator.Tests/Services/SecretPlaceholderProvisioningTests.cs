@@ -402,15 +402,103 @@ public class SecretPlaceholderProvisioningTests
     }
 
     [Fact]
-    public async Task UnchangedState_IsNotRewritten()
+    public async Task EveryWrite_RefreshesTheTimestamp_EvenWhenNothingElseChanged()
+    {
+        // The forwarder refuses a state that is too old, so an unchanged state is still rewritten.
+        await using var harness = await StartAsync();
+        await harness.Service.ProvisionAsync("agent1");
+        var first = State(harness);
+
+        await Task.Delay(20);
+        Assert.Null(await harness.SecretState.WriteAsync(failClosed: false));
+        var second = State(harness);
+
+        Assert.True(second.GeneratedAtUtc > first.GeneratedAtUtc);
+        Assert.True(DateTimeOffset.UtcNow - second.GeneratedAtUtc < TimeSpan.FromSeconds(SecretProxyState.HeartbeatSeconds));
+        Assert.Equal(first.Bindings.Single(), second.Bindings.Single() with { Hosts = first.Bindings.Single().Hosts });
+        Assert.Equal(first.Grants, second.Grants);
+    }
+
+    // ── A state write that fails is never a success ───────────────────────────
+
+    private static void ForceWriteFailure(ProvisioningHarness harness, bool deleteFailsToo = false)
+    {
+        harness.SecretState.ReplaceFile = (_, _) => throw new IOException("synthetic: no space left on device");
+        if (deleteFailsToo)
+            harness.SecretState.DeleteFile = _ => throw new UnauthorizedAccessException("synthetic: read-only");
+    }
+
+    [Fact]
+    public async Task Deprovision_WhenTheStateCannotBeWritten_FailsAndWithdrawsTheStateThatStillListedTheGrant()
+    {
+        await using var harness = await StartAsync();
+        await harness.Service.ProvisionAsync("agent1");
+        var path = harness.SecretState.StatePath!;
+        Assert.Single(State(harness).Grants);
+        harness.ContainerExists = true;
+        ForceWriteFailure(harness);
+
+        var result = await harness.Service.DeprovisionAsync("agent1");
+
+        // Not "stopped and removed": the revocation did not reach the forwarder.
+        Assert.False(result.Success);
+        Assert.Contains("secret_proxy_state_write_failed", result.Message);
+        Assert.Contains("not revoked", result.Message);
+        // The old file authorised the grant. It is gone, so the forwarder refuses everything.
+        Assert.False(File.Exists(path));
+        Assert.Contains(harness.Logs.Entries, e => e.Message.Contains("withdrawn after a failed write", StringComparison.Ordinal));
+
+        // The database did record the revocation, and the next good write publishes it.
+        harness.SecretState.ReplaceFile = (target, content) => File.WriteAllText(target, content);
+        Assert.Null(await harness.SecretState.WriteAsync());
+        Assert.Empty(State(harness).Grants);
+    }
+
+    [Fact]
+    public async Task Provision_WhenTheStateCannotBeWritten_FailsBeforeDocker_AndLeavesNoStateBehind()
+    {
+        await using var harness = await StartAsync();
+        ForceWriteFailure(harness);
+
+        var result = await harness.Service.ProvisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.Contains("secret_proxy_state_write_failed", result.Message);
+        Assert.Empty(harness.CreateBodies);
+        Assert.False(File.Exists(harness.SecretState.StatePath!));
+    }
+
+    [Fact]
+    public async Task WhenTheStateCanBeNeitherWrittenNorWithdrawn_TheCallStillFails_AndTheOldFileIsLeftToTheAgeBound()
     {
         await using var harness = await StartAsync();
         await harness.Service.ProvisionAsync("agent1");
         var before = File.ReadAllText(harness.SecretState.StatePath!);
+        harness.ContainerExists = true;
+        ForceWriteFailure(harness, deleteFailsToo: true);
 
-        Assert.Null(await harness.SecretState.WriteAsync());
-        Assert.Null(await harness.SecretState.WriteAsync());
+        var result = await harness.Service.DeprovisionAsync("agent1");
 
+        Assert.False(result.Success);
+        Assert.Contains("secret_proxy_state_write_failed", result.Message);
+        // Nothing on disk could be changed. The file keeps its old timestamp, which is what the
+        // forwarder's age bound acts on (Fleet.SecretProxy.Tests: StateOlderThanTheAgeBound_IsRefusedWhole).
+        Assert.Equal(before, File.ReadAllText(harness.SecretState.StatePath!));
+        Assert.Contains(harness.Logs.Entries, e => e.Message.Contains("neither written nor withdrawn", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task BackgroundRefresh_ThatFails_ReportsTheFault_ButDoesNotWithdrawTheState()
+    {
+        // The refresh has no change of its own to enforce. A state it cannot refresh expires at the forwarder.
+        await using var harness = await StartAsync();
+        await harness.Service.ProvisionAsync("agent1");
+        var before = File.ReadAllText(harness.SecretState.StatePath!);
+        ForceWriteFailure(harness);
+
+        var fault = await harness.SecretState.WriteAsync(failClosed: false);
+
+        Assert.Equal("secret_proxy_state_write_failed", fault);
         Assert.Equal(before, File.ReadAllText(harness.SecretState.StatePath!));
     }
 
@@ -437,6 +525,33 @@ public class SecretPlaceholderProvisioningTests
         await using var never = await StartAsync(enabled: false, seed: db => db.Agents.Add(NewAgent("agent1", PlainKey)));
         await never.Service.ProvisionAsync("agent1");
         Assert.False(File.Exists(never.SecretState.StatePath!));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DisabledWriter_NeverReportsAFault_EvenWhenALeftoverStateCannotBeEmptied(bool deleteFailsToo)
+    {
+        // With the feature off, a broken state directory must not fail ordinary saves.
+        await using var enabled = await StartAsync();
+        await enabled.Service.ProvisionAsync("agent1");
+        var path = enabled.SecretState.StatePath!;
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Provisioning:BaseDir"] = enabled.BaseDir }).Build();
+        var disabled = new SecretProxyStateWriter(
+            enabled.Services.GetRequiredService<IServiceScopeFactory>(), config, SecretProxySettings.Disabled,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<SecretProxyStateWriter>.Instance)
+        {
+            ReplaceFile = (_, _) => throw new IOException("synthetic"),
+        };
+        if (deleteFailsToo)
+            disabled.DeleteFile = _ => throw new UnauthorizedAccessException("synthetic");
+
+        Assert.Null(await disabled.WriteAsync());
+
+        // Emptying failed, so the leftover was removed instead; where even that failed it stays, and
+        // a forwarder still running refuses it once it is too old.
+        Assert.Equal(deleteFailsToo, File.Exists(path));
     }
 
     // ── GitHub App ────────────────────────────────────────────────────────────

@@ -125,7 +125,7 @@ internal sealed class ProxyHarness : IAsyncDisposable
     public SecretProxyState DefaultState() => new()
     {
         Version = SecretProxyState.CurrentVersion,
-        GeneratedAtUtc = DateTimeOffset.UnixEpoch,
+        GeneratedAtUtc = Time.GetUtcNow(),
         Bindings =
         [
             new SecretProxyBinding(KeyA, SecretBindingRules.KindStatic, [HostA], "Authorization", SecretA),

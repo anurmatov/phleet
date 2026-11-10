@@ -543,11 +543,12 @@ public sealed class ContainerProvisioningService(
                 if (await docker.ConnectToNetworkAsync(network, containerId, ct, secretAddress))
                     continue;
                 await docker.RemoveContainerAsync(agent.ContainerName, ct);
-                await RecordSecretGrantsAsync(db, agent.Id, SecretPlan.None, ct);
+                var cleanupFault = await RecordSecretGrantsAsync(db, agent.Id, SecretPlan.None, ct);
                 return ProvisionResult.Fail(agentName,
                     $"secret_proxy_network_unavailable: could not attach '{agent.ContainerName}' to {network} at {secretAddress}. "
                     + "Check that fleet-secrets is running, that the network exists with the configured subnet, "
-                    + "and that no other container holds that address.");
+                    + "and that no other container holds that address."
+                    + (cleanupFault is null ? "" : $" Also: {cleanupFault}"));
             }
 
             var ok = await docker.ConnectToNetworkAsync(network, containerId, ct);
@@ -601,8 +602,12 @@ public sealed class ContainerProvisioningService(
             return ProvisionResult.Fail(agentName,
                 $"failed to remove container '{agent.ContainerName}' — check orchestrator logs");
 
-        // The container is gone, and its placeholders with it: the forwarder forgets them now.
-        await RecordSecretGrantsAsync(db, agent.Id, SecretPlan.None, ct);
+        // The container is gone, and its placeholders with it: the forwarder forgets them now. If it
+        // could not be told, that is not a clean deprovision: say so rather than report success while
+        // the old grants may still be honoured.
+        if (await RecordSecretGrantsAsync(db, agent.Id, SecretPlan.None, ct) is { } revokeFault)
+            return ProvisionResult.Fail(agentName,
+                $"container '{agent.ContainerName}' stopped and removed, but its secret grants were not revoked at fleet-secrets: {revokeFault}");
 
         return ProvisionResult.Ok(agentName, $"container '{agent.ContainerName}' stopped and removed");
     }
@@ -631,8 +636,20 @@ public sealed class ContainerProvisioningService(
         if (!changed)
             return null;
 
-        await db.SaveChangesAsync(ct);
-        return secretState is null ? null : await secretState.WriteAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (SecretStatePublicationException ex)
+        {
+            // The hashes are saved but fleet-secrets was not told (the save interceptor's write
+            // failed and the old state was withdrawn). Not a success, whichever way the change went.
+            return ex.Message;
+        }
+
+        if (secretState is null)
+            return null;
+        return await secretState.WriteAsync(ct) is { } fault ? new SecretStatePublicationException(fault).Message : null;
     }
 
     /// <summary>

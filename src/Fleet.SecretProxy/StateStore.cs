@@ -10,8 +10,21 @@ internal sealed class StateSnapshot
     private readonly Dictionary<string, SecretProxyGrant> _grantsByHash;
     private readonly HashSet<string> _hosts;
 
+    /// <summary>When the orchestrator wrote this state.</summary>
+    public DateTimeOffset GeneratedAtUtc { get; }
+
+    /// <summary>The bindings and grants without the timestamp: equal for two writes of the same state.</summary>
+    public string Content { get; }
+
+    public int BindingCount { get; }
+    public int GrantCount { get; }
+
     public StateSnapshot(SecretProxyState state)
     {
+        GeneratedAtUtc = state.GeneratedAtUtc;
+        Content = (state with { GeneratedAtUtc = default }).Serialize();
+        BindingCount = state.Bindings.Count;
+        GrantCount = state.Grants.Count;
         _bindings = state.Bindings.ToDictionary(b => b.Key, StringComparer.Ordinal);
         _hosts = state.Bindings.SelectMany(b => b.Hosts).ToHashSet(StringComparer.Ordinal);
 
@@ -51,19 +64,26 @@ internal sealed class StateSnapshot
 /// still two states. The file is small and replaced atomically, so a read sees one whole version.
 /// </para>
 /// <para>
-/// It fails closed. A file that is missing, unreadable or invalid yields no snapshot, and with no
-/// snapshot the forwarder refuses every request: it never keeps serving a state it can no longer read.
+/// It fails closed. A file that is missing, unreadable, invalid or older than
+/// <see cref="SecretProxyOptions.MaxStateAgeSeconds"/> yields no snapshot, and with no snapshot the
+/// forwarder refuses every request. The age bound matters because the file is the only channel a
+/// revocation has: if the orchestrator can no longer replace or remove it, the grants in it must still
+/// stop working. Age is checked on every request, against the time written inside the file.
 /// </para>
 /// </remarks>
-internal sealed class StateStore(SecretProxyOptions options, ILogger<StateStore> logger)
+internal sealed class StateStore(SecretProxyOptions options, ILogger<StateStore> logger, TimeProvider? time = null)
 {
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private readonly TimeSpan _maxAge = TimeSpan.FromSeconds(options.MaxStateAgeSeconds);
     private readonly object _lock = new();
     private byte[]? _bytes;
     private StateSnapshot? _snapshot;
+    private string? _parseFault = "state_missing";
     private string? _fault = "state_missing";
     private string? _loggedFault;
+    private string? _loggedContent;
 
-    /// <summary>The fixed fault code of the current state, or null when a snapshot is loaded.</summary>
+    /// <summary>The fixed fault code of the current state, or null when a usable snapshot is loaded.</summary>
     public string? Fault
     {
         get
@@ -98,19 +118,21 @@ internal sealed class StateStore(SecretProxyOptions options, ILogger<StateStore>
                 {
                     _bytes = null;
                     _snapshot = null;
-                    _fault = readFault;
+                    _parseFault = readFault;
                 }
                 else if (_bytes is null || !bytes.AsSpan().SequenceEqual(_bytes))
                 {
                     _bytes = bytes;
                     var state = SecretProxyState.TryParse(System.Text.Encoding.UTF8.GetString(bytes), out var fault);
                     _snapshot = state is null ? null : new StateSnapshot(state);
-                    _fault = fault;
-                    if (state is not null)
-                        logger.LogInformation(
-                            "SecretProxy state loaded: bindings={Bindings} grants={Grants}",
-                            state.Bindings.Count, state.Grants.Count);
+                    _parseFault = fault;
                 }
+
+                // Judged now, not when the file was read: an unchanged file grows stale by itself.
+                var usable = _snapshot is not null && _time.GetUtcNow() - _snapshot.GeneratedAtUtc <= _maxAge
+                    ? _snapshot
+                    : null;
+                _fault = _snapshot is null ? _parseFault : usable is null ? "state_stale" : null;
 
                 if (_fault != _loggedFault)
                 {
@@ -118,8 +140,15 @@ internal sealed class StateStore(SecretProxyOptions options, ILogger<StateStore>
                     if (_fault is not null)
                         logger.LogError("SecretProxy state unavailable ({Fault}); every request is refused", _fault);
                 }
+                // The file is rewritten every few seconds to stay fresh; say so only when what it grants changed.
+                if (usable is not null && usable.Content != _loggedContent)
+                {
+                    _loggedContent = usable.Content;
+                    logger.LogInformation(
+                        "SecretProxy state loaded: bindings={Bindings} grants={Grants}", usable.BindingCount, usable.GrantCount);
+                }
 
-                return _snapshot;
+                return usable;
             }
         }
     }

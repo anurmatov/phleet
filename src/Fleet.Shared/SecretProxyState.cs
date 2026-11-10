@@ -27,6 +27,16 @@ public sealed record SecretProxyState
     public const string CaCertificateFile = "ca.crt";
     public const string CaKeyFile = "ca.key";
 
+    /// <summary>How often the orchestrator rewrites the file, changed or not, so its timestamp stays fresh.</summary>
+    public const int HeartbeatSeconds = 10;
+
+    /// <summary>
+    /// The default age past which the forwarder refuses a state. The file is the only way a revocation
+    /// reaches the forwarder, so a state that stops being refreshed (the orchestrator is down, or can
+    /// no longer write or even remove the file) must stop being honoured on its own.
+    /// </summary>
+    public const int DefaultMaxAgeSeconds = 120;
+
     /// <summary>Where the CA certificate is mounted in an agent container, and what trusts it there.</summary>
     public const string AgentCaPath = "/usr/local/share/ca-certificates/fleet-secrets.crt";
 

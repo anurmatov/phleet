@@ -31,7 +31,7 @@ public sealed class GitHubAppTests : IDisposable
         proxy.WriteState(new SecretProxyState
         {
             Version = SecretProxyState.CurrentVersion,
-            GeneratedAtUtc = DateTimeOffset.UnixEpoch,
+            GeneratedAtUtc = proxy.Time.GetUtcNow(),
             Bindings = [new SecretProxyBinding(Key, SecretBindingRules.KindGitHubApp, [Api, Git], "Authorization", StoredKey, AppId)],
             Grants = [new SecretProxyGrant("agent1", Loopback, Key, SecretPlaceholders.Hash(proxy.PlaceholderA))],
         });
@@ -142,8 +142,15 @@ public sealed class GitHubAppTests : IDisposable
         Assert.Equal(1, Minting(proxy).Count(c => c.Uri.AbsolutePath == "/app/installations"));
         Assert.Equal(2, Minting(proxy).Count(c => c.Uri.AbsolutePath.EndsWith("/access_tokens", StringComparison.Ordinal)));
 
-        // 56 minutes later the token has under five minutes left.
+        // 56 minutes later the token has under five minutes left. The orchestrator has kept the state fresh.
         proxy.Time.Advance(TimeSpan.FromMinutes(56));
+        proxy.WriteState(new SecretProxyState
+        {
+            Version = SecretProxyState.CurrentVersion,
+            GeneratedAtUtc = proxy.Time.GetUtcNow(),
+            Bindings = [new SecretProxyBinding(Key, SecretBindingRules.KindGitHubApp, [Api, Git], "Authorization", StoredKey, AppId)],
+            Grants = [new SecretProxyGrant("agent1", Loopback, Key, SecretPlaceholders.Hash(proxy.PlaceholderA))],
+        });
         using var later = await client.SendAsync(Get($"https://{Api}/repos/acme/widgets", "Bearer " + proxy.PlaceholderA));
 
         Assert.NotEqual(targets[0].Header("Authorization"), Targets(proxy)[^1].Header("Authorization"));
@@ -211,7 +218,7 @@ public sealed class GitHubAppTests : IDisposable
         proxy.WriteState(new SecretProxyState
         {
             Version = SecretProxyState.CurrentVersion,
-            GeneratedAtUtc = DateTimeOffset.UnixEpoch,
+            GeneratedAtUtc = proxy.Time.GetUtcNow(),
             Bindings = [new SecretProxyBinding(Key, SecretBindingRules.KindGitHubApp, [Api, Git], "Authorization", key == "VALID" ? StoredKey : key, appId)],
             Grants = [new SecretProxyGrant("agent1", Loopback, Key, SecretPlaceholders.Hash(proxy.PlaceholderA))],
         });
@@ -236,7 +243,7 @@ public sealed class GitHubAppTests : IDisposable
         proxy.WriteState(new SecretProxyState
         {
             Version = SecretProxyState.CurrentVersion,
-            GeneratedAtUtc = DateTimeOffset.UnixEpoch,
+            GeneratedAtUtc = proxy.Time.GetUtcNow(),
             Bindings = [new SecretProxyBinding(Key, SecretBindingRules.KindGitHubApp, [Api, Git], "Authorization", rotated.ExportRSAPrivateKeyPem(), AppId)],
             Grants = [new SecretProxyGrant("agent1", Loopback, Key, SecretPlaceholders.Hash(proxy.PlaceholderA))],
         });
@@ -274,7 +281,7 @@ public sealed class GitHubAppTests : IDisposable
         proxy.WriteState(new SecretProxyState
         {
             Version = SecretProxyState.CurrentVersion,
-            GeneratedAtUtc = DateTimeOffset.UnixEpoch,
+            GeneratedAtUtc = proxy.Time.GetUtcNow(),
             Bindings = [new SecretProxyBinding(Key, SecretBindingRules.KindGitHubApp, [Api, Git], "Authorization", StoredKey, AppId)],
             Grants = [],
         });

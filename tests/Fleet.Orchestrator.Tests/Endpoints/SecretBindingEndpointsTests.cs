@@ -61,6 +61,9 @@ public class SecretBindingEndpointsTests : IAsyncLifetime
 
         _app = builder.Build();
 
+        // The production mapping of an unpublished change to a 503, called rather than copied.
+        _app.UseSecretStateFaults();
+
         // The production gate, called rather than copied.
         _app.Use(async (context, next) =>
         {
@@ -375,6 +378,122 @@ public class SecretBindingEndpointsTests : IAsyncLifetime
         using var second = await PutAsync(Key, new { hosts = new[] { "moved.example.test" } });
 
         Assert.Equal(["moved.example.test"], State().Bindings.Single().Hosts);
+    }
+
+    // ── A committed change that cannot be published is never reported as done ─
+
+    private SecretProxyStateWriter Writer => _app.Services.GetRequiredService<SecretProxyStateWriter>();
+
+    private void ForceWriteFailure(bool deleteFailsToo = false)
+    {
+        Writer.ReplaceFile = (_, _) => throw new IOException("synthetic: no space left on device");
+        if (deleteFailsToo)
+            Writer.DeleteFile = _ => throw new UnauthorizedAccessException("synthetic: read-only");
+    }
+
+    private async Task<string> SeedAHeldGrantAsync()
+    {
+        var hash = SecretPlaceholders.Hash(SecretPlaceholders.Create());
+        await SeedAgentAsync("agent1", hash, Key);
+        using var put = await PutAsync(Key, new { hosts = new[] { "api.example.test" } });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+        Assert.Equal(hash, State().Grants.Single().PlaceholderSha256);
+        return hash;
+    }
+
+    [Fact]
+    public async Task McpRevoke_WhenTheStateCannotBeWritten_DoesNotSayRemoved_AndTheStaleStateIsWithdrawn()
+    {
+        await SeedAHeldGrantAsync();
+        ForceWriteFailure();
+
+        var answer = await Tool().ManageAgentEnvRefsAsync("agent1", "remove", Key);
+
+        Assert.DoesNotContain("Removed env ref", answer);
+        Assert.Contains("NOT published", answer);
+        Assert.Contains("secret_proxy_state_write_failed", answer);
+        // The file that still authorised the grant is gone: the forwarder now refuses everything.
+        Assert.False(File.Exists(StateFile));
+        // The database has the revocation; the next write that succeeds publishes it.
+        Assert.Equal(0, await DbAsync(db => db.AgentEnvRefs.CountAsync()));
+        Writer.ReplaceFile = (target, content) => File.WriteAllText(target, content);
+        Assert.Null(await Writer.WriteAsync());
+        Assert.Empty(State().Grants);
+    }
+
+    [Fact]
+    public async Task RestRevoke_WhenTheStateCannotBeWritten_Is503_NamesTheFault_AndTheStaleStateIsWithdrawn()
+    {
+        await SeedAHeldGrantAsync();
+        ForceWriteFailure();
+
+        using var response = await _client.SendAsync(Authed(HttpMethod.Delete, $"/api/secret-bindings/{Key}?allowPlainDelivery=true"));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal("secret_proxy_state_write_failed", json.GetProperty("fault").GetString());
+        Assert.True(json.GetProperty("saved").GetBoolean());
+        Assert.False(json.GetProperty("enforced").GetBoolean());
+        Assert.DoesNotContain(Value, await response.Content.ReadAsStringAsync());
+        Assert.False(File.Exists(StateFile));
+    }
+
+    [Fact]
+    public async Task BindingChange_WhenTheStateCannotBeWritten_Is503()
+    {
+        await SeedAHeldGrantAsync();
+        ForceWriteFailure();
+
+        using var response = await PutAsync(Key, new { hosts = new[] { "moved.example.test" } });
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.False(File.Exists(StateFile));
+    }
+
+    [Fact]
+    public async Task AnySaveThatRevokes_WhenTheStateCannotBeWritten_Throws_SoNoCallerCanReportSuccess()
+    {
+        await SeedAHeldGrantAsync();
+        ForceWriteFailure();
+
+        var error = await Assert.ThrowsAsync<SecretStatePublicationException>(() => DbAsync(async db =>
+        {
+            db.Agents.Remove(await db.Agents.SingleAsync());
+            return await db.SaveChangesAsync();
+        }));
+
+        Assert.Equal("secret_proxy_state_write_failed", error.Fault);
+        Assert.False(File.Exists(StateFile));
+    }
+
+    [Fact]
+    public async Task Revoke_WhenTheStateCanBeNeitherWrittenNorWithdrawn_StillFails_AndTheOldFileKeepsItsOldTimestamp()
+    {
+        await SeedAHeldGrantAsync();
+        var before = File.ReadAllText(StateFile);
+        ForceWriteFailure(deleteFailsToo: true);
+
+        var answer = await Tool().ManageAgentEnvRefsAsync("agent1", "remove", Key);
+
+        Assert.Contains("NOT published", answer);
+        // The stale file is still there with its old timestamp; the forwarder's age bound ends it
+        // (Fleet.SecretProxy.Tests: StateOlderThanTheAgeBound_IsRefusedWhole).
+        Assert.Equal(before, File.ReadAllText(StateFile));
+    }
+
+    [Fact]
+    public async Task ASaveThatTouchesNothingSecret_IsUnaffectedByABrokenStateDirectory()
+    {
+        await SeedAHeldGrantAsync();
+        ForceWriteFailure();
+
+        await DbAsync(async db =>
+        {
+            (await db.Agents.SingleAsync()).DisplayName = "renamed";
+            return await db.SaveChangesAsync();
+        });
+
+        Assert.True(File.Exists(StateFile));
     }
 
     // ── The MCP tool cannot grant a bound secret ──────────────────────────────

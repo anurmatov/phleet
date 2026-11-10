@@ -43,7 +43,11 @@ public sealed class ManageAgentEnvRefsTool(IServiceScopeFactory scopeFactory)
                          + "(dashboard, or PUT /api/agents/{name}/config). Nothing was changed.";
 
                 agent.EnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = env_key_name });
-                await db.SaveChangesAsync();
+                try { await db.SaveChangesAsync(); }
+                catch (Fleet.Orchestrator.Services.SecretStatePublicationException ex)
+                {
+                    return $"Env ref '{env_key_name}' was saved for agent '{agent_name}', but NOT published: {ex.Message}";
+                }
                 return $"Added env ref '{env_key_name}' to agent '{agent_name}'.";
             }
 
@@ -54,7 +58,12 @@ public sealed class ManageAgentEnvRefsTool(IServiceScopeFactory scopeFactory)
                     return $"Env ref '{env_key_name}' not found for agent '{agent_name}'.";
 
                 db.AgentEnvRefs.Remove(existing);
-                await db.SaveChangesAsync();
+                try { await db.SaveChangesAsync(); }
+                catch (Fleet.Orchestrator.Services.SecretStatePublicationException ex)
+                {
+                    // Never "Removed": the grant is gone from the database but was not revoked at the forwarder.
+                    return $"Env ref '{env_key_name}' was deleted for agent '{agent_name}', but the revocation was NOT published: {ex.Message}";
+                }
                 return $"Removed env ref '{env_key_name}' from agent '{agent_name}'.";
             }
 

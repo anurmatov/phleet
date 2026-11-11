@@ -323,6 +323,12 @@ An install that ran the stock OpenShell (managed sandbox runtime) build must fol
 **[docs/upgrading/remove-managed-runtime.md](docs/upgrading/remove-managed-runtime.md)** before
 deploying: that integration was removed.
 
+### Push notifications (optional)
+
+The orchestrator can notify the [iOS app](https://github.com/anurmatov/phleet-ios) when a gate is
+waiting, a workflow failed or an agent went down. Off by default; it needs an Apple push key in
+`.env`. See [`docs/push-notifications.md`](docs/push-notifications.md).
+
 ## Troubleshooting
 
 ### Agents start returning "unauthorized" from Claude / Codex

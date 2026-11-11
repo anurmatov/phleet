@@ -87,7 +87,10 @@ public sealed class AddSecretBindingsMigrationTests : IAsyncLifetime
 
         await MigrateAsync(Target);
         await using var db = NewContext();
-        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        // Later migrations exist; this one is back in place.
+        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
+        Assert.Equal(1L, await ScalarAsync<long>(
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'secret_bindings'"));
     }
 
     private OrchestratorDbContext NewContext() =>

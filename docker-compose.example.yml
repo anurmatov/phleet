@@ -440,6 +440,13 @@ services:
       - EpicGrants__AutonomyEnabled=${FLEET_AUTONOMY_ENABLED:-false}
       - EpicDriverWatcher__Enabled=${FLEET_EPIC_WATCHER_ENABLED:-false}
       - EpicDriverWatcher__IntervalSeconds=${FLEET_EPIC_WATCHER_INTERVAL_SECONDS:-300}
+      # Push notifications to the iOS app: off unless FLEET_PUSH_ENABLED=true and all four APNs
+      # values are set. See docs/push-notifications.md.
+      - Push__Enabled=${FLEET_PUSH_ENABLED:-false}
+      - Push__ApnsKeyBase64=${FLEET_PUSH_APNS_KEY_BASE64:-}
+      - Push__ApnsKeyId=${FLEET_PUSH_APNS_KEY_ID:-}
+      - Push__ApnsTeamId=${FLEET_PUSH_APNS_TEAM_ID:-}
+      - Push__ApnsTopic=${FLEET_PUSH_APNS_TOPIC:-}
       # Secret placeholders: off unless FLEET_SECRETS_ENABLED=true. The subnet and address must equal
       # the fleet-secrets-net definition and the fleet-secrets service below.
       - SecretProxy__Enabled=${FLEET_SECRETS_ENABLED:-false}

@@ -15,6 +15,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<AgentInstruction> AgentInstructions => Set<AgentInstruction>();
     public DbSet<AgentEnvRef> AgentEnvRefs => Set<AgentEnvRef>();
     public DbSet<SecretBinding> SecretBindings => Set<SecretBinding>();
+    public DbSet<PushDevice> PushDevices => Set<PushDevice>();
     public DbSet<AgentTelegramUser> AgentTelegramUsers => Set<AgentTelegramUser>();
     public DbSet<AgentTelegramGroup> AgentTelegramGroups => Set<AgentTelegramGroup>();
     public DbSet<AgentNetwork> AgentNetworks => Set<AgentNetwork>();
@@ -206,6 +207,15 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
              .WithMany(a => a.EnvRefs)
              .HasForeignKey(x => x.AgentId)
              .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PushDevice>(e =>
+        {
+            e.ToTable("push_devices");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.DeviceId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.Token).HasMaxLength(200).IsRequired();
+            e.HasIndex(x => x.DeviceId).IsUnique();
         });
 
         modelBuilder.Entity<SecretBinding>(e =>

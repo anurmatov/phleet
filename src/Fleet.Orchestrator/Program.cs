@@ -6,10 +6,12 @@ using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
+using Fleet.Orchestrator.Services.Push;
 using Fleet.Shared;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -111,6 +113,24 @@ builder.Services.AddSingleton<IEpicDriverTemporal>(sp => sp.GetRequiredService<T
 builder.Services.AddSingleton<EpicRunLinkage>();
 builder.Services.AddSingleton<EpicDriverStateService>();
 builder.Services.AddHostedService<EpicDriverWatcherService>();
+
+// Push notifications to the first-party iOS app (off by default). The key is parsed only when
+// something asks for the client, which the notifier does only when the feature is on and complete.
+builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.Section));
+builder.Services.AddSingleton<OperatorStops>();
+builder.Services.TryAddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(sp =>
+{
+    var push = sp.GetRequiredService<IOptions<PushOptions>>().Value;
+    return new ApnsProviderToken(push.ApnsKeyBase64, push.ApnsKeyId, push.ApnsTeamId);
+});
+builder.Services.AddHttpClient(ApnsClient.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton<IApnsClient>(sp => new ApnsClient(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(ApnsClient.HttpClientName),
+    sp.GetRequiredService<IOptions<PushOptions>>(),
+    sp.GetRequiredService<ApnsProviderToken>(),
+    sp.GetRequiredService<TimeProvider>()));
+builder.Services.AddHostedService<PushNotifierService>();
 
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services
@@ -354,6 +374,9 @@ app.MapCommsJournalEndpoints();
 // Mapped from Endpoints/OutputStyleEndpoints.cs so the endpoint tests exercise the same
 // handlers a live orchestrator serves rather than a copy of them.
 app.MapOutputStyleEndpoints();
+
+// REST: /api/push — device registration for push notifications to the iOS app.
+app.MapPushEndpoints();
 
 // Secret bindings: which .env keys agents hold only as placeholders, and the hosts each may reach.
 app.MapSecretBindingEndpoints();
@@ -619,7 +642,7 @@ app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory sco
 });
 
 // REST: stop an agent's container via Docker API
-app.MapPost("/api/agents/{name}/stop", async (string name, AgentRegistry registry, DockerService docker) =>
+app.MapPost("/api/agents/{name}/stop", async (string name, AgentRegistry registry, DockerService docker, OperatorStops operatorStops) =>
 {
     var agent = registry.Get(name);
     if (agent is null)
@@ -627,6 +650,8 @@ app.MapPost("/api/agents/{name}/stop", async (string name, AgentRegistry registr
 
     var containerName = agent.ContainerName ?? name;
     var ok = await docker.StopContainerAsync(containerName);
+    // A stop someone asked for is not an agent going down: the push notifier stays quiet about it.
+    if (ok) operatorStops.MarkStopped(name);
 
     return ok
         ? Results.Ok(new { message = $"Container '{containerName}' stop requested" })

@@ -1084,6 +1084,9 @@ namespace Fleet.Orchestrator.Migrations
                         .HasColumnType("varchar(16)")
                         .HasDefaultValue("static");
 
+                    b.Property<string>("SshKnownHosts")
+                        .HasColumnType("text");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime(6)");
 

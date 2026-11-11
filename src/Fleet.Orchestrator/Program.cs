@@ -114,9 +114,11 @@ builder.Services.AddSingleton<EpicRunLinkage>();
 builder.Services.AddSingleton<EpicDriverStateService>();
 builder.Services.AddHostedService<EpicDriverWatcherService>();
 
-// Push notifications to the first-party iOS app (off by default). The key is parsed only when
-// something asks for the client, which the notifier does only when the feature is on and complete.
+// Push notifications to the first-party iOS app (off by default). PushReadiness reads the key once
+// when the feature is on, and the notifier and /api/push both follow its answer; the client is
+// built only when it says the sender can run.
 builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.Section));
+builder.Services.AddSingleton<PushReadiness>();
 builder.Services.AddSingleton<OperatorStops>();
 builder.Services.TryAddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(sp =>

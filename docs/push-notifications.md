@@ -91,9 +91,11 @@ run identifier, signal name, or agent name.
 - **At most ten devices.**
 - **Delivery is Apple's.** "Accepted" means Apple took the notification, not that the phone showed
   it. Focus modes, notification settings and an offline phone are outside this.
-- **A missed pass is not retried.** If the failure query or Apple is unavailable, that pass is
-  skipped; an event still true on the next pass is announced then, and one that has already gone
-  is not.
+- **A refused send is tried again, per device.** A device that did not accept a notification
+  (Apple busy or unreachable) is sent it again on later passes while the event is still true, up
+  to ten sends in all: about five minutes at the default interval. A device that accepted is not
+  sent it again, and a gate decided in the meantime is not announced late. What is owed is held in
+  memory, so a restart owes nothing. If the failure query is unavailable, that pass is skipped.
 - **The key signs for your whole Apple team.** It lives only in `.env` and the orchestrator's
   environment. No endpoint returns it and it is never logged. Do not give it to an agent as an Env
   Ref.
@@ -102,16 +104,18 @@ run identifier, signal name, or agent name.
 
 With `FLEET_PUSH_ENABLED=true` and a value missing or unusable, the orchestrator logs
 `push_misconfigured` once, with the name of what is wrong and never its value, and the feature
-stays off:
+stays off. The key is checked by signing with it once, so a key that would only fail at the first
+notification is caught here:
 
 | Logged | Meaning |
 |---|---|
 | `push_apns_key_missing`, `push_apns_key_id_missing`, `push_apns_team_id_missing`, `push_apns_topic_missing` | That setting is empty |
 | `push_apns_host_invalid` | `Push__ApnsHost` is not a bare host name |
-| `the APNs key …` | The key is not base64 of a `.p8` file, not PEM text, or not a P-256 key |
+| `the APNs key …` | The key is not base64 of a `.p8` file, not PEM text, not a P-256 key, or a public key that cannot sign |
 
-While off, `PUT /api/push/devices/{deviceId}` answers `503 push_disabled` and stores nothing, so
-the app can say that notifications are not available rather than claim they are on.
+While off, `GET /api/push` answers `"enabled": false` and `PUT /api/push/devices/{deviceId}`
+answers `503 push_disabled` and stores nothing, so the app can say that notifications are not
+available rather than claim they are on. Both follow the same check as the sender.
 
 ## Troubleshooting
 
@@ -121,6 +125,7 @@ the app can say that notifications are not available rather than claim they are 
 | `Push not sent: … (TopicDisallowed)` or `(BadTopic)` | The bundle identifier is wrong, or the key is restricted to another app |
 | `Push device … is no longer registered (BadDeviceToken)` | The build uses the other APNs environment than this host (see Limits) |
 | `Push not sent: … (transport)` | The orchestrator cannot reach Apple's host over HTTP/2 on port 443 |
+| `Push not sent: … given up after 10 attempts` | Apple refused the same notification to that device every time; read the reason |
 | `Push notifier pass failed` | The failure query or the database was unavailable for that pass |
 
 ## Files and tests

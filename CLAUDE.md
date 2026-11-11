@@ -401,10 +401,13 @@ poller's `WorkflowStore` snapshot, `ListRecentFailuresAsync` and the `AgentRegis
 sends an APNs alert (HTTP/2, ES256 provider token kept 50 minutes) to each row of `push_devices`
 (migration `AddPushDevices`) for three events: a run enters a phase a registered signal names, a
 run closes `Failed`/`TimedOut`, an agent seen alive is silent past the grace period.
-`PushEventDetector` announces each once and nothing on its first pass after start-up. `OperatorStops`
+`PushEventDetector` announces each once and nothing on its first pass after start-up. `PushDelivery`
+sends a notification again, in memory, only to a device that did not accept it, while
+`PushEventDetector.IsCurrent` and for at most `MaxAttempts` (10) sends. `OperatorStops`
 (in memory) is set by `POST /api/agents/{name}/stop`, so a requested stop is not "down". Enabled
-with a value missing logs `push_misconfigured` once and is treated as off; `PUT
-/api/push/devices/{deviceId}` then answers `503 push_disabled`.
+with a value missing or a key that cannot sign logs `push_misconfigured` once and is treated as
+off. `PushReadiness` decides that once; the notifier and `/api/push` both read it, so `GET` then
+says `enabled: false` and `PUT /api/push/devices/{deviceId}` answers `503 push_disabled`.
 
 MUST NOT: put task text, comments, failure messages or output in a notification (`PushMessages`:
 identifying fields only); log or return a device token or any part of the key; delete a device on

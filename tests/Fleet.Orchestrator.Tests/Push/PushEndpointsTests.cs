@@ -1,12 +1,16 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
+using Fleet.Orchestrator.Models;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Services.Push;
+using Fleet.Orchestrator.Tests.EpicGrants;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -16,6 +20,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace Fleet.Orchestrator.Tests.Push;
 
@@ -37,6 +42,9 @@ public class PushEndpointsTests : IAsyncLifetime
     private WebApplication _app = null!;
     private HttpClient _client = null!;
     private bool _enabled = true;
+    private string _key = KeyBase64(ECDsa.Create(ECCurve.NamedCurves.nistP256));
+
+    private static string KeyBase64(ECDsa key) => Convert.ToBase64String(Encoding.UTF8.GetBytes(key.ExportPkcs8PrivateKeyPem()));
 
     public Task InitializeAsync() => StartAsync();
 
@@ -52,11 +60,12 @@ public class PushEndpointsTests : IAsyncLifetime
         builder.Services.Configure<PushOptions>(o =>
         {
             o.Enabled = _enabled;
-            o.ApnsKeyBase64 = "synthetic";
+            o.ApnsKeyBase64 = _key;
             o.ApnsKeyId = "KEYID12345";
             o.ApnsTeamId = "TEAMID1234";
             o.ApnsTopic = "com.example.app";
         });
+        builder.Services.AddSingleton<PushReadiness>();
 
         _app = builder.Build();
         _app.Use(async (context, next) =>
@@ -196,6 +205,54 @@ public class PushEndpointsTests : IAsyncLifetime
         Assert.False(JsonDocument.Parse(await status.Content.ReadAsStringAsync()).RootElement.GetProperty("enabled").GetBoolean());
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("malformed")]
+    [InlineData("wrong-curve")]
+    [InlineData("other-256-bit-curve")]
+    [InlineData("public-only")]
+    public async Task AKeyTheSenderCannotUse_KeepsTheNotifierOff_AndTheRouteSaysSo(string kind)
+    {
+        await DisposeAsync();
+        _key = kind switch
+        {
+            "missing" => "",
+            "malformed" => "synthetic",
+            "wrong-curve" => KeyBase64(ECDsa.Create(ECCurve.NamedCurves.nistP384)),
+            "other-256-bit-curve" => KeyBase64(ECDsa.Create(ECCurve.NamedCurves.brainpoolP256r1)),
+            _ => Convert.ToBase64String(Encoding.UTF8.GetBytes(ECDsa.Create(ECCurve.NamedCurves.nistP256).ExportSubjectPublicKeyInfoPem())),
+        };
+        await StartAsync();
+
+        // The notifier, given the same readiness as the routes and no client to build: it must
+        // stop before asking for one.
+        var log = new CapturingLogger<PushNotifierService>();
+        using var notifier = new PushNotifierService(
+            _app.Services.GetRequiredService<IOptions<PushOptions>>(),
+            _app.Services.GetRequiredService<PushReadiness>(),
+            new WorkflowStore(),
+            new AgentRegistry(null!, NullLogger<AgentRegistry>.Instance),
+            new TemporalClientRegistry(Options.Create(new TemporalOptions()), NullLogger<TemporalClientRegistry>.Instance),
+            new OperatorStops(),
+            _app.Services.GetRequiredService<IServiceScopeFactory>(),
+            _app.Services,
+            TimeProvider.System,
+            log);
+        await notifier.StartAsync(CancellationToken.None);
+        await notifier.ExecuteTask!;
+
+        using var response = await PutAsync("device-0001", new { token = TokenA });
+        using var status = await _client.GetAsync("/api/push");
+
+        var line = Assert.Single(log.Lines);
+        Assert.StartsWith("push_misconfigured: ", line);
+        if (_key.Length > 0) Assert.DoesNotContain(_key, line);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("push_disabled", await ErrorAsync(response));
+        Assert.Empty(await DevicesAsync());
+        Assert.False(JsonDocument.Parse(await status.Content.ReadAsStringAsync()).RootElement.GetProperty("enabled").GetBoolean());
+    }
+
     // ── Reading and removing ─────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -244,8 +301,11 @@ public class PushEndpointsTests : IAsyncLifetime
     private static readonly PushMessage Gate = new("gate", "Merge approval waiting", "example/project · PR #42", new Dictionary<string, string>(), "k1");
     private static readonly PushMessage Failure = new("run", "Workflow failed", "example/project · PR #7", new Dictionary<string, string>(), "k2");
 
+    private PushDelivery NewDelivery(IApnsClient apns) =>
+        new(_app.Services.GetRequiredService<IServiceScopeFactory>(), apns, NullLogger.Instance);
+
     private Task DeliverAsync(IApnsClient apns, params PushMessage[] messages) =>
-        PushDelivery.DeliverAsync(_app.Services.GetRequiredService<IServiceScopeFactory>(), apns, messages, NullLogger.Instance, CancellationToken.None);
+        NewDelivery(apns).DeliverAsync(messages, _ => true, CancellationToken.None);
 
     [Fact]
     public async Task EveryMessage_GoesToEveryDevice()
@@ -293,5 +353,97 @@ public class PushEndpointsTests : IAsyncLifetime
         await DeliverAsync(apns, Gate);
 
         Assert.Empty(apns.Sent);
+    }
+
+    // ── Across passes: the notifier's own pass, with the real detector ───────────────────────
+
+    private static readonly ApnsResult Accepted = new(ApnsOutcome.Accepted);
+    private static readonly ApnsResult Unavailable = new(ApnsOutcome.Failed, "ServiceUnavailable");
+
+    private static WorkflowSummary GateRun(string phase = "merge-approval") =>
+        new("pr-42", "run-1", "UwePrImplementationWorkflow", "fleet", "fleet", "Running", DateTimeOffset.UtcNow.AddHours(-1),
+            PrNumber: 42, Repo: "example/project", Phase: phase, GateRef: "gate-a");
+
+    private sealed class Passes(PushDelivery delivery)
+    {
+        private readonly PushEventDetector _detector = new(TimeSpan.FromMinutes(5), new OperatorStops());
+        public PushDelivery Delivery { get; } = delivery;
+
+        public Task RunAsync(params WorkflowSummary[] running) =>
+            PushNotifierService.PassAsync(_detector, Delivery, running, [], [], DateTimeOffset.UtcNow, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ATransientFailure_IsSentAgain_ToThatDeviceOnly_UntilItIsAccepted()
+    {
+        (await PutAsync("device-0001", new { token = TokenA })).Dispose();
+        (await PutAsync("device-0002", new { token = TokenB })).Dispose();
+        var appleDown = true;
+        var apns = new FakeApns(token => token == TokenA && appleDown ? Unavailable : Accepted);
+        var passes = new Passes(NewDelivery(apns));
+
+        await passes.RunAsync();
+        Assert.Empty(apns.Sent);
+
+        await passes.RunAsync(GateRun());
+        Assert.Equal([(TokenA, "gate"), (TokenB, "gate")], apns.Sent);
+        Assert.Equal(1, passes.Delivery.Owed);
+
+        // The detector has nothing new; the device that missed it is sent it again, the other is not.
+        appleDown = false;
+        await passes.RunAsync(GateRun());
+        Assert.Equal([(TokenA, "gate"), (TokenB, "gate"), (TokenA, "gate")], apns.Sent);
+        Assert.Equal(0, passes.Delivery.Owed);
+
+        await passes.RunAsync(GateRun());
+        Assert.Equal(3, apns.Sent.Count);
+    }
+
+    [Fact]
+    public async Task AFailedNotification_IsNotSentAgain_OnceItsEventHasResolved()
+    {
+        (await PutAsync("device-0001", new { token = TokenA })).Dispose();
+        var apns = new FakeApns(_ => Unavailable);
+        var passes = new Passes(NewDelivery(apns));
+        await passes.RunAsync();
+        await passes.RunAsync(GateRun());
+        Assert.Single(apns.Sent);
+
+        // The gate was decided while Apple was down: the phone is not told about it now.
+        await passes.RunAsync(GateRun(phase: "implementation"));
+
+        Assert.Single(apns.Sent);
+        Assert.Equal(0, passes.Delivery.Owed);
+    }
+
+    [Fact]
+    public async Task ARefusalThatNeverClears_StopsAfterTheLastAttempt()
+    {
+        (await PutAsync("device-0001", new { token = TokenA })).Dispose();
+        var apns = new FakeApns(_ => new ApnsResult(ApnsOutcome.Failed, "TopicDisallowed"));
+        var passes = new Passes(NewDelivery(apns));
+        await passes.RunAsync();
+
+        for (var i = 0; i < PushDelivery.MaxAttempts + 5; i++) await passes.RunAsync(GateRun());
+
+        Assert.Equal(PushDelivery.MaxAttempts, apns.Sent.Count);
+        Assert.Equal(0, passes.Delivery.Owed);
+        Assert.Single(await DevicesAsync());
+    }
+
+    [Fact]
+    public async Task ADeviceRemovedBeforeTheRetry_IsOwedNothing()
+    {
+        (await PutAsync("device-0001", new { token = TokenA })).Dispose();
+        var apns = new FakeApns(_ => Unavailable);
+        var passes = new Passes(NewDelivery(apns));
+        await passes.RunAsync();
+        await passes.RunAsync(GateRun());
+
+        (await DeleteAsync("device-0001")).Dispose();
+        await passes.RunAsync(GateRun());
+
+        Assert.Single(apns.Sent);
+        Assert.Equal(0, passes.Delivery.Owed);
     }
 }

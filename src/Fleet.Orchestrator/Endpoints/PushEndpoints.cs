@@ -1,11 +1,9 @@
 using System.Text.RegularExpressions;
-using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Services.Push;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 
 namespace Fleet.Orchestrator.Endpoints;
 
@@ -30,26 +28,26 @@ public static partial class PushEndpoints
 
     public static IEndpointRouteBuilder MapPushEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/api/push", async ([FromServices] IOptions<PushOptions> options, [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+        app.MapGet("/api/push", async ([FromServices] PushReadiness readiness, [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
         {
             await using var scope = scopes.CreateAsyncScope();
             var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
             return Results.Ok(new
             {
-                enabled = IsOn(options.Value),
+                enabled = readiness.IsReady,
                 devices = db is null ? 0 : await db.PushDevices.CountAsync(ct),
             });
         });
 
         app.MapPut("/api/push/devices/{deviceId}", async (string deviceId, [FromBody] RegisterBody? body,
-            [FromServices] IOptions<PushOptions> options, [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+            [FromServices] PushReadiness readiness, [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
         {
             await using var scope = scopes.CreateAsyncScope();
             var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
             if (db is null) return Results.Problem("Database is not configured");
             // Said before anything is stored: an app that registered against an orchestrator
             // that will never send would otherwise tell its owner that notifications are on.
-            if (!IsOn(options.Value)) return Results.Json(new { error = "push_disabled" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+            if (!readiness.IsReady) return Results.Json(new { error = "push_disabled" }, statusCode: StatusCodes.Status503ServiceUnavailable);
             if (!DeviceIdShape().IsMatch(deviceId)) return Results.BadRequest(new { error = "device_id_invalid" });
             var token = body?.Token?.Trim();
             if (!ApnsClient.IsDeviceToken(token)) return Results.BadRequest(new { error = "token_invalid" });
@@ -89,6 +87,4 @@ public static partial class PushEndpoints
 
         return app;
     }
-
-    private static bool IsOn(PushOptions options) => options.Enabled && options.DescribeFault() is null;
 }

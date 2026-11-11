@@ -42,6 +42,8 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
     private readonly Dictionary<string, DateTimeOffset> _silentSince = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _reportedDown = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _seenAlive = new(StringComparer.OrdinalIgnoreCase);
+    // Agent name → the key of the "down" notification sent for it, while it stays down.
+    private readonly Dictionary<string, string> _downKeys = new(StringComparer.OrdinalIgnoreCase);
     private bool _seeded;
 
     public IReadOnlyList<PushMessage> Observe(
@@ -96,6 +98,7 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
                 }
                 _silentSince.Remove(agent.AgentName);
                 _reportedDown.Remove(agent.AgentName);
+                _downKeys.Remove(agent.AgentName);
                 continue;
             }
 
@@ -118,15 +121,24 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
             if (now - since < agentDownGrace) continue;
 
             _reportedDown.Add(agent.AgentName);
-            messages.Add(PushMessages.AgentDown(agent, since));
+            var down = PushMessages.AgentDown(agent, since);
+            _downKeys[agent.AgentName] = down.Key;
+            messages.Add(down);
         }
         foreach (var gone in _silentSince.Keys.Where(name => !listed.Contains(name)).ToList()) _silentSince.Remove(gone);
         _reportedDown.RemoveWhere(name => !listed.Contains(name));
         _seenAlive.RemoveWhere(name => !listed.Contains(name));
+        foreach (var gone in _downKeys.Keys.Where(name => !listed.Contains(name)).ToList()) _downKeys.Remove(gone);
 
         _seeded = true;
         return messages;
     }
+
+    /// <summary>
+    /// Whether what a notification announced is still true as of the last observation: the gate is
+    /// still waiting, the failure is still in the window, the agent is still down since the same moment.
+    /// </summary>
+    public bool IsCurrent(string key) => _gates.Contains(key) || _failures.Contains(key) || _downKeys.ContainsValue(key);
 
     /// <summary>
     /// The signals a run is waiting for: registered for its type, and naming its current phase. A

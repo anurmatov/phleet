@@ -79,7 +79,11 @@ public sealed class ApnsProviderToken : IDisposable
         try
         {
             key.ImportFromPem(text);
-            if (key.KeySize != 256) throw new FormatException("the APNs key is not a P-256 key");
+            // ES256 is P-256 by name: other 256-bit curves import too, and Apple refuses their tokens.
+            if (key.ExportParameters(false).Curve.Oid?.Value != ECCurve.NamedCurves.nistP256.Oid.Value)
+                throw new FormatException("the APNs key is not a P-256 key");
+            // A public key imports as well and fails only when a token is signed. Sign once here instead.
+            key.SignData([0], HashAlgorithmName.SHA256);
             return key;
         }
         catch (Exception ex) when (ex is ArgumentException or CryptographicException)

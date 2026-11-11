@@ -114,6 +114,26 @@ public class ApnsTests
         Assert.Throws<FormatException>(() => ApnsProviderToken.ImportKey(base64));
     }
 
+    [Fact]
+    public void AnotherCurveOfTheSameSize_IsRefused()
+    {
+        // 256 bits but not P-256: it imports, and Apple refuses every token it signs.
+        var (_, base64) = NewKey(ECCurve.NamedCurves.brainpoolP256r1);
+
+        var ex = Assert.Throws<FormatException>(() => ApnsProviderToken.ImportKey(base64));
+        Assert.Equal("the APNs key is not a P-256 key", ex.Message);
+    }
+
+    [Fact]
+    public void APublicKey_IsRefused_BecauseItCannotSign()
+    {
+        var (key, _) = NewKey();
+        var publicOnly = Convert.ToBase64String(Encoding.UTF8.GetBytes(key.ExportSubjectPublicKeyInfoPem()));
+
+        var ex = Assert.Throws<FormatException>(() => ApnsProviderToken.ImportKey(publicOnly));
+        Assert.Equal("the APNs key could not be read as a private key", ex.Message);
+    }
+
     // ── The request ──────────────────────────────────────────────────────────────────────────
 
     private sealed class FixedTime(DateTimeOffset now) : TimeProvider
@@ -301,6 +321,24 @@ public class ApnsTests
         Assert.Equal("push_apns_team_id_missing", new PushOptions { ApnsKeyBase64 = "k", ApnsKeyId = "i", ApnsTopic = "x" }.DescribeFault());
         Assert.Equal("push_apns_topic_missing", new PushOptions { ApnsKeyBase64 = "k", ApnsKeyId = "i", ApnsTeamId = "t" }.DescribeFault());
         Assert.Equal("push_apns_host_invalid", new PushOptions { ApnsKeyBase64 = "k", ApnsKeyId = "i", ApnsTeamId = "t", ApnsTopic = "x", ApnsHost = "https://x/y" }.DescribeFault());
+    }
+
+    [Fact]
+    public void Readiness_ReadsTheKey_OnlyWhenTheFeatureIsOn()
+    {
+        var (_, base64) = NewKey();
+        PushOptions With(bool enabled, string key) => new() { Enabled = enabled, ApnsKeyBase64 = key, ApnsKeyId = "KEYID12345", ApnsTeamId = "TEAMID1234", ApnsTopic = "com.example.app" };
+
+        var off = new PushReadiness(Options.Create(With(false, "c3ludGhldGlj")));
+        var ready = new PushReadiness(Options.Create(With(true, base64)));
+        var unusable = new PushReadiness(Options.Create(With(true, "c3ludGhldGlj")));
+
+        Assert.False(off.IsReady);
+        Assert.Null(off.Fault);
+        Assert.True(ready.IsReady);
+        Assert.False(unusable.IsReady);
+        Assert.StartsWith("the APNs key ", unusable.Fault);
+        Assert.DoesNotContain("c3ludGhldGlj", unusable.Fault);
     }
 
     [Fact]

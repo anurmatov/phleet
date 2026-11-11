@@ -216,6 +216,30 @@ public class PushEventDetectorTests
         Assert.Empty(Observe(detector, agents: [Agent("spare", TimeSpan.FromHours(3), status: "offline", dbOnly: true)]));
     }
 
+    // ── Still current ────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void WhatWasAnnounced_IsCurrent_UntilItResolves()
+    {
+        var (detector, _) = NewDetector();
+        var failed = Run("pr-7", status: "Failed", phase: null);
+        Observe(detector, agents: [Agent("builder", TimeSpan.Zero)]);
+        var announced = Observe(detector, running: [Run()], failed: [failed], agents: [Agent("builder", TimeSpan.FromMinutes(6))]);
+        var gate = Assert.Single(announced, m => m.Kind == "gate");
+        var run = Assert.Single(announced, m => m.Kind == "run");
+        var agent = Assert.Single(announced, m => m.Kind == "agent");
+
+        // Nothing new on the next pass, and all three are still true.
+        Assert.Empty(Observe(detector, running: [Run()], failed: [failed], agents: [Agent("builder", TimeSpan.FromMinutes(7))]));
+        Assert.All(announced, m => Assert.True(detector.IsCurrent(m.Key)));
+
+        // The gate decided, the failure out of the window, the agent back: none is current.
+        Observe(detector, running: [Run(phase: "implementation", gateRef: null)], agents: [Agent("builder", TimeSpan.Zero)]);
+        Assert.False(detector.IsCurrent(gate.Key));
+        Assert.False(detector.IsCurrent(run.Key));
+        Assert.False(detector.IsCurrent(agent.Key));
+    }
+
     // ── What a notification says ─────────────────────────────────────────────────────────────
 
     [Fact]

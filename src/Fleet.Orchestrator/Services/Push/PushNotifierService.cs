@@ -17,6 +17,7 @@ namespace Fleet.Orchestrator.Services.Push;
 /// </remarks>
 public sealed class PushNotifierService(
     IOptions<PushOptions> options,
+    PushReadiness readiness,
     WorkflowStore workflows,
     AgentRegistry agents,
     TemporalClientRegistry temporal,
@@ -32,28 +33,23 @@ public sealed class PushNotifierService(
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         var o = options.Value;
-        if (!o.Enabled)
+        if (!readiness.Enabled)
         {
             logger.LogInformation("Push notifications disabled");
             return;
         }
-        if (o.DescribeFault() is { } fault)
+        if (readiness.Fault is { } fault)
         {
             // Named once, and treated as off: a half-configured sender must not look like a
-            // working one that happens to be quiet.
+            // working one that happens to be quiet. /api/push reads the same answer.
             logger.LogError("push_misconfigured: {Fault}. Push notifications are off.", fault);
             return;
         }
 
-        IApnsClient client;
-        try { client = services.GetRequiredService<IApnsClient>(); }
-        catch (FormatException ex)
-        {
-            logger.LogError("push_misconfigured: {Reason}. Push notifications are off.", ex.Message);
-            return;
-        }
-
+        // The key was already read once by the readiness check, so this cannot fail on it.
+        var client = services.GetRequiredService<IApnsClient>();
         var detector = new PushEventDetector(TimeSpan.FromSeconds(o.EffectiveAgentDownGraceSeconds), stops);
+        var delivery = new PushDelivery(scopes, client, logger);
         logger.LogInformation("PushNotifierService starting, interval={Interval}s", o.EffectiveIntervalSeconds);
 
         while (!ct.IsCancellationRequested)
@@ -61,8 +57,7 @@ public sealed class PushNotifierService(
             try
             {
                 var failed = await RecentlyFailedAsync(ct);
-                var messages = detector.Observe(workflows.GetAll(), failed, agents.GetAll(), time.GetUtcNow());
-                if (messages.Count > 0) await DeliverAsync(client, messages, ct);
+                await PassAsync(detector, delivery, workflows.GetAll(), failed, agents.GetAll(), time.GetUtcNow(), ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -71,6 +66,19 @@ public sealed class PushNotifierService(
 
             await Task.Delay(TimeSpan.FromSeconds(o.EffectiveIntervalSeconds), time, ct).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
+    }
+
+    /// <summary>
+    /// One look at the fleet: what is new goes to every device, and what a device missed on an
+    /// earlier pass is sent to that device again while it is still true.
+    /// </summary>
+    public static async Task PassAsync(
+        PushEventDetector detector, PushDelivery delivery,
+        IReadOnlyCollection<WorkflowSummary> running, IReadOnlyCollection<WorkflowSummary> recentlyFailed,
+        IReadOnlyCollection<AgentState> agents, DateTimeOffset now, CancellationToken ct)
+    {
+        var messages = detector.Observe(running, recentlyFailed, agents, now);
+        await delivery.DeliverAsync(messages, detector.IsCurrent, ct);
     }
 
     private async Task<IReadOnlyCollection<WorkflowSummary>> RecentlyFailedAsync(CancellationToken ct)
@@ -84,51 +92,93 @@ public sealed class PushNotifierService(
             throw new InvalidOperationException("failure query unavailable", ex);
         }
     }
-
-    private Task DeliverAsync(IApnsClient client, IReadOnlyList<PushMessage> messages, CancellationToken ct) =>
-        PushDelivery.DeliverAsync(scopes, client, messages, logger, ct);
 }
 
-/// <summary>Sends each message to each registered device, and forgets devices Apple says are gone.</summary>
-public static class PushDelivery
+/// <summary>
+/// Sends each new message to each registered device, sends it again on later passes to a device
+/// that did not accept it, and forgets devices Apple says are gone.
+/// </summary>
+/// <remarks>
+/// What a device is owed is held in memory only, so a restart owes nothing and stays quiet. One
+/// entry per event and device at most, and each ends when that device accepts, when the event is no
+/// longer current (the gate decided, the agent back), when the device is removed, or after
+/// <see cref="MaxAttempts"/> sends. A device that accepted is never sent the same event again.
+/// </remarks>
+public sealed class PushDelivery(IServiceScopeFactory scopes, IApnsClient client, ILogger logger)
 {
-    public static async Task DeliverAsync(
-        IServiceScopeFactory scopes, IApnsClient client, IReadOnlyList<PushMessage> messages, ILogger logger, CancellationToken ct)
+    /// <summary>
+    /// Sends of one notification to one device, the first included: about five minutes at the default
+    /// interval. A refusal that is not transient, such as a wrong key or topic, stops here.
+    /// </summary>
+    public const int MaxAttempts = 10;
+
+    private readonly Dictionary<(string Key, string DeviceId), (PushMessage Message, int Attempts)> _owed = [];
+
+    /// <summary>Notifications a device has not accepted yet and will be sent again.</summary>
+    public int Owed => _owed.Count;
+
+    public async Task DeliverAsync(IReadOnlyList<PushMessage> messages, Func<string, bool> isCurrent, CancellationToken ct)
     {
+        foreach (var stale in _owed.Keys.Where(k => !isCurrent(k.Key)).ToList()) _owed.Remove(stale);
+        if (messages.Count == 0 && _owed.Count == 0) return;
+
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
         if (db is null) return;
 
         var devices = await db.PushDevices.ToListAsync(ct);
-        if (devices.Count == 0) return;
+        var byId = devices.ToDictionary(d => d.DeviceId, StringComparer.Ordinal);
+        foreach (var removed in _owed.Keys.Where(k => !byId.ContainsKey(k.DeviceId)).ToList()) _owed.Remove(removed);
 
-        var forget = new List<PushDevice>();
+        // What a device missed earlier, then each new message to every device. Recorded as owed
+        // before it is sent, so a pass that stops part-way leaves the rest for the next one.
+        var sends = _owed.Keys.ToList();
         foreach (var message in messages)
         {
             foreach (var device in devices)
             {
-                if (forget.Contains(device)) continue;
-                var result = await client.SendAsync(device.Token, message, ct);
-                switch (result.Outcome)
-                {
-                    case ApnsOutcome.Accepted:
-                        logger.LogInformation("Push sent: {Kind}", message.Kind);
-                        break;
-                    case ApnsOutcome.Unregistered:
-                        // Apple says this token is finished. Keeping it would mean a failed
-                        // request on every event from now on.
-                        logger.LogInformation("Push device {DeviceId} is no longer registered ({Reason}); forgetting it", device.DeviceId, result.Reason);
-                        forget.Add(device);
-                        break;
-                    default:
-                        logger.LogWarning("Push not sent: {Kind} ({Reason})", message.Kind, result.Reason);
-                        break;
-                }
+                var key = (message.Key, device.DeviceId);
+                if (_owed.TryAdd(key, (message, 0))) sends.Add(key);
+            }
+        }
+
+        var forget = new List<PushDevice>();
+        foreach (var key in sends)
+        {
+            var device = byId[key.DeviceId];
+            if (forget.Contains(device)) continue;
+            var (message, attempts) = _owed[key];
+            var result = await client.SendAsync(device.Token, message, ct);
+            switch (result.Outcome)
+            {
+                case ApnsOutcome.Accepted:
+                    _owed.Remove(key);
+                    logger.LogInformation("Push sent: {Kind}", message.Kind);
+                    break;
+                case ApnsOutcome.Unregistered:
+                    // Apple says this token is finished. Keeping it would mean a failed
+                    // request on every event from now on.
+                    logger.LogInformation("Push device {DeviceId} is no longer registered ({Reason}); forgetting it", device.DeviceId, result.Reason);
+                    forget.Add(device);
+                    break;
+                default:
+                    if (attempts + 1 < MaxAttempts)
+                    {
+                        _owed[key] = (message, attempts + 1);
+                        logger.LogWarning("Push not sent: {Kind} ({Reason}); will try again", message.Kind, result.Reason);
+                    }
+                    else
+                    {
+                        _owed.Remove(key);
+                        logger.LogWarning("Push not sent: {Kind} ({Reason}); given up after {Attempts} attempts", message.Kind, result.Reason, MaxAttempts);
+                    }
+                    break;
             }
         }
 
         if (forget.Count > 0)
         {
+            foreach (var gone in _owed.Keys.Where(k => forget.Any(d => d.DeviceId == k.DeviceId)).ToList()) _owed.Remove(gone);
             db.PushDevices.RemoveRange(forget);
             await db.SaveChangesAsync(ct);
         }

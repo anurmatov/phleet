@@ -11,7 +11,6 @@ using Fleet.Shared;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -114,25 +113,8 @@ builder.Services.AddSingleton<EpicRunLinkage>();
 builder.Services.AddSingleton<EpicDriverStateService>();
 builder.Services.AddHostedService<EpicDriverWatcherService>();
 
-// Push notifications to the first-party iOS app (off by default). PushReadiness reads the key once
-// when the feature is on, and the notifier and /api/push both follow its answer; the client is
-// built only when it says the sender can run.
-builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.Section));
-builder.Services.AddSingleton<PushReadiness>();
-builder.Services.AddSingleton<OperatorStops>();
-builder.Services.TryAddSingleton(TimeProvider.System);
-builder.Services.AddSingleton(sp =>
-{
-    var push = sp.GetRequiredService<IOptions<PushOptions>>().Value;
-    return new ApnsProviderToken(push.ApnsKeyBase64, push.ApnsKeyId, push.ApnsTeamId);
-});
-builder.Services.AddHttpClient(ApnsClient.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(15));
-builder.Services.AddSingleton<IApnsClient>(sp => new ApnsClient(
-    sp.GetRequiredService<IHttpClientFactory>().CreateClient(ApnsClient.HttpClientName),
-    sp.GetRequiredService<IOptions<PushOptions>>(),
-    sp.GetRequiredService<ApnsProviderToken>(),
-    sp.GetRequiredService<TimeProvider>()));
-builder.Services.AddHostedService<PushNotifierService>();
+// Push notifications to the first-party iOS app (off by default).
+builder.Services.AddPushNotifications(builder.Configuration);
 
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services

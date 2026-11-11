@@ -410,7 +410,8 @@ off. `PushReadiness` decides that once; the notifier and `/api/push` both read i
 says `enabled: false` and `PUT /api/push/devices/{deviceId}` answers `503 push_disabled`.
 
 MUST NOT: put task text, comments, failure messages or output in a notification (`PushMessages`:
-identifying fields only); log or return a device token or any part of the key; delete a device on
+identifying fields only); log or return a device token or any part of the key (the `apns` HttpClient
+has no factory loggers, which would log the URI and so the token); delete a device on
 any failure other than Apple saying the token is gone (`ApnsOutcome.Unregistered`). See
 `docs/push-notifications.md`.
 

@@ -1,9 +1,13 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Services.Push;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Orchestrator.Tests.Push;
@@ -296,6 +300,51 @@ public class ApnsTests
         var result = await client.SendAsync(DeviceToken, Message, CancellationToken.None);
 
         Assert.Equal(new ApnsResult(ApnsOutcome.Failed, "transport"), result);
+    }
+
+    private sealed class LogLines : ILoggerProvider, ILogger
+    {
+        public ConcurrentQueue<string> Lines { get; } = new();
+        public ILogger CreateLogger(string categoryName) => this;
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Lines.Enqueue(formatter(state, exception));
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public async Task ASend_ThroughTheRealRegistration_NeverLogsTheDeviceToken()
+    {
+        var (_, base64) = NewKey();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Push:Enabled"] = "true",
+            ["Push:ApnsKeyBase64"] = base64,
+            ["Push:ApnsKeyId"] = "KEYID12345",
+            ["Push:ApnsTeamId"] = "TEAMID1234",
+            ["Push:ApnsTopic"] = "com.example.app",
+        }).Build();
+        var logs = new LogLines();
+        var handler = new Handler(_ => Answer(HttpStatusCode.OK));
+        var services = new ServiceCollection();
+        services.AddLogging(b => b.AddProvider(logs).SetMinimumLevel(LogLevel.Trace));
+        services.AddPushNotifications(configuration);
+        // Only the network is replaced; the handler chain the factory builds around it is the real one.
+        services.AddHttpClient(ApnsClient.HttpClientName).ConfigurePrimaryHttpMessageHandler(() => handler);
+        // A control client with the factory's default loggers, to show this capture would see a token.
+        services.AddHttpClient("control").ConfigurePrimaryHttpMessageHandler(() => handler);
+        await using var provider = services.BuildServiceProvider();
+
+        var result = await provider.GetRequiredService<IApnsClient>().SendAsync(DeviceToken, Message, CancellationToken.None);
+
+        Assert.Equal(ApnsOutcome.Accepted, result.Outcome);
+        Assert.Single(handler.Seen);
+        Assert.DoesNotContain(logs.Lines, line => line.Contains(DeviceToken, StringComparison.OrdinalIgnoreCase));
+
+        using var control = await provider.GetRequiredService<IHttpClientFactory>().CreateClient("control")
+            .PostAsync($"https://api.push.apple.com/3/device/{DeviceToken}", new StringContent("{}"));
+        Assert.Contains(logs.Lines, line => line.Contains(DeviceToken, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

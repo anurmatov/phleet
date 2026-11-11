@@ -281,7 +281,7 @@ else
 
   if [[ "$SECRETS_ENABLED" == "true" ]]; then
     # Owner-only: the state directory holds the bound secret values, the CA directory its key.
-    mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca"
+    mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" "$FLEET_BASE_DIR/secret-proxy/ssh"
     chmod 700 "$FLEET_BASE_DIR/secret-proxy" "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" 2>/dev/null || true
   fi
 

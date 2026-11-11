@@ -65,6 +65,16 @@ if [ -e "$FLEET_SECRETS_CA" ]; then
     echo "Secret placeholders: trusting the fleet-secrets CA."
 fi
 
+# Bound SSH keys. The key stays in fleet-secrets: this directory holds only a signing socket
+# (SSH_AUTH_SOCK already points at it) and the host keys of the hosts the key is bound to. ssh reads
+# those as its system-wide known hosts, so a bound host is verified from the first connection.
+FLEET_SECRETS_SSH=/run/fleet-secrets/ssh
+if [ -d "$FLEET_SECRETS_SSH" ]; then
+    mkdir -p /etc/ssh
+    ln -sfn "$FLEET_SECRETS_SSH/known_hosts" /etc/ssh/ssh_known_hosts
+    echo "Secret placeholders: SSH keys are used through $FLEET_SECRETS_SSH/agent.sock."
+fi
+
 if [ "$PROVIDER" = "gemini" ]; then
     # Gemini auth — OAuth credentials mounted writable directly as ~/.gemini/oauth_creds.json.
     # Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;

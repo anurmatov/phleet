@@ -19,6 +19,9 @@ internal sealed class StateSnapshot
     public int BindingCount { get; }
     public int GrantCount { get; }
 
+    /// <summary>Every grant on an SSH key, with its binding. These never match an HTTPS request.</summary>
+    public IReadOnlyList<(string Agent, SecretProxyBinding Binding)> SshGrants { get; }
+
     public StateSnapshot(SecretProxyState state)
     {
         GeneratedAtUtc = state.GeneratedAtUtc;
@@ -26,7 +29,12 @@ internal sealed class StateSnapshot
         BindingCount = state.Bindings.Count;
         GrantCount = state.Grants.Count;
         _bindings = state.Bindings.ToDictionary(b => b.Key, StringComparer.Ordinal);
-        _hosts = state.Bindings.SelectMany(b => b.Hosts).ToHashSet(StringComparer.Ordinal);
+        // An SSH key has destinations, not HTTPS hosts: the forwarder never answers TLS for them.
+        _hosts = state.Bindings.Where(b => b.Kind != SecretBindingRules.KindSshKey)
+            .SelectMany(b => b.Hosts).ToHashSet(StringComparer.Ordinal);
+        SshGrants = [.. state.Grants
+            .Where(g => _bindings.TryGetValue(g.Key, out var binding) && binding.Kind == SecretBindingRules.KindSshKey)
+            .Select(g => (g.Agent, _bindings[g.Key]))];
 
         // Two grants cannot share a placeholder: 256 random bits. If the file says they do, it is
         // not a state this build wrote, and neither grant is honoured.

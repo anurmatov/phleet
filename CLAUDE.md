@@ -189,6 +189,18 @@ not read `.env`. Kind `github_app` keeps the App key there too: it mints install
 agent's `GH_TOKEN` is a placeholder (`entrypoint.sh` → `gh-auth.sh --placeholder`; the `gh` wrapper
 appends `.owner` as the installation hint).
 
+Kind `ssh_key` is never sent anywhere: the agent gets no variable, only its own read-only
+directory `/run/fleet-secrets/ssh` (`secret-proxy/ssh/<agent>/` on the host, layout in
+`SecretProxySsh`) with a socket (`SSH_AUTH_SOCK`) and the bound hosts' `known_hosts`, and it reaches
+the SSH server directly, unsteered. `SshAgentGate` keeps one stock `ssh-agent` per granted agent with
+the key loaded under destination constraints (`ssh-add -h user@host` against the binding's
+`knownHosts`), so OpenSSH itself signs only for a bound host key and user. The gate re-reads the state
+on every connection and relays only list, sign and session-bind; MUST NOT relay any other agent
+request (add, remove, lock) or write a key to disk (it goes to `ssh-add` on stdin). The state member
+`knownHosts` is omitted for every other kind, so a state without SSH keys is unchanged bytes and an
+older forwarder still reads it. Needs a Linux Docker host (a socket shared by host path). An open SSH
+session survives revocation; new logins do not.
+
 MUST NOT: deliver a bound key any other way (every fault refuses the provision instead:
 `secret_proxy_disabled`, `secret_proxy_ca_missing`, `secret_proxy_network_unavailable`, …; a
 reprovision finds them in `DescribeSecretPlanFaultAsync`, before `DeprovisionAsync`, so a refusal

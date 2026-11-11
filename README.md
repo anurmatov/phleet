@@ -69,6 +69,8 @@ Once setup finishes, the dashboard is live at:
 **👉 http://localhost:3700**
 
 Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `./fleet/.env` — `setup.sh` generates it for you.
+To connect the [iOS app](https://github.com/anurmatov/phleet-ios) to this dashboard, open
+**Credentials → Phone** and scan the setup code; see [`docs/phone-setup-code.md`](docs/phone-setup-code.md).
 
 ### 4. Create your co-CTO agent
 

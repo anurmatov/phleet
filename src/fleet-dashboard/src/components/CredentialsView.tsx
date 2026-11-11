@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiFetch } from '../utils'
 import SecretBindingsSection from './SecretBindingsSection'
+import PhoneSetupSection from './PhoneSetupSection'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -531,6 +532,9 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
 
       {/* ── Secret bindings ─────────────────────────────────────────────────── */}
       <SecretBindingsSection onToast={showToast} />
+
+      {/* ── Phone ───────────────────────────────────────────────────────────── */}
+      <PhoneSetupSection />
 
       {/* ── Connections ─────────────────────────────────────────────────────── */}
       <section className="cred-section">

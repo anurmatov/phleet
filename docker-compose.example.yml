@@ -476,6 +476,8 @@ services:
   # No host port, ever.
   #   state/  written by the orchestrator (bindings, their current values, grant hashes); read-only here
   #   ca/     the local CA, created on first start; its key never leaves this directory
+  #   ssh/    one subdirectory per agent that holds a bound SSH key: its signing socket and the
+  #           bound hosts' host keys. The orchestrator mounts an agent's own subdirectory into it.
   fleet-secrets:
     profiles: ["secrets"]
     build:
@@ -486,6 +488,7 @@ services:
     volumes:
       - ${FLEET_BASE_DIR}/secret-proxy/state:/var/lib/fleet-secrets/state:ro
       - ${FLEET_BASE_DIR}/secret-proxy/ca:/var/lib/fleet-secrets/ca
+      - ${FLEET_BASE_DIR}/secret-proxy/ssh:/var/lib/fleet-secrets/ssh
     environment:
       - SecretProxy__ListenAddress=${FLEET_SECRETS_ADDRESS:-10.213.96.2}
     mem_limit: 256m

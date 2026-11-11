@@ -28,7 +28,8 @@ public static class SecretBindingEndpoints
         string? HeaderName,
         string[]? ExposeAs,
         string? AppIdEnvKey,
-        bool? AgentAttachable);
+        bool? AgentAttachable,
+        string[]? KnownHosts = null);
 
     /// <summary>
     /// Turns <see cref="SecretStatePublicationException"/> from any REST handler into a 503 that
@@ -100,7 +101,17 @@ public static class SecretBindingEndpoints
             var exposeAs = (body.ExposeAs ?? []).Select(n => (n ?? "").Trim()).Where(n => n.Length > 0).ToArray();
             var appIdKey = string.IsNullOrWhiteSpace(body.AppIdEnvKey) ? null : body.AppIdEnvKey.Trim();
 
-            if (SecretGrantPlanner.DescribeBindingFault(key, kind, hosts, header, exposeAs, appIdKey) is { } fault)
+            // Host key lines as ssh-keyscan prints them: blank lines and comment lines are dropped,
+            // runs of blanks become one. Anything else that is not a plain line is refused below.
+            var knownHosts = (body.KnownHosts ?? [])
+                .SelectMany(text => (text ?? "").Split('\n'))
+                .Select(line => string.Join(' ', line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)))
+                .Where(line => line.Length > 0 && !line.StartsWith('#'))
+                .ToArray();
+            if (kind == SecretBindingRules.KindSshKey)
+                header = SecretBindingRules.DefaultHeader;
+
+            if (SecretGrantPlanner.DescribeBindingFault(key, kind, hosts, header, exposeAs, appIdKey, knownHosts) is { } fault)
                 return Results.BadRequest(new { error = fault });
 
             var all = await db.SecretBindings.ToListAsync(ct);
@@ -120,6 +131,7 @@ public static class SecretBindingEndpoints
             existing.HeaderName = header;
             existing.ExposeAs = exposeAs.Length == 0 ? null : string.Join(",", exposeAs);
             existing.AppIdEnvKey = appIdKey;
+            existing.SshKnownHosts = kind == SecretBindingRules.KindSshKey ? string.Join('\n', knownHosts) : null;
             existing.AgentAttachable = body.AgentAttachable ?? false;
             existing.UpdatedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
@@ -202,6 +214,8 @@ public static class SecretBindingEndpoints
             binding.HeaderName,
             ExposeAs = binding.ExposeAsList,
             binding.AppIdEnvKey,
+            // Host keys are public; listing them lets the operator check what the key is bound to.
+            KnownHosts = binding.KnownHostList ?? [],
             binding.AgentAttachable,
             ValuePresent = Present(env, binding.EnvKeyName)
                 && (binding.Kind != SecretBindingRules.KindGitHubApp || (binding.AppIdEnvKey is { } id && Present(env, id))),

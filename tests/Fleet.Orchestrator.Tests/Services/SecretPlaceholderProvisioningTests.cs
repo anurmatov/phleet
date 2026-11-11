@@ -812,4 +812,165 @@ public class SecretPlaceholderProvisioningTests
         Assert.Equal((SecretBindingRules.KindGitHubApp, Pem, "424242"), (binding.Kind, binding.Value, binding.AppId));
         Assert.Equal("granted", State(harness).Grants.Single().Agent);
     }
+
+    // ── SSH keys: used through a socket, never delivered ───────────────────────
+
+    private const string SshKeyName = "SSH_KEY_EXAMPLE";
+    private const string SshKeyValue = "c3ludGhldGljLXNzaC1rZXktdGV4dC1mNGIyYTE=";
+    private const string SshDestination = "deploy@build.example.test";
+    private const string SshHostKeyLine =
+        "build.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZha2VmYWtlZmFrZWZha2VmYWtlZmFrZWZha2VmYWtlZmFr";
+
+    private static SecretBinding SshBinding() => new()
+    {
+        EnvKeyName = SshKeyName,
+        Kind = SecretBindingRules.KindSshKey,
+        Hosts = SshDestination,
+        SshKnownHosts = SshHostKeyLine,
+    };
+
+    private static async Task<ProvisioningHarness> StartWithSshAsync(string agentName = "agent1", params string[] extraRefs)
+    {
+        var harness = await StartAsync(seed: db =>
+        {
+            db.SecretBindings.Add(Binding());
+            db.SecretBindings.Add(SshBinding());
+            db.Agents.Add(NewAgent(agentName, [SshKeyName, .. extraRefs]));
+        });
+        File.AppendAllText(harness.EnvFile, $"{SshKeyName}={SshKeyValue}\n");
+        return harness;
+    }
+
+    [Fact]
+    public async Task BoundSshKey_IsNeverInTheContainer_WhichGetsItsOwnSocketDirectoryInstead()
+    {
+        await using var harness = await StartWithSshAsync();
+
+        var result = await harness.Service.ProvisionAsync("agent1");
+
+        Assert.True(result.Success, result.Message);
+        var body = harness.CreateBodies.Single();
+        Assert.DoesNotContain(SshKeyValue, body);
+        var env = Env(body);
+        Assert.DoesNotContain(env, e => e.StartsWith(SshKeyName + "=", StringComparison.Ordinal));
+        Assert.Contains("SSH_AUTH_SOCK=/run/fleet-secrets/ssh/agent.sock", env);
+        // The placeholder of an SSH grant is recorded, not handed out.
+        Assert.DoesNotContain(env, e => SecretPlaceholders.FindAll(e).Count > 0);
+
+        using var json = JsonDocument.Parse(body);
+        var hostConfig = json.RootElement.GetProperty("HostConfig");
+        Assert.Contains(hostConfig.GetProperty("Binds").EnumerateArray().Select(b => b.GetString()),
+            b => b == $"{harness.BaseDir}/secret-proxy/ssh/agent1:/run/fleet-secrets/ssh:ro");
+        // The agent reaches the SSH server itself: nothing is steered to the forwarder for it.
+        Assert.True(!hostConfig.TryGetProperty("ExtraHosts", out var extraHosts)
+            || extraHosts.ValueKind == JsonValueKind.Null || extraHosts.GetArrayLength() == 0);
+        Assert.True(Directory.Exists(Path.Combine(harness.BaseDir, "secret-proxy", "ssh", "agent1")));
+    }
+
+    [Fact]
+    public async Task BoundSshKey_ReachesTheForwarderState_WithItsDestinationsHostKeysAndGrant()
+    {
+        await using var harness = await StartWithSshAsync();
+
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+
+        var state = State(harness);
+        var binding = state.Bindings.Single(b => b.Key == SshKeyName);
+        Assert.Equal(SecretBindingRules.KindSshKey, binding.Kind);
+        Assert.Equal([SshDestination], binding.Hosts);
+        Assert.Equal([SshHostKeyLine], binding.KnownHosts);
+        Assert.Equal(SshKeyValue, binding.Value);
+        var grant = Assert.Single(state.Grants);
+        Assert.Equal(("agent1", SshKeyName), (grant.Agent, grant.Key));
+    }
+
+    [Fact]
+    public async Task SshKeyAndHeaderSecretOnOneAgent_EachGoItsOwnWay()
+    {
+        await using var harness = await StartWithSshAsync("agent1", BoundKey);
+
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+
+        var body = harness.CreateBodies.Single();
+        Assert.True(SecretPlaceholders.IsPlaceholder(ValueOf(body, BoundKey)));
+        Assert.Contains("SSH_AUTH_SOCK=/run/fleet-secrets/ssh/agent.sock", Env(body));
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal([$"{Host}:{SecretProxyNetwork.DefaultAddress}"],
+            json.RootElement.GetProperty("HostConfig").GetProperty("ExtraHosts").EnumerateArray().Select(h => h.GetString()));
+        Assert.Equal(2, State(harness).Grants.Count);
+    }
+
+    [Fact]
+    public async Task StateWithoutAnSshKey_HasNoHostKeyMember_SoAnOlderForwarderStillReadsIt()
+    {
+        await using var harness = await StartAsync();
+
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+
+        Assert.DoesNotContain("knownHosts", File.ReadAllText(harness.SecretState.StatePath!));
+    }
+
+    [Fact]
+    public async Task SshPreview_ShowsTheSocket_AndNeverTheKey()
+    {
+        await using var harness = await StartWithSshAsync();
+
+        var preview = await harness.Service.PreviewAsync("agent1");
+
+        Assert.Contains("SSH_AUTH_SOCK=/run/fleet-secrets/ssh/agent.sock", preview.Desired.Env);
+        Assert.DoesNotContain(preview.Desired.Env, e => e.Contains(SshKeyValue, StringComparison.Ordinal));
+        Assert.Contains(preview.Desired.Binds, b => b.EndsWith("/secret-proxy/ssh/agent1:/run/fleet-secrets/ssh:ro", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AgentWhoseNameCannotBeASocketDirectory_IsRefusedBeforeDocker()
+    {
+        var longName = new string('a', 49);
+        await using var harness = await StartWithSshAsync(longName);
+
+        var result = await harness.Service.ProvisionAsync(longName);
+
+        Assert.False(result.Success);
+        Assert.StartsWith("secret_ssh_agent_name_unsupported", result.Message);
+        Assert.Empty(harness.CreateBodies);
+    }
+
+    [Fact]
+    public async Task SshKeyNextToAPlainSocketVariable_IsRefusedBeforeDocker()
+    {
+        await using var harness = await StartWithSshAsync("agent1", "SSH_AUTH_SOCK");
+        File.AppendAllText(harness.EnvFile, "SSH_AUTH_SOCK=/tmp/synthetic.sock\n");
+
+        var result = await harness.Service.ProvisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith("secret_expose_conflict", result.Message);
+        Assert.Empty(harness.CreateBodies);
+    }
+
+    [Fact]
+    public async Task Deprovision_RemovesTheSshGrant_SoTheForwarderClosesTheSocket()
+    {
+        await using var harness = await StartWithSshAsync();
+        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        Assert.Single(State(harness).Grants);
+        harness.ContainerExists = true;
+
+        var result = await harness.Service.DeprovisionAsync("agent1");
+
+        Assert.True(result.Success, result.Message);
+
+        Assert.Empty(State(harness).Grants);
+    }
+
+    [Theory]
+    [InlineData(new[] { "GH_TOKEN" }, null, "secret_binding_expose_invalid")]
+    [InlineData(null, "GITHUB_APP_ID", "secret_binding_app_id_unexpected")]
+    public void SshBinding_HasNoExposedNameAndNoAppId(string[]? exposeAs, string? appIdKey, string fault)
+    {
+        Assert.StartsWith(fault, SecretGrantPlanner.DescribeBindingFault(
+            SshKeyName, SecretBindingRules.KindSshKey, [SshDestination], "Authorization", exposeAs, appIdKey, [SshHostKeyLine]));
+        Assert.Null(SecretGrantPlanner.DescribeBindingFault(
+            SshKeyName, SecretBindingRules.KindSshKey, [SshDestination], "Authorization", null, null, [SshHostKeyLine]));
+    }
 }

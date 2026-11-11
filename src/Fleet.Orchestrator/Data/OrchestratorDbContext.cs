@@ -229,8 +229,10 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.ExposeAs).HasMaxLength(1024);
             e.Property(x => x.AppIdEnvKey).HasMaxLength(200);
             e.Property(x => x.AgentAttachable).HasDefaultValue(false);
+            e.Property(x => x.SshKnownHosts).HasColumnType("text");
             e.Ignore(x => x.HostList);
             e.Ignore(x => x.ExposeAsList);
+            e.Ignore(x => x.KnownHostList);
             e.HasIndex(x => x.EnvKeyName).IsUnique();
         });
 

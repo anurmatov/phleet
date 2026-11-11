@@ -3,4 +3,5 @@
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git gh nodejs python3 openssl jq \
+      openssh-client openssh-server \
  && rm -rf /var/lib/apt/lists/*

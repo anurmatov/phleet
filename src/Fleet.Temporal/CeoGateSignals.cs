@@ -32,6 +32,7 @@ public static class CeoGateSignals
         "design-approval",
         "advisory-review",
         "acceptance-decision",
+        "request-input",
         "request-approval",
     };
 

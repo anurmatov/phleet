@@ -26,12 +26,10 @@ public static class SignalRegistry
     private static readonly Dictionary<string, SignalDef[]> _registry =
         new(StringComparer.OrdinalIgnoreCase)
         {
-            ["UweHumanApprovalRequestWorkflow"] =
+            ["UweHumanInputWorkflow"] =
             [
-                new SignalDef("request-approval", "request approval", [
-                    new SignalButton("Approve", """{"Decision":"approved"}"""),
-                    new SignalButton("Reject", """{"Decision":"rejected"}"""),
-                ], ValidPhases: ["request-approval"], BindAttribute: "GateRef"),
+                new SignalDef("request-input", "human input", [new SignalButton("Answer", "{}")],
+                    ValidPhases: ["request-input"], BindAttribute: "GateRef"),
             ],
             ["ExternalAdvisoryWorkflow"] =
             [

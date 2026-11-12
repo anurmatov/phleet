@@ -139,8 +139,8 @@ available rather than claim they are on. Both follow the same check as the sende
 
 ## Exact-request approvals
 
-The registered `request-approval` phase uses the existing gate detector and APNs
-payload. Notification text never contains Action, Scope or Comment. Source gate
+The registered `request-input` phase uses the existing gate detector and APNs
+payload. Notification text never contains Question, Context, answer or Comment. Source gate
 registration is not proof of physical delivery or exact-request native navigation;
-see [human approval requests](human-approval-requests.md) for the companion,
+see [human input requests](human-input-requests.md) for the companion,
 confirmation, adoption and real-phone acceptance boundaries.

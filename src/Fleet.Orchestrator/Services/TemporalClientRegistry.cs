@@ -282,7 +282,7 @@ public sealed class TemporalClientRegistry(
             throw new InvalidOperationException("WorkflowExecutionStarted event not found in history");
 
         var wfType = attrs.WorkflowType.Name;
-        if (string.Equals(wfType.Trim(), "UweHumanApprovalRequestWorkflow", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(wfType.Trim(), "UweHumanInputWorkflow", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Human approval requests cannot be restarted or cloned. Inspect the original exact run.");
         var taskQueue = attrs.TaskQueue.Name;
 

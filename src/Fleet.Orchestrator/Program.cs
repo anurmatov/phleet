@@ -796,8 +796,8 @@ app.MapGet("/api/workflow-types", async (IServiceScopeFactory scopeFactory) =>
                     var props = string.Join(",", fields.Select(f => $"\"{f}\":{{\"type\":\"string\"}}"));
                     inputSchema = $"{{\"type\":\"object\",\"properties\":{{{props}}}}}";
                 }
-                if (t.Name == "UweHumanApprovalRequestWorkflow")
-                    inputSchema = """{"type":"object","additionalProperties":false,"required":["Action","Scope"],"properties":{"Action":{"type":"string","minLength":1},"Scope":{"type":"string","minLength":1}}}""";
+                if (t.Name == "UweHumanInputWorkflow")
+                    inputSchema = """{"type":"object","additionalProperties":false,"required":["Question","Context","AnswerMode"],"properties":{"Question":{"type":"string","minLength":1},"Context":{"type":"string","minLength":1},"AnswerMode":{"enum":["choice","text","approve-reject"]},"Choices":{"type":"array"}}}""";
                 types.Add(new { t.Name, t.Description, t.Namespace, t.TaskQueue, InputSchema = inputSchema });
             }
         }

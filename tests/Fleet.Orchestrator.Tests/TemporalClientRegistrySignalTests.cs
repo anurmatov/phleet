@@ -12,7 +12,7 @@ namespace Fleet.Orchestrator.Tests;
 public class TemporalClientRegistrySignalTests
 {
     [Fact]
-    public async Task Restart_ApprovalRequest_RefusesBeforeTerminateOrStart()
+    public async Task Restart_HumanInputRequest_RefusesBeforeTerminateOrStart()
     {
         var client = Substitute.For<ITemporalClient>();
         var handle = Substitute.For<WorkflowHandle>(client, "request", "exact-run", null!, null!);
@@ -23,7 +23,7 @@ public class TemporalClientRegistrySignalTests
                 EventType = Temporalio.Api.Enums.V1.EventType.WorkflowExecutionStarted,
                 WorkflowExecutionStartedEventAttributes = new()
                 {
-                    WorkflowType = new() { Name = "UweHumanApprovalRequestWorkflow" },
+                    WorkflowType = new() { Name = "UweHumanInputWorkflow" },
                     TaskQueue = new() { Name = "fleet" }
                 }
             }]));

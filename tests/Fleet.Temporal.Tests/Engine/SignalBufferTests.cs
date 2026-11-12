@@ -701,6 +701,7 @@ public sealed class SignalBufferTests
     [Theory]
     [InlineData("doc-review")]
     [InlineData("request-approval")]
+    [InlineData("request-input")]
     [InlineData("{{vars.gate}}")]
     public async Task SignalWorkflow_ApproverGateRefusal_IsNotSuppressedByNestedIgnoreFailureAncestors(string signalName)
     {
@@ -709,7 +710,7 @@ public sealed class SignalBufferTests
             IgnoreFailure = true,
             Steps =
             [
-                new SetVariableStep { Vars = new() { ["gate"] = "request-approval" } },
+                new SetVariableStep { Vars = new() { ["gate"] = "request-input" } },
                 new BranchStep
                 {
                     IgnoreFailure = true,

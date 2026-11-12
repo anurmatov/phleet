@@ -226,7 +226,7 @@ export default function WorkflowsView({
   }, [pendingConfirm])
 
   function handleSignalBtnClick(wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) {
-    if (btn.requiresComment || sig.name === 'request-approval') {
+    if (btn.requiresComment || sig.name === 'request-input') {
       // Exact-request decisions must load their run-bound content in the modal.
       onSignalClick(wf, sig, btn)
       return

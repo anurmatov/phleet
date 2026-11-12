@@ -257,6 +257,7 @@ public sealed class TemporalWorkflowToolsTests
     [InlineData("advisory-review")]
     [InlineData("acceptance-decision")]
     [InlineData("request-approval")]
+    [InlineData("request-input")]
     public async Task SignalWorkflowAsync_OtherCeoOnlySignalFromCto_Blocks(string signalName)
     {
         var context = BuildTool();
@@ -280,6 +281,7 @@ public sealed class TemporalWorkflowToolsTests
         foreach (var payload in new[] { "{\"Decision\":\"approved\"}", "{\"Decision\":\"changes_requested\",\"Comment\":\"x\"}",
             "{\"Decision\":\"approved\",\"GrantId\":\"grant\"}" })
         {
+            Assert.Contains("CEO-only gate", await context.Tool.SignalWorkflowAsync("workflow-1", "request-input", payload));
             Assert.Contains("CEO-only gate", await context.Tool.SignalWorkflowAsync("workflow-1", "request-approval", payload));
             Assert.Null(context.SentSignal);
         }
@@ -649,7 +651,7 @@ public sealed class TemporalWorkflowToolsTests
     {
         Assert.True(CeoGateSignals.IsReserved("design-approval"));
         Assert.Equal(
-            new[] { "acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval", "request-approval" },
+            new[] { "acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval", "request-approval", "request-input" },
             CeoGateSignals.All.Order(StringComparer.Ordinal).ToArray());
     }
 

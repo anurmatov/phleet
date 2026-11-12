@@ -2,11 +2,13 @@ namespace Fleet.Temporal.Engine;
 
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using Fleet.Shared;
 using Fleet.Temporal.Activities;
 using Fleet.Temporal.Configuration;
 using Fleet.Temporal.Models;
 using Microsoft.Extensions.Logging;
 using Temporalio.Common;
+using WorkflowIdReusePolicy = Temporalio.Api.Enums.V1.WorkflowIdReusePolicy;
 using Temporalio.Converters;
 using Temporalio.Exceptions;
 using Temporalio.Workflows;
@@ -137,20 +139,20 @@ public class UniversalWorkflow
         var input = args.Length > 0
             ? Workflow.PayloadConverter.ToValue<JsonElement>(args[0])
             : default;
-        if (HumanApprovalRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
+        if (HumanInputRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
         {
             try
             {
-                var requester = Workflow.Memo.TryGetValue(HumanApprovalRequestContract.RequesterMemo, out var memo)
-                    ? Workflow.PayloadConverter.ToValue<string>(memo) : null;
+                var requester = Workflow.Memo.TryGetValue(HumanInputRequestContract.OriginMemo, out var memo)
+                    ? Workflow.PayloadConverter.ToValue<JsonElement>(memo) : (JsonElement?)null;
                 if (args.Length != 1) throw new ArgumentException("Exactly one approval input is required.");
-                HumanApprovalRequestContract.ValidateStart(input, requester, Workflow.Info.WorkflowId,
-                    Workflow.Info.Namespace, Workflow.Info.TaskQueue, Workflow.PayloadConverter);
+                HumanInputRequestContract.ValidateStart(input, requester, Workflow.Info.WorkflowId,
+                    Workflow.Info.Namespace, Workflow.Info.TaskQueue, Workflow.PayloadConverter, Workflow.Info.Parent);
             }
             catch (Exception ex)
             {
-                throw new ApplicationFailureException("Human approval admission refused: " + ex.Message,
-                    errorType: "HumanApprovalAdmission", nonRetryable: true);
+                throw new ApplicationFailureException("Human input admission refused: " + ex.Message,
+                    errorType: "HumanInputAdmission", nonRetryable: true);
             }
         }
         _variables["input"] = input;
@@ -193,7 +195,7 @@ public class UniversalWorkflow
         // The report-only callback uses ignoreFailure, which can also swallow an activity
         // cancellation. Never return an approval result once this request was canceled.
         // Legacy workflows retain their existing cancellation/ignoreFailure behavior.
-        if (HumanApprovalRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
+        if (HumanInputRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
             Workflow.CancellationToken.ThrowIfCancellationRequested();
 
         return _variables.GetValueOrDefault("_result");
@@ -455,6 +457,8 @@ public class UniversalWorkflow
 
     private async Task<object?> ExecuteDelegateAsync(DelegateStep step)
     {
+        if (HumanInputRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
+            Workflow.CancellationToken.ThrowIfCancellationRequested();
         // Reset first, before anything that can throw, so an attempt that never returns a status
         // reads "unknown" rather than a previous attempt's value (#424). Only a workflow variable
         // is written; the command sequence is unchanged.
@@ -637,7 +641,35 @@ public class UniversalWorkflow
     // Signal waiting
     // -------------------------------------------------------------------------
 
+    private bool _humanInputTimedOut;
     private async Task<object?> ExecuteWaitForSignalAsync(WaitForSignalStep step)
+    {
+        _humanInputTimedOut = false;
+        var result = await ExecuteWaitForSignalCoreAsync(step);
+        if (HumanInputRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
+        {
+            object? answer = null;
+            var status = _humanInputTimedOut ? "expired" : "invalid";
+            if (!_humanInputTimedOut && result is JsonElement payload)
+            {
+                try
+                {
+                    var vars = (Dictionary<string, object?>)_variables["vars"]!;
+                    if (HumanInputContract.Text(payload, "Ref") != Workflow.Info.RunId ||
+                        !vars.TryGetValue("input_visit", out var visit) || visit is not string currentVisit ||
+                        HumanInputContract.Text(payload, "VisitId") != currentVisit)
+                        throw new ArgumentException("Answer binding mismatch.");
+                    answer = HumanInputContract.ValidateAnswer((JsonElement)_variables["input"]!, payload, true);
+                    status = "answered";
+                }
+                catch (ArgumentException) { }
+            }
+            SetVar("human_input_response", JsonSerializer.SerializeToElement(new { Status = status, Answer = answer }));
+        }
+        return result;
+    }
+
+    private async Task<object?> ExecuteWaitForSignalCoreAsync(WaitForSignalStep step)
     {
         var signalName = _template.ResolveString(step.SignalName);
 
@@ -762,6 +794,7 @@ public class UniversalWorkflow
                 if (visitId != null) ClearGateVisitAttribute();
                 if (step.AutoCompleteOnTimeout)
                 {
+                    _humanInputTimedOut = true;
                     var timeoutPayload = JsonSerializer.SerializeToElement(new { Decision = "timeout" });
                     // The engine generated this payload, so it carries no correlation field and
                     // cannot be stale or misaddressed. It is scored `match` WITHOUT comparison —
@@ -1042,6 +1075,29 @@ public class UniversalWorkflow
         var ns = step.Namespace ?? Workflow.Info.Namespace;
         var tq = step.TaskQueue ?? Workflow.Info.TaskQueue;
 
+        if (HumanInputRequestContract.IsWorkflowType(workflowType))
+        {
+            if (ns != Workflow.Info.Namespace || ns != "fleet" || tq != "fleet")
+                throw new ApplicationFailureException("Human input child routing refused.", nonRetryable: true);
+            var childId = "human-input-" + Workflow.NewGuid();
+            JsonElement enriched;
+            try { enriched = HumanInputRequestContract.EnrichParent(JsonSerializer.SerializeToElement(args), childId,
+                ns, tq, Workflow.Info.WorkflowId, Workflow.Info.RunId, Workflow.PayloadConverter); }
+            catch (ArgumentException ex) { throw new ApplicationFailureException(ex.Message, errorType: "HumanInputAdmission", nonRetryable: true); }
+            var childResult = await Workflow.ExecuteChildWorkflowAsync<object?>(HumanInputRequestContract.WorkflowType, [enriched],
+                new ChildWorkflowOptions
+                {
+                    Id = childId, TaskQueue = tq, IdReusePolicy = WorkflowIdReusePolicy.RejectDuplicate,
+                    RetryPolicy = new() { MaximumAttempts = 1 },
+                    ParentClosePolicy = ParentClosePolicy.Terminate,
+                    CancellationType = ChildWorkflowCancellationType.WaitCancellationCompleted,
+                    Memo = new Dictionary<string, object> { [HumanInputRequestContract.OriginMemo] = enriched.GetProperty("Origin") },
+                    ExecutionTimeout = step.ExecutionTimeoutMinutes is { } timeout ? TimeSpan.FromMinutes(timeout) : null
+                });
+            if (step.OutputVar != null) SetVar(step.OutputVar, childResult);
+            return childResult;
+        }
+
         var result = await Workflow.ExecuteChildWorkflowAsync<object?>(
             workflowType,
             args is not null ? [args] : [],
@@ -1059,6 +1115,9 @@ public class UniversalWorkflow
     private async Task<object?> ExecuteFireAndForgetAsync(FireAndForgetStep step)
     {
         var workflowType = _template.ResolveString(step.WorkflowType);
+        if (HumanInputRequestContract.IsWorkflowType(workflowType))
+            throw new ApplicationFailureException("Human input requires an awaited same-namespace child.",
+                errorType: ReservedSignalErrorType, nonRetryable: true);
         var args = ResolveArgs(step.Args);
         var ns = step.Namespace ?? Workflow.Info.Namespace;
         var tq = step.TaskQueue ?? Workflow.Info.TaskQueue;
@@ -1080,6 +1139,9 @@ public class UniversalWorkflow
     private async Task<object?> ExecuteCrossNamespaceStartAsync(CrossNamespaceStartStep step)
     {
         var workflowType = _template.ResolveString(step.WorkflowType);
+        if (HumanInputRequestContract.IsWorkflowType(workflowType))
+            throw new ApplicationFailureException("Human input requires an awaited same-namespace child.",
+                errorType: ReservedSignalErrorType, nonRetryable: true);
         var workflowId = step.WorkflowId != null
             ? _template.ResolveString(step.WorkflowId)
             : null;

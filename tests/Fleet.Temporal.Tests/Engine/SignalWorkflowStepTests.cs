@@ -186,6 +186,7 @@ public sealed class SignalWorkflowStepTests
     [InlineData("advisory-review")]
     [InlineData("acceptance-decision")]
     [InlineData("request-approval")]
+    [InlineData("request-input")]
     [InlineData("MERGE-APPROVAL")]   // case is not a bypass
     [InlineData("  doc-review  ")]   // nor is whitespace
     public void Validate_SignalWorkflowSendingAnApproverGate_FailsToLoad(string signalName)
@@ -240,7 +241,7 @@ public sealed class SignalWorkflowStepTests
     public void TheReservedList_IncludesAcceptanceDecision()
     {
         Assert.Equal(
-            ["acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval", "request-approval"],
+            ["acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval", "request-approval", "request-input"],
             CeoGateSignals.All.OrderBy(n => n, StringComparer.Ordinal).ToArray());
 
         Assert.False(CeoGateSignals.IsReserved("human-review"));

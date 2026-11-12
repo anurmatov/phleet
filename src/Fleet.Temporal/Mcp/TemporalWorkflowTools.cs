@@ -108,13 +108,13 @@ public sealed class TemporalWorkflowTools(
         try
         {
             var client = await clientFactory.GetClientAsync(@namespace);
-            var approvalRequest = HumanApprovalRequestContract.IsWorkflowType(workflow_type);
+            var humanInputRequest = HumanInputRequestContract.IsWorkflowType(workflow_type);
             string? requester = null;
-            if (approvalRequest)
+            if (humanInputRequest)
             {
-                workflow_type = HumanApprovalRequestContract.WorkflowType;
+                workflow_type = HumanInputRequestContract.WorkflowType;
                 requester = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
-                inputObj = HumanApprovalRequestContract.Enrich(inputObj is JsonElement element ? element : default,
+                inputObj = HumanInputRequestContract.Enrich(inputObj is JsonElement element ? element : default,
                     requester, workflow_id, @namespace, task_queue, client.Options.DataConverter.PayloadConverter);
                 id_reuse_policy = "reject_duplicate";
             }
@@ -124,10 +124,10 @@ public sealed class TemporalWorkflowTools(
                 new WorkflowOptions(id: id, taskQueue: task_queue)
                 {
                     IdReusePolicy = id_reuse_policy == "reject_duplicate" ? WorkflowIdReusePolicy.RejectDuplicate : WorkflowIdReusePolicy.AllowDuplicate,
-                    Memo = approvalRequest ? new Dictionary<string, object> { [HumanApprovalRequestContract.RequesterMemo] = requester! } : null
+                    Memo = humanInputRequest ? new Dictionary<string, object> { [HumanInputRequestContract.OriginMemo] = ((JsonElement)inputObj!).GetProperty("Origin") } : null
                 });
 
-            if (approvalRequest)
+            if (humanInputRequest)
                 return JsonSerializer.Serialize(new
                 {
                     workflowId = handle.Id,
@@ -225,7 +225,7 @@ public sealed class TemporalWorkflowTools(
         "(1) 'human-review' — structured payload required: {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} or {\"Decision\":\"rejected\",\"Comment\":\"reason\"}. " +
         "(2) 'escalation-decision' — {\"Decision\":\"retry|skip|continue\",\"UpdatedInstruction\":\"...\"}. " +
         "IMPORTANT — CEO-only signals are BLOCKED and cannot be sent via this tool: " +
-        "'merge-approval', 'doc-review', 'design-approval', 'advisory-review', 'acceptance-decision', 'request-approval'. " +
+        "'merge-approval', 'doc-review', 'design-approval', 'advisory-review', 'acceptance-decision', 'request-approval', 'request-input'. " +
         "There are two exceptions, both only for the currently configured CTO agent resolved from the MCP request. " +
         "(a) Feedback: 'merge-approval' or 'design-approval' with Decision exactly 'changes_requested' and a nonblank Comment. " +
         "'design-approval' feedback is accepted only while the workflow is Running and waiting at its design-approval gate (Phase 'design-approval'); otherwise it is refused and nothing is sent. " +

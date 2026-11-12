@@ -58,12 +58,12 @@ function text(node: unknown): string {
 const send = (tree: ReactElement) => elements(tree).find(e => e.type === 'button' && text(e.props.children) === 'Send')!
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
 const wf: WorkflowSummary = {
-  workflowId: 'human-approval-123e4567-e89b-42d3-a456-426614174000', runId: 'run-1',
-  workflowType: 'UweHumanApprovalRequestWorkflow', namespace: 'fleet', phase: 'request-approval', gateRef: 'run-1',
+  workflowId: 'human-input-123e4567-e89b-42d3-a456-426614174000', runId: 'run-1',
+  workflowType: 'UweHumanInputWorkflow', namespace: 'fleet', phase: 'request-input', gateRef: 'run-1',
   taskQueue: 'fleet', status: 'Running', startTime: '2026-11-12T12:00:00Z', closeTime: null,
   issueNumber: null, prNumber: null, repo: null, docPrs: null,
 }
-const request = { Action: ' \"read\"\nКыргыз \\ {{config.Secret}} ', Scope: 'only this report', RequesterAgent: 'agent1' }
+const request = { Question: ' \"read\"\nКыргыз \\ {{config.Secret}} ', Context: 'only this report', AnswerMode: 'approve-reject' as const, Origin: { Kind: 'agent' as const, RequesterAgent: 'agent1' } }
 const history = [{ eventType: 'WorkflowStarted', inputSummary: JSON.stringify(request) }]
 
 test('both workflows request actions must load the exact request before sending', async t => {
@@ -74,15 +74,18 @@ test('both workflows request actions must load the exact request before sending'
   try {
     const { default: View } = await server.ssrLoadModule('/src/components/WorkflowsView.tsx')
     const { default: Modal } = await server.ssrLoadModule('/src/components/SignalModal.tsx')
-    for (const label of ['Approve', 'Reject']) {
-      for (const success of [false, true]) await t.test(`${label}: ${success ? 'full literal request before Send' : 'history error refuses Send'}`, async () => {
+    for (const mode of ['approve-reject', 'choice', 'text'] as const) {
+      const label = 'Answer'
+      const currentRequest = { ...request, AnswerMode: mode, ...(mode === 'choice' ? { Choices: [{ Id: 'first', Label: 'First literal' }, { Id: 'other', Label: 'Other' }] } : {}) }
+      const currentHistory = [{ eventType: 'WorkflowStarted', inputSummary: JSON.stringify(currentRequest) }]
+      for (const success of [false, true]) await t.test(`${mode}: ${success ? 'full literal request before Send' : 'history error refuses Send'}`, async () => {
         let modal: SignalModalState | null = null
         let sends = 0
         let resolve!: (response: Response) => void
         const urls: string[] = []
         globalThis.fetch = ((url: string) => { urls.push(url); return new Promise<Response>(r => { resolve = r }) }) as typeof fetch
-        const sig = { name: 'request-approval', label: 'request approval', validPhases: ['request-approval'],
-          buttons: ['Approve', 'Reject'].map(label => ({ label, requiresComment: false, payload: JSON.stringify({ Decision: label === 'Approve' ? 'approved' : 'rejected' }) })) }
+        const sig = { name: 'request-input', label: 'request approval', validPhases: ['request-input'],
+          buttons: [{ label: 'Answer', requiresComment: false, payload: '{}' }] }
         const tree = new Hooks().render(View, {
           workflows: [wf], filteredWorkflows: [wf], filteredCompletedWorkflows: [], completedCollapsed: true,
           completedLoading: false, nsFilter: 'all', namespaces: [], agentByWorkflow: {}, wfActionMsg: {},
@@ -108,12 +111,16 @@ test('both workflows request actions must load the exact request before sending'
         hooks.flush()
         assert.equal(urls.length, 1)
         assert.match(urls[0], /\?runId=run-1$/)
-        resolve(new Response(JSON.stringify(history), { status: success ? 200 : 503 }))
+        resolve(new Response(JSON.stringify(currentHistory), { status: success ? 200 : 503 }))
         await tick()
         confirmation = hooks.render(Modal, props)
         if (success) {
-          assert.ok(text(confirmation).includes(request.Action))
-          assert.ok(text(confirmation).includes(request.Scope))
+          assert.ok(text(confirmation).includes(request.Question))
+          assert.ok(text(confirmation).includes(request.Context))
+          assert.equal(send(confirmation).props.disabled, true, 'no answer is preselected')
+          const control = elements(confirmation).find(e => mode === 'text' ? e.type === 'textarea' && (e.props as unknown as { 'aria-label': string })['aria-label'] === 'Answer' : e.type === 'input')!
+          ;(control.props as unknown as { onChange: (event?: unknown) => void }).onChange(mode === 'text' ? { target: { value: ' literal\nanswer ' } } : undefined)
+          confirmation = hooks.render(Modal, props)
           assert.equal(send(confirmation).props.disabled, false)
         } else {
           assert.ok(text(confirmation).includes('Cannot load the exact request'))
@@ -123,5 +130,56 @@ test('both workflows request actions must load the exact request before sending'
         assert.equal(sends, success ? 1 : 0)
       })
     }
+  } finally { globalThis.fetch = originalFetch; await server.close() }
+})
+
+test('late history from a previous run cannot unlock the current request', async () => {
+  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), configFile: false,
+    define: { 'import.meta.env.VITE_AUTH_TOKEN': JSON.stringify('synthetic-operator') },
+    server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' })
+  const originalFetch = globalThis.fetch
+  try {
+    const { default: Modal } = await server.ssrLoadModule('/src/components/SignalModal.tsx')
+    const responses: ((r: Response) => void)[] = []
+    globalThis.fetch = (() => new Promise<Response>(resolve => responses.push(resolve))) as typeof fetch
+    const hooks = new Hooks()
+    let sends = 0
+    const props = { modal: { wf, signalName: 'request-input', button: { label: 'Answer', payload: '{}', requiresComment: false }, comment: '' },
+      onClose: () => {}, onCommentChange: () => {}, onSend: () => { sends++ } }
+    hooks.render(Modal, props); hooks.flush()
+    const next = { ...props, modal: { ...props.modal, wf: { ...wf, runId: 'run-2', gateRef: 'run-2' } } }
+    hooks.render(Modal, next); hooks.flush()
+    responses[0](new Response(JSON.stringify(history), { status: 200 }))
+    await tick()
+    let current = hooks.render(Modal, next)
+    assert.equal(send(current).props.disabled, true)
+    assert.equal(text(current).includes(request.Question), false)
+    send(current).props.onClick!(); assert.equal(sends, 0)
+    responses[1](new Response('{}', { status: 503 })); await tick()
+    current = hooks.render(Modal, next)
+    assert.equal(send(current).props.disabled, true)
+  } finally { globalThis.fetch = originalFetch; await server.close() }
+})
+
+test('read-only confirmation cannot send even after history and explicit selection', async () => {
+  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), configFile: false,
+    define: { 'import.meta.env.VITE_AUTH_TOKEN': JSON.stringify('') },
+    server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' })
+  const originalFetch = globalThis.fetch
+  try {
+    const { default: Modal } = await server.ssrLoadModule('/src/components/SignalModal.tsx')
+    globalThis.fetch = (async () => new Response(JSON.stringify(history), { status: 200 })) as typeof fetch
+    const hooks = new Hooks()
+    let sends = 0
+    const props = { modal: { wf, signalName: 'request-input', button: { label: 'Answer', payload: '{}', requiresComment: false }, comment: '' },
+      onClose: () => {}, onCommentChange: () => {}, onSend: () => { sends++ } }
+    hooks.render(Modal, props); hooks.flush(); await tick()
+    let tree = hooks.render(Modal, props)
+    const radio = elements(tree).find(e => e.type === 'input')!
+    ;(radio.props as unknown as { onChange: () => void }).onChange()
+    tree = hooks.render(Modal, props)
+    assert.ok(text(tree).includes('Read-only'))
+    assert.equal(send(tree).props.disabled, true)
+    send(tree).props.onClick!(); assert.equal(sends, 0)
   } finally { globalThis.fetch = originalFetch; await server.close() }
 })

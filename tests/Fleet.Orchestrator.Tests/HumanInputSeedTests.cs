@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Orchestrator.Tests;
 
-public class HumanApprovalSeedTests
+public class HumanInputSeedTests
 {
     [Theory]
     [InlineData(false)]
@@ -14,7 +14,7 @@ public class HumanApprovalSeedTests
     {
         var options = new DbContextOptionsBuilder<OrchestratorDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         await using var db = new OrchestratorDbContext(options);
-        const string name = "UweHumanApprovalRequestWorkflow";
+        const string name = "UweHumanInputWorkflow";
         db.WorkflowDefinitions.Add(new WorkflowDefinition { Namespace = "fleet", TaskQueue = "fleet", Name = "CustomWorkflow", Definition = "{}", Version = 7 });
         if (existing) db.WorkflowDefinitions.Add(new WorkflowDefinition { Namespace = "fleet", TaskQueue = "fleet", Name = name, Definition = "{\"custom\":true}", Version = 9, IsActive = false });
         await db.SaveChangesAsync();
@@ -32,6 +32,6 @@ public class HumanApprovalSeedTests
         Assert.Equal(existing ? 9 : 1, row.Version);
         Assert.Equal(!existing, row.IsActive);
         if (existing) Assert.Equal("{\"custom\":true}", row.Definition);
-        else Assert.Contains("approval_visit", row.Definition);
+        else Assert.Contains("input_visit", row.Definition);
     }
 }

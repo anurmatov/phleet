@@ -4,7 +4,8 @@ import {
   emptyPhoneSetupForm, normalizeOrigin, phoneSetupCode, phoneSetupProblemMessage,
   type PhoneSetupForm, type PhoneSetupProblem,
 } from './phoneSetup.ts'
-import { qrMatrix } from './qrMatrix.ts'
+import qrcode from 'qrcode-generator'
+import { QR_MAX_BYTES, qrMatrix } from './qrMatrix.ts'
 
 const form = (over: Partial<PhoneSetupForm> = {}): PhoneSetupForm => ({
   origin: 'https://fleet.example.test', includeOperatorToken: true,
@@ -74,7 +75,7 @@ test('other address problems are named', () => {
 test('every problem has its own words', () => {
   const problems: PhoneSetupProblem[] = [
     'origin_empty', 'origin_invalid', 'origin_insecure', 'origin_userinfo',
-    'service_token_incomplete', 'operator_token_missing',
+    'service_token_incomplete', 'operator_token_missing', 'code_too_long',
   ]
   const messages = problems.map(phoneSetupProblemMessage)
   assert.equal(new Set(messages).size, problems.length)
@@ -109,4 +110,53 @@ test('a longer code makes a larger matrix rather than failing', () => {
   const short = qrMatrix(codeOf(form({ includeOperatorToken: false })))
   const long = qrMatrix(codeOf(form({ accessClientId: 'c'.repeat(64), accessClientSecret: 's'.repeat(96) }), 't'.repeat(96)))
   assert.ok(long.length > short.length)
+})
+
+test('a credential outside ASCII reaches the phone exactly, in a code that is plain ASCII', () => {
+  const secret = 'секрет-ünïcödé-\u{1F511}'
+  const code = codeOf(form({ accessClientId: 'клиент', accessClientSecret: secret }), 'тест')
+
+  // Plain ASCII is the same bytes whichever character set a scanner assumes.
+  assert.ok([...code].every(c => c.charCodeAt(0) < 0x80), 'every character of the code is ASCII')
+  const parsed = JSON.parse(code)
+  assert.equal(parsed.operatorToken, 'тест')
+  assert.equal(parsed.accessClientId, 'клиент')
+  assert.equal(parsed.accessClientSecret, secret)
+})
+
+test('different credentials never draw the same QR code', () => {
+  // Every character of 'тест' has the same low byte as the matching one of 'B5AB'. Written as
+  // low bytes, the two tokens drew identical codes.
+  assert.notDeepEqual(qrMatrix(codeOf(form(), 'тест')), qrMatrix(codeOf(form(), 'B5AB')))
+  assert.notDeepEqual(qrMatrix('тест'), qrMatrix('B5AB'))
+})
+
+test('the QR code carries the UTF-8 bytes of its text', () => {
+  // 'é' is C3 A9 in UTF-8. Handed straight to the library, the two characters whose low bytes
+  // those are draw the code with exactly those bytes. This checks the bytes written, not a scan.
+  const direct = qrcode(0, 'M')
+  direct.addData('\u00c3\u00a9', 'Byte')
+  direct.make()
+  const size = direct.getModuleCount()
+  const bytes = Array.from({ length: size }, (_, row) =>
+    Array.from({ length: size }, (_, column) => direct.isDark(row, column)))
+  assert.deepEqual(qrMatrix('é'), bytes)
+})
+
+test('a code too long for one QR code is a problem with the form, not a failure to draw', () => {
+  for (const length of [4_000, 10_000]) {
+    assert.equal(problemOf(form({ accessClientId: 'client-id', accessClientSecret: 's'.repeat(length) })), 'code_too_long')
+  }
+  // Escaped characters count at their escaped length, which is what the code carries.
+  assert.equal(problemOf(form(), 'т'.repeat(QR_MAX_BYTES / 6 + 1)), 'code_too_long')
+})
+
+test('the longest code accepted can be drawn, and one byte more is refused', () => {
+  const base = codeOf(form({ accessClientId: 'client-id', accessClientSecret: 's' }))
+  const longest = 's'.repeat(1 + QR_MAX_BYTES - base.length)
+  const code = codeOf(form({ accessClientId: 'client-id', accessClientSecret: longest }))
+
+  assert.equal(code.length, QR_MAX_BYTES)
+  assert.equal(qrMatrix(code).length, 177, 'version 40, the largest QR code')
+  assert.equal(problemOf(form({ accessClientId: 'client-id', accessClientSecret: `${longest}s` })), 'code_too_long')
 })

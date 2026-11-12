@@ -5,6 +5,8 @@
 // opened at. Empty parts are left out rather than sent empty — the app treats a connection with
 // no operator token as read-only, and "" must not be mistaken for a token.
 
+import { fitsInQrCode } from './qrMatrix.ts'
+
 export const PHONE_SETUP_KIND = 'control-setup'
 export const PHONE_SETUP_VERSION = 1
 
@@ -22,6 +24,7 @@ export type PhoneSetupProblem =
   | 'origin_userinfo'
   | 'service_token_incomplete'
   | 'operator_token_missing'
+  | 'code_too_long'
 
 export type PhoneSetupResult = { code: string } | { problem: PhoneSetupProblem }
 
@@ -70,7 +73,13 @@ export function phoneSetupCode(form: PhoneSetupForm, operatorToken: string): Pho
   }
   if (form.includeOperatorToken) payload.operatorToken = token
 
-  return { code: JSON.stringify(payload) }
+  // Anything outside ASCII is written as a JSON escape: the same JSON to whatever reads it, and
+  // the same bytes whichever character set a phone's scanner assumes for a QR code.
+  const code = JSON.stringify(payload).replace(/[^\x00-\x7f]/g,
+    c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+  // Refused here, as a problem with the form, rather than discovered while drawing the code.
+  if (!fitsInQrCode(code)) return { problem: 'code_too_long' }
+  return { code }
 }
 
 export function phoneSetupProblemMessage(problem: PhoneSetupProblem): string {
@@ -81,5 +90,6 @@ export function phoneSetupProblemMessage(problem: PhoneSetupProblem): string {
     case 'origin_userinfo': return 'The address must not contain a user name or password.'
     case 'service_token_incomplete': return 'Enter both the client ID and the client secret, or leave both empty.'
     case 'operator_token_missing': return 'This dashboard was built without an operator token, so the code can only be read-only. Untick the operator token.'
+    case 'code_too_long': return 'That is too much for one code. Use a shorter address or service token.'
   }
 }

@@ -32,6 +32,9 @@ A part that is not given is **left out**, never sent as an empty string.
 - It sends the code nowhere and stores nothing. The service token you paste is gone when the
   section closes.
 - It refuses an `http://` address rather than upgrading it, because the app refuses one too.
+- It writes the code in plain ASCII: a character outside ASCII becomes a JSON `\u` escape, so a
+  reader gets the exact value whichever character set its scanner assumes.
+- It refuses a code too long for one QR code (2,331 bytes) as a problem with the form.
 - It hides the code after two minutes.
 
 ## Limits

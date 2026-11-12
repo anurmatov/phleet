@@ -7,8 +7,8 @@ using Microsoft.Extensions.Configuration;
 namespace Fleet.Orchestrator.Tests.Services;
 
 /// <summary>
-/// What turning Chat on for an agent writes into its generated settings (#530), and what it
-/// refuses.
+/// What Chat writes into an agent's generated settings (#530). On by default; never a reason to
+/// refuse provisioning.
 /// </summary>
 public class ChatProvisioningTests
 {
@@ -89,23 +89,33 @@ public class ChatProvisioningTests
     public void TheListenerAddressComesFromConfiguration_WithADefault(string? configured, string expected) =>
         Assert.Equal(expected, ChatAgents.BuildProvisioning(AgentNamed("builder", true), Tokens(Key), configured, null)!.SouthBaseUrl);
 
+    [Fact]
+    public void ChatIsOnByDefault_ForANewAgent() => Assert.True(new Agent
+    {
+        Name = "builder", DisplayName = "builder", Role = "developer", Model = "example-model",
+        ContainerName = "fleet-builder",
+    }.ChatEnabled);
+
     [Theory]
-    [InlineData("builder", "valid", null)]
-    [InlineData("Builder_2-b", "valid", null)]
-    [InlineData("builder", "missing", "chat_key_missing")]
-    [InlineData("builder", "invalid", "chat_key_invalid")]
+    [InlineData("builder", "valid", true)]
+    [InlineData("Builder_2-b", "valid", true)]
+    // No chat service on this deployment: the agent simply has no chat.
+    [InlineData("builder", "missing", false)]
+    [InlineData("builder", "invalid", false)]
     // A name is the routing key, the queue segment and the token subject. A dot or a space is none of those.
-    [InlineData("build.er", "valid", "chat_agent_name_invalid")]
-    [InlineData("the builder", "valid", "chat_agent_name_invalid")]
-    [InlineData("", "valid", "chat_agent_name_invalid")]
-    public void TurningChatOn_IsRefusedByNameForWhatItCannotWorkWith(string name, string key, string? fault)
+    [InlineData("build.er", "valid", false)]
+    [InlineData("the builder", "valid", false)]
+    [InlineData("", "valid", false)]
+    public void ChatApplies_OnlyWhereTheDeploymentAndTheNameCanCarryIt(string name, string key, bool applies)
     {
         var tokens = Tokens(key switch { "valid" => Key, "invalid" => "invalid", _ => null });
+        var agent = AgentNamed(name, chatEnabled: true);
 
-        Assert.Equal(fault, ChatAgents.DescribeEnableFault(AgentNamed(name, chatEnabled: false), tokens));
-        Assert.Equal(fault, ChatAgents.DescribeProvisioningFault(AgentNamed(name, chatEnabled: true), tokens));
-        // An agent that never opted in is never refused for it.
-        Assert.Null(ChatAgents.DescribeProvisioningFault(AgentNamed(name, chatEnabled: false), tokens));
+        Assert.Equal(applies, ChatAgents.IsEffective(agent, tokens));
+        Assert.Equal(applies, ChatAgents.BuildProvisioning(agent, tokens, null, null) is not null);
+
+        // Switched off, it never applies.
+        Assert.False(ChatAgents.IsEffective(AgentNamed(name, chatEnabled: false), tokens));
     }
 
     [Fact]

@@ -49,11 +49,16 @@ public class Agent
     public bool JournalEnabled { get; set; } = false;
     public bool JournalCrossChatEnabled { get; set; } = false;
     /// <summary>
-    /// Lets a signed-in person chat with this agent from the dashboard and the app (#530).
-    /// Provisioning writes the agent's <c>Conversations</c> section only while this is true, and
-    /// the chat service refuses a conversation with an agent for which it is false.
+    /// Lets a signed-in person chat with this agent from the dashboard and the app (#530). On by
+    /// default, for new and existing agents; the owner turns it off per agent.
     /// </summary>
-    public bool ChatEnabled { get; set; } = false;
+    /// <remarks>
+    /// It takes effect only where the deployment can carry chat (<see cref="Services.ChatAgents.IsEffective"/>):
+    /// provisioning writes the agent's <c>Conversations</c> section then and only then, and never
+    /// refuses an agent over chat. The chat service refuses a conversation with an agent for which
+    /// it is false.
+    /// </remarks>
+    public bool ChatEnabled { get; set; } = true;
     [MaxLength(30)]
     public string? CodexSandboxMode { get; set; }
 

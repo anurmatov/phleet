@@ -134,12 +134,9 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
         return Results.BadRequest(new { error = "journal_not_configured", detail = journalFault });
 
-    // Chat likewise: only turning it ON needs anything. The key is the one the orchestrator and
-    // the chat service share, which mints this agent's token; the name is that token's subject and
-    // the agent's queue segment, so it must be usable as both.
-    if (body.ChatEnabled == true && !agent.ChatEnabled &&
-        ChatAgents.DescribeEnableFault(agent, scope.ServiceProvider.GetRequiredService<JournalTokenService>()) is { } chatFault)
-        return Results.BadRequest(new { error = "chat_not_configured", detail = chatFault });
+    // Chat (#530) is a plain switch, on by default: saving it never fails. Whether it applies is
+    // decided at provisioning (ChatAgents.IsEffective), where a deployment without the chat service
+    // simply gives the agent no chat.
 
     var oldCrossChat = agent.JournalCrossChatEnabled;
 

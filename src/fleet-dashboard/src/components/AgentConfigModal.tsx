@@ -62,7 +62,7 @@ export function ChatToggle({ checked, onChange }: { checked: boolean; onChange: 
       <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} />
       <span className="config-label">Chat</span>
     </label>
-    <FieldHint>Lets you chat with this agent from the dashboard&apos;s Chat view and the phone app. Needs the chat service (Fleet.Comms) and <code>FLEET_COMMS_JOURNAL_KEY</code>. Takes effect on reprovision.</FieldHint>
+    <FieldHint>Lets you chat with this agent from the dashboard&apos;s Chat view and the phone app. On by default. Applies only where the chat service (Fleet.Comms) runs; takes effect on reprovision.</FieldHint>
   </div>
 }
 

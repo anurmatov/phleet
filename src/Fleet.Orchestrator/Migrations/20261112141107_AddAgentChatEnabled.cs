@@ -15,7 +15,8 @@ namespace Fleet.Orchestrator.Migrations
                 table: "agents",
                 type: "tinyint(1)",
                 nullable: false,
-                defaultValue: false);
+                // On for every existing agent too (#530): chat is on unless the owner turns it off.
+                defaultValue: true);
         }
 
         /// <inheritdoc />

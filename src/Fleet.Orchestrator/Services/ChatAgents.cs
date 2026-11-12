@@ -41,39 +41,29 @@ public static partial class ChatAgents
     public static bool IsUsableName(string? name) => name is not null && NameShape().IsMatch(name);
 
     /// <summary>
-    /// Why chat cannot be turned on for this agent, or null. A fixed code, never a value.
-    /// </summary>
-    public static string? DescribeEnableFault(Agent agent, JournalTokenService tokens)
-    {
-        if (!IsUsableName(agent.Name)) return "chat_agent_name_invalid";
-
-        return tokens.DescribeKeyFault() switch
-        {
-            null => null,
-            "journal_key_missing" => "chat_key_missing",
-            _ => "chat_key_invalid",
-        };
-    }
-
-    /// <summary>
-    /// Why a chat-enabled agent cannot be provisioned, or null. Null for every agent with chat off,
-    /// so an agent that never opted in is never refused for it.
-    /// </summary>
-    public static string? DescribeProvisioningFault(Agent agent, JournalTokenService tokens) =>
-        agent.ChatEnabled ? DescribeEnableFault(agent, tokens) : null;
-
-    /// <summary>
     /// Whether this deployment can offer chat at all: the shared key is what every part of it needs.
     /// </summary>
     public static bool IsAvailable(JournalTokenService tokens) => tokens.DescribeKeyFault() is null;
 
     /// <summary>
-    /// The <c>Conversations</c> section for a chat-enabled agent, or null for any other.
+    /// Whether chat applies to this agent: its switch is on (the default), the deployment can offer
+    /// chat, and its name can be a routing key.
+    /// </summary>
+    /// <remarks>
+    /// Never a reason to refuse anything. Chat is on by default for every agent, so a deployment
+    /// without the chat service — or an agent whose name cannot be a queue segment — simply has no
+    /// chat with it, and provisions exactly as it did before.
+    /// </remarks>
+    public static bool IsEffective(Agent agent, JournalTokenService tokens) =>
+        agent.ChatEnabled && IsUsableName(agent.Name) && IsAvailable(tokens);
+
+    /// <summary>
+    /// The <c>Conversations</c> section for an agent chat applies to, or null for any other.
     /// </summary>
     internal static ChatProvisioning? BuildProvisioning(
         Agent agent, JournalTokenService tokens, string? southUrl, long? primaryHumanUserId)
     {
-        if (!agent.ChatEnabled) return null;
+        if (!IsEffective(agent, tokens)) return null;
 
         return new ChatProvisioning(
             string.IsNullOrWhiteSpace(southUrl) ? DefaultSouthUrl : southUrl.Trim().TrimEnd('/'),

@@ -433,8 +433,6 @@ public sealed class ContainerProvisioningService(
             return ProvisionResult.Fail(agentName, providerFault);
         if (DescribeJournalProvisioningFault(agent) is { } journalFault)
             return ProvisionResult.Fail(agentName, journalFault);
-        if (ChatAgents.DescribeProvisioningFault(agent, journalTokens) is { } chatFault)
-            return ProvisionResult.Fail(agentName, chatFault);
 
         // Bound secrets: decided before Docker is called or any file is generated. A fault here means
         // the agent would otherwise start without a way to use a secret it is meant to hold.
@@ -1593,7 +1591,8 @@ public sealed class ContainerProvisioningService(
                 node["Journal"]!.AsObject()["MediaEnabled"] = true;
         }
 
-        // #530. Written only for a chat-enabled agent, so every other agent keeps its bytes. The
+        // #530. Written only for an agent chat applies to (ChatAgents.IsEffective), so every other
+        // agent — chat off, or no chat service on this deployment — keeps its bytes. The
         // section's presence is what turns the agent's chat path on; it names no agent and no
         // broker, because the agent already holds both.
         if (chat is not null)
@@ -1777,11 +1776,7 @@ public sealed class ContainerProvisioningService(
             .Include(a => a.EnvRefs)
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        // Chat faults ride the same check for the same reason: found before DeprovisionAsync, so
-        // a refusal leaves the old container running.
-        return agent is null
-            ? null
-            : DescribeJournalProvisioningFault(agent) ?? ChatAgents.DescribeProvisioningFault(agent, journalTokens);
+        return agent is null ? null : DescribeJournalProvisioningFault(agent);
     }
 
     private async Task<string?> DescribeProviderPreflightFaultAsync(string agentName, CancellationToken ct)

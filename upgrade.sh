@@ -279,8 +279,9 @@ else
 
   # Chat is a per-agent switch now (#530), applied by provisioning, and Comms keeps no devices.
   if [[ "$COMMS_ENABLED" == "true" && -n "$(read_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATION_DB")" ]]; then
-    warn "Chat: sign in to the dashboard, turn Chat on for the agents that should have it, and"
-    warn "  reprovision them. Remove any hand-attached Conversations__* Env Refs."
+    warn "Chat is on for every agent by default: reprovision the agents to give them chat, and turn"
+    warn "  it off per agent in the dashboard where you do not want it. Remove any hand-attached"
+    warn "  Conversations__* Env Refs."
     warn "  Connect the phone again from Credentials → Devices: old Comms registrations do not carry over."
   fi
 

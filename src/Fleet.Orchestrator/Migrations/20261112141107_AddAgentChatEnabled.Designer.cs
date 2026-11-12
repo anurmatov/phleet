@@ -49,7 +49,7 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<bool>("ChatEnabled")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("tinyint(1)")
-                        .HasDefaultValue(false)
+                        .HasDefaultValue(true)
                         .HasColumnName("chat_enabled");
 
                     b.Property<string>("CodexSandboxMode")

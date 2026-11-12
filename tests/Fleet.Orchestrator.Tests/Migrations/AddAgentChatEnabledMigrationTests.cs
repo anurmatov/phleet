@@ -33,25 +33,62 @@ public sealed class AddAgentChatEnabledMigrationTests : IAsyncLifetime
             await ExecAsync(_admin, $"DROP DATABASE IF EXISTS `{_database}`");
     }
 
+    /// <summary>Chat is on by default (#530): for agents that exist at upgrade and for new rows.</summary>
     [Fact]
-    public async Task Column_is_non_nullable_bool_defaulting_false_for_existing_and_new_rows()
+    public async Task Column_is_non_nullable_bool_defaulting_true_for_existing_and_new_rows()
     {
         await MigrateAsync(Before);
         await InsertAgentAsync("old-agent");
 
         await MigrateAsync(Target);
 
-        Assert.Equal("tinyint(1)|NO|0", await ScalarAsync<string>("""
+        Assert.Equal("tinyint(1)|NO|1", await ScalarAsync<string>("""
             SELECT CONCAT(COLUMN_TYPE, '|', IS_NULLABLE, '|', COLUMN_DEFAULT)
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agents' AND COLUMN_NAME = 'chat_enabled'
             """));
         Assert.Equal(1L, await ScalarAsync<long>(
-            "SELECT COUNT(*) FROM agents WHERE Name = 'old-agent' AND chat_enabled = 0"));
+            "SELECT COUNT(*) FROM agents WHERE Name = 'old-agent' AND chat_enabled = 1"));
 
         await InsertAgentAsync("new-agent");
         Assert.Equal(1L, await ScalarAsync<long>(
-            "SELECT COUNT(*) FROM agents WHERE Name = 'new-agent' AND chat_enabled = 0"));
+            "SELECT COUNT(*) FROM agents WHERE Name = 'new-agent' AND chat_enabled = 1"));
+    }
+
+    /// <summary>
+    /// Through EF, an agent created with chat switched OFF is stored off, and one created without
+    /// saying is stored on. Guards against a default-true column turning an explicit false back on.
+    /// </summary>
+    [Fact]
+    public async Task An_agent_saved_with_chat_off_stays_off_and_one_saved_by_default_is_on()
+    {
+        await using (var db = NewContext())
+        {
+            await db.Database.MigrateAsync();
+            db.Agents.Add(NewAgent("default-agent"));
+            db.Agents.Add(NewAgent("off-agent", chatEnabled: false));
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Equal(1L, await ScalarAsync<long>(
+            "SELECT chat_enabled FROM agents WHERE Name = 'default-agent'"));
+        Assert.Equal(0L, await ScalarAsync<long>(
+            "SELECT chat_enabled FROM agents WHERE Name = 'off-agent'"));
+
+        await using var read = NewContext();
+        Assert.False((await read.Agents.AsNoTracking().SingleAsync(a => a.Name == "off-agent")).ChatEnabled);
+        Assert.True((await read.Agents.AsNoTracking().SingleAsync(a => a.Name == "default-agent")).ChatEnabled);
+    }
+
+    private static Agent NewAgent(string name, bool? chatEnabled = null)
+    {
+        var agent = new Agent
+        {
+            Name = name, DisplayName = name, Role = "dev", Model = "model-x",
+            ContainerName = $"fleet-{name}",
+        };
+        if (chatEnabled is { } value) agent.ChatEnabled = value;
+        return agent;
     }
 
     [Fact]

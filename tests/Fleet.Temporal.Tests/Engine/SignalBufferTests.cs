@@ -698,14 +698,19 @@ public sealed class SignalBufferTests
     /// the offending step. Every ancestor rethrows it, and the run closes Failed with the
     /// refusal's own type.
     /// </summary>
-    [Fact]
-    public async Task SignalWorkflow_ApproverGateRefusal_IsNotSuppressedByNestedIgnoreFailureAncestors()
+    [Theory]
+    [InlineData("doc-review")]
+    [InlineData("request-approval")]
+    [InlineData("request-input")]
+    [InlineData("{{vars.gate}}")]
+    public async Task SignalWorkflow_ApproverGateRefusal_IsNotSuppressedByNestedIgnoreFailureAncestors(string signalName)
     {
         var definition = Definition(new SequenceStep
         {
             IgnoreFailure = true,
             Steps =
             [
+                new SetVariableStep { Vars = new() { ["gate"] = "request-input" } },
                 new BranchStep
                 {
                     IgnoreFailure = true,
@@ -716,7 +721,7 @@ public sealed class SignalBufferTests
                         {
                             Name = "sneaky_approval",
                             WorkflowId = "some-other-workflow",
-                            SignalName = "doc-review",
+                            SignalName = signalName,
                             IgnoreFailure = true,
                         },
                     },

@@ -46,3 +46,7 @@ models/fleet-memory/*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Disposable browser qualification output
+src/fleet-dashboard/test-results/
+src/fleet-dashboard/playwright-report/

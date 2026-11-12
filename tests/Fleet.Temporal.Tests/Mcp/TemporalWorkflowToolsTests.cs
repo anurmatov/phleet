@@ -256,6 +256,8 @@ public sealed class TemporalWorkflowToolsTests
     [InlineData("doc-review")]
     [InlineData("advisory-review")]
     [InlineData("acceptance-decision")]
+    [InlineData("request-approval")]
+    [InlineData("request-input")]
     public async Task SignalWorkflowAsync_OtherCeoOnlySignalFromCto_Blocks(string signalName)
     {
         var context = BuildTool();
@@ -267,6 +269,22 @@ public sealed class TemporalWorkflowToolsTests
 
         Assert.Contains("CEO-only gate", result);
         Assert.Null(context.SentSignal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("agent1")]
+    [InlineData("cto-agent")]
+    public async Task RequestApproval_AllAgentCallers_AreRefused(string? caller)
+    {
+        var context = BuildTool(caller: caller);
+        foreach (var payload in new[] { "{\"Decision\":\"approved\"}", "{\"Decision\":\"changes_requested\",\"Comment\":\"x\"}",
+            "{\"Decision\":\"approved\",\"GrantId\":\"grant\"}" })
+        {
+            Assert.Contains("CEO-only gate", await context.Tool.SignalWorkflowAsync("workflow-1", "request-input", payload));
+            Assert.Contains("CEO-only gate", await context.Tool.SignalWorkflowAsync("workflow-1", "request-approval", payload));
+            Assert.Null(context.SentSignal);
+        }
     }
 
     [Fact]
@@ -633,7 +651,7 @@ public sealed class TemporalWorkflowToolsTests
     {
         Assert.True(CeoGateSignals.IsReserved("design-approval"));
         Assert.Equal(
-            new[] { "acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval" },
+            new[] { "acceptance-decision", "advisory-review", "design-approval", "doc-review", "merge-approval", "request-approval", "request-input" },
             CeoGateSignals.All.Order(StringComparer.Ordinal).ToArray());
     }
 

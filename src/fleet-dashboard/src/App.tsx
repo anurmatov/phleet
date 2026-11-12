@@ -35,6 +35,7 @@ import type {
 } from './types'
 import { apiFetch, heartbeatAge } from './utils'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
+import { humanInputIdentity } from './humanInputRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
 import { contextWindowEditValue } from './contextWindow'
@@ -1492,7 +1493,7 @@ export default function App() {
   }
 
   function handleSignalClick(wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) {
-    if (btn.requiresComment) {
+    if (btn.requiresComment || sig.name === 'request-input') {
       setSignalModal({ wf, signalName: sig.name, button: btn, comment: '' })
       return
     }
@@ -1516,10 +1517,10 @@ export default function App() {
     })
       .then(async r => {
         if (r.ok) { setSignalStates(prev => ({ ...prev, [key]: 'success' })); setSignalMsg(prev => ({ ...prev, [key]: 'Signal sent' })); setSentSignals(prev => new Set(prev).add(`${wf.workflowId}::${wf.phase}`)) }
-        else { const b = await r.json().catch(() => ({})); setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalErrorMessage(r.status, b) })) }
+        else { const b = await r.json().catch(() => ({})); setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalName === 'request-input' && r.status >= 500 ? 'Answer delivery is uncertain. Refresh this exact run before retrying.' : signalErrorMessage(r.status, b) })) }
       })
-      .catch(() => { setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: 'Request failed' })) })
-      .finally(() => setTimeout(() => setSignalStates(prev => ({ ...prev, [key]: 'idle' })), 4000))
+      .catch(() => { setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalName === 'request-input' ? 'Answer delivery is uncertain. Refresh this exact run before retrying.' : 'Request failed' })) })
+      .finally(() => { if (signalName !== 'request-input') setTimeout(() => setSignalStates(prev => ({ ...prev, [key]: 'idle' })), 4000) })
   }
 
   function applyLogFilter(lines: string[]): string[] {
@@ -2136,10 +2137,12 @@ export default function App() {
       {signalModal && (
         <SignalModal
           modal={signalModal}
+          currentGate={signalModal.signalName !== 'request-input' || workflows.some(wf =>
+            humanInputIdentity(wf) === humanInputIdentity(signalModal.wf))}
           onClose={() => setSignalModal(null)}
           onCommentChange={comment => setSignalModal(m => m ? { ...m, comment } : null)}
-          onSend={() => {
-            sendSignal(signalModal.wf, signalModal.signalName, signalModal.button.payload, signalModal.comment || undefined)
+          onSend={(payload) => {
+            sendSignal(signalModal.wf, signalModal.signalName, payload ?? signalModal.button.payload, signalModal.comment || undefined)
             setSignalModal(null)
           }}
         />

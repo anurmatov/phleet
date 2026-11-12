@@ -114,6 +114,19 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Install browser for human-input regression
+        run: npx playwright install --with-deps chromium
+
+      - name: Human-input production App click path
+        run: npm run test:human-input-browser
+
+      - name: Human-input browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: human-input-browser
+          path: src/fleet-dashboard/test-results/human-input
+
   conversations-tests:
     name: Conversations store (MySQL)
     runs-on: ubuntu-latest

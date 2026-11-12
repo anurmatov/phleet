@@ -412,3 +412,7 @@ MIT — see [LICENSE](LICENSE).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Exact-request, report-only human questions and answers are documented in
+[human input requests](docs/human-input-requests.md). The backend/dashboard
+source is separate from native-client and real-phone rollout qualification.

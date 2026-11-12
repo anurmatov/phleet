@@ -26,7 +26,7 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TaskCompletionRegistry _registry;
-    private readonly TemporalClientFactory _clientFactory;
+    private readonly ITemporalClientFactory _clientFactory;
     private readonly ILogger<TemporalRelayListener> _logger;
 
     private IConnection? _connection;
@@ -35,7 +35,7 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
     public TemporalRelayListener(
         IOptions<RabbitMqOptions> rabbitConfig,
         TaskCompletionRegistry registry,
-        TemporalClientFactory clientFactory,
+        ITemporalClientFactory clientFactory,
         ILogger<TemporalRelayListener> logger)
     {
         _rabbitConfig = rabbitConfig.Value;
@@ -171,13 +171,19 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
     /// Delivers a workflow-signal message to the target workflow via Temporal.
     /// Expects WorkflowId and SignalName to be populated; Text is the signal payload.
     /// </summary>
-    private async Task HandleWorkflowSignalAsync(RelayMessage message)
+    internal async Task HandleWorkflowSignalAsync(RelayMessage message)
     {
         if (string.IsNullOrEmpty(message.WorkflowId) || string.IsNullOrEmpty(message.SignalName))
         {
             _logger.LogWarning(
                 "workflow-signal from {Sender} missing WorkflowId or SignalName — dropping",
                 message.Sender);
+            return;
+        }
+
+        if (CeoGateSignals.IsReserved(message.SignalName))
+        {
+            _logger.LogWarning("Reserved workflow signal refused on agent relay: {SignalName}", message.SignalName);
             return;
         }
 

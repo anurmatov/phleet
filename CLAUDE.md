@@ -331,6 +331,28 @@ grants. A payload without `GrantId`, a wait without `visitVar` and a run outside
 behave exactly as before. See `docs/epic-grants.md` (threat model, scope, checks, deploy rule:
 no bridge restart during consensus).
 
+## Push notifications
+
+Off by default (`FLEET_PUSH_ENABLED=false` → orchestrator `Push__Enabled`, plus
+`FLEET_PUSH_APNS_KEY_BASE64`, `_KEY_ID`, `_TEAM_ID`, `_TOPIC`). `PushNotifierService` reads the
+poller's `WorkflowStore` snapshot, `ListRecentFailuresAsync` and the `AgentRegistry` every 30 s and
+sends an APNs alert (HTTP/2, ES256 provider token kept 50 minutes) to each row of `push_devices`
+(migration `AddPushDevices`) for three events: a run enters a phase a registered signal names, a
+run closes `Failed`/`TimedOut`, an agent seen alive is silent past the grace period.
+`PushEventDetector` announces each once and nothing on its first pass after start-up. `PushDelivery`
+sends a notification again, in memory, only to a device that did not accept it, while
+`PushEventDetector.IsCurrent` and for at most `MaxAttempts` (10) sends. `OperatorStops`
+(in memory) is set by `POST /api/agents/{name}/stop`, so a requested stop is not "down". Enabled
+with a value missing or a key that cannot sign logs `push_misconfigured` once and is treated as
+off. `PushReadiness` decides that once; the notifier and `/api/push` both read it, so `GET` then
+says `enabled: false` and `PUT /api/push/devices/{deviceId}` answers `503 push_disabled`.
+
+MUST NOT: put task text, comments, failure messages or output in a notification (`PushMessages`:
+identifying fields only); log or return a device token or any part of the key (the `apns` HttpClient
+has no factory loggers, which would log the URI and so the token); delete a device on
+any failure other than Apple saying the token is gone (`ApnsOutcome.Unregistered`). See
+`docs/push-notifications.md`.
+
 ## Workflow failure notifier
 
 Off by default (`FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false` → bridge

@@ -641,3 +641,21 @@ public class CredentialsAudit
     [MaxLength(255)]
     public string Actor { get; set; } = "CEO";
 }
+
+/// <summary>
+/// A phone registered for push notifications: the iOS app's control-plane connection on one device.
+/// </summary>
+/// <remarks>
+/// <see cref="DeviceId"/> is chosen by the app and stable for one install, so a token that changes
+/// replaces the old one instead of piling up beside it. <see cref="Token"/> is Apple's device token.
+/// It is not a credential on its own — it is useless without the team's signing key — but it is
+/// never returned by an endpoint or written to a log either.
+/// </remarks>
+public class PushDevice
+{
+    public int Id { get; set; }
+    public required string DeviceId { get; set; }
+    public required string Token { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}

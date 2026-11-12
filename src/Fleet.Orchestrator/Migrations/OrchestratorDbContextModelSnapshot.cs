@@ -961,6 +961,38 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("project_context_versions", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.PushDevice", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("DeviceId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeviceId")
+                        .IsUnique();
+
+                    b.ToTable("push_devices", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.Repository", b =>
                 {
                     b.Property<int>("Id")

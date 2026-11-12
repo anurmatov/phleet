@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end proof of secret placeholders, with synthetic fixtures only: the real fleet-secrets
-# image, a fake HTTPS upstream, and a client container using curl, git, gh, node and python exactly
-# as an agent would. Exit 0: pass, 1: assertion, 2: infrastructure.
+# image, a fake HTTPS upstream, two real sshd servers, and a client container using curl, git, gh,
+# node, python and ssh exactly as an agent would. Exit 0: pass, 1: assertion, 2: infrastructure.
 #
 #   PROXY_IMAGE   fleet-secrets image to test (default: built from src/Fleet.SecretProxy/Dockerfile)
 #   AGENT_IMAGE   image of the two client containers (default: the light image built from
@@ -20,6 +20,9 @@ TOOL_IMAGE="fleet-secrets-e2e:client"
 EGRESS="${EGRESS_SUBNET:-10.213.210}"
 SECRETS="${SECRETS_SUBNET:-10.213.211}"
 UPSTREAM_IP="$EGRESS.10"; PROXY_IP="$SECRETS.2"; AGENT_IP="$SECRETS.20"; FOREIGN_IP="$SECRETS.21"
+# Two SSH servers that both accept the bound key. The key is bound to the first one only.
+SSH_BOUND_HOST=build.example.test; SSH_BOUND_IP="$EGRESS.11"
+SSH_OTHER_HOST=other.example.test; SSH_OTHER_IP="$EGRESS.12"
 STATIC_SECRET="synthetic-static-secret-5d2e8a"
 HOSTS=(api.example.test api.github.com github.com)
 WORK="$(mktemp -d)"
@@ -29,8 +32,9 @@ mkdir -p "$WORK/state" "$WORK/ca" "$WORK/fixture" "$WORK/log"
 cleanup() {
     # KEEP=1 leaves the containers, networks and work directory in place for debugging.
     if [ -n "${KEEP:-}" ]; then echo "kept: $ID ($WORK)" >&2; return; fi
-    docker rm -f "$ID-agent" "$ID-foreign" "$ID-proxy" "$ID-upstream" > /dev/null 2>&1 || true
+    docker rm -f "$ID-agent" "$ID-foreign" "$ID-proxy" "$ID-upstream" "$ID-ssh-bound" "$ID-ssh-other" > /dev/null 2>&1 || true
     docker network rm "$ID-secrets" "$ID-egress" > /dev/null 2>&1 || true
+    docker volume rm "$ID-ssh" "$ID-ssh-foreign" > /dev/null 2>&1 || true
     # Files the containers created are root-owned on Linux.
     docker run --rm -v "$WORK:/work" "$TOOL_IMAGE" sh -c 'rm -rf /work/*' > /dev/null 2>&1 || true
     rm -rf "$WORK"
@@ -59,7 +63,13 @@ printf "subjectAltName=DNS:api.example.test,DNS:api.github.com,DNS:github.com\n"
 openssl x509 -req -in upstream.csr -CA public-ca.crt -CAkey public-ca.key -CAcreateserial -out upstream.crt -days 2 -extfile san.ext 2>/dev/null
 openssl genrsa -out app.pem 2048 2>/dev/null
 base64 -w0 app.pem > app.pem.b64
-for name in static github; do
+# An SSH user key (kept as base64, the way a multi-line key sits in .env) and a host key per server.
+ssh-keygen -q -t ed25519 -N "" -C synthetic -f ssh_user
+ssh-keygen -q -t ed25519 -N "" -C synthetic -f ssh_host_bound
+ssh-keygen -q -t ed25519 -N "" -C synthetic -f ssh_host_other
+base64 -w0 ssh_user > ssh_user.b64
+printf "%s %s" build.example.test "$(cut -d" " -f1,2 ssh_host_bound.pub)" > ssh_known_host
+for name in static github ssh; do
     printf "fleet_placeholder_%s" "$(openssl rand -base64 32 | tr "+/" "-_" | tr -d "=\n")" > placeholder.$name
     printf "%s" "$(cat placeholder.$name)" | sha256sum | cut -d" " -f1 > placeholder.$name.sha256
 done
@@ -71,8 +81,12 @@ PH_GITHUB="$(cat "$WORK/fixture/placeholder.github")"
 KEY_LINE="$(sed -n 2p "$WORK/fixture/app.pem")"
 KEY_B64="$(head -c 48 "$WORK/fixture/app.pem.b64")"
 [ "${#KEY_LINE}" -ge 40 ] && [ "${#KEY_B64}" -eq 48 ] || fail_infra "key fixture has the wrong shape"
+SSH_KEY_LINE="$(sed -n 2p "$WORK/fixture/ssh_user")"
+SSH_KEY_B64="$(head -c 48 "$WORK/fixture/ssh_user.b64")"
+[ "${#SSH_KEY_LINE}" -ge 40 ] && [ "${#SSH_KEY_B64}" -eq 48 ] || fail_infra "SSH key fixture has the wrong shape"
 
 # write_state <static value | ""> <grants: both | github | none> [age in seconds, default 0]
+# "both" is every grant: the static key, the GitHub App and the SSH key. "github" leaves only that one.
 # The forwarder refuses a state that is too old, so every call stamps the current time unless an
 # age is given.
 write_state() {
@@ -81,12 +95,15 @@ set -e
 value='$1'; grants='$2'; age='${3:-0}'
 static_grant='{\"agent\":\"agent1\",\"sourceIp\":\"$AGENT_IP\",\"key\":\"EXAMPLE_API_KEY\",\"placeholderSha256\":\"'\$(cat fixture/placeholder.static.sha256)'\"}'
 github_grant='{\"agent\":\"agent1\",\"sourceIp\":\"$AGENT_IP\",\"key\":\"GITHUB_APP_PEM\",\"placeholderSha256\":\"'\$(cat fixture/placeholder.github.sha256)'\"}'
-case \$grants in both) list=\"\$static_grant,\$github_grant\" ;; github) list=\"\$github_grant\" ;; none) list='' ;; esac
-jq -n --arg value \"\$value\" --arg pem \"\$(cat fixture/app.pem.b64)\" --argjson grants \"[\$list]\" --argjson age \"\$age\" '{
+ssh_grant='{\"agent\":\"agent1\",\"sourceIp\":\"$AGENT_IP\",\"key\":\"SSH_KEY_EXAMPLE\",\"placeholderSha256\":\"'\$(cat fixture/placeholder.ssh.sha256)'\"}'
+case \$grants in both) list=\"\$static_grant,\$github_grant,\$ssh_grant\" ;; github) list=\"\$github_grant\" ;; none) list='' ;; esac
+jq -n --arg value \"\$value\" --arg pem \"\$(cat fixture/app.pem.b64)\" --arg sshkey \"\$(cat fixture/ssh_user.b64)\" \\
+   --arg hostkey \"\$(cat fixture/ssh_known_host)\" --argjson grants \"[\$list]\" --argjson age \"\$age\" '{
   version: 1, generatedAtUtc: ((now - \$age) | todate),
   bindings: [
     {key: \"EXAMPLE_API_KEY\", kind: \"static\", hosts: [\"api.example.test\"], header: \"Authorization\", value: \$value, appId: null},
-    {key: \"GITHUB_APP_PEM\", kind: \"github_app\", hosts: [\"api.github.com\", \"github.com\"], header: \"Authorization\", value: \$pem, appId: \"424242\"}
+    {key: \"GITHUB_APP_PEM\", kind: \"github_app\", hosts: [\"api.github.com\", \"github.com\"], header: \"Authorization\", value: \$pem, appId: \"424242\"},
+    {key: \"SSH_KEY_EXAMPLE\", kind: \"ssh_key\", hosts: [\"deploy@$SSH_BOUND_HOST\"], header: \"Authorization\", value: \$sshkey, appId: null, knownHosts: [\$hostkey]}
   ],
   grants: \$grants}' > state/.state.tmp
 chmod 600 state/.state.tmp
@@ -103,6 +120,42 @@ docker run -d --name "$ID-upstream" --network "$ID-egress" --ip "$UPSTREAM_IP" -
     -v "$HERE/upstream.py:/upstream.py:ro" -v "$WORK/fixture:/fixture:ro" -v "$WORK/log:/log" \
     "$TOOL_IMAGE" /upstream.py "$STATIC_SECRET" /log/requests.jsonl /fixture/upstream.crt /fixture/upstream.key > /dev/null
 
+# Two SSH servers. Both accept the fixture key for two users; each has its own host key.
+start_sshd() {
+    docker run -d --name "$1" --network "$ID-egress" --ip "$2" --add-host "$SSH_OTHER_HOST:$SSH_OTHER_IP" --entrypoint bash \
+        -v "$WORK/fixture:/fixture:ro" "$TOOL_IMAGE" -c "
+for u in deploy other; do
+    useradd -m \$u && usermod -p '*' \$u
+    install -d -m 700 -o \$u /home/\$u/.ssh
+    install -m 600 -o \$u /fixture/ssh_user.pub /home/\$u/.ssh/authorized_keys
+done
+mkdir -p /run/sshd && install -m 600 /fixture/$3 /etc/ssh/harness_host_key
+exec /usr/sbin/sshd -D -e -h /etc/ssh/harness_host_key -o PasswordAuthentication=no" > /dev/null \
+        || fail_infra "could not start an SSH server"
+}
+start_sshd "$ID-ssh-bound" "$SSH_BOUND_IP" ssh_host_bound
+start_sshd "$ID-ssh-other" "$SSH_OTHER_IP" ssh_host_other
+# Control: with the key file in hand, both servers let both users in. Every refusal the agent meets
+# later is therefore the signer's, not the server's.
+for target in "deploy@$SSH_BOUND_IP" "other@$SSH_BOUND_IP" "deploy@$SSH_OTHER_IP"; do
+    ok=""
+    for _ in $(seq 1 15); do
+        ok="$(docker run --rm --network "$ID-egress" --entrypoint bash -v "$WORK/fixture:/fixture:ro" "$TOOL_IMAGE" -c "
+install -m 600 /fixture/ssh_user /tmp/key
+ssh -i /tmp/key -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $target 'echo ok' 2> /dev/null" || true)"
+        [ "$ok" = ok ] && break
+        sleep 1
+    done
+    [ "$ok" = ok ] || fail_infra "SSH server did not accept the fixture key for $target"
+done
+echo "PASS control: both SSH servers accept the key itself, for both users"
+
+# The signing sockets live on volumes, not on the host directory: a unix socket made in one
+# container is not reachable from another through a Docker Desktop file share. The granted agent's
+# volume is its subdirectory in the forwarder; the foreign container's volume is never filled.
+docker volume create "$ID-ssh" > /dev/null && docker volume create "$ID-ssh-foreign" > /dev/null \
+    || fail_infra "could not create the SSH socket volumes"
+
 # The forwarder trusts only the stand-in CA and resolves every bound host to the fake upstream, so
 # nothing in this harness can reach a real service.
 add_upstream=(); for h in "${HOSTS[@]}"; do add_upstream+=(--add-host "$h:$UPSTREAM_IP"); done
@@ -110,6 +163,7 @@ docker create --name "$ID-proxy" --network "$ID-egress" "${add_upstream[@]}" \
     -e SSL_CERT_FILE=/fixture/public-ca.crt -e SSL_CERT_DIR=/nonexistent \
     -e "SecretProxy__ListenAddress=$PROXY_IP" -e SecretProxy__MaxStateAgeSeconds=600 \
     -v "$WORK/state:/var/lib/fleet-secrets/state:ro" -v "$WORK/ca:/var/lib/fleet-secrets/ca" -v "$WORK/fixture:/fixture:ro" \
+    -v "$ID-ssh:/var/lib/fleet-secrets/ssh/agent1" \
     "$PROXY_IMAGE" > /dev/null
 docker network connect --ip "$PROXY_IP" "$ID-secrets" "$ID-proxy"
 docker start "$ID-proxy" > /dev/null
@@ -124,15 +178,18 @@ docker exec "$ID-proxy" curl -fs http://127.0.0.1:8080/health | grep -q '"state"
     || { docker logs "$ID-proxy" >&2; fail_infra "fleet-secrets is not serving a loaded state"; }
 echo "PASS forwarder up: CA created, state loaded"
 
-# What the orchestrator gives a granted agent: placeholders, steering, the CA, a fixed address.
+# What the orchestrator gives a granted agent: placeholders, steering, the CA, a fixed address, and
+# for an SSH key its own socket directory. The SSH servers are reached directly, never steered.
 start_client() {
-    local name="$1" ip="$2" steer=()
+    local name="$1" ip="$2" ssh_volume="$3" steer=()
     for h in "${HOSTS[@]}"; do steer+=(--add-host "$h:$PROXY_IP"); done
+    steer+=(--add-host "$SSH_BOUND_HOST:$SSH_BOUND_IP" --add-host "$SSH_OTHER_HOST:$SSH_OTHER_IP")
     docker create --name "$name" --network "$ID-egress" "${steer[@]}" --entrypoint sleep \
         -e "EXAMPLE_API_KEY=$PH_STATIC" -e "GH_TOKEN=$PH_GITHUB" -e "GITHUB_TOKEN=$PH_GITHUB" \
         -e NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/fleet-secrets.crt \
         -e REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
         -e GH_PROMPT_DISABLED=1 -e GH_NO_UPDATE_NOTIFIER=1 \
+        -e SSH_AUTH_SOCK=/run/fleet-secrets/ssh/agent.sock -v "$ssh_volume:/run/fleet-secrets/ssh:ro" \
         -v "$WORK/ca/ca.crt:/usr/local/share/ca-certificates/fleet-secrets.crt:ro" \
         -v "$REPO_ROOT/entrypoint.sh:/app/entrypoint.sh:ro" -v "$REPO_ROOT/gh-auth.sh:/app/gh-auth.sh:ro" \
         -v "$HERE/checks.sh:/checks.sh:ro" "$AGENT_IMAGE" infinity > /dev/null
@@ -140,14 +197,14 @@ start_client() {
     docker start "$name" > /dev/null
 }
 phase() {
-    docker exec -u 0 "$1" bash /checks.sh "$2" "$STATIC_SECRET" "$KEY_LINE" "$KEY_B64" && return 0
+    docker exec -u 0 "$1" bash /checks.sh "$2" "$STATIC_SECRET" "$KEY_LINE" "$KEY_B64" "$SSH_KEY_LINE" "$SSH_KEY_B64" && return 0
     # The forwarder log carries no secret by design (asserted below), so it is safe to show.
     echo "--- fleet-secrets log (tail) ---" >&2
     docker logs "$ID-proxy" 2>&1 | tail -15 >&2
     fail_assert "phase $2"
 }
 
-start_client "$ID-agent" "$AGENT_IP"
+start_client "$ID-agent" "$AGENT_IP" "$ID-ssh"
 phase "$ID-agent" setup
 write_state "$STATIC_SECRET" both
 phase "$ID-agent" granted
@@ -171,7 +228,7 @@ write_state "$STATIC_SECRET" both
 phase "$ID-agent" restored
 
 # ── The same placeholders from another container ─────────────────────────────────────────────────
-start_client "$ID-foreign" "$FOREIGN_IP"
+start_client "$ID-foreign" "$FOREIGN_IP" "$ID-ssh-foreign"
 phase "$ID-foreign" setup
 write_state "$STATIC_SECRET" both
 phase "$ID-foreign" foreign
@@ -193,9 +250,11 @@ check_log "the refused requests never arrived (no /v1/whoami with a query string
     '[.[] | select(.path | contains("token="))] | length == 0'
 
 docker logs "$ID-proxy" > "$WORK/proxy.log" 2>&1
-for needle in "$STATIC_SECRET" "$PH_STATIC" "$PH_GITHUB" ghs_synthetic 'PRIVATE KEY' "$KEY_LINE" "$KEY_B64"; do
+for needle in "$STATIC_SECRET" "$PH_STATIC" "$PH_GITHUB" ghs_synthetic 'PRIVATE KEY' "$KEY_LINE" "$KEY_B64" "$SSH_KEY_LINE" "$SSH_KEY_B64"; do
     grep -q -- "$needle" "$WORK/proxy.log" && fail_assert "the forwarder logged a secret, placeholder, token or key"
 done
 grep -q 'reason=injected' "$WORK/proxy.log" || fail_assert "the forwarder log has no injected request"
+grep -q 'ssh socket ready: agent=agent1 keys=1' "$WORK/proxy.log" || fail_assert "the forwarder log has no loaded SSH key"
+grep -q 'ssh socket removed: agent=agent1' "$WORK/proxy.log" || fail_assert "the forwarder log has no removed SSH socket"
 echo "PASS forwarder log: no secret, placeholder, installation token or key"
 echo "PASS secret placeholders end to end"

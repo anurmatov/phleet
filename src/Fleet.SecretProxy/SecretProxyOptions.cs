@@ -27,4 +27,21 @@ public sealed class SecretProxyOptions
 
     /// <summary>Where GitHub App installation tokens are minted. HTTPS only.</summary>
     public string GitHubApiBaseUrl { get; set; } = "https://api.github.com";
+
+    /// <summary>
+    /// One subdirectory per agent that holds an SSH grant, each with that agent's signing socket and
+    /// host keys (<see cref="Fleet.Shared.SecretProxySsh"/>). The orchestrator mounts an agent's own
+    /// subdirectory into its container. Empty turns SSH keys off.
+    /// </summary>
+    public string SshDirectory { get; set; } = "/var/lib/fleet-secrets/ssh";
+
+    /// <summary>Where the stock ssh-agent sockets live. Never mounted anywhere. Keep it short: a socket path is at most 108 bytes.</summary>
+    public string SshPrivateDirectory { get; set; } = "/tmp";
+
+    public string SshAgentPath { get; set; } = "ssh-agent";
+
+    public string SshAddPath { get; set; } = "ssh-add";
+
+    /// <summary>How often the sockets are checked against the state (1 to 60). Every connection checks as well.</summary>
+    public int SshReconcileSeconds { get; set; } = 2;
 }

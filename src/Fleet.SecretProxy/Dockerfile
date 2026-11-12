@@ -11,7 +11,8 @@ RUN dotnet publish src/Fleet.SecretProxy/Fleet.SecretProxy.csproj -c Release -o 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# openssh-client: ssh-agent and ssh-add hold and constrain bound SSH keys (SshAgentGate).
+RUN apt-get update && apt-get install -y curl openssh-client && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app .
 

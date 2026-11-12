@@ -118,6 +118,8 @@ public sealed class ContainerProvisioningService(
         // Bound secrets: the CA the agent trusts, and its place on the internal secrets network.
         if (secrets.Bind is { } caBind)
             binds.Add(caBind);
+        if (secrets.SshBind is { } sshBind)
+            binds.Add(sshBind);
         if (secrets.Address is not null && !networks.Contains(SecretProxyNetwork.NetworkName, StringComparer.Ordinal))
             networks.Add(SecretProxyNetwork.NetworkName);
 
@@ -516,6 +518,21 @@ public sealed class ContainerProvisioningService(
         // and must forget the previous container's: record their hashes, then rewrite its state.
         if (await RecordSecretGrantsAsync(db, agent.Id, secretPlan, ct) is { } recordFault)
             return ProvisionResult.Fail(agentName, recordFault);
+
+        // The agent's signing-socket directory must exist before Docker mounts it; fleet-secrets
+        // puts the socket in it once it has read the state written just above.
+        if (secretPlan.SshBind is not null && SecretProxySsh.AgentDirectoryName(agent.Name) is { } sshDirectory)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(baseDir, SecretProxySsh.Directory, sshDirectory));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return ProvisionResult.Fail(agentName,
+                    $"secret_ssh_directory_unavailable: {SecretProxySsh.Directory}/{sshDirectory} could not be created under the fleet base directory");
+            }
+        }
 
         var containerId = await docker.CreateContainerAsync(
             agent.ContainerName,

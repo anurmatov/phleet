@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  GITHUB_APP_KIND, SSH_KEY_KIND, STATIC_KIND,
   agentSummary, bindingBody, emptyForm, formFor, splitList, statusProblem, withKind,
   type SecretBinding, type SecretBindingsStatus,
 } from './secretBindings.ts'
@@ -61,4 +62,36 @@ test('agentSummary lists the agents and counts those still to reprovision', () =
   })
   assert.equal(agentSummary(two), 'agent1, agent2 (1 to reprovision)')
   assert.equal(agentSummary({ ...two, pendingReprovision: [] }), 'agent1, agent2')
+})
+
+test('an SSH key binding sends destinations and host key lines, and nothing a header binding has', () => {
+  const form = withKind({
+    ...emptyForm(), envKeyName: 'SSH_KEY_EXAMPLE', hosts: 'Deploy@Build.example.test', headerName: 'X-Api-Key', exposeAs: 'TOKEN',
+  }, SSH_KEY_KIND)
+  const body = bindingBody({ ...form, knownHosts: '\n build.example.test ssh-ed25519 AAAAsynthetic \n\n' })
+
+  assert.deepEqual(body, {
+    kind: 'ssh_key',
+    hosts: ['deploy@build.example.test'],
+    knownHosts: ['build.example.test ssh-ed25519 AAAAsynthetic'],
+    agentAttachable: false,
+  })
+})
+
+test('formFor shows an SSH key with its host keys and no exposed name', () => {
+  const form = formFor(binding({
+    kind: SSH_KEY_KIND, hosts: ['deploy@build.example.test'], exposeAs: [],
+    knownHosts: ['build.example.test ssh-ed25519 AAAAsynthetic', 'build.example.test ssh-rsa AAAAother'],
+  }))
+
+  assert.equal(form.exposeAs, '')
+  assert.equal(form.knownHosts, 'build.example.test ssh-ed25519 AAAAsynthetic\nbuild.example.test ssh-rsa AAAAother')
+})
+
+test('leaving the SSH kind drops the host keys', () => {
+  const ssh = { ...withKind(emptyForm(), SSH_KEY_KIND), knownHosts: 'build.example.test ssh-ed25519 AAAAsynthetic' }
+
+  assert.equal(withKind(ssh, STATIC_KIND).knownHosts, '')
+  assert.equal(withKind(ssh, GITHUB_APP_KIND).knownHosts, '')
+  assert.equal('knownHosts' in bindingBody(withKind(ssh, STATIC_KIND)), false)
 })

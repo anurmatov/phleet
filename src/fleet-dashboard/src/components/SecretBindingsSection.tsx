@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../utils'
 import {
-  GITHUB_APP_KIND, STATIC_KIND, agentSummary, bindingBody, emptyForm, formFor, statusProblem, withKind,
+  GITHUB_APP_KIND, SSH_KEY_KIND, STATIC_KIND, agentSummary, bindingBody, emptyForm, formFor, statusProblem, withKind,
   type SecretBinding, type SecretBindingForm, type SecretBindingsStatus,
 } from '../secretBindings'
 
@@ -85,7 +85,9 @@ export default function SecretBindingsSection({ onToast }: { onToast: (message: 
       <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
         A bound key is never written into an agent container. The agent gets a placeholder, and fleet-secrets
         swaps it for the real value only on an HTTPS request to one of the hosts listed here, in the named header.
-        Attach a bound key to an agent as an Env Ref, then reprovision the agent.
+        An SSH key is never sent at all: the agent gets a signing socket, and fleet-secrets signs only for a session
+        with one of the listed hosts, proven by its host key. Attach a bound key to an agent as an Env Ref, then
+        reprovision the agent.
       </p>
 
       {loadError && <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 8 }}>{loadError}</div>}
@@ -96,7 +98,7 @@ export default function SecretBindingsSection({ onToast }: { onToast: (message: 
           <thead>
             <tr style={{ color: 'var(--muted)' }}>
               <th style={cell}>Key</th>
-              <th style={cell}>Sent only to</th>
+              <th style={cell}>Used only for</th>
               <th style={cell}>In header</th>
               <th style={cell}>Agent sees it as</th>
               <th style={cell}>Agents</th>
@@ -112,11 +114,12 @@ export default function SecretBindingsSection({ onToast }: { onToast: (message: 
                 <td style={{ ...cell, fontFamily: 'monospace' }}>
                   {binding.envKeyName}
                   {binding.kind === GITHUB_APP_KIND && <div style={{ color: 'var(--muted)' }}>GitHub App ({binding.appIdEnvKey})</div>}
+                  {binding.kind === SSH_KEY_KIND && <div style={{ color: 'var(--muted)' }}>SSH key ({binding.knownHosts?.length ?? 0} host keys)</div>}
                   {!binding.valuePresent && <div style={{ color: 'var(--red)' }}>no value in .env</div>}
                 </td>
                 <td style={{ ...cell, fontFamily: 'monospace' }}>{binding.hosts.map(host => <div key={host}>{host}</div>)}</td>
-                <td style={{ ...cell, fontFamily: 'monospace' }}>{binding.headerName}</td>
-                <td style={{ ...cell, fontFamily: 'monospace' }}>{binding.exposeAs.join(', ')}</td>
+                <td style={{ ...cell, fontFamily: 'monospace' }}>{binding.kind === SSH_KEY_KIND ? 'signed, never sent' : binding.headerName}</td>
+                <td style={{ ...cell, fontFamily: 'monospace' }}>{binding.kind === SSH_KEY_KIND ? 'SSH_AUTH_SOCK (a socket)' : binding.exposeAs.join(', ')}</td>
                 <td style={cell}>
                   {agentSummary(binding)}
                   {binding.agentAttachable && <div style={{ color: 'var(--muted)' }}>agents may attach it</div>}
@@ -145,23 +148,29 @@ export default function SecretBindingsSection({ onToast }: { onToast: (message: 
                 onChange={e => setForm(withKind(form, e.target.value))}>
                 <option value={STATIC_KIND}>Static value</option>
                 <option value={GITHUB_APP_KIND}>GitHub App private key</option>
+                <option value={SSH_KEY_KIND}>SSH private key</option>
               </select>
             </div>
             <div>
-              <span style={label}>Hosts (exact names, comma-separated)</span>
+              <span style={label}>{form.kind === SSH_KEY_KIND ? 'Destinations (user@host, comma-separated)' : 'Hosts (exact names, comma-separated)'}</span>
               <input className="config-input" style={{ width: '100%' }} value={form.hosts}
-                placeholder="api.example.test" onChange={e => setForm({ ...form, hosts: e.target.value })} />
+                placeholder={form.kind === SSH_KEY_KIND ? 'deploy@build.example.test' : 'api.example.test'}
+                onChange={e => setForm({ ...form, hosts: e.target.value })} />
             </div>
-            <div>
-              <span style={label}>Request header</span>
-              <input className="config-input" style={{ width: '100%' }} value={form.headerName} disabled={form.kind === GITHUB_APP_KIND}
-                onChange={e => setForm({ ...form, headerName: e.target.value })} />
-            </div>
-            <div>
-              <span style={label}>Variable names in the agent (blank: the key itself)</span>
-              <input className="config-input" style={{ width: '100%' }} value={form.exposeAs}
-                onChange={e => setForm({ ...form, exposeAs: e.target.value })} />
-            </div>
+            {form.kind !== SSH_KEY_KIND && (
+              <div>
+                <span style={label}>Request header</span>
+                <input className="config-input" style={{ width: '100%' }} value={form.headerName} disabled={form.kind === GITHUB_APP_KIND}
+                  onChange={e => setForm({ ...form, headerName: e.target.value })} />
+              </div>
+            )}
+            {form.kind !== SSH_KEY_KIND && (
+              <div>
+                <span style={label}>Variable names in the agent (blank: the key itself)</span>
+                <input className="config-input" style={{ width: '100%' }} value={form.exposeAs}
+                  onChange={e => setForm({ ...form, exposeAs: e.target.value })} />
+              </div>
+            )}
             {form.kind === GITHUB_APP_KIND && (
               <div>
                 <span style={label}>.env key that holds the App id</span>
@@ -170,6 +179,17 @@ export default function SecretBindingsSection({ onToast }: { onToast: (message: 
               </div>
             )}
           </div>
+          {form.kind === SSH_KEY_KIND && (
+            <div style={{ marginTop: 10 }}>
+              <span style={label}>
+                Host keys, one line per key (run <code>ssh-keyscan build.example.test</code> and check the result against the host).
+                The key signs only for these.
+              </span>
+              <textarea className="config-input" style={{ width: '100%', minHeight: 70, fontFamily: 'monospace', fontSize: 11 }}
+                value={form.knownHosts} placeholder="build.example.test ssh-ed25519 AAAA…"
+                onChange={e => setForm({ ...form, knownHosts: e.target.value })} />
+            </div>
+          )}
           <label style={{ display: 'block', fontSize: 12, marginTop: 10 }}>
             <input type="checkbox" checked={form.agentAttachable}
               onChange={e => setForm({ ...form, agentAttachable: e.target.checked })} />{' '}

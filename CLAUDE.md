@@ -1,84 +1,10 @@
 # Fleet — Autonomous AI Agent System
 
-## Repository Structure
-
-```
-src/
-├── Fleet.Agent/        — core agent process (Telegram bot + multi-provider executor)
-├── Fleet.Orchestrator/ — agent registry, Temporal workflow polling, MCP + REST + WebSocket
-├── Fleet.Temporal/     — workflow orchestration bridge (MCP server)
-├── Fleet.Bridge/       — RabbitMQ relay for inter-agent messaging
-├── Fleet.Memory/       — semantic memory MCP server (Qdrant + embeddings)
-├── Fleet.SecretProxy/  — fleet-secrets: swaps placeholders for bound secrets on the way to bound hosts
-├── Fleet.Shared/       — shared utilities
-└── fleet-dashboard/    — React SPA for agent monitoring and lifecycle management
-Dockerfile              — agent image (multi-stage)
-Dockerfile.temporal     — temporal bridge image
-entrypoint.sh           — container init script
-gh-auth.sh              — GitHub App JWT generation utility
-seed.example.json       — example agent bootstrap config (setup.sh copies → ./fleet/seed.json)
-docker-compose.example.yml — full stack example (setup.sh copies → ./fleet/docker-compose.yml)
-.env.example            — required environment variables (setup.sh copies → ./fleet/.env)
-setup.sh                — guided installer
-upgrade.sh              — rebuild images + restart (no prompts)
-./fleet/                — gitignored runtime data dir (created by setup.sh)
-```
-
-## Build Commands
-
-```bash
-# Build the entire solution
-dotnet build
-
-# Build a specific project
-dotnet build src/Fleet.Agent/Fleet.Agent.csproj
-
-# Run tests
-dotnet test
-
-# Build Docker images (from repo root)
-docker build -t fleet:agent .
-docker build -t fleet:memory -f src/Fleet.Memory/Dockerfile .
-docker build -t fleet:orchestrator -f src/Fleet.Orchestrator/Dockerfile .
-docker build -t fleet:temporal-bridge -f Dockerfile.temporal .
-docker build -t fleet:bridge -f src/Fleet.Bridge/Dockerfile .
-docker build -t fleet:secrets -f src/Fleet.SecretProxy/Dockerfile .
-docker build -t fleet:dashboard \
-  --build-arg VITE_AUTH_TOKEN=your-token \
-  -f src/fleet-dashboard/Dockerfile .
-
-# Dashboard (React)
-cd src/fleet-dashboard
-npm install
-npm run dev    # local dev server
-npm run build  # production build
-```
+## Build and setup notes
 
 The dashboard proxy resolves the orchestrator per request via Docker DNS (`resolver 127.0.0.11`) — do not reintroduce a literal `proxy_pass` host; the regression harness is `bash tests/dashboard-proxy/run.sh`.
 
-## Quick Start
-
-1. Run the setup wizard from the repo root:
-   ```bash
-   ./setup.sh
-   ```
-
-   This creates a `./fleet/` subdirectory next to the repo holding all
-   runtime state: `.env`, `seed.json`, generated `docker-compose.yml`,
-   `workspaces/`, `memories/`, credentials, mysql backups. The entire
-   dir is gitignored — `rm -rf fleet/` to reset.
-
-2. Fill in the prompted values (Telegram bot tokens, GitHub App credentials, etc.) — setup.sh writes them to `./fleet/.env`.
-
-3. Open the dashboard and use the SetupBanner to provision your first agent (co-cto). `seed.example.json` ships with no agents — agents are provisioned via the dashboard, not seed.json.
-
-4. setup.sh starts the stack automatically. To start/stop later:
-   ```bash
-   cd fleet && docker compose up -d
-   cd fleet && docker compose down
-   ```
-
-5. The orchestrator reads `seed.json` on first start and bootstraps your agents into the database.
+`seed.example.json` ships with no agents — agents are provisioned via the dashboard (SetupBanner), not seed.json.
 
 ## Architecture
 
@@ -263,6 +189,18 @@ not read `.env`. Kind `github_app` keeps the App key there too: it mints install
 agent's `GH_TOKEN` is a placeholder (`entrypoint.sh` → `gh-auth.sh --placeholder`; the `gh` wrapper
 appends `.owner` as the installation hint).
 
+Kind `ssh_key` is never sent anywhere: the agent gets no variable, only its own read-only
+directory `/run/fleet-secrets/ssh` (`secret-proxy/ssh/<agent>/` on the host, layout in
+`SecretProxySsh`) with a socket (`SSH_AUTH_SOCK`) and the bound hosts' `known_hosts`, and it reaches
+the SSH server directly, unsteered. `SshAgentGate` keeps one stock `ssh-agent` per granted agent with
+the key loaded under destination constraints (`ssh-add -h user@host` against the binding's
+`knownHosts`), so OpenSSH itself signs only for a bound host key and user. The gate re-reads the state
+on every connection and relays only list, sign and session-bind; MUST NOT relay any other agent
+request (add, remove, lock) or write a key to disk (it goes to `ssh-add` on stdin). The state member
+`knownHosts` is omitted for every other kind, so a state without SSH keys is unchanged bytes and an
+older forwarder still reads it. Needs a Linux Docker host (a socket shared by host path). An open SSH
+session survives revocation; new logins do not.
+
 MUST NOT: deliver a bound key any other way (every fault refuses the provision instead:
 `secret_proxy_disabled`, `secret_proxy_ca_missing`, `secret_proxy_network_unavailable`, …; a
 reprovision finds them in `DescribeSecretPlanFaultAsync`, before `DeprovisionAsync`, so a refusal
@@ -409,16 +347,6 @@ notify. Notices carry identity, status and a fixed cause category, never failure
 strings. There is no recovery automation. Bridge `GET /workflow-failures` shows the records. See
 `docs/workflow-failure-notifier.md`.
 
-## Code Conventions
-
-- .NET 10, C# latest features
-- File-scoped namespaces
-- `required` keyword for mandatory config properties
-- `IAsyncEnumerable` for streaming
-- Microsoft.Extensions.Hosting for service lifecycle
-- Options pattern for configuration
-- React + TypeScript + Vite + Tailwind for the dashboard
-
 ## Configuration
 
 Agent config is DB-driven (MySQL via EF Core). On first run, the orchestrator seeds from `seed.json`.
@@ -445,17 +373,6 @@ Configuration priority (highest to lowest):
 3. Baked defaults in the image
 
 ## Testing
-
-```bash
-# Run all tests
-dotnet test
-
-# Run with output
-dotnet test --logger "console;verbosity=normal"
-
-# Run specific test project
-dotnet test tests/Fleet.Agent.Tests/
-```
 
 `FLEET_PRIMARY_HUMAN_USER_ID` is an optional positive Telegram user id read from the deployment `.env` at provisioning; blank omits `Telegram.PrimaryHumanUserId`, and invalid values refuse before deprovisioning. See `docs/primary-human-priority.md`.
 

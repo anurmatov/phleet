@@ -95,7 +95,7 @@ public sealed record SecretProxyState
         foreach (var binding in state.Bindings)
         {
             if (binding is null
-                || SecretBindingRules.DescribeFault(binding.Key, binding.Kind, binding.Hosts, binding.Header) is not null
+                || SecretBindingRules.DescribeFault(binding.Key, binding.Kind, binding.Hosts, binding.Header, binding.KnownHosts) is not null
                 || !keys.Add(binding.Key))
             {
                 fault = "state_binding_invalid";
@@ -121,23 +121,35 @@ public sealed record SecretProxyState
     }
 }
 
-/// <summary>One bound secret: where it may be sent, in which header, and its current value.</summary>
+/// <summary>One bound secret: where it may be used, how, and its current value.</summary>
 /// <param name="Key">The <c>.env</c> key. Agents reference it as an Env Ref.</param>
-/// <param name="Kind"><see cref="SecretBindingRules.KindStatic"/> or <see cref="SecretBindingRules.KindGitHubApp"/>.</param>
-/// <param name="Hosts">Exact lowercase host names. The secret is sent nowhere else.</param>
-/// <param name="Header">The one request header the secret may be injected into.</param>
+/// <param name="Kind">
+/// <see cref="SecretBindingRules.KindStatic"/>, <see cref="SecretBindingRules.KindGitHubApp"/> or
+/// <see cref="SecretBindingRules.KindSshKey"/>.
+/// </param>
+/// <param name="Hosts">
+/// Exact lowercase host names; the secret is sent nowhere else. For an SSH key, the
+/// <c>user@host</c> destinations it may sign for.
+/// </param>
+/// <param name="Header">The one request header the secret may be injected into. Unused by an SSH key.</param>
 /// <param name="Value">
 /// The value from <c>.env</c>: the secret itself, or for a GitHub App the base64 private key. Null
 /// when <c>.env</c> has no usable value, in which case the forwarder refuses rather than forwards.
 /// </param>
 /// <param name="AppId">GitHub App only: the App id from <c>.env</c>.</param>
+/// <param name="KnownHosts">
+/// SSH key only: the host keys of <paramref name="Hosts"/>, one <c>host keytype key</c> line each. The
+/// key signs only for a session with one of these host keys. Absent from the file for every other
+/// kind, so a state without SSH keys is the same bytes it was before this field existed.
+/// </param>
 public sealed record SecretProxyBinding(
     string Key,
     string Kind,
     IReadOnlyList<string> Hosts,
     string Header,
     string? Value,
-    string? AppId = null);
+    string? AppId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? KnownHosts = null);
 
 /// <summary>One agent's hold on one bound secret.</summary>
 /// <param name="Agent">The agent name. Logged; never used for the match.</param>
@@ -154,8 +166,15 @@ public static partial class SecretBindingRules
 {
     public const string KindStatic = "static";
     public const string KindGitHubApp = "github_app";
+
+    /// <summary>
+    /// An SSH private key. It is never sent anywhere: <c>fleet-secrets</c> signs with it on request,
+    /// for sessions with the bound hosts only (see <see cref="SecretProxySsh"/>).
+    /// </summary>
+    public const string KindSshKey = "ssh_key";
     public const string DefaultHeader = "Authorization";
     public const int MaxHosts = 8;
+    public const int MaxKnownHosts = 32;
 
     /// <summary>Request headers a secret may never be injected into: they route or frame the request.</summary>
     private static readonly HashSet<string> ForbiddenHeaders = new(StringComparer.OrdinalIgnoreCase)
@@ -179,17 +198,51 @@ public static partial class SecretBindingRules
 
     public static bool IsHostName(string? value) => value is not null && HostName().IsMatch(value);
 
+    // An SSH host: lowercase DNS labels (one label is enough on a LAN) or an IPv4 address. No port,
+    // no IPv6, no wildcard.
+    private const string SshHostPattern =
+        @"(?=[a-z0-9.-]{1,253}(?![a-z0-9.-]))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*";
+
+    [GeneratedRegex(@"\A(?<user>[a-z_][a-z0-9_-]{0,31})@(?<host>" + SshHostPattern + @")\z", RegexOptions.CultureInvariant)]
+    private static partial Regex SshDestination();
+
+    // One known_hosts line: a plain name or [name]:port, a key type, the key. No marker, no hashed
+    // name, no pattern, no comment.
+    [GeneratedRegex(
+        @"\A(?:(?<host>" + SshHostPattern + @")|\[(?<host>" + SshHostPattern + @")\]:(?<port>[1-9][0-9]{0,4}))"
+        + @" (?<type>ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)"
+        + @" (?<key>[A-Za-z0-9+/]{32,2048}={0,2})\z",
+        RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture)]
+    private static partial Regex KnownHostLine();
+
+    /// <summary>The host of a <c>user@host</c> SSH destination, or null when it is not one.</summary>
+    public static string? SshDestinationHost(string? destination) =>
+        destination is not null && SshDestination().Match(destination) is { Success: true } match
+            ? match.Groups["host"].Value
+            : null;
+
+    /// <summary>The parts of one known-hosts line of an SSH binding, or null when it is not one.</summary>
+    public static (string Host, string KeyType, string Key)? ParseKnownHost(string? line) =>
+        line is not null && KnownHostLine().Match(line) is { Success: true } match
+            ? (match.Groups["host"].Value, match.Groups["type"].Value, match.Groups["key"].Value)
+            : null;
+
     /// <summary>Why these fields are not a valid binding, or null. Fixed text: no value is echoed.</summary>
-    public static string? DescribeFault(string? key, string? kind, IReadOnlyList<string>? hosts, string? header)
+    public static string? DescribeFault(
+        string? key, string? kind, IReadOnlyList<string>? hosts, string? header, IReadOnlyList<string>? knownHosts = null)
     {
         if (!IsEnvKey(key))
             return "secret_binding_key_invalid: use an environment variable name (letters, digits, underscore)";
-        if (kind is not (KindStatic or KindGitHubApp))
-            return $"secret_binding_kind_invalid: use '{KindStatic}' or '{KindGitHubApp}'";
+        if (kind is not (KindStatic or KindGitHubApp or KindSshKey))
+            return $"secret_binding_kind_invalid: use '{KindStatic}', '{KindGitHubApp}' or '{KindSshKey}'";
         if (hosts is null || hosts.Count == 0)
             return "secret_binding_hosts_missing: name at least one host";
         if (hosts.Count > MaxHosts)
             return $"secret_binding_hosts_invalid: at most {MaxHosts} hosts";
+        if (kind == KindSshKey)
+            return DescribeSshFault(hosts, knownHosts);
+        if (knownHosts is { Count: > 0 })
+            return "secret_binding_known_hosts_unexpected: only an SSH key binding lists host keys";
         if (hosts.Any(h => !IsHostName(h)))
             return "secret_binding_hosts_invalid: each host must be one exact lowercase DNS name, "
                 + "with no scheme, port, path, wildcard or IP address";
@@ -200,6 +253,47 @@ public static partial class SecretBindingRules
                 + DefaultHeader;
         if (kind == KindGitHubApp && !string.Equals(header, DefaultHeader, StringComparison.OrdinalIgnoreCase))
             return $"secret_binding_header_invalid: a GitHub App binding always uses {DefaultHeader}";
+        return null;
+    }
+
+    /// <summary>
+    /// The SSH rules: every destination is <c>user@host</c>, every host has at least one host key, and
+    /// no host key is listed for a host that is not a destination. The host keys are what the key is
+    /// bound to, so a binding without them would sign for anyone who answers on that name.
+    /// </summary>
+    private static string? DescribeSshFault(IReadOnlyList<string> hosts, IReadOnlyList<string>? knownHosts)
+    {
+        var destinationHosts = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var destination in hosts)
+        {
+            if (SshDestinationHost(destination) is not { } host)
+                return "secret_binding_hosts_invalid: each SSH destination is user@host in lowercase, where host is a "
+                    + "DNS name or an IPv4 address, with no port, path or wildcard";
+            destinationHosts.Add(host);
+        }
+        if (hosts.Distinct(StringComparer.Ordinal).Count() != hosts.Count)
+            return "secret_binding_hosts_invalid: a destination is listed twice";
+
+        if (knownHosts is null || knownHosts.Count == 0)
+            return "secret_binding_known_hosts_missing: list the host key of every destination, one "
+                + "'host keytype key' line each (the output of ssh-keyscan, without comments)";
+        if (knownHosts.Count > MaxKnownHosts)
+            return $"secret_binding_known_hosts_invalid: at most {MaxKnownHosts} host key lines";
+
+        var covered = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in knownHosts)
+        {
+            if (ParseKnownHost(line) is not { } parsed)
+                return "secret_binding_known_hosts_invalid: each line is 'host keytype key' or '[host]:port keytype key', "
+                    + "with one plain host name, no marker, no hashed name and no comment";
+            if (!destinationHosts.Contains(parsed.Host))
+                return "secret_binding_known_hosts_invalid: a host key is listed for a host that is not a destination";
+            covered.Add(parsed.Host);
+        }
+        if (knownHosts.Distinct(StringComparer.Ordinal).Count() != knownHosts.Count)
+            return "secret_binding_known_hosts_invalid: a host key line is listed twice";
+        if (!destinationHosts.SetEquals(covered))
+            return "secret_binding_known_hosts_missing: every destination host needs at least one host key line";
         return null;
     }
 }

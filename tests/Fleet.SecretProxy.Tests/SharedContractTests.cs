@@ -174,4 +174,107 @@ public sealed class SharedContractTests
         Assert.StartsWith(fault, SecretProxyNetwork.TryParse(subnet, address, out var network));
         Assert.Null(network);
     }
+
+    // ── SSH keys ───────────────────────────────────────────────────────────────
+
+    private const string HostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIGZha2VmYWtlZmFrZWZha2VmYWtlZmFrZWZha2VmYWtlZmFr";
+
+    [Theory]
+    [InlineData("deploy@build.example.test", "build.example.test ssh-ed25519 " + HostKey, null)]
+    [InlineData("deploy@buildhost", "buildhost ssh-ed25519 " + HostKey, null)]
+    [InlineData("deploy@192.0.2.10", "192.0.2.10 ecdsa-sha2-nistp256 " + HostKey, null)]
+    [InlineData("deploy@build.example.test", "[build.example.test]:2222 ssh-rsa " + HostKey, null)]
+    [InlineData("deploy@a.example.test,ops@b.example.test", "a.example.test ssh-ed25519 " + HostKey + "|b.example.test ssh-ed25519 " + HostKey, null)]
+    [InlineData("build.example.test", "build.example.test ssh-ed25519 " + HostKey, "secret_binding_hosts_invalid")]
+    [InlineData("Deploy@build.example.test", "build.example.test ssh-ed25519 " + HostKey, "secret_binding_hosts_invalid")]
+    [InlineData("deploy@build.example.test:22", "build.example.test ssh-ed25519 " + HostKey, "secret_binding_hosts_invalid")]
+    [InlineData("deploy@*.example.test", "build.example.test ssh-ed25519 " + HostKey, "secret_binding_hosts_invalid")]
+    [InlineData("deploy@build.example.test,deploy@build.example.test", "build.example.test ssh-ed25519 " + HostKey, "secret_binding_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "", "secret_binding_known_hosts_missing")]
+    [InlineData("deploy@a.example.test,ops@b.example.test", "a.example.test ssh-ed25519 " + HostKey, "secret_binding_known_hosts_missing")]
+    [InlineData("deploy@build.example.test", "other.example.test ssh-ed25519 " + HostKey, "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "build.example.test ssh-ed25519 " + HostKey + " comment", "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "@cert-authority build.example.test ssh-ed25519 " + HostKey, "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "|1|c2FsdA==|aGFzaA== ssh-ed25519 " + HostKey, "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "build.example.test,other.example.test ssh-ed25519 " + HostKey, "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "build.example.test ssh-dss " + HostKey, "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "build.example.test ssh-ed25519 short", "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "build.example.test ssh-ed25519 " + HostKey + "|build.example.test ssh-ed25519 " + HostKey, "secret_binding_known_hosts_invalid")]
+    public void SshBindingRules_NameTheFault(string destinations, string knownHosts, string? fault)
+    {
+        var actual = SecretBindingRules.DescribeFault(
+            "SSH_KEY_EXAMPLE", SecretBindingRules.KindSshKey,
+            destinations.Split(',', StringSplitOptions.RemoveEmptyEntries), "Authorization",
+            knownHosts.Split('|', StringSplitOptions.RemoveEmptyEntries));
+
+        if (fault is null) Assert.Null(actual);
+        else Assert.StartsWith(fault, actual);
+    }
+
+    [Fact]
+    public void HostKeys_AreRefusedOnAnyOtherKind()
+    {
+        Assert.StartsWith("secret_binding_known_hosts_unexpected", SecretBindingRules.DescribeFault(
+            "K", SecretBindingRules.KindStatic, ["api.example.test"], "Authorization",
+            ["api.example.test ssh-ed25519 " + HostKey]));
+    }
+
+    [Fact]
+    public void SshState_RoundTrips_AndAStateWithoutSshKeysIsTheBytesItAlwaysWas()
+    {
+        var hash = SecretPlaceholders.Hash(SecretPlaceholders.Create());
+        var plain = new SecretProxyState
+        {
+            Version = SecretProxyState.CurrentVersion,
+            GeneratedAtUtc = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            Bindings = [new SecretProxyBinding("K", SecretBindingRules.KindStatic, ["api.example.test"], "Authorization", "synthetic")],
+            Grants = [new SecretProxyGrant("agent1", "10.213.96.20", "K", hash)],
+        };
+        // A forwarder built before SSH keys refuses a file with a member it does not know, so the
+        // member must not exist unless an SSH key does.
+        Assert.DoesNotContain("knownHosts", plain.Serialize());
+
+        var line = "build.example.test ssh-ed25519 " + HostKey;
+        var withSsh = plain with
+        {
+            Bindings = [.. plain.Bindings, new SecretProxyBinding(
+                "SSH_KEY_EXAMPLE", SecretBindingRules.KindSshKey, ["deploy@build.example.test"], "Authorization",
+                "synthetic-key-text", KnownHosts: [line])],
+        };
+        var parsed = SecretProxyState.TryParse(withSsh.Serialize(), out var fault);
+
+        Assert.Null(fault);
+        Assert.Equal([line], parsed!.Bindings.Single(b => b.Kind == SecretBindingRules.KindSshKey).KnownHosts);
+    }
+
+    [Fact]
+    public void State_WithAnSshKeyThatHasNoHostKeys_IsRefusedWhole()
+    {
+        var state = new SecretProxyState
+        {
+            Version = SecretProxyState.CurrentVersion,
+            GeneratedAtUtc = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            Bindings = [new SecretProxyBinding(
+                "SSH_KEY_EXAMPLE", SecretBindingRules.KindSshKey, ["deploy@build.example.test"], "Authorization", "synthetic-key-text")],
+            Grants = [],
+        };
+
+        Assert.Null(SecretProxyState.TryParse(state.Serialize(), out var fault));
+        Assert.Equal("state_binding_invalid", fault);
+    }
+
+    [Theory]
+    [InlineData("agent1", "agent1")]
+    [InlineData("dev-2.b_c", "dev-2.b_c")]
+    [InlineData("", null)]
+    [InlineData(".hidden", null)]
+    [InlineData("..", null)]
+    [InlineData("a/b", null)]
+    [InlineData("a b", null)]
+    [InlineData("trailing.", null)]
+    [InlineData("a23456789012345678901234567890123456789012345678x", null)]
+    public void SocketDirectory_IsThePlainAgentName_OrNothing(string agent, string? expected)
+    {
+        Assert.Equal(expected, SecretProxySsh.AgentDirectoryName(agent));
+    }
 }

@@ -26,6 +26,11 @@ public static class SignalRegistry
     private static readonly Dictionary<string, SignalDef[]> _registry =
         new(StringComparer.OrdinalIgnoreCase)
         {
+            ["UweHumanInputWorkflow"] =
+            [
+                new SignalDef("request-input", "human input", [new SignalButton("Answer", "{}")],
+                    ValidPhases: ["request-input"], BindAttribute: "GateRef"),
+            ],
             ["ExternalAdvisoryWorkflow"] =
             [
                 new SignalDef("advisory-review", "advisory review", [

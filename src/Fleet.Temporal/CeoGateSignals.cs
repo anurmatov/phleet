@@ -32,6 +32,8 @@ public static class CeoGateSignals
         "design-approval",
         "advisory-review",
         "acceptance-decision",
+        "request-input",
+        "request-approval",
     };
 
     /// <summary>The reserved names, for messages and documentation.</summary>

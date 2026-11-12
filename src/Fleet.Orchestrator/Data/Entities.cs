@@ -257,11 +257,20 @@ public class SecretBinding
     /// <summary>The <c>.env</c> key; agents reference it as an Env Ref.</summary>
     public required string EnvKeyName { get; set; }
 
-    /// <summary><c>static</c> or <c>github_app</c> (<see cref="Fleet.Shared.SecretBindingRules"/>).</summary>
+    /// <summary><c>static</c>, <c>github_app</c> or <c>ssh_key</c> (<see cref="Fleet.Shared.SecretBindingRules"/>).</summary>
     public string Kind { get; set; } = Fleet.Shared.SecretBindingRules.KindStatic;
 
-    /// <summary>Exact lowercase host names, comma-separated.</summary>
+    /// <summary>
+    /// Exact lowercase host names, comma-separated. For an SSH key, the <c>user@host</c> destinations
+    /// it may sign for.
+    /// </summary>
     public required string Hosts { get; set; }
+
+    /// <summary>
+    /// SSH key only: the host keys of the destinations, one <c>host keytype key</c> line each. Public
+    /// keys, not secrets. Null for every other kind.
+    /// </summary>
+    public string? SshKnownHosts { get; set; }
 
     /// <summary>The one request header the secret may be injected into.</summary>
     public string HeaderName { get; set; } = Fleet.Shared.SecretBindingRules.DefaultHeader;
@@ -287,9 +296,17 @@ public class SecretBinding
     public IReadOnlyList<string> HostList =>
         Hosts.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-    public IReadOnlyList<string> ExposeAsList => string.IsNullOrWhiteSpace(ExposeAs)
-        ? [EnvKeyName]
-        : ExposeAs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    /// <summary>Empty for an SSH key: it is used through a socket and never exposed as a variable.</summary>
+    public IReadOnlyList<string> ExposeAsList => Kind == Fleet.Shared.SecretBindingRules.KindSshKey
+        ? []
+        : string.IsNullOrWhiteSpace(ExposeAs)
+            ? [EnvKeyName]
+            : ExposeAs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>Null unless this is an SSH key.</summary>
+    public IReadOnlyList<string>? KnownHostList => Kind == Fleet.Shared.SecretBindingRules.KindSshKey
+        ? (SshKnownHosts ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        : null;
 }
 
 // ─── Project Contexts ─────────────────────────────────────────────────────────
@@ -623,4 +640,22 @@ public class CredentialsAudit
 
     [MaxLength(255)]
     public string Actor { get; set; } = "CEO";
+}
+
+/// <summary>
+/// A phone registered for push notifications: the iOS app's control-plane connection on one device.
+/// </summary>
+/// <remarks>
+/// <see cref="DeviceId"/> is chosen by the app and stable for one install, so a token that changes
+/// replaces the old one instead of piling up beside it. <see cref="Token"/> is Apple's device token.
+/// It is not a credential on its own — it is useless without the team's signing key — but it is
+/// never returned by an endpoint or written to a log either.
+/// </remarks>
+public class PushDevice
+{
+    public int Id { get; set; }
+    public required string DeviceId { get; set; }
+    public required string Token { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
 }

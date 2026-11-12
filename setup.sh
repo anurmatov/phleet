@@ -68,6 +68,7 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED \
       FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS \
       FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED \
+      FLEET_PUSH_ENABLED FLEET_PUSH_APNS_KEY_BASE64 FLEET_PUSH_APNS_KEY_ID FLEET_PUSH_APNS_TEAM_ID FLEET_PUSH_APNS_TOPIC \
       FLEET_SECRETS_ENABLED FLEET_SECRETS_SUBNET FLEET_SECRETS_ADDRESS
 
 # ── Canonical paths ───────────────────────────────────────────────────────────
@@ -711,7 +712,7 @@ fi
 
 # Epic grants (#436): a fresh .env already has these from .env.example. An older .env gets the
 # defaults (feature off) when a key is missing; a present value is never changed. No prompts.
-for _epic_default in FLEET_EPIC_WATCHER_ENABLED=false FLEET_EPIC_WATCHER_INTERVAL_SECONDS=300 FLEET_EPIC_GRANTS_ENABLED=false FLEET_EPIC_GRANTS_MAX_DAYS=14 FLEET_EPIC_GRANTS_DENIED_REPOS= FLEET_AUTONOMY_ENABLED=false FLEET_SECRETS_ENABLED=false FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false; do
+for _epic_default in FLEET_PUSH_ENABLED=false FLEET_EPIC_WATCHER_ENABLED=false FLEET_EPIC_WATCHER_INTERVAL_SECONDS=300 FLEET_EPIC_GRANTS_ENABLED=false FLEET_EPIC_GRANTS_MAX_DAYS=14 FLEET_EPIC_GRANTS_DENIED_REPOS= FLEET_AUTONOMY_ENABLED=false FLEET_SECRETS_ENABLED=false FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false; do
   if ! grep -q "^${_epic_default%%=*}=" "$ENV_FILE" 2>/dev/null; then
     write_env_var "$ENV_FILE" "${_epic_default%%=*}" "${_epic_default#*=}"
   fi
@@ -1129,7 +1130,7 @@ else
 
     if [[ "$SECRETS_ENABLED" == true ]]; then
       # Owner-only: the state directory holds the bound secret values, the CA directory its key.
-      mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca"
+      mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" "$FLEET_BASE_DIR/secret-proxy/ssh"
       chmod 700 "$FLEET_BASE_DIR/secret-proxy" "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" 2>/dev/null || true
     fi
 

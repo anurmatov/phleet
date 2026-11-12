@@ -87,6 +87,10 @@ internal sealed class ProxyHarness : IAsyncDisposable
     public int Port { get; private set; }
     public string StateFile => Path.Combine(_directory, "state", SecretProxyState.FileName);
     public string CaDirectory => Path.Combine(_directory, "ca");
+
+    /// <summary>Short on purpose: a unix socket path is limited to about a hundred bytes.</summary>
+    public string SshDirectory { get; } = Path.Combine("/tmp", "fst-" + Guid.NewGuid().ToString("N")[..8]);
+    public IServiceProvider Services => _app!.Services;
     public string PlaceholderA { get; } = SecretPlaceholders.Create();
     public string PlaceholderB { get; } = SecretPlaceholders.Create();
     public X509Certificate2 Ca { get; private set; } = null!;
@@ -107,6 +111,8 @@ internal sealed class ProxyHarness : IAsyncDisposable
                 ["SecretProxy:ListenAddress"] = Loopback,
                 ["SecretProxy:Port"] = "0",
                 ["SecretProxy:HealthPort"] = "0",
+                ["SecretProxy:SshDirectory"] = harness.SshDirectory,
+                ["SecretProxy:SshReconcileSeconds"] = "1",
             });
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Trace);
@@ -216,5 +222,6 @@ internal sealed class ProxyHarness : IAsyncDisposable
         }
         Ca?.Dispose();
         try { Directory.Delete(_directory, recursive: true); } catch (IOException) { }
+        try { if (Directory.Exists(SshDirectory)) Directory.Delete(SshDirectory, recursive: true); } catch (IOException) { }
     }
 }

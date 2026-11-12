@@ -440,6 +440,13 @@ services:
       - EpicGrants__AutonomyEnabled=${FLEET_AUTONOMY_ENABLED:-false}
       - EpicDriverWatcher__Enabled=${FLEET_EPIC_WATCHER_ENABLED:-false}
       - EpicDriverWatcher__IntervalSeconds=${FLEET_EPIC_WATCHER_INTERVAL_SECONDS:-300}
+      # Push notifications to the iOS app: off unless FLEET_PUSH_ENABLED=true and all four APNs
+      # values are set. See docs/push-notifications.md.
+      - Push__Enabled=${FLEET_PUSH_ENABLED:-false}
+      - Push__ApnsKeyBase64=${FLEET_PUSH_APNS_KEY_BASE64:-}
+      - Push__ApnsKeyId=${FLEET_PUSH_APNS_KEY_ID:-}
+      - Push__ApnsTeamId=${FLEET_PUSH_APNS_TEAM_ID:-}
+      - Push__ApnsTopic=${FLEET_PUSH_APNS_TOPIC:-}
       # Secret placeholders: off unless FLEET_SECRETS_ENABLED=true. The subnet and address must equal
       # the fleet-secrets-net definition and the fleet-secrets service below.
       - SecretProxy__Enabled=${FLEET_SECRETS_ENABLED:-false}
@@ -469,6 +476,8 @@ services:
   # No host port, ever.
   #   state/  written by the orchestrator (bindings, their current values, grant hashes); read-only here
   #   ca/     the local CA, created on first start; its key never leaves this directory
+  #   ssh/    one subdirectory per agent that holds a bound SSH key: its signing socket and the
+  #           bound hosts' host keys. The orchestrator mounts an agent's own subdirectory into it.
   fleet-secrets:
     profiles: ["secrets"]
     build:
@@ -479,6 +488,7 @@ services:
     volumes:
       - ${FLEET_BASE_DIR}/secret-proxy/state:/var/lib/fleet-secrets/state:ro
       - ${FLEET_BASE_DIR}/secret-proxy/ca:/var/lib/fleet-secrets/ca
+      - ${FLEET_BASE_DIR}/secret-proxy/ssh:/var/lib/fleet-secrets/ssh
     environment:
       - SecretProxy__ListenAddress=${FLEET_SECRETS_ADDRESS:-10.213.96.2}
     mem_limit: 256m

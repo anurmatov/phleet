@@ -54,24 +54,28 @@ public sealed class AddSecretBindingsMigrationTests : IAsyncLifetime
         var reference = await db.AgentEnvRefs.SingleAsync();
         Assert.Equal("EXAMPLE_API_KEY", reference.EnvKeyName);
         Assert.Null(reference.PlaceholderSha256);
-        Assert.Empty(await db.SecretBindings.ToListAsync());
+        // SQL from here on: the model has since gained a column this schema does not have yet.
+        Assert.Equal(0L, await ScalarAsync<long>("SELECT COUNT(*) FROM secret_bindings"));
 
-        db.SecretBindings.Add(new SecretBinding { EnvKeyName = "EXAMPLE_API_KEY", Hosts = "api.example.test" });
-        await db.SaveChangesAsync();
-        var stored = await db.SecretBindings.AsNoTracking().SingleAsync();
-        Assert.Equal(("static", "Authorization", false), (stored.Kind, stored.HeaderName, stored.AgentAttachable));
+        await ExecAsync(_connectionString, InsertBinding("EXAMPLE_API_KEY", "api.example.test"));
+        Assert.Equal("static|Authorization|0", await ScalarAsync<string>(
+            "SELECT CONCAT(Kind, '|', HeaderName, '|', AgentAttachable) FROM secret_bindings"));
     }
+
+    // Names only the columns without a default, so the defaults are what the migration gave them.
+    private static string InsertBinding(string key, string hosts) =>
+        $"INSERT INTO secret_bindings (EnvKeyName, Hosts, CreatedAt, UpdatedAt) VALUES ('{key}', '{hosts}', UTC_TIMESTAMP(), UTC_TIMESTAMP())";
 
     [Fact]
     public async Task OneBindingPerKey_WhateverTheLetterCase()
     {
         await MigrateAsync(Target);
-        await using var db = NewContext();
-        db.SecretBindings.Add(new SecretBinding { EnvKeyName = "EXAMPLE_API_KEY", Hosts = "api.example.test" });
-        await db.SaveChangesAsync();
+        await ExecAsync(_connectionString, InsertBinding("EXAMPLE_API_KEY", "api.example.test"));
 
-        db.SecretBindings.Add(new SecretBinding { EnvKeyName = "example_api_key", Hosts = "other.example.test" });
-        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        var duplicate = await Assert.ThrowsAsync<MySqlException>(
+            () => ExecAsync(_connectionString, InsertBinding("example_api_key", "other.example.test")));
+        Assert.Equal(MySqlErrorCode.DuplicateKeyEntry, duplicate.ErrorCode);
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM secret_bindings"));
     }
 
     [Fact]
@@ -87,7 +91,10 @@ public sealed class AddSecretBindingsMigrationTests : IAsyncLifetime
 
         await MigrateAsync(Target);
         await using var db = NewContext();
-        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        // Later migrations exist; this one is back in place.
+        Assert.Contains(Target, await db.Database.GetAppliedMigrationsAsync());
+        Assert.Equal(1L, await ScalarAsync<long>(
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'secret_bindings'"));
     }
 
     private OrchestratorDbContext NewContext() =>

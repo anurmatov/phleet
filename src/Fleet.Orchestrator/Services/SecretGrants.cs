@@ -70,12 +70,17 @@ public sealed record SecretPlanGrant(string EnvKeyName, string Placeholder);
 /// <param name="ExtraHosts"><c>host:address</c> entries that point each bound host at the forwarder.</param>
 /// <param name="Bind">The read-only CA certificate mount, relative to the fleet base directory.</param>
 /// <param name="Address">The agent's fixed address on <see cref="SecretProxyNetwork.NetworkName"/>.</param>
+/// <param name="SshBind">
+/// The read-only mount of the agent's own signing-socket directory, relative to the fleet base
+/// directory. Null unless the agent holds a bound SSH key.
+/// </param>
 public sealed record SecretPlan(
     IReadOnlyList<SecretPlanGrant> Grants,
     IReadOnlyList<string> Env,
     IReadOnlyList<string> ExtraHosts,
     string? Bind,
-    string? Address)
+    string? Address,
+    string? SshBind = null)
 {
     public static SecretPlan None { get; } = new([], [], [], null, null);
 
@@ -154,11 +159,31 @@ public static class SecretGrantPlanner
             .Select(r => r.EnvKeyName)
             .ToHashSet(StringComparer.Ordinal);
 
+        string? sshBind = null;
         foreach (var (reference, binding) in bound)
         {
+            // Every grant has a placeholder hash, an SSH key's included: it is what marks the grant
+            // as held by a running container. The placeholder of an SSH key goes nowhere.
             var placeholder = mint();
             grants.Add(new SecretPlanGrant(reference.EnvKeyName, placeholder));
-            foreach (var name in binding!.ExposeAsList)
+
+            if (binding!.Kind == SecretBindingRules.KindSshKey)
+            {
+                // Not a variable and not a steered host: the agent reaches the SSH server itself and
+                // asks fleet-secrets, over a socket in its own directory, to sign.
+                if (SecretProxySsh.AgentDirectoryName(agent.Name) is not { } directory)
+                    return (null,
+                        $"secret_ssh_agent_name_unsupported: SSH key {reference.EnvKeyName} needs a socket directory named "
+                        + $"after the agent, and '{agent.Name}' is not usable as one (letters, digits, '.', '_' and '-', at most 48).");
+                if (rawKeys.Contains(SecretProxySsh.SocketVariable))
+                    return (null,
+                        $"secret_expose_conflict: SSH key {reference.EnvKeyName} sets {SecretProxySsh.SocketVariable}, "
+                        + "which is also a plain Env Ref of this agent. Remove one.");
+                sshBind = SecretProxySsh.AgentBind(directory);
+                continue;
+            }
+
+            foreach (var name in binding.ExposeAsList)
             {
                 if (rawKeys.Contains(name))
                     return (null,
@@ -177,13 +202,22 @@ public static class SecretGrantPlanner
         env.Add($"{NodeCaVariable}={SecretProxyState.AgentCaPath}");
         env.Add($"{RequestsCaVariable}={SystemCaBundle}");
         env.Add($"{OpenSslCaVariable}={SystemCaBundle}");
+        if (sshBind is not null)
+        {
+            if (exposed.ContainsKey(SecretProxySsh.SocketVariable))
+                return (null,
+                    $"secret_expose_conflict: {exposed[SecretProxySsh.SocketVariable]} is exposed as {SecretProxySsh.SocketVariable}, "
+                    + "which a bound SSH key of this agent sets. Attach only one of them.");
+            env.Add($"{SecretProxySsh.SocketVariable}={SecretProxySsh.AgentSocketPath}");
+        }
 
         return (new SecretPlan(
             grants,
             env,
             [.. hosts.Select(h => $"{h}:{settings.Network.ProxyAddress}")],
             CaBind,
-            address.ToString()), null);
+            address.ToString(),
+            sshBind), null);
     }
 
     /// <summary>
@@ -193,9 +227,9 @@ public static class SecretGrantPlanner
     /// </summary>
     public static string? DescribeBindingFault(
         string? envKeyName, string? kind, IReadOnlyList<string>? hosts, string? header,
-        IReadOnlyList<string>? exposeAs, string? appIdEnvKey)
+        IReadOnlyList<string>? exposeAs, string? appIdEnvKey, IReadOnlyList<string>? knownHosts = null)
     {
-        if (SecretBindingRules.DescribeFault(envKeyName, kind, hosts, header) is { } fault)
+        if (SecretBindingRules.DescribeFault(envKeyName, kind, hosts, header, knownHosts) is { } fault)
             return fault;
 
         // A bot token is consumed by the agent process itself, in a URL path; a hosted-model key is
@@ -204,6 +238,16 @@ public static class SecretGrantPlanner
             return "secret_binding_key_unsupported: a Telegram bot token is used by the agent process in a URL path and cannot be bound";
         if (HostedModelProviders.KeyEnvVars.Contains(envKeyName!, StringComparer.Ordinal))
             return "secret_binding_key_unsupported: a hosted-model key is already kept out of the agent by its own forwarder";
+
+        if (kind == SecretBindingRules.KindSshKey)
+        {
+            if (exposeAs is { Count: > 0 })
+                return "secret_binding_expose_invalid: an SSH key is never exposed as an environment variable; "
+                    + "the agent gets a signing socket instead";
+            return string.IsNullOrEmpty(appIdEnvKey)
+                ? null
+                : "secret_binding_app_id_unexpected: only a GitHub App binding has an App id key";
+        }
 
         if (exposeAs is { Count: > 0 })
         {

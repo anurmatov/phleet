@@ -35,6 +35,8 @@ public static class SecretProxyApp
             sp.GetRequiredService<HttpMessageInvoker>(), options,
             sp.GetRequiredService<ILogger<GitHubAppTokens>>(), sp.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton<InjectingForwarder>();
+        builder.Services.AddSingleton<SshAgentGate>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<SshAgentGate>());
 
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
@@ -85,6 +87,7 @@ public static class SecretProxyApp
                     status = "healthy",
                     service = "fleet-secrets",
                     state = fault ?? "loaded",
+                    sshSockets = context.RequestServices.GetRequiredService<SshAgentGate>().ActiveAgents.Count,
                 });
             }
 

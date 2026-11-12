@@ -3,6 +3,8 @@
 
 export const STATIC_KIND = 'static'
 export const GITHUB_APP_KIND = 'github_app'
+// An SSH private key: never sent anywhere. fleet-secrets signs with it, for the listed hosts only.
+export const SSH_KEY_KIND = 'ssh_key'
 
 export interface SecretBindingAgent {
   agent: string
@@ -16,6 +18,7 @@ export interface SecretBinding {
   headerName: string
   exposeAs: string[]
   appIdEnvKey: string | null
+  knownHosts?: string[]
   agentAttachable: boolean
   valuePresent: boolean
   agents: SecretBindingAgent[]
@@ -38,6 +41,7 @@ export interface SecretBindingForm {
   headerName: string
   exposeAs: string
   appIdEnvKey: string
+  knownHosts: string
   agentAttachable: boolean
 }
 
@@ -48,12 +52,14 @@ export const GITHUB_APP_DEFAULTS = {
 }
 
 export function emptyForm(): SecretBindingForm {
-  return { envKeyName: '', kind: STATIC_KIND, hosts: '', headerName: 'Authorization', exposeAs: '', appIdEnvKey: '', agentAttachable: false }
+  return { envKeyName: '', kind: STATIC_KIND, hosts: '', headerName: 'Authorization', exposeAs: '', appIdEnvKey: '', knownHosts: '', agentAttachable: false }
 }
 
 export function formFor(binding: SecretBinding): SecretBindingForm {
   // The orchestrator reports the key itself when no other name is set; the form shows that as blank.
-  const custom = !(binding.exposeAs.length === 1 && binding.exposeAs[0] === binding.envKeyName)
+  // An SSH key reports none at all.
+  const custom = binding.exposeAs.length > 0
+    && !(binding.exposeAs.length === 1 && binding.exposeAs[0] === binding.envKeyName)
   return {
     envKeyName: binding.envKeyName,
     kind: binding.kind,
@@ -61,6 +67,7 @@ export function formFor(binding: SecretBinding): SecretBindingForm {
     headerName: binding.headerName,
     exposeAs: custom ? binding.exposeAs.join(', ') : '',
     appIdEnvKey: binding.appIdEnvKey ?? '',
+    knownHosts: (binding.knownHosts ?? []).join('\n'),
     agentAttachable: binding.agentAttachable,
   }
 }
@@ -72,6 +79,16 @@ export function splitList(text: string): string[] {
 
 /** Hosts are lowercased for the operator; everything else is sent as typed and judged by the server. */
 export function bindingBody(form: SecretBindingForm) {
+  if (form.kind === SSH_KEY_KIND) {
+    // Destinations are user@host; host key lines go as typed, one per line (the server drops
+    // blank and comment lines and refuses anything that is not a plain host key).
+    return {
+      kind: form.kind,
+      hosts: splitList(form.hosts).map(host => host.toLowerCase()),
+      knownHosts: form.knownHosts.split('\n').map(line => line.trim()).filter(line => line.length > 0),
+      agentAttachable: form.agentAttachable,
+    }
+  }
   return {
     kind: form.kind,
     hosts: splitList(form.hosts).map(host => host.toLowerCase()),
@@ -84,7 +101,9 @@ export function bindingBody(form: SecretBindingForm) {
 
 /** Switching to a GitHub App fills the usual hosts and token names when those fields are empty. */
 export function withKind(form: SecretBindingForm, kind: string): SecretBindingForm {
-  if (kind !== GITHUB_APP_KIND) return { ...form, kind, appIdEnvKey: '' }
+  // An SSH key has no header, no variable and no App id; the other kinds have no host keys.
+  if (kind === SSH_KEY_KIND) return { ...form, kind, headerName: 'Authorization', exposeAs: '', appIdEnvKey: '' }
+  if (kind !== GITHUB_APP_KIND) return { ...form, kind, appIdEnvKey: '', knownHosts: '' }
   return {
     ...form,
     kind,
@@ -92,6 +111,7 @@ export function withKind(form: SecretBindingForm, kind: string): SecretBindingFo
     hosts: form.hosts.trim() || GITHUB_APP_DEFAULTS.hosts,
     exposeAs: form.exposeAs.trim() || GITHUB_APP_DEFAULTS.exposeAs,
     appIdEnvKey: form.appIdEnvKey.trim() || GITHUB_APP_DEFAULTS.appIdEnvKey,
+    knownHosts: '',
   }
 }
 

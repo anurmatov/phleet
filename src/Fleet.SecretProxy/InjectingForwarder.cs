@@ -166,7 +166,9 @@ internal sealed partial class InjectingForwarder(
                     agent ??= grant.Agent;
                     key ??= grant.Key;
                     var binding = snapshot.FindBinding(grant.Key);
-                    if (binding is null || !binding.Hosts.Contains(host, StringComparer.Ordinal))
+                    // An SSH key is never a header value, whatever its destination list says.
+                    if (binding is null || binding.Kind == SecretBindingRules.KindSshKey
+                        || !binding.Hosts.Contains(host, StringComparer.Ordinal))
                         return await RefuseAsync(context, 403, "secret_destination_mismatch",
                             "this secret is not bound to this host", ct, agent: grant.Agent, key: grant.Key);
                     if (!string.Equals(binding.Header, name, StringComparison.OrdinalIgnoreCase))

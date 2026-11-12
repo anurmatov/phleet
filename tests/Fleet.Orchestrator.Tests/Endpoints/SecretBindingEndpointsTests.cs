@@ -541,4 +541,71 @@ public class SecretBindingEndpointsTests : IAsyncLifetime
         Assert.StartsWith("Removed env ref", answer);
         Assert.Empty(State().Grants);
     }
+
+    // ── SSH keys ──────────────────────────────────────────────────────────────
+
+    private const string SshHostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIGZha2VmYWtlZmFrZWZha2VmYWtlZmFrZWZha2VmYWtlZmFr";
+
+    [Fact]
+    public async Task SshKeyBinding_IsSavedWithItsDestinationsAndHostKeys_AndExposesNoVariable()
+    {
+        using var response = await PutAsync("SSH_KEY_EXAMPLE", new
+        {
+            kind = "ssh_key",
+            hosts = new[] { "deploy@build.example.test" },
+            // As pasted from ssh-keyscan: a comment line, a blank line, doubled blanks.
+            knownHosts = new[] { "# build.example.test:22 SSH-2.0-OpenSSH\n\nbuild.example.test  ssh-ed25519   " + SshHostKey + "\n" },
+            headerName = "X-Ignored",
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var binding = (await ReadJsonAsync(response)).GetProperty("binding");
+        Assert.Equal("ssh_key", binding.GetProperty("kind").GetString());
+        Assert.Equal(["deploy@build.example.test"], binding.GetProperty("hosts").EnumerateArray().Select(h => h.GetString()));
+        Assert.Equal(["build.example.test ssh-ed25519 " + SshHostKey],
+            binding.GetProperty("knownHosts").EnumerateArray().Select(h => h.GetString()));
+        Assert.Empty(binding.GetProperty("exposeAs").EnumerateArray());
+
+        var stored = await DbAsync(db => db.SecretBindings.SingleAsync(b => b.EnvKeyName == "SSH_KEY_EXAMPLE"));
+        Assert.Equal("build.example.test ssh-ed25519 " + SshHostKey, stored.SshKnownHosts);
+        Assert.Equal(SecretBindingRules.DefaultHeader, stored.HeaderName);
+    }
+
+    [Theory]
+    [InlineData("deploy@build.example.test", "", "secret_binding_known_hosts_missing")]
+    [InlineData("build.example.test", "build.example.test ssh-ed25519 " + SshHostKey, "secret_binding_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "other.example.test ssh-ed25519 " + SshHostKey, "secret_binding_known_hosts_invalid")]
+    [InlineData("deploy@build.example.test", "|1|c2FsdA==|aGFzaA== ssh-ed25519 " + SshHostKey, "secret_binding_known_hosts_invalid")]
+    public async Task SshKeyBinding_ThatDoesNotPinItsHosts_IsRefused_AndNothingIsSaved(string destination, string knownHosts, string fault)
+    {
+        using var response = await PutAsync("SSH_KEY_EXAMPLE", new
+        {
+            kind = "ssh_key", hosts = new[] { destination }, knownHosts = new[] { knownHosts },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.StartsWith(fault, (await ReadJsonAsync(response)).GetProperty("error").GetString());
+        Assert.Empty(await DbAsync(db => db.SecretBindings.ToListAsync()));
+    }
+
+    [Fact]
+    public async Task HostKeysOnAHeaderBinding_AreRefused_AndAnSshBindingTurnedBackDropsThem()
+    {
+        using var refused = await PutAsync(Key, new
+        {
+            hosts = new[] { "api.example.test" }, knownHosts = new[] { "api.example.test ssh-ed25519 " + SshHostKey },
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.StartsWith("secret_binding_known_hosts_unexpected", (await ReadJsonAsync(refused)).GetProperty("error").GetString());
+
+        using var ssh = await PutAsync("SSH_KEY_EXAMPLE", new
+        {
+            kind = "ssh_key", hosts = new[] { "deploy@build.example.test" },
+            knownHosts = new[] { "build.example.test ssh-ed25519 " + SshHostKey },
+        });
+        Assert.Equal(HttpStatusCode.OK, ssh.StatusCode);
+        using var back = await PutAsync("SSH_KEY_EXAMPLE", new { hosts = new[] { "api.example.test" } });
+        Assert.Equal(HttpStatusCode.OK, back.StatusCode);
+        Assert.Null((await DbAsync(db => db.SecretBindings.SingleAsync(b => b.EnvKeyName == "SSH_KEY_EXAMPLE"))).SshKnownHosts);
+    }
 }

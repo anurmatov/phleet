@@ -15,6 +15,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<AgentInstruction> AgentInstructions => Set<AgentInstruction>();
     public DbSet<AgentEnvRef> AgentEnvRefs => Set<AgentEnvRef>();
     public DbSet<SecretBinding> SecretBindings => Set<SecretBinding>();
+    public DbSet<PushDevice> PushDevices => Set<PushDevice>();
     public DbSet<AgentTelegramUser> AgentTelegramUsers => Set<AgentTelegramUser>();
     public DbSet<AgentTelegramGroup> AgentTelegramGroups => Set<AgentTelegramGroup>();
     public DbSet<AgentNetwork> AgentNetworks => Set<AgentNetwork>();
@@ -208,6 +209,15 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
              .OnDelete(DeleteBehavior.Cascade);
         });
 
+        modelBuilder.Entity<PushDevice>(e =>
+        {
+            e.ToTable("push_devices");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.DeviceId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.Token).HasMaxLength(200).IsRequired();
+            e.HasIndex(x => x.DeviceId).IsUnique();
+        });
+
         modelBuilder.Entity<SecretBinding>(e =>
         {
             e.ToTable("secret_bindings");
@@ -219,8 +229,10 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.ExposeAs).HasMaxLength(1024);
             e.Property(x => x.AppIdEnvKey).HasMaxLength(200);
             e.Property(x => x.AgentAttachable).HasDefaultValue(false);
+            e.Property(x => x.SshKnownHosts).HasColumnType("text");
             e.Ignore(x => x.HostList);
             e.Ignore(x => x.ExposeAsList);
+            e.Ignore(x => x.KnownHostList);
             e.HasIndex(x => x.EnvKeyName).IsUnique();
         });
 

@@ -211,7 +211,8 @@ public sealed class SecretProxyStateWriter(
         foreach (var binding in bindings)
         {
             var hosts = binding.HostList;
-            if (SecretBindingRules.DescribeFault(binding.EnvKeyName, binding.Kind, hosts, binding.HeaderName) is not null)
+            var knownHosts = binding.KnownHostList;
+            if (SecretBindingRules.DescribeFault(binding.EnvKeyName, binding.Kind, hosts, binding.HeaderName, knownHosts) is not null)
             {
                 logger?.LogError("SecretProxy binding {Key} is invalid and was left out of the state", binding.EnvKeyName);
                 continue;
@@ -222,7 +223,8 @@ public sealed class SecretProxyStateWriter(
                 Usable(env, binding.EnvKeyName),
                 binding.Kind == SecretBindingRules.KindGitHubApp && binding.AppIdEnvKey is { } appIdKey
                     ? Usable(env, appIdKey)
-                    : null));
+                    : null,
+                knownHosts));
         }
 
         var known = stateBindings.Select(b => b.Key).ToHashSet(StringComparer.Ordinal);

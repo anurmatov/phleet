@@ -21,6 +21,8 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
 unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED
+# Push notifications: likewise. A key exported in a shell must never stand in for the one in .env.
+unset FLEET_PUSH_ENABLED FLEET_PUSH_APNS_KEY_BASE64 FLEET_PUSH_APNS_KEY_ID FLEET_PUSH_APNS_TEAM_ID FLEET_PUSH_APNS_TOPIC
 # Secret placeholders (fleet-secrets): likewise, .env decides.
 unset FLEET_SECRETS_ENABLED FLEET_SECRETS_SUBNET FLEET_SECRETS_ADDRESS
 # The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
@@ -108,6 +110,7 @@ add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
+add_missing_env_var FLEET_PUSH_ENABLED false
 # Secret placeholders: added off when missing, never changed when present.
 add_missing_env_var FLEET_SECRETS_ENABLED false
 
@@ -281,7 +284,7 @@ else
 
   if [[ "$SECRETS_ENABLED" == "true" ]]; then
     # Owner-only: the state directory holds the bound secret values, the CA directory its key.
-    mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca"
+    mkdir -p "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" "$FLEET_BASE_DIR/secret-proxy/ssh"
     chmod 700 "$FLEET_BASE_DIR/secret-proxy" "$FLEET_BASE_DIR/secret-proxy/state" "$FLEET_BASE_DIR/secret-proxy/ca" 2>/dev/null || true
   fi
 

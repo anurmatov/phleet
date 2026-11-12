@@ -5,6 +5,10 @@ is never written into an agent container. The agent gets a placeholder (`fleet_p
 followed by 43 random characters), and the `fleet-secrets` service swaps it for the real value only
 on an HTTPS request to one of the binding's hosts, in the binding's header.
 
+An SSH private key is bound the same way but used differently, because it is never sent to anyone:
+the agent gets a signing socket instead of the key, and `fleet-secrets` signs only for a session with
+one of the binding's hosts. See [SSH keys](#ssh-keys).
+
 The prefix says what the value is and matches no vendor's key format, so a placeholder that ends up
 in a commit, a log or a chat does not trip secret scanning, and a real key is never taken for one.
 
@@ -134,6 +138,53 @@ Then attach `GITHUB_APP_PEM` as an Env Ref to each agent that should use GitHub,
 - A second App is a second binding (for example `GITHUB_APP_PEM_OVERRIDE` with
   `appIdEnvKey: GITHUB_APP_ID_OVERRIDE`). An agent may hold only one binding per exposed name.
 
+## SSH keys
+
+Bind an SSH private key and no agent holds it. The agent runs `ssh`, `scp`, `rsync` or git over SSH
+as usual; the signature each login needs is made in `fleet-secrets`.
+
+```sh
+ssh-keyscan build.example.test          # check the result against the host itself before using it
+curl -X PUT http://localhost:3600/api/secret-bindings/SSH_KEY_EXAMPLE \
+  -H "Authorization: Bearer $ORCHESTRATOR_AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"kind": "ssh_key",
+       "hosts": ["deploy@build.example.test"],
+       "knownHosts": ["build.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…"]}'
+```
+
+Then attach `SSH_KEY_EXAMPLE` as an Env Ref to each agent that should use it, and reprovision.
+
+| Field | Rule |
+|---|---|
+| `.env` value | The private key, unencrypted, as text or as base64 of the text (`base64 -w0 key`). A key with a passphrase is not loaded. |
+| `hosts` | Up to eight `user@host` destinations, lowercase. `host` is a DNS name or an IPv4 address, with no port. |
+| `knownHosts` | The host key of every destination, one `host keytype key` line each, or `[host]:port keytype key` for a server on another port. Up to 32 lines. No hashed names, markers, patterns or comments. |
+
+How it works:
+
+- The container gets one read-only directory, `/run/fleet-secrets/ssh`, holding a socket and a
+  `known_hosts` file, and `SSH_AUTH_SOCK` pointing at the socket. It gets no variable for the key.
+  `entrypoint.sh` makes that `known_hosts` the system-wide one, so a bound host is verified from the
+  first connection.
+- Behind the socket, `fleet-secrets` runs a stock `ssh-agent` per granted agent, with the key loaded
+  under destination constraints (`ssh-add -h user@host`) against the binding's host keys. OpenSSH
+  itself then refuses to sign unless the session's server proved one of those host keys and the
+  login is for that user.
+- `fleet-secrets` checks the state file on every connection to the socket and relays only three
+  requests: list keys, sign, and bind a session to a host key. Adding, removing or locking keys from
+  inside the container is refused.
+- The SSH connection itself goes from the agent straight to the server. Nothing is steered, so the
+  agent needs the same network path to the host that it had before.
+
+What it needs:
+
+- **A Linux Docker host.** The socket is a file in `secret-proxy/ssh/<agent>/` shared between the
+  forwarder and the agent container. Docker Desktop file shares on macOS and Windows do not
+  carry a socket between containers; this was not tested there.
+- **OpenSSH 8.9 or newer in the agent** (the image has 9.6). Older clients, and libraries that speak
+  the agent protocol without session binding, are refused.
+- **An agent name of at most 48 plain characters**, because it names the socket directory.
+
 ## Revocation and rotation
 
 | Action | Takes effect |
@@ -149,6 +200,11 @@ Then attach `GITHUB_APP_PEM` as an Env Ref to each agent that should use GitHub,
 The save itself rewrites the state file, and the forwarder reads the file on every request, including
 on a connection that was already open. A background pass every 10 seconds keeps the file fresh and
 is what picks up `.env` edits. A request already in flight completes.
+
+An SSH grant is revoked on the same events and takes effect on the next login: the socket checks the
+state on every connection. **An SSH session that is already open stays open**: it was authenticated
+before the revocation and runs between the agent and the server. Close it on the server if that
+matters. A rotated key replaces the old one within the same 10 seconds.
 
 ### When the state cannot be written
 
@@ -185,8 +241,15 @@ stops being served at once.
 
 - **Use, not disclosure, is what a grant allows.** An agent with a grant can send any request the
   bound host accepts with that credential. Bind narrow credentials to few hosts.
-- **HTTPS on port 443, to exact host names.** No plain HTTP, SSH, database or message-broker
+- **HTTPS on port 443, to exact host names.** No plain HTTP, database or message-broker
   protocols, no WebSocket or other protocol upgrade on a bound host, and no host without a dot.
+  SSH is the one other protocol, through its own binding kind.
+- **An SSH grant is a login, not a command.** Whatever the bound user may do on the bound host, the
+  agent may do while it holds the grant. Bind a dedicated low-privilege account, not an
+  administrator's. The key cannot be read out, used for another host or user, or carried to a
+  second host through agent forwarding.
+- **An SSH key is bound to host keys, not names.** A server that presents a listed host key is
+  the bound host, on any name or port. Check `ssh-keyscan` output against the host before saving it.
 - **Headers only.** A value is never written into a URL or a body, so it cannot be posted somewhere
   and read back. A placeholder in a body is relayed as the inert string it is.
 - **A bound host that echoes the credential leaks it.** The forwarder withholds a response whose
@@ -205,7 +268,8 @@ stops being served at once.
 - **Bindings are only as protected as the orchestrator's write API.** With an empty
   `ORCHESTRATOR_AUTH_TOKEN` that API is unauthenticated, for bindings as for every other write.
 - **Not covered.** Provider OAuth credentials (Claude, Codex, Gemini); tokens the agent process
-  itself uses (its Telegram bot, the journal, MinIO); SSH keys; anything not sent in an HTTP header.
+  itself uses (its Telegram bot, the journal, MinIO); anything else that is neither sent in an HTTP
+  header nor an SSH key.
 - **Steering can be bypassed, harmlessly.** A request that does not reach the forwarder (a proxy,
   a hard-coded address, a tool with its own resolver) carries only the placeholder, which is worth
   nothing outside the secrets network. The request fails; nothing leaks.
@@ -229,6 +293,8 @@ container, so a refusal leaves a working agent working. The one exception is
 | `secret_proxy_address_exhausted` | The subnet has no address for this agent id. |
 | `secret_expose_conflict` | Two bound keys, or a bound and a plain key, use one variable name. |
 | `secret_proxy_network_unavailable` | The container could not join `fleet-secrets-net` at its address. It is removed, not started. |
+| `secret_ssh_agent_name_unsupported` | The agent holds a bound SSH key and its name cannot name a socket directory (plain characters, at most 48). |
+| `secret_ssh_directory_unavailable` | `secret-proxy/ssh/<agent>` could not be created under the fleet base directory. |
 
 ## Files and settings
 
@@ -237,6 +303,7 @@ container, so a refusal leaves a working agent working. The one exception is
 | `secret-proxy/state/state.json` (0600, directory 0700) | orchestrator | Bindings, current values, grant hashes |
 | `secret-proxy/ca/ca.crt` | `fleet-secrets`, first start | The CA certificate mounted into granted agents |
 | `secret-proxy/ca/ca.key` (0600) | `fleet-secrets`, first start | The CA key; never mounted anywhere else |
+| `secret-proxy/ssh/<agent>/` | `fleet-secrets` | That agent's signing socket and bound host keys; mounted read-only into that agent only. Never a key |
 
 | `.env` key | Default | Used by |
 |---|---|---|
@@ -282,15 +349,27 @@ end-to-end harness. The cause was not established.
   `state_missing` (never written, or withdrawn after a failed write), `state_stale` (not refreshed
   within the age bound: is the orchestrator running?), or `state_unreadable`. The orchestrator log
   has the matching `SecretProxy state …` line.
-- **Health:** the same command reports `"state":"loaded"` when all is well.
+- **Health:** the same command reports `"state":"loaded"` when all is well, and `sshSockets`, the
+  number of agents that currently have a signing socket.
+- **`ssh` says `Permission denied (publickey)` for a bound host.** In the agent, `ssh-add -L` shows
+  what the socket offers. Nothing listed: the key did not load (`docker logs fleet-secrets` has
+  `ssh key … could not be loaded`: it is encrypted, or not a private key) or `.env` has no value.
+  `Could not open a connection to your authentication agent`: there is no socket, so the grant is
+  not in the state (reprovision the agent) or the state is missing or stale. Listed but refused with
+  `agent refused operation`: the user or the server's host key is not one the binding lists.
+- **`Host key verification failed` for a bound host.** The server's host key is not in the binding's
+  `knownHosts`. If the host was rebuilt, update the binding; the socket picks it up in seconds.
 
 ## Tests
 
 - `tests/Fleet.SecretProxy.Tests/`: injection, wrong destinations, revocation, leaks, the CA and
-  GitHub App minting, against the real forwarder on loopback.
+  GitHub App minting, against the real forwarder on loopback. `SshAgentGateTests` runs the signing
+  socket against the real `ssh-agent` and `ssh-add`, and passes without running where those are not
+  installed.
 - `tests/Fleet.Orchestrator.Tests/Services/SecretPlaceholderProvisioningTests.cs` and
   `Endpoints/SecretBindingEndpointsTests.cs`: what a container is created with, what is written to
   disk, and that a save revokes at once.
 - `bash tests/secret-proxy/run.sh`: the end-to-end harness. It runs the real `fleet-secrets` image, a
-  fake HTTPS upstream and a client container using `curl`, `git`, `gh`, node and python. Set
+  fake HTTPS upstream, two real `sshd` servers that both accept the bound key, and a client
+  container using `curl`, `git`, `gh`, node, python, `ssh` and `scp`. Set
   `AGENT_IMAGE=fleet:agent` to use the real agent image as the client.

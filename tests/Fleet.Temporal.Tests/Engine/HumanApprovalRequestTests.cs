@@ -139,6 +139,130 @@ public class HumanApprovalRequestTests
         });
     }
 
+    [Theory]
+    [InlineData("approved", "approved")]
+    [InlineData("rejected", "rejected")]
+    [InlineData("stale", "expired")]
+    public async Task Decision_CoBatchedWithFiredTimer_UsesInheritedGuardOrdering(string decision, string expected)
+    {
+        var run = await RunWithWorkerStopped(async (env, handle) =>
+        {
+            await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new
+            {
+                Decision = decision == "stale" ? "approved" : decision,
+                Ref = handle.ResultRunId, VisitId = decision == "stale" ? "old-visit" : Signal + ":1"
+            })]);
+        }, fireTimer: true);
+        var timer = Assert.Single(run.History.Events, e => e.EventType == EventType.TimerFired);
+        var signal = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionSignaled);
+        Assert.True(timer.EventId < signal.EventId);
+        // No worker consumed the timer before the decision arrived: both enter the next task.
+        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.WorkflowTaskStarted &&
+            e.EventId > timer.EventId && e.EventId < signal.EventId);
+        Assert.Equal(expected, JsonSerializer.Deserialize<JsonElement>(run.Result!).GetProperty("Decision").GetString());
+        Assert.Single(run.Activities.Calls);
+        await Replay(run.History);
+    }
+
+    [Fact]
+    public async Task Decision_AfterRecordedExpiry_CannotReplaceExpiredResultOrCallback()
+    {
+        var run = await Run("matching", async (env, handle, activities) =>
+        {
+            activities.HoldNotification = true;
+            try
+            {
+                await Parked(handle);
+                var advance = env.DelayAsync(TimeSpan.FromDays(1) + TimeSpan.FromSeconds(1));
+                await activities.Notifying.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                var history = await handle.FetchHistoryAsync();
+                Assert.Contains(history.Events, e => e.EventType == EventType.TimerFired);
+                var callback = Assert.Single(activities.Calls);
+                Assert.Equal("expired", JsonSerializer.Deserialize<JsonElement>(callback.Instruction.Split('\n').Last()).GetProperty("Decision").GetString());
+                await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new
+                { Decision = "approved", Ref = handle.ResultRunId, VisitId = Signal + ":1" })]);
+                activities.ReleaseNotification.TrySetResult();
+                await advance.WaitAsync(TimeSpan.FromSeconds(20));
+            }
+            finally { activities.ReleaseNotification.TrySetResult(); }
+        });
+        Assert.Equal("expired", JsonSerializer.Deserialize<JsonElement>(run.Result).GetProperty("Decision").GetString());
+        Assert.Single(run.Activities.Calls);
+        var fired = Assert.Single(run.History.Events, e => e.EventType == EventType.TimerFired);
+        var late = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionSignaled);
+        Assert.True(late.EventId > fired.EventId);
+        await Replay(run.History);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Cancellation_CoBatchedWithDecision_NoApprovalOrRequesterCallback(bool cancelFirst)
+    {
+        var run = await RunWithWorkerStopped(async (_, handle) =>
+        {
+            if (cancelFirst) await handle.CancelAsync();
+            await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new
+            { Decision = "approved", Ref = handle.ResultRunId, VisitId = Signal + ":1" })]);
+            if (!cancelFirst) await handle.CancelAsync();
+        }, canceled: true);
+        var canceled = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionCancelRequested);
+        var signal = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionSignaled);
+        Assert.Equal(cancelFirst, canceled.EventId < signal.EventId);
+        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.WorkflowTaskStarted &&
+            e.EventId > Math.Min(canceled.EventId, signal.EventId) && e.EventId < Math.Max(canceled.EventId, signal.EventId));
+        Assert.Null(run.Result);
+        Assert.Empty(run.Activities.Calls);
+        Assert.Equal(EventType.WorkflowExecutionCanceled, run.History.Events.Last().EventType);
+        await Replay(run.History);
+    }
+
+    private static Task Replay(WorkflowHistory history) => new WorkflowReplayer(
+        new WorkflowReplayerOptions { Namespace = "fleet", TaskQueue = "fleet" }.AddWorkflow<UniversalWorkflow>()).ReplayWorkflowAsync(history);
+
+    private sealed record BatchedRun(string? Result, WorkflowHistory History, ApprovalActivities Activities);
+    private static async Task<BatchedRun> RunWithWorkerStopped(Func<WorkflowEnvironment, WorkflowHandle, Task> submit, bool canceled = false, bool fireTimer = false)
+    {
+        await using var env = await WorkflowEnvironment.StartTimeSkippingAsync(new() { Namespace = "fleet" });
+        await env.Client.Connection.OperatorService.AddSearchAttributesAsync(new AddSearchAttributesRequest
+        { Namespace = "fleet", SearchAttributes = { ["Phase"] = IndexedValueType.Keyword, ["GateRef"] = IndexedValueType.Keyword, ["GateVisit"] = IndexedValueType.Keyword } });
+        var activities = new ApprovalActivities(new WorkflowDefinitionModel
+        { Name = Type, Namespace = "fleet", TaskQueue = "fleet", Root = SeedHarness.Parse(Type) }, "matching");
+        WorkflowHandle handle = null!;
+        // Stop the worker, not the workflow, so external events cannot be consumed separately.
+        // Disable sticky queues so the stopped worker cannot retain the next activation.
+        using (var worker = new TemporalWorker(env.Client, new TemporalWorkerOptions("fleet") { MaxCachedWorkflows = 0 }.AddWorkflow<UniversalWorkflow>().AddAllActivities(activities)))
+            await worker.ExecuteAsync(async () =>
+            {
+                handle = await env.Client.StartWorkflowAsync(Type, [Input()], new WorkflowOptions(Id(), "fleet")
+                { Memo = new Dictionary<string, object> { [HumanApprovalRequestContract.RequesterMemo] = "agent1" } });
+                await Parked(handle);
+            });
+        Task? advance = null;
+        if (fireTimer)
+        {
+            // Time skipping pauses at a pending workflow task. Keep the bounded advance alive
+            // until the stopped worker resumes, rather than awaiting past that task here.
+            advance = env.DelayAsync(TimeSpan.FromDays(1) + TimeSpan.FromSeconds(1));
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (!(await handle.FetchHistoryAsync()).Events.Any(e => e.EventType == EventType.TimerFired))
+            {
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("Approval timer did not fire");
+                await Task.Delay(20);
+            }
+        }
+        await submit(env, handle);
+        string? result = null;
+        using (var resumed = new TemporalWorker(env.Client, new TemporalWorkerOptions("fleet") { MaxCachedWorkflows = 0 }.AddWorkflow<UniversalWorkflow>().AddAllActivities(activities)))
+            await resumed.ExecuteAsync(async () =>
+            {
+                if (canceled) await Assert.ThrowsAsync<WorkflowFailedException>(() => handle.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(40)));
+                else result = await handle.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(40));
+                if (advance is not null) await advance.WaitAsync(TimeSpan.FromSeconds(20));
+            });
+        return new(result, await handle.FetchHistoryAsync(), activities);
+    }
+
     private static string Id() => "human-approval-" + Guid.NewGuid();
     private static JsonElement Input() => JsonSerializer.SerializeToElement(new { Action = Literal, Scope = Literal, RequesterAgent = "agent1" });
     private sealed record ApprovalRun(string Id, string RunId, string ResultText, WorkflowHistory History, ApprovalActivities Activities)
@@ -175,13 +299,18 @@ public class HumanApprovalRequestTests
     public sealed class ApprovalActivities(WorkflowDefinitionModel definition, string receipt)
     {
         public ConcurrentQueue<(string Target, string Instruction, string TaskId)> Calls { get; } = new();
+        public bool HoldNotification { get; set; }
+        public TaskCompletionSource Notifying { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseNotification { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         [Activity("LoadWorkflowDefinition")] public WorkflowDefinitionModel Load(string _) => definition;
         [Activity("LoadWorkflowConfig")] public JsonElement Config() => JsonSerializer.SerializeToElement(new { });
         [Activity("DelegateToAgent")]
-        public AgentTaskResult Notify(string target, string instruction, string taskId, bool retry, int maxRetries)
+        public async Task<AgentTaskResult> Notify(string target, string instruction, string taskId, bool retry, int maxRetries)
         {
             Calls.Enqueue((target, instruction, taskId));
             Assert.False(retry);
+            Notifying.TrySetResult();
+            if (HoldNotification) await ReleaseNotification.Task.WaitAsync(ActivityExecutionContext.Current.CancellationToken);
             var snapshot = JsonSerializer.Deserialize<JsonElement>(instruction.Split('\n').Last());
             var expected = $"APPROVAL_RECEIVED:{snapshot.GetProperty("WorkflowId").GetString()}:{snapshot.GetProperty("RunId").GetString()}:{snapshot.GetProperty("Decision").GetString()}";
             return receipt switch

@@ -109,9 +109,14 @@ only after separately approved drain and rollback checks.
 Source tests cover admission, literal string results, approved/rejected/invalid
 outcomes, expired results, stale visit rejection, duplicate IDs, recorded replay,
 cancellation, callback receipt/failure handling, reserved signal denial and API binding/auth.
+Component click-path tests cover both workflow-card decisions, blocking Send while
+history loads or fails, and displaying literal content before a successful send.
+Test-server histories batch a fired timer with approved/rejected/stale decisions
+before an uncached worker resumes, preserve expiry after a late approval, and
+cancel without callbacks with either cancellation/decision arrival order.
 The source PR reports exact executed counts and remaining checks. Desktop/mobile
-screenshot and accessibility qualification, explicit timer-tie
-qualification, isolated versioned adoption/rollback and deployed-runtime checks
+screenshot and accessibility qualification, isolated versioned adoption/rollback
+and deployed-runtime checks
 are not established by these source tests. Native simulator and real-phone
 notification/display/tap/decision/requester smoke acceptance remain separate,
 human-approved work. A backend merge alone is not feature completion.

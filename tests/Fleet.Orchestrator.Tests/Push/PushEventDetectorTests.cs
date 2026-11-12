@@ -115,6 +115,18 @@ public class PushEventDetectorTests
         Assert.Empty(Observe(detector, running: [Run(type: "ExternalAdvisoryWorkflow", phase: "review")]));
     }
 
+    [Fact]
+    public void RequestApproval_NewGateAfterBaseline_IsAnnouncedOnlyOnce()
+    {
+        var (detector, _) = NewDetector();
+        Observe(detector);
+        var request = Run(type: "UweHumanApprovalRequestWorkflow", phase: "request-approval", gateRef: "run-1");
+        var notification = Assert.Single(Observe(detector, running: [request]));
+        Assert.Contains("request-approval", JsonSerializer.Serialize(notification));
+        Assert.Empty(Observe(detector, running: [request]));
+        Assert.Empty(Observe(detector, running: [request]));
+    }
+
     // ── Failures ─────────────────────────────────────────────────────────────────────────────
 
     [Theory]

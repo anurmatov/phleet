@@ -79,12 +79,62 @@ public class SignalGateIdentityTests
         var response = await client.PostAsJsonAsync("/api/workflows/fleet/signal/wf-1", new { signalName = "merge-approval", payload = "{}" });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode); Assert.Equal(0, fake.Describes); Assert.Equal(0, fake.Sends);
     }
-    private static async Task<WebApplication> Start(FakeSignalClient fake)
+    [Theory]
+    [InlineData(null, "operator", "approved", "Running", "request-approval", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow", 401)]
+    [InlineData("operator", null, "approved", "Running", "request-approval", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow", 401)]
+    [InlineData("operator", "operator", "approved", "Running", "request-approval", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow", 200)]
+    [InlineData("operator", "operator", "rejected", "Running", "request-approval", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow", 200)]
+    [InlineData("operator", "operator", "APPROVED", "Running", "request-approval", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow", 400)]
+    [InlineData("operator", "operator", "approved", "Completed", "request-approval", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow", 409)]
+    [InlineData("operator", "operator", "approved", "Running", "other", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow", 409)]
+    [InlineData("operator", "operator", "approved", "Running", "request-approval", null, "visit-1", "UweHumanApprovalRequestWorkflow", 409)]
+    [InlineData("operator", "operator", "approved", "Running", "request-approval", "run-1", null, "UweHumanApprovalRequestWorkflow", 409)]
+    [InlineData("operator", "operator", "approved", "Running", "request-approval", "run-1", "visit-1", "OtherWorkflow", 409)]
+    public async Task RequestApproval_AuthAndExactDescribedGate_Required(string? token, string? configured, string decision,
+        string status, string phase, string? gateRef, string? visit, string type, int code)
+    {
+        var fake = new FakeSignalClient { State = new(status, phase, gateRef, visit, type) };
+        await using var app = await Start(fake, configured);
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+        if (token != null) client.DefaultRequestHeaders.Authorization = new("Bearer", token);
+        var response = await client.PostAsJsonAsync("/api/workflows/fleet/signal/wf-1", new
+        {
+            signalName = "request-approval", runId = "run-1", expectedGateRef = "run-1",
+            payload = JsonSerializer.Serialize(new { Decision = decision, Comment = "\"literal\"\n{{input.Action}}" })
+        });
+        Assert.Equal(code, (int)response.StatusCode);
+        Assert.Equal(code == 200 ? 1 : 0, fake.Sends);
+        if (code == 200)
+        {
+            var payload = JsonSerializer.Deserialize<JsonElement>(fake.Payload!);
+            Assert.Equal("run-1", payload.GetProperty("Ref").GetString());
+            Assert.Equal("visit-1", payload.GetProperty("VisitId").GetString());
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"Decision\":\"approved\",\"Decision\":\"rejected\"}")]
+    [InlineData("{\"decision\":\"approved\"}")]
+    [InlineData("{\"Decision\":\"approved\",\"Ref\":\"forged\"}")]
+    [InlineData("{\"Decision\":\"approved\",\"Comment\":null}")]
+    [InlineData("{\"Decision\":\"approved\",\"comment\":\"x\"}")]
+    public async Task RequestApproval_InvalidPayload_Refused(string payload)
+    {
+        var fake = new FakeSignalClient { State = new("Running", "request-approval", "run-1", "visit-1", "UweHumanApprovalRequestWorkflow") };
+        await using var app = await Start(fake, "operator");
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+        client.DefaultRequestHeaders.Authorization = new("Bearer", "operator");
+        var response = await client.PostAsJsonAsync("/api/workflows/fleet/signal/wf-1", new
+        { signalName = "request-approval", runId = "run-1", expectedGateRef = "run-1", payload });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, fake.Sends);
+    }
+    private static async Task<WebApplication> Start(FakeSignalClient fake, string? token = null)
     {
         var builder = WebApplication.CreateBuilder();
         // Keep the owned HTTP fixture independent of application listen configuration.
         builder.Configuration.Sources.Clear();
-        builder.Configuration.AddInMemoryCollection();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["Orchestrator:AuthToken"] = token });
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Services.AddSingleton<IWorkflowSignalClient>(fake);
         var app = builder.Build(); app.MapWorkflowSignalEndpoints(); await app.StartAsync(); return app;

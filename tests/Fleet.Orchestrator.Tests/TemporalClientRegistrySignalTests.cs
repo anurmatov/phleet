@@ -11,6 +11,31 @@ namespace Fleet.Orchestrator.Tests;
 
 public class TemporalClientRegistrySignalTests
 {
+    [Fact]
+    public async Task Restart_ApprovalRequest_RefusesBeforeTerminateOrStart()
+    {
+        var client = Substitute.For<ITemporalClient>();
+        var handle = Substitute.For<WorkflowHandle>(client, "request", "exact-run", null!, null!);
+        client.GetWorkflowHandle("request", "exact-run", Arg.Any<string?>()).Returns(handle);
+        handle.FetchHistoryAsync(Arg.Any<WorkflowHistoryEventFetchOptions?>()).Returns(new Temporalio.Common.WorkflowHistory("request",
+            [new Temporalio.Api.History.V1.HistoryEvent
+            {
+                EventType = Temporalio.Api.Enums.V1.EventType.WorkflowExecutionStarted,
+                WorkflowExecutionStartedEventAttributes = new()
+                {
+                    WorkflowType = new() { Name = "UweHumanApprovalRequestWorkflow" },
+                    TaskQueue = new() { Name = "fleet" }
+                }
+            }]));
+        var registry = new TemporalClientRegistry(Options.Create(new TemporalOptions { Address = "example:7233" }), NullLogger<TemporalClientRegistry>.Instance);
+        typeof(TemporalClientRegistry).GetField("_clients", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(registry, new Dictionary<string, ITemporalClient> { ["fleet"] = client });
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => registry.RestartWorkflowAsync("fleet", "request", "exact-run", true));
+        Assert.Contains("cannot be restarted", error.Message);
+        await handle.DidNotReceiveWithAnyArgs().TerminateAsync(default!, default!);
+        await client.DidNotReceiveWithAnyArgs().StartWorkflowAsync(default!, default!, default!);
+    }
+
     [Theory]
     [InlineData("sent")]
     [InlineData("not_found")]

@@ -282,6 +282,8 @@ public sealed class TemporalClientRegistry(
             throw new InvalidOperationException("WorkflowExecutionStarted event not found in history");
 
         var wfType = attrs.WorkflowType.Name;
+        if (string.Equals(wfType.Trim(), "UweHumanApprovalRequestWorkflow", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Human approval requests cannot be restarted or cloned. Inspect the original exact run.");
         var taskQueue = attrs.TaskQueue.Name;
 
         // Decode JSON payloads from the original input
@@ -700,7 +702,8 @@ public sealed class TemporalClientRegistry(
         if(described.RunId!=runId) throw new InvalidOperationException("Run identity mismatch");
         described.TypedSearchAttributes.TryGetValue(SearchAttributeKey.CreateKeyword("Phase"),out var phase);
         described.TypedSearchAttributes.TryGetValue(SearchAttributeKey.CreateKeyword("GateRef"),out var gateRef);
-        return new(described.Status.ToString(),phase,gateRef);
+        described.TypedSearchAttributes.TryGetValue(SearchAttributeKey.CreateKeyword("GateVisit"),out var visit);
+        return new(described.Status.ToString(),phase,gateRef,visit,described.WorkflowType);
     }
 
     public async Task<bool> SignalWorkflowAsync(

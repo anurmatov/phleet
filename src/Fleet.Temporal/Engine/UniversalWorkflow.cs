@@ -137,6 +137,22 @@ public class UniversalWorkflow
         var input = args.Length > 0
             ? Workflow.PayloadConverter.ToValue<JsonElement>(args[0])
             : default;
+        if (HumanApprovalRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
+        {
+            try
+            {
+                var requester = Workflow.Memo.TryGetValue(HumanApprovalRequestContract.RequesterMemo, out var memo)
+                    ? Workflow.PayloadConverter.ToValue<string>(memo) : null;
+                if (args.Length != 1) throw new ArgumentException("Exactly one approval input is required.");
+                HumanApprovalRequestContract.ValidateStart(input, requester, Workflow.Info.WorkflowId,
+                    Workflow.Info.Namespace, Workflow.Info.TaskQueue, Workflow.PayloadConverter);
+            }
+            catch (Exception ex)
+            {
+                throw new ApplicationFailureException("Human approval admission refused: " + ex.Message,
+                    errorType: "HumanApprovalAdmission", nonRetryable: true);
+            }
+        }
         _variables["input"] = input;
 
         // 2. Initialize vars scope before template engine (template engine holds a reference)

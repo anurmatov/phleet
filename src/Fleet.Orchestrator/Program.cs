@@ -728,7 +728,7 @@ app.MapPost("/api/workflows/{ns}/restart/{**id}", async (string ns, string id, H
 
 // REST: workflow execution history for detail view — GET /api/workflows/{ns}/history/{**id}
 // Uses /history/ prefix before the catch-all so ASP.NET Core routing resolves correctly.
-app.MapGet("/api/workflows/{ns}/history/{**id}", async (string ns, string id, TemporalClientRegistry temporal, CancellationToken ct) =>
+app.MapGet("/api/workflows/{ns}/history/{**id}", async (string ns, string id, string? runId, TemporalClientRegistry temporal, CancellationToken ct) =>
 {
     if (!temporal.IsConfigured)
         return Results.Problem("Temporal is not configured on this orchestrator");
@@ -736,7 +736,7 @@ app.MapGet("/api/workflows/{ns}/history/{**id}", async (string ns, string id, Te
     var workflowId = Uri.UnescapeDataString(id);
     try
     {
-        var events = await temporal.FetchWorkflowEventsAsync(ns, workflowId, runId: null, ct);
+        var events = await temporal.FetchWorkflowEventsAsync(ns, workflowId, runId: runId, ct);
         return Results.Ok(events);
     }
     catch (Exception ex)
@@ -796,6 +796,8 @@ app.MapGet("/api/workflow-types", async (IServiceScopeFactory scopeFactory) =>
                     var props = string.Join(",", fields.Select(f => $"\"{f}\":{{\"type\":\"string\"}}"));
                     inputSchema = $"{{\"type\":\"object\",\"properties\":{{{props}}}}}";
                 }
+                if (t.Name == "UweHumanApprovalRequestWorkflow")
+                    inputSchema = """{"type":"object","additionalProperties":false,"required":["Action","Scope"],"properties":{"Action":{"type":"string","minLength":1},"Scope":{"type":"string","minLength":1}}}""";
                 types.Add(new { t.Name, t.Description, t.Namespace, t.TaskQueue, InputSchema = inputSchema });
             }
         }

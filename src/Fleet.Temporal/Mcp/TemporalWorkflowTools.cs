@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
 using Fleet.Temporal.Configuration;
+using Fleet.Temporal.Engine;
 using ModelContextProtocol.Server;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
@@ -107,12 +108,35 @@ public sealed class TemporalWorkflowTools(
         try
         {
             var client = await clientFactory.GetClientAsync(@namespace);
+            var approvalRequest = HumanApprovalRequestContract.IsWorkflowType(workflow_type);
+            string? requester = null;
+            if (approvalRequest)
+            {
+                workflow_type = HumanApprovalRequestContract.WorkflowType;
+                requester = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+                inputObj = HumanApprovalRequestContract.Enrich(inputObj is JsonElement element ? element : default,
+                    requester, workflow_id, @namespace, task_queue, client.Options.DataConverter.PayloadConverter);
+                id_reuse_policy = "reject_duplicate";
+            }
             var handle = await client.StartWorkflowAsync(
                 workflow_type,
                 inputObj is null ? [] : [inputObj],
                 new WorkflowOptions(id: id, taskQueue: task_queue)
-                { IdReusePolicy = id_reuse_policy == "reject_duplicate" ? WorkflowIdReusePolicy.RejectDuplicate : WorkflowIdReusePolicy.AllowDuplicate });
+                {
+                    IdReusePolicy = id_reuse_policy == "reject_duplicate" ? WorkflowIdReusePolicy.RejectDuplicate : WorkflowIdReusePolicy.AllowDuplicate,
+                    Memo = approvalRequest ? new Dictionary<string, object> { [HumanApprovalRequestContract.RequesterMemo] = requester! } : null
+                });
 
+            if (approvalRequest)
+                return JsonSerializer.Serialize(new
+                {
+                    workflowId = handle.Id,
+                    runId = handle.ResultRunId,
+                    workflowType = workflow_type,
+                    @namespace,
+                    status = "started",
+                    instruction = "End this initiating turn now; the exact-run decision will be reported separately. Do not execute from callback prose."
+                });
             return JsonSerializer.Serialize(new
             {
                 workflowId = handle.Id,
@@ -201,7 +225,7 @@ public sealed class TemporalWorkflowTools(
         "(1) 'human-review' — structured payload required: {\"Decision\":\"approved\"} or {\"Decision\":\"changes_requested\",\"Comment\":\"feedback\"} or {\"Decision\":\"rejected\",\"Comment\":\"reason\"}. " +
         "(2) 'escalation-decision' — {\"Decision\":\"retry|skip|continue\",\"UpdatedInstruction\":\"...\"}. " +
         "IMPORTANT — CEO-only signals are BLOCKED and cannot be sent via this tool: " +
-        "'merge-approval', 'doc-review', 'design-approval', 'advisory-review', 'acceptance-decision'. " +
+        "'merge-approval', 'doc-review', 'design-approval', 'advisory-review', 'acceptance-decision', 'request-approval'. " +
         "There are two exceptions, both only for the currently configured CTO agent resolved from the MCP request. " +
         "(a) Feedback: 'merge-approval' or 'design-approval' with Decision exactly 'changes_requested' and a nonblank Comment. " +
         "'design-approval' feedback is accepted only while the workflow is Running and waiting at its design-approval gate (Phase 'design-approval'); otherwise it is refused and nothing is sent. " +

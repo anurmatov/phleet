@@ -136,3 +136,11 @@ available rather than claim they are on. Both follow the same check as the sende
 - Migration `AddPushDevices` — the `push_devices` table
 - `tests/Fleet.Orchestrator.Tests/Push/` — no network: the HTTP handler is a double and the key is
   generated per test
+
+## Exact-request approvals
+
+The registered `request-approval` phase uses the existing gate detector and APNs
+payload. Notification text never contains Action, Scope or Comment. Source gate
+registration is not proof of physical delivery or exact-request native navigation;
+see [human approval requests](human-approval-requests.md) for the companion,
+confirmation, adoption and real-phone acceptance boundaries.

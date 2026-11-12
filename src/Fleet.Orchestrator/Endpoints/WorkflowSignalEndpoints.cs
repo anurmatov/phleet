@@ -4,7 +4,7 @@ using Fleet.Orchestrator.Services;
 
 namespace Fleet.Orchestrator.Endpoints;
 
-public sealed record WorkflowSignalGate(string Status, string? Phase, string? GateRef);
+public sealed record WorkflowSignalGate(string Status, string? Phase, string? GateRef, string? GateVisit = null, string? WorkflowType = null);
 
 /// <summary>The existing Temporal singleton is used in production; endpoint tests substitute only IO.</summary>
 public interface IWorkflowSignalClient
@@ -32,11 +32,23 @@ public static class WorkflowSignalEndpoints
         if (body is null || string.IsNullOrWhiteSpace(body.SignalName))
             return Results.BadRequest(new { error = "signalName is required" });
         var signalName = body.SignalName;
+        var approvalRequest = signalName.Equals("request-approval", StringComparison.OrdinalIgnoreCase);
+        if (approvalRequest)
+        {
+            // This new human-only path fails closed even when legacy development auth is off.
+            var configured = request.HttpContext.RequestServices.GetRequiredService<IConfiguration>()["Orchestrator:AuthToken"];
+            var authorization = request.Headers.Authorization.FirstOrDefault();
+            var token = authorization?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true ? authorization[7..].Trim() : null;
+            if (string.IsNullOrWhiteSpace(configured) || token != configured) return Results.Unauthorized();
+            signalName = "request-approval";
+        }
         var known = string.IsNullOrWhiteSpace(body.WorkflowType) ? null : SignalRegistry.Get(body.WorkflowType);
         // Omitting or inventing workflowType cannot bypass a reserved name's gate binding.
         var definition = SignalRegistry.All.Values.SelectMany(x => x)
             .FirstOrDefault(s => s.Name.Equals(signalName, StringComparison.OrdinalIgnoreCase) && s.BindAttribute == "GateRef");
         var payload = body.Payload ?? "{}";
+        if (approvalRequest && !IsApprovalPayload(payload))
+            return Results.BadRequest(new { error = "invalid_payload" });
         var workflowId = Uri.UnescapeDataString(id);
         if (definition is not null && string.IsNullOrWhiteSpace(body.RunId))
             return Results.BadRequest(new { error = "run_required" });
@@ -51,7 +63,13 @@ public static class WorkflowSignalEndpoints
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(request.HttpContext.RequestAborted);
             deadline.CancelAfter(TimeSpan.FromSeconds(10));
             try { gate = await temporal.DescribeSignalGateAsync(ns, workflowId, body.RunId!, deadline.Token).WaitAsync(deadline.Token); }
+            catch (Temporalio.Exceptions.RpcException ex) when (approvalRequest && ex.Code == Temporalio.Exceptions.RpcException.StatusCode.NotFound)
+            { return Results.Json(new { error = "stale_run" }, statusCode: 409); }
             catch (Exception) { return Results.Json(new { error = "describe_unavailable" }, statusCode: 503); }
+            if (approvalRequest && (ns != "fleet" || gate.WorkflowType != "UweHumanApprovalRequestWorkflow" ||
+                gate.Phase != "request-approval" || string.IsNullOrWhiteSpace(gate.GateRef) ||
+                gate.GateRef != body.RunId || string.IsNullOrWhiteSpace(gate.GateVisit)))
+                return Results.Json(new { error = "no_gate" }, statusCode: 409);
             if (gate.Status != "Running")
                 return Results.Json(new { error = "stale_run" }, statusCode: 409);
             var current = string.IsNullOrEmpty(gate.GateRef) ? null : gate.GateRef;
@@ -78,6 +96,7 @@ public static class WorkflowSignalEndpoints
                 foreach (var key in parsed.Select(p => p.Key).Where(k => k.Equals("Ref", StringComparison.OrdinalIgnoreCase)).ToArray())
                     parsed.Remove(key);
                 parsed["Ref"] = current;
+                if (approvalRequest) parsed["VisitId"] = gate.GateVisit;
                 payload = parsed.ToJsonString();
             }
         }
@@ -92,6 +111,27 @@ public static class WorkflowSignalEndpoints
             return Results.Json(new { error = $"Failed to send signal: {ex.Message}" }, statusCode: 500);
         }
     }
+    private static bool IsApprovalPayload(string payload)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var field in doc.RootElement.EnumerateObject())
+            {
+                if (!seen.Add(field.Name) || field.Value.ValueKind != JsonValueKind.String) return false;
+                if (field.Name == "Decision")
+                {
+                    if (field.Value.GetString() is not ("approved" or "rejected")) return false;
+                }
+                else if (field.Name != "Comment" || field.Value.GetString()!.Length > 2000) return false;
+            }
+            return seen.Contains("Decision");
+        }
+        catch (JsonException) { return false; }
+    }
+
     private static IResult StaleGate(string? expected, string? current)
         => Results.Json(new { error = "stale_gate", expectedGateRef = expected, currentGateRef = current }, statusCode: 409);
 }

@@ -412,3 +412,7 @@ MIT — see [LICENSE](LICENSE).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Exact-request, report-only human decisions are documented in
+[human approval requests](docs/human-approval-requests.md). The backend/dashboard
+source is separate from native-client and real-phone rollout qualification.

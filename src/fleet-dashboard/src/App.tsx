@@ -1492,7 +1492,7 @@ export default function App() {
   }
 
   function handleSignalClick(wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) {
-    if (btn.requiresComment) {
+    if (btn.requiresComment || sig.name === 'request-approval') {
       setSignalModal({ wf, signalName: sig.name, button: btn, comment: '' })
       return
     }

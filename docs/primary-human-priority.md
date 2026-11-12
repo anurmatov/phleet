@@ -2,13 +2,13 @@
 
 Set `FLEET_PRIMARY_HUMAN_USER_ID` in the deployment `.env` to one positive Telegram user id, then reprovision the bot agents. Blank means off and omits `Telegram.PrimaryHumanUserId`; malformed, zero, negative or overflowing values refuse provisioning with `primary_human_invalid` before an existing container is removed. Headless agents never get the field. This is not a peer-config key.
 
-Only an allowed human's DM, dispatched group message or `/new` qualifies. The runtime checks Telegram `from.id`, `from.is_bot`, `sender_chat` and the live user/group allowlists. Text, usernames and display names do not confer priority. Relay, Bridge, CheckIn, debounced batches, reactions and client submissions stay routine. Commands such as `/stop` and `/cancel` still run before task queueing for every allowed user.
+Only an allowed human's DM, dispatched group message or `/new` qualifies. The runtime checks Telegram `from.id`, `from.is_bot`, `sender_chat` and the live user/group allowlists. Text, usernames and display names do not confer priority. Relay, Bridge, CheckIn, debounced batches and reactions stay routine. A chat submission (Fleet.Comms) qualifies when its conversation belongs to the owner and `FLEET_PRIMARY_HUMAN_USER_ID` is set (#530): provisioning writes `Conversations.PrimaryHumanPrincipalId`, and the principal comes from the server-derived envelope, never from the client. Commands such as `/stop` and `/cancel` still run before task queueing for every allowed user.
 
 The running turn is never interrupted by priority. Same-chat human messages still use provider injection or the Inbox continuation before global queued work. An incoming `/new` always creates a separate entry and never injects or merges.
 
 ## Human steering of workflow turns
 
-A human message reaches the agent's running turn, whatever the agent is doing, except when that turn is another human's task. Any allowed human qualifies, primary or not, by the same `from.id`, `from.is_bot`, `sender_chat` and live allowlist checks; only the router's regular-message path marks a message eligible. `/new`, reactions, debounced batches, relay/bridge and client submissions never steer.
+A human message reaches the agent's running turn, whatever the agent is doing, except when that turn is another human's task. Any allowed human qualifies, primary or not, by the same `from.id`, `from.is_bot`, `sender_chat` and live allowlist checks; only the router's regular-message path marks a message eligible. `/new`, reactions, debounced batches and relay/bridge never steer. The primary human's chat submission may steer, scoped to its own conversation's key (#530).
 
 The message first takes the normal queue path unchanged. Only when it is `Queued` does the runtime also send a text-only steering copy (a fixed header plus the prompt; media waits) into a running Relay or Bridge turn, found across every chat key. The workflow's callback, terminal event, binding and merged submissions do not change. The human's reply comes from their own queued turn in their own chat, prefixed to say the message was already seen.
 

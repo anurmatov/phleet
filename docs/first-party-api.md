@@ -13,6 +13,14 @@ writing it surfaced a tension with those, the tension is recorded in
 [Proposed amendments](#proposed-amendments-to-274276277) rather than resolved here in this
 document's favour. Two documents disagreeing about `seq` is worse than either being wrong alone.
 
+> **Changed by #530 — one sign-in.** This boundary no longer signs anyone in. The orchestrator owns
+> users, devices and credentials ([sign-in](sign-in.md)); a caller presents a browser session cookie
+> (writes add `X-Fleet-Request: 1`) or an app's access token, and Comms asks the orchestrator who it
+> is. `/v1/auth/*` is gone, `GET /v1/session` has no `agentLabel`, a conversation names its agent
+> (`POST /v1/conversations` takes `agent`, `GET /v1/conversations` lists the caller's own), and a new
+> code `agent_unavailable` (`409`) means that agent does not accept chat. §1, §3 and §5 below are
+> updated; the enrollment and device rules in §18 Slice 1 are history.
+
 ---
 
 ## 1. The two boundaries
@@ -26,7 +34,7 @@ kinds of caller**, and conflating them is the single most expensive mistake avai
 | Designed by | #276 §4.9, amended by #277 D-4 | **this document** |
 | Reachability | private, service-to-service | public, TLS, hostile network |
 | Caller | trusted process | untrusted device |
-| Credential | service-to-service, out of scope here | device-bound access token (§3) |
+| Credential | each agent's own `cj1.south.<agent>` token | a browser session cookie or an app access token, checked by the orchestrator (§3) |
 
 ### The south endpoint list is NOT served on the north listener
 
@@ -45,24 +53,25 @@ trusted service caller, and a path collision between the two surfaces resolves t
 to nothing.
 
 `Fleet.Comms` accepts a caller-supplied `principalId` on **neither** surface (#276 §4.9). On the
-north boundary the principal is derived only from the authenticated device record.
+north boundary the principal is the orchestrator's answer for the presented credential, and the
+agent comes from the conversation.
 
-### Everything a device can reach
+### Everything a client can reach
 
-This is the complete list. Anything not here is not reachable with a device credential.
+This is the complete list. Anything not here is not reachable with a client credential.
 
 | Method | Route |
 |---|---|
-| `POST` | `/v1/auth/devices` |
-| `POST` | `/v1/auth/token` |
-| `POST` | `/v1/auth/devices/{deviceId}:revoke` |
 | `GET` | `/v1/session` |
+| `GET` | `/v1/conversations` |
 | `POST` | `/v1/conversations` |
 | `GET` | `/v1/conversations/{id}/events` |
 | `POST` | `/v1/conversations/{id}/submissions` |
 | `POST` | `/v1/conversations/{id}:cancel` |
 | `POST` | `/v1/conversations/{id}/cursor` |
 | `GET` | `/v1/conversations/{id}/stream` (WebSocket upgrade) |
+
+Plus the three attachment routes of §5 when an attachment root is configured.
 
 ---
 
@@ -117,123 +126,37 @@ inherited is re-decided by this document.
 
 ---
 
-## 3. Authentication and credential lifecycle (D2)
+## 3. Authentication (D2, changed by #530)
 
-Three stages. Each exists because the stage before it cannot do its job.
+The orchestrator signs people in; this boundary only asks it. Enrollment codes, device secrets,
+access tokens and browser sessions are specified in [sign-in](sign-in.md). What a client of this
+boundary needs:
 
-### Stage 1 — enrollment
-
-The operator issues a single-use enrollment code out of band.
-
-| Parameter | Value |
-|---|---|
-| Entropy | **256 bits** from a CSPRNG |
-| Absolute TTL | **15 minutes** from issue, never extended or refreshed |
-| Uses | one, consumed atomically, subject only to the recovery window in §3.4 |
-| Binding | the one owner principal, fixed at issue time |
-
-An expired or already-burned code fails exactly like an unknown one.
-
-### Stage 2 — device registration
-
-`POST /v1/auth/devices` exchanges the enrollment code for a `deviceId` and a `deviceSecret`.
-
-| Parameter | Value |
-|---|---|
-| `deviceSecret` entropy | **256 bits** from a CSPRNG |
-| Returned | exactly once, in the registration response |
-| Server-side storage | **Argon2id** hash with a **per-record salt**; the secret itself is never stored |
-| Client-side storage | the platform secure store |
-
-**Owner-only means exactly one active device in this slice.** Registering a second device while one
-is active fails with `device_limit`. Rotation is an explicit revoke-then-enroll, never an implicit
-replacement — an implicit replacement would let anyone holding a stolen enrollment code silently
-displace the owner's working device.
-
-### Stage 3 — access tokens
-
-`POST /v1/auth/token` exchanges `deviceId` + `deviceSecret` for a bearer token.
-
-| Parameter | Value |
-|---|---|
-| Form | **opaque**, not a JWT |
-| Entropy | **256 bits** from a CSPRNG |
-| TTL | **15 minutes** |
-| Expiry | absolute, **stored at issue time**, never recomputed at check time |
-
-**There is no refresh token.** Refresh is a fresh `deviceId` + `deviceSecret` exchange at the same
-endpoint, and the client re-presents ahead of expiry. A refresh token would be a second long-lived
-credential with its own rotation, revocation and theft story, bought to save one round trip every
-fifteen minutes against a credential the client already holds.
-
-**Opaque rather than JWT is a decision, not a preference.** A JWT buys stateless validation that a
-single deployable does not need, and costs immediate revocation, key distribution and an
-algorithm-confusion surface. An opaque token is a server-side lookup that can be revoked in one
-statement.
-
-Storing absolute expiry at issue time is what makes a **backward clock jump** fail closed rather
-than extend a token's life (see the dependency table).
-
-### 3.4 Recovery when the registration response is lost
-
-The server commits the device record and the secret hash before it can know the response arrived. A
-client that loses the response holds no secret while the server holds an active device that blocks
-re-registration — so without a stated path **the owner is locked out by a dropped packet**.
-
-The path is a bounded **re-presentation window**:
-
-- Re-presenting the **same** enrollment code returns the **same** `deviceId` with a **newly rotated**
-  `deviceSecret`, invalidating the previous one.
-- The window closes at the **earlier** of **15 minutes from first registration**, or **the moment
-  that device first successfully mints an access token**.
-- Once closed, re-presentation fails as an unknown code. Recovery is then operator revoke-and-
-  re-enroll.
-- Each rotation is logged as a distinct registration event, so repeated rotation on one code is
-  visible rather than silent.
-
-**Is the window bounded by the enrollment code's own 15-minute issue TTL? No — deliberately.** The
-window is evaluated independently and may outlive the issue TTL. The issue TTL bounds how long an
-*unused* code may sit around; the window bounds how long a *consumed* code may rotate a secret for a
-device that has never authenticated. Applying both would give a registration made late in the code's
-life a truncated — possibly zero-length — recovery window, which is precisely the moment a client
-most needs one. The absolute cap is 15 minutes from first registration regardless of how much issue
-TTL remained.
-
-**Closing on first successful token mint — not on the timer alone — is what stops this being a
-re-issue oracle.** The instant the device proves it holds the secret, the only party who could
-benefit from another copy is an attacker. A timer-only window keeps handing out fresh secrets for a
-credential already proven to be in the client's hands.
+- **Credential.** An app sends `Authorization: Bearer <access token>` (15 minutes; mint a new one from
+  the device's id and secret before it expires, or after a `401`). A browser sends its
+  `fleet_session` cookie and adds `X-Fleet-Request: 1` to every write.
+- **The check.** Comms forwards the credential to the orchestrator and remembers a definite answer
+  for at most 10 seconds. An answer it could not get is `503`, never a pass; a throttled answer is
+  `429`.
 
 ### 3.5 Revocation is bounded, not best-effort
 
 | Surface | When revocation takes effect |
 |---|---|
-| HTTPS | on the next request, immediately |
-| Open WebSocket | **within 30 seconds** |
-
-The stream layer re-validates the token on a fixed **30-second** interval and closes with `4401`
-when it fails, rather than trusting the value captured at upgrade. Thirty seconds is the stated
-worst case a revoking operator may rely on. A design that promises only "eventually" gives the
-operator nothing to act on.
+| HTTPS | within 10 seconds |
+| Open WebSocket | **within 20 seconds**: every ping tick asks the orchestrator again, fresh, and closes with `4401` when the answer is not the same signed-in person |
 
 ### 3.6 Failures are indistinguishable
 
-Enrollment-code failure, unknown device, bad secret, expired token and revoked token all return
-**`401`** with `ProtocolErrorCode.Unauthorized` and the fixed message from `ProtocolErrors`. They are
-**indistinguishable to the caller**.
+An absent, unknown, expired or revoked credential — and a browser write without `X-Fleet-Request` —
+all return **`401`** with `ProtocolErrorCode.Unauthorized` and the fixed message from
+`ProtocolErrors`. Nothing is logged with the presented value.
 
-The distinguishing detail is logged server-side **without the presented value** — the log records
-which check failed, never the code, secret or token that failed it, and never a prefix of one.
+### 3.7 Credential placement (D3)
 
-### 3.7 WebSocket credential placement (D3)
-
-The upgrade request carries `Authorization: Bearer <token>`. A native client can set upgrade headers;
-this is not a browser contract and must not be designed for one.
-
-**The token MUST NOT appear in a query string, path segment or fragment.** URLs are logged by
-intermediaries, retained in access logs and stored in crash reports — a token in a URL is a token in
-a log file. If a future browser client needs an alternative, it gets a single-use, short-TTL ticket
-minted over HTTPS and redeemed at upgrade, designed then rather than pre-emptively.
+In the `Authorization` header or the session cookie, and nowhere else. **A credential MUST NOT appear
+in a query string, path segment or fragment.** A browser's WebSocket upgrade carries the cookie
+automatically, which is why no ticket scheme is needed.
 
 ---
 
@@ -275,11 +198,9 @@ All routes are under `/v1/`. Every request and response body carries
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/v1/auth/devices` | Register a device with an enrollment code |
-| `POST` | `/v1/auth/token` | Mint an access token |
-| `POST` | `/v1/auth/devices/{deviceId}:revoke` | **Self-revoke only** (§5.5) |
-| `GET` | `/v1/session` | Bound principal, agent label, server limits, protocol version |
-| `POST` | `/v1/conversations` | Open or resume by `externalRef` |
+| `GET` | `/v1/session` | Signed-in principal, server limits, protocol version |
+| `GET` | `/v1/conversations` | The caller's conversations, most recently active first |
+| `POST` | `/v1/conversations` | Open or resume with an `agent`, by `externalRef` |
 | `GET` | `/v1/conversations/{id}/events` | Catch-up |
 | `POST` | `/v1/conversations/{id}/submissions` | Create **or** steer |
 | `POST` | `/v1/conversations/{id}:cancel` | `scope: "current" \| "all"` |
@@ -287,7 +208,7 @@ All routes are under `/v1/`. Every request and response body carries
 | `GET` | `/v1/conversations/{id}/stream` | WebSocket upgrade |
 | `POST` | `/v1/conversations/{id}/attachments` | Reserve an attachment slot (#308) |
 | `PUT` | `/v1/attachments/{attachmentId}/content` | Upload bytes — **upload capability, single-use** |
-| `GET` | `/v1/attachments/{attachmentId}/content` | Download bytes — **session bearer** |
+| `GET` | `/v1/attachments/{attachmentId}/content` | Download bytes — **the client's credential** |
 
 The last three are mapped only when an attachment root is configured. Without one they are absent
 from the router entirely, and a non-empty `attachments` array on a submission is refused with
@@ -307,36 +228,6 @@ client to believe steer modifies an existing submission. It does not.
 
 ### 5.1 Worked requests and responses
 
-**Register a device.**
-
-```http
-POST /v1/auth/devices
-Content-Type: application/json
-
-{ "protocol": "fleet.conversation.v1", "enrollmentCode": "<256-bit value, base64url>" }
-```
-
-```json
-{
-  "protocol": "fleet.conversation.v1",
-  "deviceId": "dev_7xKq2mNp",
-  "deviceSecret": "<256-bit value, base64url — returned exactly once>"
-}
-```
-
-**Mint an access token.**
-
-```http
-POST /v1/auth/token
-Content-Type: application/json
-
-{ "protocol": "fleet.conversation.v1", "deviceId": "dev_7xKq2mNp", "deviceSecret": "<secret>" }
-```
-
-```json
-{ "protocol": "fleet.conversation.v1", "accessToken": "<opaque>", "expiresInSeconds": 900 }
-```
-
 **Session.**
 
 ```http
@@ -347,8 +238,7 @@ Authorization: Bearer <token>
 ```json
 {
   "protocol": "fleet.conversation.v1",
-  "principalId": "p_owner",
-  "agentLabel": "assistant",
+  "principalId": "owner",
   "limits": {
     "inboundTextBytes": 32768,
     "catchUpLimitDefault": 200,
@@ -359,19 +249,41 @@ Authorization: Bearer <token>
 }
 ```
 
-**Open or resume a conversation.**
+**List the caller's conversations.**
+
+```http
+GET /v1/conversations
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "protocol": "fleet.conversation.v1",
+  "conversations": [
+    { "conversationId": "c_4Jd8Ls2w", "agent": "builder", "externalRef": "main",
+      "nextSeq": 41, "retainedFloorSeq": 12, "lastActivityAt": "2026-11-12T10:00:00+00:00" }
+  ]
+}
+```
+
+**Open or resume a conversation.** `agent` is the agent's unique name, as
+`GET /api/chat/agents` lists it, and must accept chat now (`409 agent_unavailable` otherwise). The
+conversation is identified by (person, agent, `externalRef`): the same three always open the same
+conversation. Both first-party clients use `externalRef: "main"`, one thread per agent, so the phone
+and the browser share it.
 
 ```http
 POST /v1/conversations
 Authorization: Bearer <token>
 
-{ "protocol": "fleet.conversation.v1", "externalRef": "main-thread" }
+{ "protocol": "fleet.conversation.v1", "externalRef": "main", "agent": "builder" }
 ```
 
 ```json
 {
   "protocol": "fleet.conversation.v1",
   "conversationId": "c_4Jd8Ls2w",
+  "agent": "builder",
   "nextSeq": 41,
   "retainedFloorSeq": 12
 }
@@ -574,8 +486,9 @@ appear inside a terminal event payload and have no status at all.
 | `attachment_gone` § | **410** | the row survives and its bytes do not |
 | `invalid_cursor` † | **400** | catch-up, cursor write |
 | `conversation_not_found` | **404** | every conversation-scoped route |
+| `agent_unavailable` (#530) | **409** | open, submit, cancel and attachment reservation, when the conversation's agent does not accept chat |
 | `idempotency_conflict` † | **409** | submissions |
-| `device_limit` ‡ | **409** | device registration |
+| `device_limit` ‡ | **409** | no longer produced here: device registration moved to the orchestrator (#530), which answers `409 device_limit` itself |
 | `payload_too_large` | **413** | submissions above the inbound text bound (32 KiB) |
 | `rate_limited` | **429**, with `Retry-After` | any route; see §5.4 |
 | `internal` | **500** *or* **503** — see below | any route |
@@ -643,29 +556,12 @@ A client parses one integer in one format from either transport. **A missing or 
 treated as 30 seconds** — the backoff cap from §9 — rather than as zero. Defaulting to zero turns a
 rate-limit signal into a retry storm.
 
-### 5.5 Revocation, including the device nobody holds any more (D5b)
+### 5.5 Revocation (D5b, changed by #530)
 
-| Situation | Who acts | How |
-|---|---|---|
-| Sign-out, uninstall, planned rotation | the device itself | `POST /v1/auth/devices/{deviceId}:revoke`, authenticated as that device |
-| **Device lost, stolen, or bricked** | **the operator, out of band** | the deployment's own administrative path, which is **not** part of this boundary |
-
-**There is deliberately no north route that revokes a device without authenticating as it.** The
-owner has exactly one active device, so an unauthenticated revoke route would be a **one-request
-denial of service against the only way in** — and the caller who most needs it is, by construction,
-the one who cannot authenticate.
-
-Operator revocation invalidates the device record and every token it holds, reaches open sockets
-within the same **30-second** bound as token revocation, and is followed by a fresh enrollment code.
-The administrative mechanism itself is deployment detail and is not specified here. What is
-specified: that it exists, that it is the only lost-device path, and that it is **not reachable from
-the north listener**.
-
-For the self-hosted deployment this repository ships, that path is a set of operator subcommands of
-the `Fleet.Comms` assembly — `enroll issue`, `devices list`, `devices revoke`, `store backup` — run
-as one-shot processes against the store and binding no listener at all. See
-[`docs/comms-deployment.md`](comms-deployment.md). **The four-route north contract above is
-unchanged**; nothing in that operator path is reachable over HTTP, on either listener.
+Devices are managed on the orchestrator, not here: **Credentials → Devices** in the dashboard lists
+every signed-in browser and app and revokes any of them, and an app can revoke itself with
+`POST /api/auth/devices/{deviceId}/revoke` ([sign-in](sign-in.md)). A revoked device reaches no
+route here within the bounds of §3.5. Nothing on this boundary revokes anything.
 
 ---
 
@@ -934,9 +830,8 @@ sequenceDiagram
     participant S as Store
     participant A as Agent runtime
 
-    C->>N: POST /v1/auth/token (deviceId + deviceSecret)
-    N-->>C: accessToken, expiresInSeconds 900
-    C->>N: POST /v1/conversations (externalRef)
+    Note over C: access token from the orchestrator (POST /api/auth/token)
+    C->>N: POST /v1/conversations (agent, externalRef)
     N->>S: open or resume
     S-->>N: conversationId, nextSeq, retainedFloorSeq
     N-->>C: 200 conversationId

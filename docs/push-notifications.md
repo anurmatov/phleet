@@ -7,9 +7,10 @@ Off by default. When on, the orchestrator tells a registered phone when somethin
 | **A gate is waiting** | A running workflow enters a phase one of its registered signals names | The run leaves the gate and returns, or the gate reference changes |
 | **A workflow failed** | A run closes `Failed` or `TimedOut` | Never for the same run |
 | **An agent went down** | An agent that was alive has sent no heartbeat for the grace period (5 minutes by default) | It recovers and goes down again |
+| **An agent replied in chat** (#530) | An agent's answer commits and no client has that conversation open (Fleet.Comms with conversations) | Never for the same answer; a device that did not accept it is retried for 10 minutes |
 
-The phone is the [iOS app](https://github.com/anurmatov/phleet-ios), through its control-plane
-connection. Notifications go through Apple's push service (APNs), which the orchestrator calls
+The phone is the [iOS app](https://github.com/anurmatov/phleet-ios), signed in as a device
+([sign-in](sign-in.md)). Notifications go through Apple's push service (APNs), which the orchestrator calls
 directly; there is no extra service.
 
 ## Setting it up
@@ -57,10 +58,16 @@ the thing:
   ("Merge approval waiting", "example/project · PR #42")
 - a failure: the same subject and the workflow type
 - an agent: its name
+- a chat reply: the agent's display name and "New reply"
 
-It never carries task text, a comment, a failure message or any output. Alongside the visible text
-it carries the identifiers the app needs to open the right screen: namespace, workflow identifier,
-run identifier, signal name, or agent name.
+It never carries task text, a comment, a failure message, a reply's text or any output. Alongside the
+visible text it carries the identifiers the app needs to open the right screen: namespace, workflow
+identifier, run identifier, signal name, agent name, or conversation identifier.
+
+A chat reply is reported by the chat service, not detected here: when an answer commits and no
+client is attached, Fleet.Comms calls `POST /internal/push/chat-reply` with its own
+`cj1.chat-push.fleet-comms` token. The route is internal, never proxied, and does nothing while push
+is off. The notification goes out at once rather than on the next 30-second pass.
 
 ## Rules it follows
 
@@ -132,7 +139,9 @@ available rather than claim they are on. Both follow the same check as the sende
 
 - `src/Fleet.Orchestrator/Services/Push/` — the provider token, the client, the event detector,
   the message wording, the background service
-- `src/Fleet.Orchestrator/Endpoints/PushEndpoints.cs` — device registration
+- `src/Fleet.Orchestrator/Endpoints/PushEndpoints.cs` — device registration, and the chat service's
+  reply route
+- `src/Fleet.Comms/ChatReplyNotifier.cs` — the chat service's side of a reply notification
 - Migration `AddPushDevices` — the `push_devices` table
 - `tests/Fleet.Orchestrator.Tests/Push/` — no network: the HTTP handler is a double and the key is
   generated per test

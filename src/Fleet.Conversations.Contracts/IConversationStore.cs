@@ -47,6 +47,12 @@ public interface IConversationStore
     Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default);
 
     /// <summary>
+    /// The id of the conversation that <paramref name="id"/> belongs to, or null when there is no
+    /// such thing. Read by the same lookup as <see cref="FindAgentAsync"/>.
+    /// </summary>
+    Task<string?> FindConversationIdAsync(AgentTargetKind kind, string id, CancellationToken ct = default);
+
+    /// <summary>
     /// <b>awaited</b> — TX1a. Creates the submission, reads and stores the accept floor, and writes
     /// the command outbox row IN THE SAME TRANSACTION.
     /// </summary>

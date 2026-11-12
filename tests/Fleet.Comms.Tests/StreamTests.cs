@@ -26,6 +26,32 @@ namespace Fleet.Comms.Tests;
 public class StreamTests
 {
     /// <summary>
+    /// Whether a client is attached is what decides a reply notification (#530 step 9): true while a
+    /// stream is open on the conversation, false once it closed, and never true for another one.
+    /// </summary>
+    [Fact]
+    public async Task A_conversation_has_a_live_stream_exactly_while_one_is_open()
+    {
+        var store = new FakeConversationStore { ConversationId = Ulid.NewUlid() };
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+
+        Assert.False(StreamEndpoint.HasLiveStream(store.ConversationId));
+
+        var socket = await ConnectAsync(host, store.ConversationId, token);
+        await ReceiveAsync(socket);
+        Assert.True(StreamEndpoint.HasLiveStream(store.ConversationId));
+        Assert.False(StreamEndpoint.HasLiveStream(Ulid.NewUlid()));
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        socket.Dispose();
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (StreamEndpoint.HasLiveStream(store.ConversationId))
+            await Task.Delay(20, deadline.Token);
+    }
+
+    /// <summary>
     /// The first frame is `hello`, and it carries what a client needs before any event.
     /// </summary>
     [Fact]

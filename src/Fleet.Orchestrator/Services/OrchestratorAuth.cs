@@ -38,7 +38,8 @@ public static class OrchestratorAuth
     ///
     /// Reads (GET/HEAD/OPTIONS) never do. Neither do the paths with their own auth or no auth at
     /// all: WebSocket upgrades, the MCP endpoint, the separately-tokened config API, health,
-    /// and the exact cross-chat authorization path (which requires its Comms-only bearer).
+    /// and the exact chat-service paths — cross-chat authorization, the sign-in check and the chat
+    /// reply push — each of which requires its own Comms-only token.
     /// </summary>
     public static bool RequiresBearerToken(string method, string path)
     {
@@ -51,6 +52,7 @@ public static class OrchestratorAuth
                         || path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase)
                         || path.Equals(Fleet.Orchestrator.Endpoints.JournalCrossChatAuthorizationEndpoints.Path, StringComparison.OrdinalIgnoreCase)
                         || path.Equals(Fleet.Orchestrator.Endpoints.AuthEndpoints.CheckPath, StringComparison.OrdinalIgnoreCase)
+                        || path.Equals(SignIn.ChatReplyPushPath, StringComparison.OrdinalIgnoreCase)
                         || path.Equals("/health", StringComparison.OrdinalIgnoreCase);
 
         return !isReadOnly && !isExemptPath;

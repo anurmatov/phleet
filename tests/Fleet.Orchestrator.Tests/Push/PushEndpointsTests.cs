@@ -234,6 +234,7 @@ public class PushEndpointsTests : IAsyncLifetime
             new AgentRegistry(null!, NullLogger<AgentRegistry>.Instance),
             new TemporalClientRegistry(Options.Create(new TemporalOptions()), NullLogger<TemporalClientRegistry>.Instance),
             new OperatorStops(),
+            new ChatReplyPushes(TimeProvider.System),
             _app.Services.GetRequiredService<IServiceScopeFactory>(),
             _app.Services,
             TimeProvider.System,

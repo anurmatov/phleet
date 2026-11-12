@@ -35,6 +35,16 @@ public static class SignIn
     public const string CheckTokenSubject = "fleet-comms";
 
     /// <summary>
+    /// Where the chat service tells the orchestrator that an agent replied while no client was
+    /// attached, so the phone gets a notification (#530 step 9). Identifiers only, never text.
+    /// </summary>
+    public const string ChatReplyPushPath = "/internal/push/chat-reply";
+
+    /// <summary>The purpose of the token the chat service presents on <see cref="ChatReplyPushPath"/>.
+    /// Its subject is <see cref="CheckTokenSubject"/>.</summary>
+    public const string ChatReplyPushTokenPurpose = "chat-push";
+
+    /// <summary>
     /// The purpose of the token an agent presents to the chat service's agent-facing listener. Its
     /// subject is the agent's name, and it acts only on that agent's conversations.
     /// </summary>

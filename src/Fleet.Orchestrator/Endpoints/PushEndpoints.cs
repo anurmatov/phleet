@@ -26,8 +26,55 @@ public static partial class PushEndpoints
 
     public sealed record RegisterBody(string? Token);
 
+    /// <summary>What the chat service says when an agent replied and no client was attached.</summary>
+    public sealed record ChatReplyBody(string? Agent, string? ConversationId, ulong? Seq);
+
+    [GeneratedRegex(@"\A[0-9A-HJKMNP-TV-Z]{26}\z")]
+    private static partial Regex ConversationIdShape();
+
     public static IEndpointRouteBuilder MapPushEndpoints(this IEndpointRouteBuilder app)
     {
+        // ── the chat service: an agent replied while nobody was looking (#530 step 9) ──
+        //
+        // Internal, never proxied, and carries its own Comms-only token. Identifiers only: which
+        // agent and which conversation, never what was said. Nothing is sent when push is off, and
+        // an agent this orchestrator does not know is ignored rather than named.
+        app.MapPost(Fleet.Shared.SignIn.ChatReplyPushPath, async (HttpContext http, [FromBody] ChatReplyBody? body,
+            [FromServices] JournalTokenService tokens, [FromServices] PushReadiness readiness,
+            [FromServices] ChatReplyPushes replies, [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+        {
+            var presented = Fleet.Orchestrator.Auth.CallerAuthenticator.BearerOf(http.Request.Headers.Authorization.FirstOrDefault());
+            if (!tokens.TryVerify(presented, Fleet.Shared.SignIn.ChatReplyPushTokenPurpose, out var subject)
+                || !string.Equals(subject, Fleet.Shared.SignIn.CheckTokenSubject, StringComparison.Ordinal))
+                return Results.Json(new { error = "push_token_invalid" }, statusCode: StatusCodes.Status403Forbidden);
+
+            if (body?.Seq is not { } seq || !ChatAgents.IsUsableName(body.Agent)
+                || body.ConversationId is null || !ConversationIdShape().IsMatch(body.ConversationId))
+                return Results.BadRequest(new { error = "body_invalid" });
+
+            if (!readiness.IsReady) return Results.NoContent();
+
+            await using var scope = scopes.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+            if (db is null) return Results.NoContent();
+
+            // Ordinal after the query: the database compares names without regard to case.
+            var agent = (await db.Agents.AsNoTracking()
+                    .Where(a => a.Name == body.Agent)
+                    .Select(a => new { a.Name, a.DisplayName })
+                    .ToListAsync(ct))
+                .FirstOrDefault(a => string.Equals(a.Name, body.Agent, StringComparison.Ordinal));
+            if (agent is null) return Results.NoContent();
+
+            var queued = replies.Enqueue(PushMessages.ChatReply(
+                agent.Name, string.IsNullOrWhiteSpace(agent.DisplayName) ? agent.Name : agent.DisplayName,
+                body.ConversationId, seq));
+
+            return queued
+                ? Results.Accepted()
+                : Results.Json(new { error = "too_many_requests" }, statusCode: StatusCodes.Status429TooManyRequests);
+        });
+
         app.MapGet("/api/push", async ([FromServices] PushReadiness readiness, [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
         {
             await using var scope = scopes.CreateAsyncScope();

@@ -89,6 +89,12 @@ internal sealed class FakeConversationStore : IConversationStore
         Task.FromResult<IReadOnlyList<ConversationSummary>>(
             string.Equals(principalId, OwnerPrincipalId, StringComparison.Ordinal) ? [Summary()] : []);
 
+    public Task<string?> FindConversationIdAsync(AgentTargetKind kind, string id, CancellationToken ct = default) =>
+        Task.FromResult<string?>(
+            kind == AgentTargetKind.Conversation && string.Equals(id, ConversationId, StringComparison.Ordinal)
+                ? ConversationId
+                : null);
+
     public Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default) =>
         Task.FromResult<string?>(
             kind == AgentTargetKind.Conversation && string.Equals(id, ConversationId, StringComparison.Ordinal)

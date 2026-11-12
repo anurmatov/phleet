@@ -68,7 +68,7 @@ internal sealed class SouthTestHost : IAsyncDisposable
     /// </remarks>
     public HttpMessageHandler CreateHandler() => _app.GetTestServer().CreateHandler();
 
-    public static async Task<SouthTestHost> StartAsync(IConversationStore store)
+    public static async Task<SouthTestHost> StartAsync(IConversationStore store, IChatReplyNotifier? replies = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
@@ -79,7 +79,7 @@ internal sealed class SouthTestHost : IAsyncDisposable
         {
             ConversationConnectionString = "configured",
             Journal = new() { TokenKeys = Key },
-        });
+        }, replies: replies);
 
         await app.StartAsync();
         return new SouthTestHost(app, app.GetTestClient());

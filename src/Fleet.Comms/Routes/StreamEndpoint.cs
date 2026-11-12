@@ -61,6 +61,14 @@ public static class StreamEndpoint
     /// </summary>
     private static readonly ConcurrentDictionary<string, CancellationTokenSource> Live = new();
 
+    /// <summary>
+    /// Whether any client has a stream open on this conversation right now. A key is the
+    /// conversation id — always 26 characters — followed by the client instance, so a prefix match
+    /// is exact.
+    /// </summary>
+    public static bool HasLiveStream(string conversationId) =>
+        Live.Keys.Any(key => key.StartsWith(conversationId, StringComparison.Ordinal));
+
     public static async Task HandleAsync(
         HttpContext http, string id, ISignInCheck signIn, IConversationStore store,
         ILoggerFactory loggerFactory, CancellationToken ct)

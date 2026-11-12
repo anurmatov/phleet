@@ -38,9 +38,13 @@ public static class SouthEndpoints
     /// The byte store, when attachments are configured. Null leaves <c>/attachments/…</c> unmapped,
     /// so an install without a root answers 404 from the router rather than from a handler.
     /// </param>
+    /// <param name="replies">
+    /// Told when an agent's answer commits and no client is attached, so the phone is notified.
+    /// Null sends nothing.
+    /// </param>
     public static void Map(
         WebApplication app, IConversationStore store, CommsOptions options,
-        AttachmentStore? attachments = null)
+        AttachmentStore? attachments = null, IChatReplyNotifier? replies = null)
     {
         var keys = options.Journal.Keys();
 
@@ -134,9 +138,26 @@ public static class SouthEndpoints
         });
 
         group.MapPost("/turns:commit", async Task<IResult> (HttpContext http, CommitTerminalRequest request, CancellationToken ct) =>
-            await RefuseForeignAsync(http, store, ct,
-                [(AgentTargetKind.Attempt, request.AttemptId), .. Submissions(request.MergedSubmissionIds)])
-            ?? Results.Json(await store.CommitTerminalAsync(request, ct), FleetProtocolJson.Options));
+        {
+            if (await RefuseForeignAsync(http, store, ct,
+                    [(AgentTargetKind.Attempt, request.AttemptId), .. Submissions(request.MergedSubmissionIds)]) is { } refusal)
+                return refusal;
+
+            var result = await store.CommitTerminalAsync(request, ct);
+
+            // An answer, committed for the first time, that nobody is watching: tell the phone
+            // (#530 step 9). A replay was already announced; an error, a cancel or an unknown
+            // outcome is not a reply.
+            if (replies is not null && !result.Replayed
+                && request.TerminalEvent.Kind == ConversationEventKind.TurnFinal
+                && await store.FindConversationIdAsync(AgentTargetKind.Attempt, request.AttemptId, ct) is { } conversationId
+                && !StreamEndpoint.HasLiveStream(conversationId))
+            {
+                replies.Replied((string)http.Items[AgentItem]!, conversationId, result.Seq);
+            }
+
+            return Results.Json(result, FleetProtocolJson.Options);
+        });
 
         group.MapPost("/events:append", async Task<IResult> (HttpContext http, AppendBatchRequest request, CancellationToken ct) =>
             await RefuseForeignAsync(http, store, ct,

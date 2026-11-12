@@ -273,37 +273,45 @@ public sealed partial class MySqlConversationStore : IConversationStore
 
     // ────────────────────────────────────────────────────────────── whose is it
 
-    public async Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default)
+    public Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default) =>
+        FindOwnerColumnAsync(kind, id, "c.agent_name", ct);
+
+    public Task<string?> FindConversationIdAsync(AgentTargetKind kind, string id, CancellationToken ct = default) =>
+        FindOwnerColumnAsync(kind, id, "c.id", ct);
+
+    /// <param name="column">A fixed column of <c>conversations c</c>, never caller input.</param>
+    private async Task<string?> FindOwnerColumnAsync(
+        AgentTargetKind kind, string id, string column, CancellationToken ct)
     {
         // One indexed lookup each. The relation these read never changes — a command, a submission,
         // an attempt and an attachment belong to one conversation for life, and a conversation to
         // one agent — so answering before the caller acts is sound, not a race.
-        var sql = kind switch
+        var from = kind switch
         {
             AgentTargetKind.Conversation =>
-                "SELECT agent_name FROM conversations WHERE id = @id",
+                "FROM conversations c WHERE c.id = @id",
             AgentTargetKind.Message =>
                 """
-                SELECT c.agent_name FROM command_outbox o
+                FROM command_outbox o
                   JOIN conversations c ON c.id = o.conversation_id
                  WHERE o.message_id = @id
                 """,
             AgentTargetKind.Submission =>
                 """
-                SELECT c.agent_name FROM submissions s
+                FROM submissions s
                   JOIN conversations c ON c.id = s.conversation_id
                  WHERE s.id = @id
                 """,
             AgentTargetKind.Attempt =>
                 """
-                SELECT c.agent_name FROM execution_attempts a
+                FROM execution_attempts a
                   JOIN submissions s ON s.id = a.submission_id
                   JOIN conversations c ON c.id = s.conversation_id
                  WHERE a.id = @id
                 """,
             AgentTargetKind.Attachment =>
                 """
-                SELECT c.agent_name FROM conversation_attachments t
+                FROM conversation_attachments t
                   JOIN conversations c ON c.id = t.conversation_id
                  WHERE t.id = @id
                 """,
@@ -311,7 +319,7 @@ public sealed partial class MySqlConversationStore : IConversationStore
         };
 
         await using var connection = await OpenAsync(ct);
-        await using var command = new MySqlCommand(sql, connection);
+        await using var command = new MySqlCommand($"SELECT {column} {from}", connection);
         command.Parameters.AddWithValue("@id", id);
         return await command.ExecuteScalarAsync(ct) as string;
     }

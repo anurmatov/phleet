@@ -1,4 +1,5 @@
 using System.Net;
+using Fleet.Comms;
 using Fleet.Comms.Contracts;
 using Fleet.Conversations.Contracts;
 using Fleet.Protocol;
@@ -484,6 +485,89 @@ public sealed class SouthSurfaceTests(MySqlFixture fixture)
         Assert.Equal(
             FleetProtocolJson.Serialize(ErrorResponse.For(code)),
             await response.Content.ReadAsStringAsync());
+    }
+
+    // ── a reply nobody is watching notifies the phone (#530 step 9) ─────────────
+
+    private sealed class RecordingReplies : IChatReplyNotifier
+    {
+        public List<(string Agent, string ConversationId, ulong Seq)> Calls { get; } = [];
+        public void Replied(string agent, string conversationId, ulong seq) => Calls.Add((agent, conversationId, seq));
+    }
+
+    /// <summary>Claim, run and start one turn, ready for its terminal.</summary>
+    private async Task<(string ConversationId, string AttemptId, string Epoch)> RunningTurnAsync(SouthTestHost host)
+    {
+        var conversation = await OpenAsync();
+        var accept = await AcceptAsync(conversation.ConversationId);
+        var messageId = await MessageIdForAsync(accept.SubmissionId!);
+        var epoch = Ulid.NewUlid();
+
+        var claim = await SouthTestHost.ReadAsync<ClaimDeliveryResult>(await host.PostAsync("/deliveries:claim",
+            new ClaimDeliveryRequest { MessageId = messageId, Owner = "agent-1" }));
+
+        Assert.Equal(HttpStatusCode.OK, (await host.PostAsync("/submissions:disposition", new RecordDispositionRequest
+        {
+            MessageId = messageId, SubmissionId = claim.SubmissionId!, AttemptId = claim.AttemptId!,
+            Disposition = SubmissionDisposition.Ran, Epoch = epoch, Ordinal = 1, Owner = "agent-1",
+        })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK, (await host.PostAsync("/turns:start", new StartTurnRequest
+        {
+            AttemptId = claim.AttemptId!, TurnId = "turn-1", Epoch = epoch, Ordinal = 2,
+        })).StatusCode);
+
+        return (conversation.ConversationId, claim.AttemptId!, epoch);
+    }
+
+    private static CommitTerminalRequest Terminal(string attemptId, string epoch, string kind) => new()
+    {
+        AttemptId = attemptId,
+        TerminalEvent = new EventDescriptor { Kind = kind, EventId = Ulid.NewUlid(), PayloadJson = """{"text":"done"}""" },
+        Epoch = epoch,
+        Ordinal = 3,
+    };
+
+    [Fact]
+    public async Task An_answer_nobody_is_watching_notifies_once_with_who_and_where()
+    {
+        var replies = new RecordingReplies();
+        await using var host = await SouthTestHost.StartAsync(_store, replies);
+        var (conversationId, attemptId, epoch) = await RunningTurnAsync(host);
+
+        var request = Terminal(attemptId, epoch, ConversationEventKind.TurnFinal);
+        var commit = await SouthTestHost.ReadAsync<CommitTerminalResult>(await host.PostAsync("/turns:commit", request));
+
+        var call = Assert.Single(replies.Calls);
+        Assert.Equal(SouthTestHost.Agent, call.Agent);
+        Assert.Equal(conversationId, call.ConversationId);
+        Assert.Equal(commit.Seq, call.Seq);
+
+        // The agent retrying its commit is a replay, and was already announced.
+        var replay = await SouthTestHost.ReadAsync<CommitTerminalResult>(await host.PostAsync("/turns:commit", request));
+        Assert.True(replay.Replayed);
+        Assert.Single(replies.Calls);
+    }
+
+    [Theory]
+    [InlineData(ConversationEventKind.TurnError)]
+    [InlineData(ConversationEventKind.TurnCanceled)]
+    public async Task A_terminal_that_is_not_an_answer_notifies_nothing(string kind)
+    {
+        var replies = new RecordingReplies();
+        await using var host = await SouthTestHost.StartAsync(_store, replies);
+        var (_, attemptId, epoch) = await RunningTurnAsync(host);
+
+        var payload = kind == ConversationEventKind.TurnError
+            ? """{"code":"executor_error","message":"failed"}"""
+            : """{"reason":"user"}""";
+        var request = Terminal(attemptId, epoch, kind) with
+        {
+            TerminalEvent = new EventDescriptor { Kind = kind, EventId = Ulid.NewUlid(), PayloadJson = payload },
+        };
+
+        Assert.Equal(HttpStatusCode.OK, (await host.PostAsync("/turns:commit", request)).StatusCode);
+        Assert.Empty(replies.Calls);
     }
 
     // ── one agent's token acts on that agent's conversations only (#530 MUST NOT 5) ──

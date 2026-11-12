@@ -204,7 +204,12 @@ static async Task<int> RunServiceAsync(string[] args)
             : null;
 
         // Composed by CommsApp, not here, so the south suite drives the same graph this line does.
-        southApp = CommsApp.BuildSouthApp(southBuilder, store, options, attachments);
+        // Replies nobody is watching become a phone notification, through the orchestrator (#530).
+        var replies = new OrchestratorChatReplyNotifier(
+            new HttpClient { Timeout = Timeout.InfiniteTimeSpan }, options.OrchestratorUrl, options.Journal.Keys()[0],
+            northApp.Services.GetRequiredService<ILoggerFactory>().CreateLogger<OrchestratorChatReplyNotifier>());
+
+        southApp = CommsApp.BuildSouthApp(southBuilder, store, options, attachments, replies);
     }
 
     // ── The journal listener, only when the journal is enabled (#375) ─────────────────

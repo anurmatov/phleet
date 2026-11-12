@@ -22,6 +22,7 @@ public sealed class PushNotifierService(
     AgentRegistry agents,
     TemporalClientRegistry temporal,
     OperatorStops stops,
+    ChatReplyPushes replies,
     IServiceScopeFactory scopes,
     IServiceProvider services,
     TimeProvider time,
@@ -57,28 +58,35 @@ public sealed class PushNotifierService(
             try
             {
                 var failed = await RecentlyFailedAsync(ct);
-                await PassAsync(detector, delivery, workflows.GetAll(), failed, agents.GetAll(), time.GetUtcNow(), ct);
+                await PassAsync(detector, delivery, workflows.GetAll(), failed, agents.GetAll(), time.GetUtcNow(), ct, replies);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError("Push notifier pass failed ({Error})", ex.GetType().Name);
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(o.EffectiveIntervalSeconds), time, ct).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            // The interval, or sooner when a chat reply is queued: a person waiting for an answer
+            // should not wait for the next fleet check too.
+            await replies.WaitAsync(TimeSpan.FromSeconds(o.EffectiveIntervalSeconds), ct);
         }
     }
 
     /// <summary>
     /// One look at the fleet: what is new goes to every device, and what a device missed on an
-    /// earlier pass is sent to that device again while it is still true.
+    /// earlier pass is sent to that device again while it is still true. Chat replies queued since
+    /// the last pass go out with it.
     /// </summary>
     public static async Task PassAsync(
         PushEventDetector detector, PushDelivery delivery,
         IReadOnlyCollection<WorkflowSummary> running, IReadOnlyCollection<WorkflowSummary> recentlyFailed,
-        IReadOnlyCollection<AgentState> agents, DateTimeOffset now, CancellationToken ct)
+        IReadOnlyCollection<AgentState> agents, DateTimeOffset now, CancellationToken ct,
+        ChatReplyPushes? replies = null)
     {
         var messages = detector.Observe(running, recentlyFailed, agents, now);
-        await delivery.DeliverAsync(messages, detector.IsCurrent, ct);
+        if (replies is not null) messages = [.. messages, .. replies.Take()];
+
+        await delivery.DeliverAsync(messages,
+            key => detector.IsCurrent(key) || replies?.IsCurrent(key) == true, ct);
     }
 
     private async Task<IReadOnlyCollection<WorkflowSummary>> RecentlyFailedAsync(CancellationToken ct)

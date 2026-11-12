@@ -495,7 +495,7 @@ public static class CommsApp
     /// </param>
     public static WebApplication BuildSouthApp(
         WebApplicationBuilder builder, IConversationStore store, CommsOptions options,
-        AttachmentStore? attachments = null)
+        AttachmentStore? attachments = null, IChatReplyNotifier? replies = null)
     {
         // Request BINDING, not just response writing. The framework's web defaults carry no enum
         // converter, so a body carrying the protocol's own `"disposition":"ran"` failed to bind and
@@ -505,7 +505,7 @@ public static class CommsApp
             jsonOptions => FleetProtocolJson.ApplyTo(jsonOptions.SerializerOptions));
 
         var app = builder.Build();
-        SouthEndpoints.Map(app, store, options, attachments);
+        SouthEndpoints.Map(app, store, options, attachments, replies);
         return app;
     }
 

@@ -77,7 +77,9 @@ public sealed class AddSignInMigrationTests : IAsyncLifetime
     [Fact]
     public async Task TheStore_RunsSignInOnMySql_UnderTheRetryingStrategy()
     {
-        await MigrateAsync(Target);
+        // This exercise uses today's store, including device-bound push revocation. Historical
+        // AddSignIn schema/rollback assertions above deliberately retain their original target.
+        await using (var db = NewContext()) await db.Database.MigrateAsync();
         await using var provider = NewProvider();
         var auth = new AuthService(
             new EfAuthStore(provider.GetRequiredService<IServiceScopeFactory>()),

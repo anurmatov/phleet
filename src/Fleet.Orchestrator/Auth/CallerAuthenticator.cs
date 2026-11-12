@@ -70,10 +70,10 @@ public sealed class AuthBusyException() : Exception("Too many sign-in checks at 
 /// calls it, so on this process a revoked device stops authenticating at once.
 /// </para>
 /// <para>
-/// <b>Unverified credentials are budgeted.</b> A credential that is not in the memory costs a KDF
-/// whether or not it is genuine. <see cref="MissesPerWindow"/> of those are allowed per
-/// <see cref="MissWindow"/> for the whole process; past that the caller is told to come back
-/// (<see cref="AuthBusyException"/>), which bounds what a stream of made-up tokens can cost.
+/// <b>Unverified credentials are budgeted.</b> Canonical unknown handles share a bounded
+/// dummy-KDF pool; each existing ordinal token handle has an independent pool. Random handles
+/// cannot spend a fresh real caller's capacity, and guesses against one real handle cannot
+/// spend another's. Admission never replaces secret verification or any revocation/expiry check.
 /// </para>
 /// </remarks>
 public sealed class CallerAuthenticator : IDisposable
@@ -91,6 +91,7 @@ public sealed class CallerAuthenticator : IDisposable
     private readonly byte[]? _serviceTokenDigest;
     private readonly ConcurrentDictionary<string, Remembered> _remembered = new(StringComparer.Ordinal);
     private readonly FixedWindowRateLimiter _misses;
+    private readonly PartitionedRateLimiter<string> _candidates;
 
     private long _generation;
     private readonly Lock _cacheGate = new();
@@ -104,6 +105,13 @@ public sealed class CallerAuthenticator : IDisposable
 
         var serviceToken = configuration["Orchestrator:AuthToken"];
         _serviceTokenDigest = string.IsNullOrWhiteSpace(serviceToken) ? null : Digest(serviceToken);
+        _candidates = PartitionedRateLimiter.Create<string, string>(id =>
+            RateLimitPartition.GetFixedWindowLimiter(id, _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = MissesPerWindow,
+                Window = MissWindow,
+                QueueLimit = 0,
+            }));
         _misses = new FixedWindowRateLimiter(new FixedWindowRateLimiterOptions
         {
             PermitLimit = MissesPerWindow,
@@ -180,15 +188,13 @@ public sealed class CallerAuthenticator : IDisposable
         if (known && !fresh) return hit!.Device;
         if (!known) _remembered.TryRemove(key, out _);
 
-        // A socket's mandatory store recheck is not an unknown credential, even during a flood.
-        if (!known)
-        {
-            using var lease = _misses.AttemptAcquire();
-            if (!lease.IsAcquired) throw new AuthBusyException();
-        }
-
         AuthResult<AuthenticatedDevice> result;
-        try { result = await _auth.AuthenticateAsync(presented, kind, ct); }
+        try
+        {
+            result = await _auth.AuthenticateAsync(presented, kind, ct,
+                // A mandatory recheck of a remembered credential is not an unknown candidate.
+                known ? null : AdmitVerification);
+        }
         catch { _remembered.TryRemove(key, out _); throw; }
         if (!result.Succeeded)
         {
@@ -252,7 +258,19 @@ public sealed class CallerAuthenticator : IDisposable
         return null;
     }
 
+    private void AdmitVerification(string? storedTokenId)
+    {
+        using var lease = storedTokenId is null
+            ? _misses.AttemptAcquire()
+            : _candidates.AttemptAcquire(storedTokenId);
+        if (!lease.IsAcquired) throw new AuthBusyException();
+    }
+
     private static byte[] Digest(string value) => SHA256.HashData(Encoding.UTF8.GetBytes(value));
 
-    public void Dispose() => _misses.Dispose();
+    public void Dispose()
+    {
+        _misses.Dispose();
+        _candidates.Dispose();
+    }
 }

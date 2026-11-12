@@ -558,4 +558,46 @@ public class AuthEndpointsTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CanonicalUnknownFlood_DoesNotRejectAnUncachedBrowserOrApp(bool throughComms)
+    {
+        await using var host = await SignInHost.StartAsync();
+        // Issue directly so neither credential has ever passed CallerAuthenticator or its cache.
+        var browser = (await host.Auth.SignInBrowserAsync(UserRecord.OwnerId, "Fresh browser")).Value!;
+        var code = (await host.Auth.IssueEnrollmentCodeAsync(UserRecord.OwnerId, "Fresh app")).Value!;
+        var app = (await host.Auth.RegisterDeviceAsync(code.EnrollmentCode, null)).Value!;
+        var access = (await host.Auth.MintTokenAsync(app.DeviceId, app.DeviceSecret)).Value!;
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow * 2; i++)
+        {
+            var unknown = Credentials.Compose(Credentials.NewRecordId(), Credentials.NewSecret());
+            if (throughComms)
+                _ = await CheckAsync(host, CheckToken(host), new { authorization = "Bearer " + unknown });
+            else _ = await host.SendAsync(Get, "/api/agents", bearer: unknown);
+        }
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: browser.SessionToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: access.AccessToken)).StatusCode);
+        // The verified path still refuses wrong secrets and observes revocation, rather than
+        // treating a real record handle as authentication.
+        var wrong = access.AccessToken[..access.AccessToken.IndexOf('.')] + "." + Credentials.NewSecret();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: wrong)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await host.SendAsync(Post, $"/api/auth/devices/{app.DeviceId}/revoke", cookie: browser.SessionToken, requestHeader: true)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: access.AccessToken)).StatusCode);
+    }
+
+    [Fact]
+    public async Task GuessesAgainstOneRealHandle_AreBoundedWithoutSpendingAnotherHandlesCapacity()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var target = (await host.Auth.SignInBrowserAsync(UserRecord.OwnerId, "Target")).Value!;
+        var fresh = (await host.Auth.SignInBrowserAsync(UserRecord.OwnerId, "Fresh")).Value!;
+        var wrong = target.SessionToken[..target.SessionToken.IndexOf('.')] + "." + Credentials.NewSecret();
+        var before = host.Hasher.Verifications;
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow * 2; i++)
+            _ = await host.SendAsync(Get, "/api/agents", cookie: wrong);
+        Assert.Equal(CallerAuthenticator.MissesPerWindow, host.Hasher.Verifications - before);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: fresh.SessionToken)).StatusCode);
+    }
+
 }

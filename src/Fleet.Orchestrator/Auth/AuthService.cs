@@ -49,7 +49,7 @@ public sealed record AuthenticatedDevice(
 ///
 /// <para><b>Two properties are structural here and easy to break by rearranging a method.</b></para>
 ///
-/// <para><i>Every credential lookup spends exactly one KDF evaluation.</i> The verify call comes
+/// <para><i>Every admitted credential lookup spends exactly one KDF evaluation.</i> The verify call comes
 /// immediately after the lookup and before any state test, so "no such record", "revoked",
 /// "expired" and "wrong secret" all cost the same. Moving a cheap state test above the verify
 /// re-opens a timing oracle for record existence, which the identical answers alone do not
@@ -435,7 +435,8 @@ public sealed class AuthService(
     /// protections of the place it is meant to live.</para>
     /// </summary>
     public Task<AuthResult<AuthenticatedDevice>> AuthenticateAsync(
-        string? presentedToken, TokenKind expected, CancellationToken ct = default)
+        string? presentedToken, TokenKind expected, CancellationToken ct = default,
+        Action<string?>? admitVerification = null)
     {
         if (!Credentials.TryParse(presentedToken, out var tokenId, out var secret))
             return Reject<AuthenticatedDevice>("token_malformed");
@@ -443,6 +444,10 @@ public sealed class AuthService(
         return store.InTransactionAsync(async (tx, ctx) =>
         {
             var record = await tx.FindTokenAsync(tokenId, ctx);
+            // Capacity is partitioned only after the ordinal store lookup. A real handle gets
+            // its own budget, never authentication: the secret, carrier, expiry and device must
+            // still verify below. Unknown handles share the bounded dummy-KDF budget.
+            admitVerification?.Invoke(record?.TokenId);
             var verified = hasher.VerifyOrDummy(secret, record?.TokenHash);
 
             if (record is null)

@@ -209,8 +209,12 @@ public class HumanApprovalRequestTests
         var canceled = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionCancelRequested);
         var signal = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionSignaled);
         Assert.Equal(cancelFirst, canceled.EventId < signal.EventId);
-        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.WorkflowTaskStarted &&
-            e.EventId > Math.Min(canceled.EventId, signal.EventId) && e.EventId < Math.Max(canceled.EventId, signal.EventId));
+        // Check the actual event batch before interpreting the terminal outcome. In particular,
+        // a result assertion in the fixture must not hide the history of a failed CI race.
+        var activation = Assert.Single(run.History.Events.Where(e =>
+            e.EventType == EventType.WorkflowTaskStarted && e.EventId > Math.Min(canceled.EventId, signal.EventId)).Take(1));
+        Assert.True(activation.EventId > Math.Max(canceled.EventId, signal.EventId), Describe(run));
+        Assert.True(run.Failure is WorkflowFailedException, Describe(run));
         Assert.Null(run.Result);
         Assert.Empty(run.Activities.Calls);
         Assert.Equal(EventType.WorkflowExecutionCanceled, run.History.Events.Last().EventType);
@@ -220,7 +224,10 @@ public class HumanApprovalRequestTests
     private static Task Replay(WorkflowHistory history) => new WorkflowReplayer(
         new WorkflowReplayerOptions { Namespace = "fleet", TaskQueue = "fleet" }.AddWorkflow<UniversalWorkflow>()).ReplayWorkflowAsync(history);
 
-    private sealed record BatchedRun(string? Result, WorkflowHistory History, ApprovalActivities Activities);
+    private sealed record BatchedRun(string? Result, WorkflowHistory History, ApprovalActivities Activities, Exception? Failure);
+    private static string Describe(BatchedRun run) =>
+        $"Result={run.Result}; failure={run.Failure}; history=" +
+        string.Join(",", run.History.Events.Select(e => $"{e.EventId}:{e.EventType}"));
     private static async Task<BatchedRun> RunWithWorkerStopped(Func<WorkflowEnvironment, WorkflowHandle, Task> submit, bool canceled = false, bool fireTimer = false)
     {
         await using var env = await WorkflowEnvironment.StartTimeSkippingAsync(new() { Namespace = "fleet" });
@@ -253,14 +260,19 @@ public class HumanApprovalRequestTests
         }
         await submit(env, handle);
         string? result = null;
+        Exception? failure = null;
         using (var resumed = new TemporalWorker(env.Client, new TemporalWorkerOptions("fleet") { MaxCachedWorkflows = 0 }.AddWorkflow<UniversalWorkflow>().AddAllActivities(activities)))
             await resumed.ExecuteAsync(async () =>
             {
-                if (canceled) await Assert.ThrowsAsync<WorkflowFailedException>(() => handle.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(40)));
-                else result = await handle.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(40));
+                // Capture failure AND history before the caller asserts cancellation. A thrown
+                // terminal assertion used to discard the only evidence needed to diagnose CI.
+                failure = await Record.ExceptionAsync(async () =>
+                    result = await handle.GetResultAsync<string>().WaitAsync(TimeSpan.FromSeconds(40)));
                 if (advance is not null) await advance.WaitAsync(TimeSpan.FromSeconds(20));
             });
-        return new(result, await handle.FetchHistoryAsync(), activities);
+        var run = new BatchedRun(result, await handle.FetchHistoryAsync(), activities, failure);
+        Assert.True(canceled || failure is null, Describe(run));
+        return run;
     }
 
     private static string Id() => "human-approval-" + Guid.NewGuid();

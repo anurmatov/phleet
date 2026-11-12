@@ -307,9 +307,15 @@ public sealed class ConversationSouthConsumer : BackgroundService
         var owned = new OwnedDelivery(messageId, submissionId, attemptId, conversationId, deliveryTag);
         _owned[submissionId] = owned;
 
+        if (envelope is { Kind: ConversationEventKind.SubmissionCancel })
+        {
+            await CancelAsync(state, owned, envelope, ct);
+            return;
+        }
+
         if (envelope is null || !IsDispatchable(envelope.Kind))
         {
-            await TerminateOnArrivalAsync(state, owned, LabelFor(envelope?.Kind), ct);
+            await TerminateOnArrivalAsync(state, owned, ConversationSouthCounters.DispositionUnknownKind, ct);
             return;
         }
 
@@ -317,20 +323,66 @@ public sealed class ConversationSouthConsumer : BackgroundService
     }
 
     /// <summary>
-    /// The two kinds this slice runs. Everything else is terminated on arrival (D11, D12).
+    /// Run a cancel (#530 D11): stop the conversation's current turn, or every turn and queued
+    /// submission of it, then close the cancel's own delivery.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The intake does the stopping and publishes <c>control.ack</c>; the turn it stopped publishes
+    /// its own <c>turn.canceled</c>. The cancel's own submission is then closed exactly as it was
+    /// before cancels ran — <c>/deliveries:complete{dropped}</c> — because a cancel starts no turn
+    /// and so has no terminal of its own. That keeps the store's contract unchanged.
+    /// </para>
+    /// <para>
+    /// Scoped to THIS conversation's runtime key, with no user id, so a chat cancel can never reach
+    /// a Telegram turn or another conversation's (see <see cref="ConversationIntake.CancelAsync"/>).
+    /// </para>
+    /// <para>
+    /// The sender gate is NOT held while the turn is stopped. Stopping runs the turn's cancellation
+    /// callbacks, and the stopped turn's own terminal goes out through this conversation's drain,
+    /// which takes the same gate; holding it here would put the cancel and the turn it stops in each
+    /// other's way. The completion below takes the gate itself.
+    /// </para>
+    /// </remarks>
+    private async Task CancelAsync(
+        ConversationState state, OwnedDelivery owned, CommandEnvelope envelope, CancellationToken ct)
+    {
+        var open = _intake.OpenAuthorized(
+            ConversationSouthAdapter.ClientChannel, owned.ConversationId, envelope.PrincipalId ?? "");
+
+        if (open.Success)
+        {
+            if (state.TryBindRuntimeKey(open.RuntimeKey))
+            {
+                _counters.ConversationRegistered();
+                state.StartDrain(this, ct);
+            }
+
+            var scope = string.Equals(envelope.Payload?.Scope, "all", StringComparison.Ordinal)
+                ? CancelScope.All
+                : CancelScope.Current;
+
+            await _intake.CancelAsync(open.RuntimeKey, scope);
+        }
+
+        if (await CompleteDeliveryAsync(state, owned, SubmissionDisposition.Dropped, senderHeld: false, ct))
+        {
+            _counters.Disposition(ConversationSouthCounters.DispositionCancel);
+            Forget(owned);
+            await AckAsync(owned.DeliveryTag);
+        }
+    }
+
+    /// <summary>
+    /// The two kinds that become a turn. A cancel is run by <see cref="CancelAsync"/>; anything else
+    /// is terminated on arrival (D11, D12).
     /// </summary>
     private static bool IsDispatchable(string? kind) =>
         kind is ConversationEventKind.SubmissionCreate or ConversationEventKind.SubmissionSteer;
 
-    private static string LabelFor(string? kind) => kind switch
-    {
-        ConversationEventKind.SubmissionCancel => ConversationSouthCounters.DispositionCancel,
-        _ => ConversationSouthCounters.DispositionUnknownKind,
-    };
-
     /// <summary>
-    /// Claim, <c>/deliveries:complete{dropped}</c>, ack — for a cancel, an unrecognised kind, or a
-    /// submission intake refused (D11, D12).
+    /// Claim, <c>/deliveries:complete{dropped}</c>, ack — for an unrecognised kind, or a submission
+    /// intake refused (D11, D12).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -339,13 +391,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
     /// <c>turn.outcome_unknown { attempt_abandoned }</c> against a client that is still waiting; a
     /// requeue of something this consumer cannot handle is an infinite broker loop (MUST NOT 11, 12).
     /// </para>
-    /// <para>
-    /// ⚠️ Known limitation for a cancel: the north route already returned <c>200</c>, and the client
-    /// receives <c>submission.accepted { dropped }</c> and no <c>control.ack</c>. Cancel
-    /// <i>execution</i> is deferred to its own issue, together with the open store-contract question
-    /// of what closes a cancel submission's attempt given that <c>control.ack</c> is not one of the
-    /// four terminal kinds.
-    /// </para>
+
     /// </remarks>
     private async Task TerminateOnArrivalAsync(
         ConversationState state, OwnedDelivery owned, string label, CancellationToken ct)
@@ -1000,6 +1046,9 @@ public sealed class ConversationSouthConsumer : BackgroundService
         /// Absent on a text-only command, so an envelope written before #308 binds unchanged.
         /// </remarks>
         [JsonPropertyName("attachments")] public IReadOnlyList<string>? Attachments { get; init; }
+
+        /// <summary>A cancel's scope: <c>current</c> or <c>all</c>. Anything else is <c>current</c>.</summary>
+        [JsonPropertyName("scope")] public string? Scope { get; init; }
     }
 
     /// <summary>One claimed delivery this process owns until its terminal is committed.</summary>

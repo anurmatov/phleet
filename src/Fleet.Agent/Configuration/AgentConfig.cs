@@ -292,6 +292,16 @@ public sealed class ConversationsOptions
     public string SouthBearerToken { get; set; } = "";
 
     /// <summary>
+    /// The chat principal that is the deployment's primary human, or empty. Written by provisioning
+    /// when <c>FLEET_PRIMARY_HUMAN_USER_ID</c> is set (#530 D11).
+    /// </summary>
+    /// <remarks>
+    /// A chat message from this principal gets what a Telegram message from that person gets: the
+    /// priority lane and eligibility to steer a running turn. An identity, never a credential.
+    /// </remarks>
+    public string PrimaryHumanPrincipalId { get; set; } = "";
+
+    /// <summary>
     /// Lease renewal cadence. Must be at most half
     /// <see cref="Fleet.Conversations.Contracts.ConversationLeaseDefaults.LeaseDuration"/>.
     /// </summary>

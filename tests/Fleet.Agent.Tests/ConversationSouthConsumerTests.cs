@@ -478,25 +478,27 @@ public sealed class ConversationSouthConsumerTests
     // ── D11 / D12: cancel and unknown kinds ──────────────────────────────────
 
     /// <summary>
-    /// A <c>submission.cancel</c> is claimed, terminated on arrival with <c>dropped</c>, and acked.
+    /// A <c>submission.cancel</c> is RUN (#530 D11): the intake stops the conversation's turn and
+    /// acknowledges, and the cancel's own delivery is then closed with <c>dropped</c> and acked.
     /// </summary>
     /// <remarks>
     /// <para>
     /// It cannot simply be ignored. An unclaimed or undispositioned cancel leaves a held claim and a
     /// live lease, and the reconciler eventually turns that into
-    /// <c>turn.outcome_unknown { attempt_abandoned }</c> against a client that is still waiting —
-    /// verbatim the symptom this whole issue exists to end.
+    /// <c>turn.outcome_unknown { attempt_abandoned }</c> against a client that is still waiting.
     /// </para>
     /// <para>
-    /// It is also not requeued: nothing about a redelivery would make this consumer able to execute
-    /// it, so a requeue is an infinite broker loop (MUST NOT 12).
+    /// A cancel starts no turn, so it has no terminal of its own: its submission is closed by
+    /// <c>/deliveries:complete{dropped}</c>, as before cancels ran, and the store's contract is
+    /// unchanged. The client learns the outcome from <c>control.ack</c>.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task ACancelIsClaimedTerminatedAndAcked()
+    public async Task ACancelIsRunThenClosedAndAcked()
     {
+        var harness = BuildIntake();
         var south = new RecordingSouth();
-        var (consumer, _, counters, _) = Build(south);
+        var (consumer, _, counters, _) = Build(south, harness.Intake);
 
         var acked = new List<ulong>();
         consumer.AckHook = tag => { acked.Add(tag); return Task.CompletedTask; };
@@ -515,6 +517,16 @@ public sealed class ConversationSouthConsumerTests
 
         var complete = south.Calls.Single(c => c.Path == "/deliveries:complete").Body;
         Assert.Contains("\"dropped\"", complete, StringComparison.Ordinal);
+
+        // The cancel ran: the intake acknowledged it for THIS conversation. Nothing was running.
+        var ack = Assert.Single(harness.Drain(), e => e.Kind == ConversationEventKind.ControlAck);
+        Assert.Equal(ConversationId, ack.Identity.ConversationId);
+        var payload = ack.PayloadAs<ControlAckPayload>()!;
+        Assert.Equal(ControlTarget.Cancel, payload.Target);
+        Assert.True(payload.Accepted);
+        Assert.False(payload.HadRunningTask);
+
+        Directory.Delete(harness.WorkDir, recursive: true);
     }
 
     /// <summary>An unrecognised kind takes the identical path, under its own counter label.</summary>

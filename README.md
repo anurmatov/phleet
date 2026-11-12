@@ -72,6 +72,8 @@ Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `./fleet/.env` — `setup.sh`
 Every request that changes something needs it as a bearer; reads do not. To check a token without
 changing anything, `GET /api/operator-token` with the bearer answers `{"status":"accepted"}` or
 `401` (`"not_required"` when no token is configured).
+To connect the [iOS app](https://github.com/anurmatov/phleet-ios) to this dashboard, open
+**Credentials → Phone** and scan the setup code; see [`docs/phone-setup-code.md`](docs/phone-setup-code.md).
 
 ### 4. Create your co-CTO agent
 

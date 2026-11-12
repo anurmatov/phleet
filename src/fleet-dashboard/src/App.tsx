@@ -35,6 +35,7 @@ import type {
 } from './types'
 import { apiFetch, heartbeatAge } from './utils'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
+import { humanInputIdentity } from './humanInputRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
 import { contextWindowEditValue } from './contextWindow'
@@ -2136,6 +2137,8 @@ export default function App() {
       {signalModal && (
         <SignalModal
           modal={signalModal}
+          currentGate={signalModal.signalName !== 'request-input' || workflows.some(wf =>
+            humanInputIdentity(wf) === humanInputIdentity(signalModal.wf))}
           onClose={() => setSignalModal(null)}
           onCommentChange={comment => setSignalModal(m => m ? { ...m, comment } : null)}
           onSend={(payload) => {

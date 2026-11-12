@@ -5,12 +5,13 @@ import { humanInputChoices, validHumanAnswer, humanInputHistoryUrl, humanInputId
 
 interface SignalModalProps {
   modal: SignalModalState
+  currentGate?: boolean
   onClose: () => void
   onCommentChange: (comment: string) => void
   onSend: (payload?: string) => void
 }
 
-export default function SignalModal({ modal, onClose, onCommentChange, onSend }: SignalModalProps) {
+export default function SignalModal({ modal, currentGate = true, onClose, onCommentChange, onSend }: SignalModalProps) {
   const approval = modal.signalName === 'request-input'
   const identity = humanInputIdentity(modal.wf)
   const [answer, setAnswer] = useState<{ identity: string; value: string }>({ identity, value: '' })
@@ -18,6 +19,10 @@ export default function SignalModal({ modal, onClose, onCommentChange, onSend }:
   const [loaded, setLoaded] = useState<{ identity: string; request?: HumanInputRequest; error?: string } | null>(null)
   useEffect(() => {
     if (!approval) return
+    if (!currentGate) {
+      setLoaded({ identity, error: 'This request changed or closed. Refresh before deciding.' })
+      return
+    }
     if (!modal.wf.runId) {
       setLoaded({ identity, error: 'Exact run is missing. Refresh before deciding.' })
       return
@@ -35,10 +40,10 @@ export default function SignalModal({ modal, onClose, onCommentChange, onSend }:
       })
       .catch(() => { if (active) setLoaded({ identity, error: 'Cannot load the exact request. Refresh before deciding.' }) })
     return () => { active = false }
-  }, [approval, identity, modal.wf])
+  }, [approval, identity, modal.wf, currentGate])
   const request = loaded?.identity === identity ? loaded.request : undefined
   const error = loaded?.identity === identity ? loaded.error : undefined
-  const blocked = approval && (!request || !AUTH_TOKEN || modal.comment.length > 2000 || !validHumanAnswer(request, value))
+  const blocked = approval && (!currentGate || !request || !AUTH_TOKEN || modal.comment.length > 2000 || !validHumanAnswer(request, value))
   return (
     <div className="signal-modal-backdrop" onClick={onClose}>
       <div className="signal-modal" role="dialog" aria-modal="true" aria-label="Confirm workflow decision" onClick={e => e.stopPropagation()}

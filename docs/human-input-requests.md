@@ -112,3 +112,39 @@ review, isolated adoption/rollback, desktop/mobile visual/accessibility checks,
 the native companion and the separately authorized real-phone notification/tap/
 answer/requester smoke remain distinct qualifications. Push payloads remain
 identity-only through the existing notifier, without question or answer text.
+
+## Browser regression and exact-head UI evidence
+
+The browser suite loads the real App, clicks the AgentsView answer button and
+uses App's production modal/send callbacks. Only HTTP and WebSocket IO is
+synthetic. Both 390px and 1280px projects cover every answer mode, loading,
+no selection, long labels, history error, read-only, selected-answer staleness and
+late history after a run changes. A live identity change invalidates the modal
+without rebinding it to a newer run.
+
+Playwright is a pinned, development-only dependency needed for actual browser
+clicks, screenshots and accessibility trees, not part of the runtime bundle:
+
+```sh
+npm ci
+npx playwright install chromium
+npm run test:human-input-browser
+```
+
+The suite starts its own loopback Vite servers with synthetic operator/read-only
+settings and blocks non-loopback browser requests. CI installs Chromium's system
+dependencies and runs the same suite. No application callbacks are replaced.
+
+Set `HUMAN_INPUT_EVIDENCE_DIR` to a directory outside the checkout to retain the
+PNG screenshots, browser `ariaSnapshot` YAML and per-capture JSON. Qualification
+requires a clean checkout: each JSON records the exact Git head, dirty flag,
+viewport, browser version and capture time. Re-run after committing and verify
+all heads match the reviewed commit and every dirty flag is false. These UI
+artifacts do not qualify backend adoption, native behavior or physical phones.
+
+Isolated A10 qualification still needs a disposable MySQL-backed definition store
+and isolated Temporal executions to test versioned adoption/rollback while
+checking unrelated rows and parked snapshots. An absent disposable database or
+local container daemon is a concrete blocker, not permission to use production
+or count InMemory seeder tests as that qualification. Report the exact-head
+blocker and leave preservation assertions unrun if those resources are absent.

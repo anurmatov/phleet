@@ -50,6 +50,7 @@ import ProjectContextsView from './components/ProjectContextsView'
 import WorkflowDefinitionsView from './components/WorkflowDefinitionsView'
 import WorkflowDefinitionEditor from './components/WorkflowEditor/WorkflowDefinitionEditor'
 import AlertsView from './components/AlertsView'
+import ChatView from './components/ChatView'
 import LogViewer from './components/LogViewer'
 import SignalModal from './components/SignalModal'
 import CreateAgentModal from './components/CreateAgentModal'
@@ -240,7 +241,7 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
+  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
   // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
   // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
@@ -1776,7 +1777,7 @@ export default function App() {
         onNavClose={() => setNavOpen(false)}
       />
 
-      <main className={`app-main${activeView === 'memory' ? ' app-main--memory' : ''}`}>
+      <main className={`app-main${activeView === 'memory' ? ' app-main--memory' : activeView === 'chat' ? ' app-main--chat' : ''}`}>
         {activeView === 'agents' && (
           <SetupBanner
             status={setupStatus}
@@ -1916,6 +1917,10 @@ export default function App() {
             onRefreshWorkflows={fetchWorkflows}
             workflowsLoading={workflowsLoading}
           />
+        )}
+
+        {activeView === 'chat' && (
+          <ChatView initialAgent={viewParam} />
         )}
 
         {activeView === 'instructions' && (

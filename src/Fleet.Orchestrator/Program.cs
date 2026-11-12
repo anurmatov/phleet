@@ -365,6 +365,10 @@ app.MapInstructionEndpoints();
 // REST: GET /api/prompt-size-policy — the active instruction and project-context soft limits (#346).
 app.MapPromptSizePolicyEndpoints();
 
+// REST: GET /api/operator-token — whether the presented bearer is the operator token. The one
+// read that checks it, so a client can verify a stored token without making a write.
+app.MapOperatorTokenEndpoints();
+
 // REST: the /api/project-contexts surface — list, detail, create, new version, rollback and
 // toggle-active. Mapped from Endpoints/ so the endpoint tests exercise the same handlers a live
 // orchestrator serves rather than a copy of them.

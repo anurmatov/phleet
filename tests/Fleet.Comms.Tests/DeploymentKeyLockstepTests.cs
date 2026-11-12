@@ -32,13 +32,40 @@ public class DeploymentKeyLockstepTests
         "FLEET_COMMS_CONVERSATION_DB",
         "FLEET_COMMS_CONVERSATION_MIGRATION_DB",
         "FLEET_COMMS_SOUTH_BIND",
-        "FLEET_COMMS_SOUTH_TOKEN",
-        "FLEET_COMMS_AGENT_NAME",
         "FLEET_COMMS_BROKER",
         "FLEET_COMMS_CLAIM_RETENTION",
         "FLEET_COMMS_MYSQL_DDL_PASSWORD",
         "FLEET_COMMS_MYSQL_RUNTIME_PASSWORD",
     ];
+
+    /// <summary>
+    /// Sign-in moved to the orchestrator and chat reaches any chat-enabled agent (#530). The names
+    /// that configured Comms's own credential store and its one agent are wired nowhere, so a
+    /// deployment cannot be told they still do something. upgrade.sh names them only to remove them.
+    /// </summary>
+    [Theory]
+    [InlineData("FLEET_COMMS_SOUTH_TOKEN")]
+    [InlineData("FLEET_COMMS_AGENT_NAME")]
+    [InlineData("FLEET_COMMS_AGENT_LABEL")]
+    [InlineData("FLEET_COMMS_STORE_PROVISIONED")]
+    [InlineData("Comms__AuthStorePath")]
+    [InlineData("Comms__SouthBearerToken")]
+    [InlineData("Comms__AgentName")]
+    [InlineData("Comms__AgentLabel")]
+    [InlineData("Comms__StoreProvisioned")]
+    [InlineData("fleet_comms_auth")]
+    public void A_removed_name_is_wired_nowhere(string name)
+    {
+        foreach (var file in new[] { "docker-compose.example.yml", ".env.example", "setup.sh" })
+            Assert.DoesNotContain(name, Read(file), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Comms_asks_the_orchestrator_on_the_docker_network()
+    {
+        Assert.Contains("Comms__OrchestratorUrl=http://fleet-orchestrator:3600",
+            Read("docker-compose.example.yml"), StringComparison.Ordinal);
+    }
 
     [Theory]
     [MemberData(nameof(ConversationKeys))]

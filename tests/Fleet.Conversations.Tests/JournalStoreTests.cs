@@ -1,6 +1,5 @@
 using System.Net;
 using Fleet.Comms;
-using Fleet.Comms.Auth;
 using Fleet.Conversations.Journal;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -331,7 +330,7 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
 
         var applied = await new MigrationRunner(scratch.ConnectionString).MigrateAsync();
 
-        Assert.Equal([4, 5, 6], applied);
+        Assert.Equal([4, 5, 6, 7], applied);
         Assert.Equal(before, await RowCountsAsync(scratch.ConnectionString, tables));
         Assert.True((await new MigrationRunner(scratch.ConnectionString).GetStatusAsync()).Matches);
 
@@ -380,7 +379,7 @@ public sealed class JournalStoreTests(MySqlFixture fixture)
         var opsBuilder = WebApplication.CreateBuilder();
         opsBuilder.WebHost.UseTestServer();
         opsBuilder.Logging.ClearProviders();
-        await using var ops = CommsApp.BuildOpsApp(opsBuilder, new InMemoryAuthStore(), conversations, scratch.ConnectionString);
+        await using var ops = CommsApp.BuildOpsApp(opsBuilder, conversations, scratch.ConnectionString);
         await ops.StartAsync();
         var ready = ops.GetTestClient();
 

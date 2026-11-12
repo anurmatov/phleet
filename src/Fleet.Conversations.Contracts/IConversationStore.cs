@@ -26,6 +26,27 @@ public interface IConversationStore
         OpenConversationRequest request, CancellationToken ct = default);
 
     /// <summary>
+    /// One conversation, for its owner. Null when it does not exist OR belongs to someone else —
+    /// the two are deliberately one answer, so there is no oracle for another person's conversation.
+    /// </summary>
+    Task<ConversationSummary?> FindConversationAsync(
+        string conversationId, string principalId, CancellationToken ct = default);
+
+    /// <summary>
+    /// A person's conversations on one channel, most recently active first. Conversations from
+    /// before a conversation named its agent have none and are not listed: nothing can route them.
+    /// </summary>
+    Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(
+        string channelId, string principalId, int limit, CancellationToken ct = default);
+
+    /// <summary>
+    /// The agent of the conversation that <paramref name="id"/> belongs to, or null when there is
+    /// no such thing. The agent-facing surface asks this BEFORE it acts, and refuses a caller whose
+    /// token names a different agent.
+    /// </summary>
+    Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default);
+
+    /// <summary>
     /// <b>awaited</b> — TX1a. Creates the submission, reads and stores the accept floor, and writes
     /// the command outbox row IN THE SAME TRANSACTION.
     /// </summary>

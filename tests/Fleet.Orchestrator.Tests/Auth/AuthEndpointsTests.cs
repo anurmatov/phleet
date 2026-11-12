@@ -473,12 +473,22 @@ public class AuthEndpointsTests
         var question = new { authorization = $"Bearer {accessToken}" };
 
         // No bearer, the admin bearer, a token minted for another purpose, and one for another subject.
-        Assert.Equal(HttpStatusCode.Unauthorized, (await CheckAsync(host, null, question)).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await CheckAsync(host, SignInHost.ServiceToken, question)).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized,
-            (await CheckAsync(host, host.Tokens.Mint("ingest", AuthEndpoints.CheckTokenSubject), question)).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized,
-            (await CheckAsync(host, host.Tokens.Mint(AuthEndpoints.CheckTokenPurpose, "someone-else"), question)).StatusCode);
+        //
+        // 403, never the 401 that means "the caller in the question is not signed in": the chat
+        // service reads a 403 as its own token being refused — the two services holding different
+        // keys — and says so, instead of refusing every person as though they had signed in wrong.
+        foreach (var bearer in new[]
+                 {
+                     null,
+                     SignInHost.ServiceToken,
+                     host.Tokens.Mint("ingest", AuthEndpoints.CheckTokenSubject),
+                     host.Tokens.Mint(AuthEndpoints.CheckTokenPurpose, "someone-else"),
+                 })
+        {
+            var response = await CheckAsync(host, bearer, question);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Equal("check_token_invalid", (await SignInHost.JsonAsync(response)).GetProperty("error").GetString());
+        }
     }
 
     // ── failure is never a pass ──────────────────────────────────────────────

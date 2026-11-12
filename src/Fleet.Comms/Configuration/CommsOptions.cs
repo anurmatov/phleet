@@ -12,25 +12,15 @@ public sealed class CommsOptions
     public const string SectionName = "Comms";
 
     /// <summary>
-    /// Non-secret display label returned by <c>GET /v1/session</c>. Not an agent identity and not
-    /// used for authorisation.
+    /// Where the orchestrator answers "who is this caller?" (#530 D7). This service keeps no
+    /// credential store of its own; every north request is checked there.
     /// </summary>
-    public string AgentLabel { get; set; } = "assistant";
-
-    /// <summary>
-    /// Filesystem path of the durable auth database. <b>Required, with no default.</b>
-    ///
-    /// <para>A path, not a credential — the file itself is the deployment's, and the deployment is
-    /// responsible for putting it somewhere that survives a container restart.</para>
-    ///
-    /// <para><b>There is deliberately no fallback value.</b> A default such as <c>auth.db</c> is
-    /// worse than nothing here: it is relative, so it resolves against whatever the working
-    /// directory happens to be, and a deployment that never set the key would come up healthy,
-    /// serve traffic, and lose every device registration on the next container recreation — with
-    /// no error at any point. Blank is refused when the application is built, so the failure is a
-    /// process that will not start rather than one that quietly forgets.</para>
-    /// </summary>
-    public string AuthStorePath { get; set; } = "";
+    /// <remarks>
+    /// Container-network only. The question carries a token under the key the two services share
+    /// (<c>Comms__Journal__TokenKeys</c>, <c>FLEET_COMMS_JOURNAL_KEY</c>), which is required whenever
+    /// conversations are on.
+    /// </remarks>
+    public string OrchestratorUrl { get; set; } = "http://fleet-orchestrator:3600";
 
     /// <summary>
     /// Where the operations listener binds. <b>Loopback only, and separate from the north
@@ -42,7 +32,7 @@ public sealed class CommsOptions
     /// caller could reach the readiness oracle through the public port by sending the right one.
     /// So this is a genuinely separate <c>WebApplication</c> on its own address.</para>
     ///
-    /// <para>The default is loopback deliberately: `/ready` reports whether the auth store is
+    /// <para>The default is loopback deliberately: `/ready` reports whether the conversation store is
     /// answering, which on a public address is an availability oracle. It is reachable by the
     /// container's own healthcheck and by nothing else — not the host, not another container on
     /// the same network, not the internet. It must never be proxied.</para>
@@ -67,18 +57,6 @@ public sealed class CommsOptions
     /// </summary>
     public bool TrustForwardedHeaders { get; set; }
 
-    /// <summary>
-    /// Set by the deployment once the auth store has been initialised. <b>Lives outside the
-    /// volume</b>, which is the entire point.
-    ///
-    /// <para>The in-volume marker catches a deleted database. It cannot catch a deleted volume,
-    /// because it goes with it — and a wiped volume then looks exactly like a first install, which
-    /// is the loss where silently creating empty state is worst. This flag is in the deployment's
-    /// environment, so it survives the volume and makes that case explicit: recovery must be
-    /// asked for.</para>
-    /// </summary>
-    public bool StoreProvisioned { get; set; }
-
     // ── Durable conversations (opt-in) ───────────────────────────────────────────────
 
     /// <summary>
@@ -87,8 +65,8 @@ public sealed class CommsOptions
     /// <remarks>
     /// <para>
     /// Its presence is what ENABLES the conversation feature. An install that leaves it empty is
-    /// byte-identical to the one the auth slice shipped: no conversation route is mapped, readiness
-    /// checks only the auth store, and <b>no database connection is attempted</b>.
+    /// serves no north route at all: no conversation route is mapped, readiness checks nothing, and
+    /// <b>no database connection is attempted</b>.
     /// </para>
     /// <para>
     /// This account holds SELECT/INSERT/UPDATE/DELETE and <b>no DDL grants</b>. That is what makes
@@ -124,24 +102,6 @@ public sealed class CommsOptions
     /// </remarks>
     public string SouthUrl { get; set; } = "http://0.0.0.0:8082";
 
-    /// <summary>
-    /// Bearer credential the south listener requires. <b>No default</b>; startup fails without it
-    /// when conversations are enabled.
-    /// </summary>
-    /// <remarks>
-    /// Compared in fixed time, and a wrong credential is indistinguishable from an absent one.
-    /// </remarks>
-    public string SouthBearerToken { get; set; } = "";
-
-    /// <summary>
-    /// The agent commands are routed to. <b>No default</b>; a blank value fails startup.
-    /// </summary>
-    /// <remarks>
-    /// It becomes a routing key AND a queue-name segment, so it is validated rather than trusted: a
-    /// value carrying a dot or a slash would produce a queue name the consumer cannot address.
-    /// </remarks>
-    public string AgentName { get; set; } = "";
-
     /// <summary>Broker connection for the two outbox publishers.</summary>
     public string BrokerConnectionString { get; set; } = "";
 
@@ -165,7 +125,7 @@ public sealed class CommsOptions
     /// the client, and not silent.
     /// </para>
     /// <para>
-    /// No default, for the same reason <see cref="AuthStorePath"/> has none: a relative fallback
+    /// No default: a relative fallback
     /// resolves against whatever the working directory happens to be, and a deployment that never set
     /// the key would come up healthy and lose every image on the next container recreation.
     /// </para>
@@ -180,31 +140,40 @@ public sealed class CommsOptions
         ConversationsEnabled && !string.IsNullOrWhiteSpace(AttachmentRootPath);
 
     /// <summary>
-    /// Fails fast on a configuration that cannot work, naming the missing key.
+    /// Fails fast on a configuration that cannot work, naming the missing key and never its value.
     /// </summary>
+    /// <remarks>
+    /// Conversations need the shared key: it signs the question this service asks the orchestrator
+    /// about every caller, and it verifies the token each agent presents on the south listener
+    /// (<c>cj1.south.&lt;agent&gt;</c>). There is no other credential on either surface.
+    /// </remarks>
     public void ValidateConversations()
     {
         if (!ConversationsEnabled) return;
 
-        if (string.IsNullOrWhiteSpace(SouthBearerToken))
+        if (string.IsNullOrWhiteSpace(Journal.TokenKeys))
             throw new InvalidOperationException(
-                "Comms__SouthBearerToken is required when the conversation feature is enabled. "
-                + "The south listener carries an administrative surface and has no default credential.");
+                "chat_key_missing: Comms__Journal__TokenKeys (FLEET_COMMS_JOURNAL_KEY) is required when "
+                + "the conversation feature is enabled. It is the key this service shares with the "
+                + "orchestrator for sign-in checks and agent tokens.");
 
-        if (string.IsNullOrWhiteSpace(AgentName))
+        try
+        {
+            Journal.Keys();
+        }
+        catch (FormatException e)
+        {
             throw new InvalidOperationException(
-                "Comms__AgentName is required when the conversation feature is enabled. "
-                + "It is the command routing key and a queue-name segment; there is no default.");
+                $"chat_key_invalid: Comms__Journal__TokenKeys: {e.Message}. Each key is base64url "
+                + $"and decodes to at least {Fleet.Conversations.Journal.JournalTokens.MinimumKeyBytes} bytes.");
+        }
 
-        if (!AgentNamePattern.IsMatch(AgentName))
+        if (!Uri.TryCreate(OrchestratorUrl, UriKind.Absolute, out var orchestrator)
+            || orchestrator.Scheme is not ("http" or "https"))
             throw new InvalidOperationException(
-                $"Comms__AgentName '{AgentName}' is not usable as a routing key and queue-name "
-                + "segment. Allowed: 1-128 characters of [A-Za-z0-9_-]. A dot or a slash would "
-                + "produce a queue name the consumer cannot address.");
+                "Comms__OrchestratorUrl must be an absolute http or https URI when the conversation "
+                + "feature is enabled. Sign-in is checked there.");
     }
-
-    private static readonly System.Text.RegularExpressions.Regex AgentNamePattern =
-        new("^[A-Za-z0-9_-]{1,128}$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     // ── Conversation journal (opt-in, #375) ──────────────────────────────────────────
 
@@ -534,38 +503,6 @@ internal static class CommsUrl
         return Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
             && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
     }
-}
-
-/// <summary>
-/// The admission bound on the auth routes (docs/first-party-api.md §5.4, §12).
-///
-/// <para><b>This is not a nicety, and the reason is the KDF.</b> Every credential check on this
-/// boundary spends one Argon2id evaluation at 19 MiB — deliberately, and deliberately on the
-/// failures too, so that a rejection cannot be timed to learn whether a record exists. That makes
-/// an unauthenticated request an amplifier: cheap to send, expensive to answer. Admission is
-/// therefore decided <b>before</b> the endpoint runs, by middleware, so a throttled request never
-/// reaches the hasher or contends for the store.</para>
-///
-/// <para>The window is sized against what the owner actually needs — one token mint per fifteen
-/// minutes, plus the occasional enrollment — so the bound is far above legitimate use and far below
-/// what makes the amplifier worth having.</para>
-/// </summary>
-public static class AuthRateLimits
-{
-    /// <summary>The named policy the auth routes opt into.</summary>
-    public const string PolicyName = "auth";
-
-    /// <summary>Requests admitted per partition per window.</summary>
-    public const int PermitsPerWindow = 30;
-
-    /// <summary>Window length in seconds, and the <c>Retry-After</c> a client is given.</summary>
-    public const int WindowSeconds = 60;
-
-    /// <summary>
-    /// Zero. A queue would hold a rejected caller's request open and let the backlog itself become
-    /// the resource being exhausted; §5.4 gives the caller a delay to obey instead.
-    /// </summary>
-    public const int QueueLimit = 0;
 }
 
 /// <summary>

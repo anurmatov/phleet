@@ -1,6 +1,5 @@
 using Fleet.Conversations;
 using Fleet.Conversations.Journal;
-using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -23,14 +22,6 @@ public static class OperatorCommands
 {
     private const string Usage = """
         Fleet.Comms operator commands
-
-          enroll issue --principal <id>          issue a single-use enrollment code
-          devices list [--principal <id>]        list devices (never secrets)
-          devices revoke --device-id <id>        revoke a device the owner cannot revoke itself
-          devices revoke --all                   revoke every device; run after a disaster restore
-          store init [--recover]                 create the auth database, once, on purpose
-          store verify --in <path>               check a backup before trusting it
-          store backup --out <path>              consistent copy of the auth store
 
           conversations migrate                  apply the conversation schema (DDL account)
           conversations status                   applied schema version against this binary's
@@ -64,14 +55,6 @@ public static class OperatorCommands
         {
             return (args[0], args.Length > 1 ? args[1] : "") switch
             {
-                ("enroll", "issue") => await IssueAsync(args, output, ct),
-                ("devices", "list") => await ListAsync(args, output, ct),
-                ("devices", "revoke") => Optional(args, "--device-id") is null && HasFlag(args, "--all")
-                    ? await RevokeAllAsync(output, ct)
-                    : await RevokeAsync(args, output, error, ct),
-                ("store", "init") => await InitAsync(args, output, ct),
-                ("store", "verify") => await VerifyAsync(args, output, error, ct),
-                ("store", "backup") => await BackupAsync(args, output, ct),
                 ("conversations", "migrate") => await ConversationsMigrateAsync(output, error, ct),
                 ("conversations", "status") => await ConversationsStatusAsync(output, ct),
                 ("journal", "token") => JournalToken(args, output),
@@ -90,285 +73,7 @@ public static class OperatorCommands
             // A precondition the operator can fix, reported as a sentence rather than a stack trace.
             return Write(error, e.Message, 1);
         }
-        catch (BackupRefusedException e)
-        {
-            // A refusal, not a fault: the destination exists, another invocation holds the claim,
-            // the destination is the live database, or what was written did not validate. Each is
-            // something the operator can act on, and none of them should end the process with a
-            // stack trace — which is what happened while these were InvalidOperationException and
-            // nothing caught them.
-            return Write(error, e.Message, 1);
-        }
-        catch (AuthStoreUnavailableException e)
-        {
-            // Store locked beyond the busy timeout, unwritable path, missing directory. The store's
-            // own message carries no path (§13), and the transaction rolled back, so there is no
-            // partial write for a later command to trip over.
-            return Write(error, e.Message, 1);
-        }
     }
-
-    /// <summary>
-    /// Create the database. Deliberately explicit, and deliberately the only thing that can.
-    ///
-    /// <para>The store otherwise opens <c>ReadWrite</c>, so a deleted-and-recreated volume is an
-    /// error rather than a brand new empty database that reports ready and has forgotten every
-    /// device. Making first use a decision is what lets the deployment document's "restore
-    /// required, never silent re-enrollment" actually be true.</para>
-    /// </summary>
-    private static async Task<int> InitAsync(string[] args, TextWriter output, CancellationToken ct)
-    {
-        var path = ResolveStorePath();
-        var directory = Path.GetDirectoryName(path)!;
-        var marker = Path.Combine(directory, StoreInitialisedMarker);
-
-        if (File.Exists(path))
-        {
-            // VALIDATED, not merely counted in bytes. "Already initialised" for any file at that
-            // path reported success for a zero-byte leftover, a truncated restore or an unrelated
-            // database — and setup.sh would then start the service against it.
-            using var existing = new SqliteAuthStore(path);
-            if (!await existing.IsUsableAsync(ct))
-            {
-                throw new OperatorCommandException(
-                    $"There is a file at {path}, but it is not a usable auth store — it may be " +
-                    "empty, truncated or an unrelated database. Restore from a backup, or move it " +
-                    "aside and run `store init` again.");
-            }
-
-            output.WriteLine($"Already initialised: {path}");
-            await EnsureMarkerAsync(marker, ct);
-            return 0;
-        }
-
-        if (!Directory.Exists(directory))
-        {
-            throw new OperatorCommandException(
-                $"The directory does not exist: {directory}. Mount the volume first — creating it " +
-                "here would hide an unmounted volume.");
-        }
-
-        // FIRST INITIALISATION versus LOSS, decided from TWO places, because each covers a case the
-        // other cannot.
-        //
-        // The marker lives inside the volume and catches a deleted database. It cannot catch a
-        // deleted VOLUME — the marker goes with it, and a wiped volume then looks exactly like a
-        // fresh install, which is the loss most likely to happen and the one where creating empty
-        // state silently is worst.
-        //
-        // `Comms:StoreProvisioned` lives in the deployment's .env, on the host, outside the volume.
-        // setup.sh and upgrade.sh set it after the first successful init, so it survives the volume
-        // and says "this deployment has been initialised before" even when nothing inside the
-        // volume does.
-        var provisioned = CommsConfiguration.Resolve().StoreProvisioned;
-
-        if ((File.Exists(marker) || provisioned) && !HasFlag(args, "--recover"))
-        {
-            throw new OperatorCommandException(
-                "This deployment has been initialised before and the auth database is gone. That " +
-                "is storage loss, not a first install: restore from a backup " +
-                "(docs/comms-deployment.md), or pass --recover to deliberately start over with no " +
-                "devices enrolled.");
-        }
-
-        using (var store = new SqliteAuthStore(path, allowCreate: true))
-            await store.InTransactionAsync((tx, token) => tx.CountActiveDevicesAsync("", token), ct);
-
-        await EnsureMarkerAsync(marker, ct);
-
-        output.WriteLine(HasFlag(args, "--recover")
-            ? $"Re-initialised {path} — EMPTY. Every previously enrolled device is gone; re-enroll."
-            : $"Initialised {path}");
-        return 0;
-    }
-
-    /// <summary>
-    /// Records that this volume has held a store, so a later missing database is recognisable as
-    /// loss rather than as a first run. Written beside the database, inside the same volume — that
-    /// is the whole point, since a fresh volume has neither.
-    /// </summary>
-    private static async Task EnsureMarkerAsync(string marker, CancellationToken ct)
-    {
-        if (!File.Exists(marker))
-        {
-            await File.WriteAllTextAsync(marker,
-                "This volume holds a Fleet.Comms auth store.\n" +
-                "If the database beside this file is missing, that is storage loss:\n" +
-                "restore from a backup rather than initialising an empty one.\n", ct);
-        }
-    }
-
-    /// <summary>
-    /// Revoke every device and every token, in one transaction.
-    ///
-    /// <para>The disaster-restore step. A snapshot predating a revocation brings that device back
-    /// active, and its secret is the long-lived credential — expiring access tokens does not help,
-    /// because the restored device can mint more. Doing this by hand, device by device, after the
-    /// service is already reachable leaves a window in which a restored credential works; this runs
-    /// before ingress reopens and takes all of them at once.</para>
-    /// </summary>
-    private static async Task<int> RevokeAllAsync(TextWriter output, CancellationToken ct)
-    {
-        var (service, store) = Build();
-        using (store)
-        {
-            var (devices, enrollments) = await service.RevokeAllDevicesAsync(ct);
-            output.WriteLine(devices == 0 && enrollments == 0
-                ? "Nothing to revoke."
-                : $"Revoked {devices} device(s) and every token, and burned {enrollments} unconsumed " +
-                  "enrollment code(s). Re-enroll before reopening ingress.");
-        }
-
-        return 0;
-    }
-
-    private static async Task<int> IssueAsync(string[] args, TextWriter output, CancellationToken ct)
-    {
-        var principal = Required(args, "--principal");
-        var (service, store) = Build();
-        using (store)
-        {
-            var issued = await service.IssueEnrollmentCodeForOperatorAsync(principal, ct);
-            if (issued is null)
-            {
-                throw new OperatorCommandException(
-                    $"{principal} already has an active device. Revoke it first: " +
-                    "devices list, then devices revoke --device-id <id>.");
-            }
-
-            var code = issued;
-
-            // stdout, and nowhere else. Never a log line, never a file, never an environment
-            // variable — the code is a bearer credential for the next fifteen minutes, and the only
-            // place it belongs is the operator's terminal.
-            output.WriteLine(code);
-        }
-
-        return 0;
-    }
-
-    private static async Task<int> ListAsync(string[] args, TextWriter output, CancellationToken ct)
-    {
-        var principal = Optional(args, "--principal");
-        var (service, store) = Build();
-        using (store)
-        {
-            var devices = await service.ListDevicesAsync(principal, ct);
-            if (devices.Count == 0)
-            {
-                output.WriteLine("No devices.");
-                return 0;
-            }
-
-            output.WriteLine($"{"DEVICE ID",-20} {"PRINCIPAL",-20} {"STATUS",-8} REGISTERED");
-            foreach (var device in devices)
-            {
-                // Identifiers, status and timestamps. No secret hash, no salt, no token material —
-                // not abbreviated, not "just the prefix for debugging". A device id is a non-secret
-                // handle; everything else on the record is not, and none of it is needed to decide
-                // which device to revoke.
-                output.WriteLine(
-                    $"{device.DeviceId,-20} {device.PrincipalId,-20} " +
-                    $"{(device.IsActive ? "active" : "revoked"),-8} " +
-                    $"{device.RegisteredAt:yyyy-MM-dd HH:mm:ss}Z");
-            }
-        }
-
-        return 0;
-    }
-
-    private static async Task<int> RevokeAsync(
-        string[] args, TextWriter output, TextWriter error, CancellationToken ct)
-    {
-        var deviceId = Required(args, "--device-id");
-        var (service, store) = Build();
-        using (store)
-        {
-            if (!await service.RevokeDeviceAsync(deviceId, ct))
-                return Write(error, $"No such device: {deviceId}", 1);
-
-            output.WriteLine($"Revoked {deviceId} and all of its tokens.");
-        }
-
-        return 0;
-    }
-
-    /// <summary>
-    /// Check a backup before anything depends on it.
-    ///
-    /// <para>The restore procedure used to be a `sqlite3 PRAGMA integrity_check` incantation, which
-    /// assumes sqlite3 is installed and answers a narrower question than "is this an auth store" —
-    /// a perfectly intact database of the wrong schema passes it. This asks the question the
-    /// restore actually depends on, using the same verification the service applies on every
-    /// open.</para>
-    /// </summary>
-    private static async Task<int> VerifyAsync(
-        string[] args, TextWriter output, TextWriter error, CancellationToken ct)
-    {
-        var path = Path.GetFullPath(Required(args, "--in"));
-        if (!File.Exists(path))
-            return Write(error, $"No such file: {path}", 1);
-
-        using var candidate = new SqliteAuthStore(path);
-        if (!await candidate.IsUsableAsync(ct, thorough: true))
-        {
-            return Write(error,
-                $"{path} is NOT a usable auth store — do not restore it. It may be empty, " +
-                "truncated, or a database of a different shape.", 1);
-        }
-
-        var devices = await candidate.InTransactionAsync(
-            (tx, token) => tx.ListDevicesAsync(null, token), ct);
-
-        output.WriteLine($"{path} is a usable auth store ({devices.Count} device record(s)).");
-        return 0;
-    }
-
-    private static async Task<int> BackupAsync(string[] args, TextWriter output, CancellationToken ct)
-    {
-        var destination = Required(args, "--out");
-        var (_, store) = Build();
-        using (store)
-        {
-            await store.BackupToAsync(destination, ct);
-            output.WriteLine($"Wrote {destination}");
-        }
-
-        return 0;
-    }
-
-    /// <summary>
-    /// Build the same service graph the north app uses, minus anything that listens.
-    ///
-    /// <para>Configuration comes from the identical sources — environment variables and
-    /// <c>appsettings.json</c> — so a subcommand and the service always agree about which store
-    /// they are talking to. A command that read the path from somewhere else could helpfully back
-    /// up a database nobody is serving.</para>
-    /// </summary>
-    private static string ResolveStorePath()
-    {
-        var path = CommsConfiguration.Resolve().AuthStorePath;
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            throw new OperatorCommandException(
-                $"{CommsOptions.SectionName}:{nameof(CommsOptions.AuthStorePath)} is required " +
-                "and has no default. Point it at the same store the service uses.");
-        }
-
-        // Logged as an absolute path so "which database did that touch?" is answerable from the
-        // output rather than from knowing the working directory.
-        return Path.GetFullPath(path);
-    }
-
-    private static (AuthService Service, SqliteAuthStore Store) Build()
-    {
-        var store = new SqliteAuthStore(ResolveStorePath());
-        var service = new AuthService(store, new Argon2idSecretHasher(),
-            new MonotonicClock(TimeProvider.System), NullLogger<AuthService>.Instance);
-        return (service, store);
-    }
-
-    private const string StoreInitialisedMarker = ".fleet-comms-store";
 
     private static bool HasFlag(string[] args, string name) => Array.IndexOf(args, name) >= 0;
 
@@ -377,8 +82,7 @@ public static class OperatorCommands
 
     /// <param name="allowNegativeNumber">
     /// Only <c>--telegram-chat</c> takes one: basic-group and supergroup chat ids are negative.
-    /// Device handles may also start with <c>-</c>: they are unpadded base64url. Only
-    /// <c>--device-id</c> accepts that exact shape; other flags still cannot become values.
+    /// Other flags still cannot become values.
     /// </param>
     private static string? Optional(string[] args, string name, bool allowNegativeNumber = false)
     {
@@ -388,17 +92,13 @@ public static class OperatorCommands
         if (index + 1 >= args.Length)
             throw new OperatorCommandException($"{name} needs a value.");
         var value = args[index + 1];
-        var deviceId = name == "--device-id"
-            && value.Length == (Credentials.RecordIdBytes * 8 + 5) / 6
-            && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
-        if (value.StartsWith('-') && !deviceId
+        if (value.StartsWith('-')
             && !(allowNegativeNumber && long.TryParse(value,
                 System.Globalization.NumberStyles.AllowLeadingSign,
                 System.Globalization.CultureInfo.InvariantCulture, out _)))
             throw new OperatorCommandException($"{name} needs a value.");
         return value;
     }
-
 
     // ── conversations ───────────────────────────────────────────────────────────────
 

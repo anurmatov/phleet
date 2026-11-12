@@ -2,131 +2,53 @@ using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Fleet.Comms.Contracts;
 using Fleet.Protocol;
+using Fleet.Shared;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
-using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
 
 namespace Fleet.Comms.Routes;
 
 /// <summary>
-/// The complete north route table for Slice 1 (docs/first-party-api.md §5, issue #292 scope 2).
+/// The session route and the authentication every north route shares (docs/first-party-api.md §5,
+/// #530 D7).
 ///
-/// <para><b>This is the whole surface a device can reach.</b> No south store endpoint is mapped
-/// here, and none may be: <c>/events:append</c> on a device-reachable listener would let a client
-/// write arbitrary events — including forged terminals — into the durable log. Separation is by
-/// listener, so the guarantee is that this method is the only thing that ever runs on the north
-/// app, and <c>NorthRouteTableTests</c> asserts the registered set is exactly these four.</para>
+/// <para><b>Sign-in is not here.</b> The orchestrator owns users, devices and credentials; this
+/// service asks it who a caller is on every request (<see cref="ISignInCheck"/>), and keeps no
+/// credential of its own. The north surface is this route plus <see cref="ConversationEndpoints"/>,
+/// and no south store endpoint is mapped on it: <c>/events:append</c> on a device-reachable listener
+/// would let a client write arbitrary events — including forged terminals — into the durable log.</para>
 /// </summary>
 public static class NorthEndpoints
 {
-    /// <summary>The routes this slice serves. Slices 2–4 add to this list, never to a south app.</summary>
+    /// <summary>The routes this class serves.</summary>
     public static readonly IReadOnlyList<string> Routes =
     [
-        "POST /v1/auth/devices",
-        "POST /v1/auth/token",
-        "POST /v1/auth/devices/{deviceId}:revoke",
         "GET /v1/session",
     ];
 
     public static IEndpointRouteBuilder MapNorthApi(this IEndpointRouteBuilder app)
     {
-        // Every route here verifies a credential, and every verification costs one Argon2id
-        // evaluation — including the ones that fail. So the limiter goes on all four, not only on
-        // the two that take a secret in the body: a bogus bearer on `GET /v1/session` buys exactly
-        // the same work as a bogus secret on `POST /v1/auth/token`.
-        app.MapPost("/v1/auth/devices", RegisterDeviceAsync)
-            .RequireRateLimiting(AuthRateLimits.PolicyName);
-        app.MapPost("/v1/auth/token", MintTokenAsync)
-            .RequireRateLimiting(AuthRateLimits.PolicyName);
-
-        // `:revoke` is a literal suffix on the id segment, matching §5. Self-revoke only: the
-        // lost-device path is operator-side and out of band, because an unauthenticated revoke
-        // route would be a one-request denial of service against the owner's only device.
-        app.MapPost("/v1/auth/devices/{deviceId}:revoke", RevokeDeviceAsync)
-            .RequireRateLimiting(AuthRateLimits.PolicyName);
-
+        // The conversation limiter, which partitions on the credential: behind the dashboard's proxy
+        // every caller arrives from one address.
         app.MapGet("/v1/session", GetSessionAsync)
-            .RequireRateLimiting(AuthRateLimits.PolicyName);
+            .RequireRateLimiting(ConversationRateLimits.PolicyName);
         return app;
     }
 
-    private static async Task<IResult> RegisterDeviceAsync(
-        HttpContext http, AuthService auth, CancellationToken ct)
-    {
-        var request = await ReadAsync<RegisterDeviceRequest>(http, ct);
-        if (request is null)
-            return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
-
-        if (!ProtocolVersion.IsSupported(request.Protocol))
-            return Error(ProtocolErrorCode.UnsupportedProtocol, StatusCodes.Status400BadRequest);
-
-        var result = await auth.RegisterDeviceAsync(request.EnrollmentCode, ct);
-        if (!result.Succeeded)
-        {
-            // device_limit is 409; every other failure here is an indistinguishable 401.
-            return result.Error == ProtocolErrorCode.DeviceLimit
-                ? Error(ProtocolErrorCode.DeviceLimit, StatusCodes.Status409Conflict)
-                : Unauthorized();
-        }
-
-        var device = result.Value!;
-        return Json(new RegisterDeviceResponse
-        {
-            DeviceId = device.DeviceId,
-            DeviceSecret = device.DeviceSecret,
-        }, StatusCodes.Status200OK);
-    }
-
-    private static async Task<IResult> MintTokenAsync(
-        HttpContext http, AuthService auth, CancellationToken ct)
-    {
-        var request = await ReadAsync<TokenRequest>(http, ct);
-        if (request is null)
-            return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
-
-        if (!ProtocolVersion.IsSupported(request.Protocol))
-            return Error(ProtocolErrorCode.UnsupportedProtocol, StatusCodes.Status400BadRequest);
-
-        var result = await auth.MintTokenAsync(request.DeviceId, request.DeviceSecret, ct);
-        if (!result.Succeeded)
-            return Unauthorized();
-
-        var token = result.Value!;
-        return Json(new TokenResponse
-        {
-            AccessToken = token.AccessToken,
-            ExpiresInSeconds = token.ExpiresInSeconds,
-        }, StatusCodes.Status200OK);
-    }
-
-    private static async Task<IResult> RevokeDeviceAsync(
-        HttpContext http, string deviceId, AuthService auth, CancellationToken ct)
-    {
-        var caller = await AuthenticateAsync(http, auth, ct);
-        if (caller is null)
-            return Unauthorized();
-
-        var result = await auth.RevokeSelfAsync(caller, deviceId, ct);
-        return result.Succeeded
-            ? Json(new RevokeDeviceResponse { Revoked = true }, StatusCodes.Status200OK)
-            : Unauthorized();
-    }
-
     private static async Task<IResult> GetSessionAsync(
-        HttpContext http, AuthService auth, IOptions<CommsOptions> options, CancellationToken ct)
+        HttpContext http, ISignInCheck signIn, CancellationToken ct)
     {
-        var caller = await AuthenticateAsync(http, auth, ct);
+        var caller = await AuthenticateAsync(http, signIn, ct);
         if (caller is null)
             return Unauthorized();
 
         return Json(new SessionResponse
         {
-            // Derived from the device record. Never read from the request.
+            // From the credential, through the orchestrator. Never read from the request.
             PrincipalId = caller.PrincipalId,
-            AgentLabel = options.Value.AgentLabel,
             Limits = new SessionLimits
             {
                 InboundTextBytes = ProtocolLimits.MaxInboundTextBytes,
@@ -139,22 +61,58 @@ public static class NorthEndpoints
     }
 
     /// <summary>
-    /// Resolve the bearer token on the request.
-    ///
-    /// <para>Header only. A token in a query string, path segment or fragment is a token in an
-    /// access log and in a crash report, and this boundary has no code path that reads one from
-    /// there (§3.7, MUST NOT 2).</para>
+    /// Who the request's credential names, or null when it names nobody.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The credential is the Authorization header or the browser's session cookie, and nothing
+    /// else: a token in a query string, path segment or fragment is a token in an access log and in
+    /// a crash report, and this boundary has no code path that reads one from there (§3.7, #530
+    /// MUST NOT 6).
+    /// </para>
+    /// <para>
+    /// A browser's write must also carry <see cref="SignIn.RequestHeader"/> (#530 D6), and one that
+    /// does not is refused like a missing credential. With the cookie SameSite=Strict, that closes
+    /// cross-site request forgery: another site's page cannot add the header.
+    /// </para>
+    /// <para>
+    /// An answer that could not be had throws <see cref="SignInUnavailableException"/> or
+    /// <see cref="SignInBusyException"/>, which the north edge turns into 503 or 429. It is never a
+    /// pass (#530 MUST NOT 3).
+    /// </para>
+    /// </remarks>
     internal static async Task<AuthenticatedPrincipal?> AuthenticateAsync(
-        HttpContext http, AuthService auth, CancellationToken ct)
-    {
-        var header = http.Request.Headers.Authorization.ToString();
-        const string scheme = "Bearer ";
-        if (!header.StartsWith(scheme, StringComparison.Ordinal))
-            return null;
+        HttpContext http, ISignInCheck signIn, CancellationToken ct) =>
+        (await CheckAsync(http, signIn, agent: null, ct))?.Caller;
 
-        var result = await auth.AuthenticateAsync(header[scheme.Length..], ct);
-        return result.Succeeded ? result.Value : null;
+    /// <summary>
+    /// <see cref="AuthenticateAsync"/>, also asking whether <paramref name="agent"/> accepts chat.
+    /// Null when the credential names nobody.
+    /// </summary>
+    internal static async Task<SignInAnswer?> CheckAsync(
+        HttpContext http, ISignInCheck signIn, string? agent, CancellationToken ct)
+    {
+        // Nothing presented costs no question.
+        if (PresentedCredential.Of(http.Request) is not { } credential) return null;
+
+        var answer = await signIn.CheckAsync(credential, agent, fresh: false, ct);
+
+        switch (answer.Outcome)
+        {
+            case SignInOutcome.Unavailable: throw new SignInUnavailableException();
+            case SignInOutcome.Busy: throw new SignInBusyException();
+            case SignInOutcome.Signed when answer.Caller is not null: break;
+            default: return null;
+        }
+
+        if (SignIn.IsBrowserWriteWithoutHeader(
+                http.Request.Method, answer.Caller.IsBrowser,
+                http.Request.Headers.ContainsKey(SignIn.RequestHeader)))
+        {
+            return null;
+        }
+
+        return answer;
     }
 
     /// <summary>

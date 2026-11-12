@@ -6,12 +6,10 @@ namespace Fleet.Comms.Tests;
 /// A negative number is a value only for <c>--telegram-chat</c>. Every other option keeps treating a
 /// leading <c>-</c> as a missing value followed by the next flag.
 /// </summary>
-[Collection("auth-store-path")]
 public sealed class JournalOperatorArgumentTests
 {
     [Theory]
-    [InlineData("enroll", "issue", "--principal", "-5")]
-    [InlineData("devices", "revoke", "--device-id", "-5")]
+    [InlineData("journal", "token", "--purpose", "-5")]
     [InlineData("journal", "purge", "--message", "-5")]
     [InlineData("journal", "purge", "--conversation", "-5")]
     public async Task Other_options_still_refuse_a_value_starting_with_a_dash(params string[] args)

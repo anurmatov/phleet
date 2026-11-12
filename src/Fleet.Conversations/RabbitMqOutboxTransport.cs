@@ -15,9 +15,15 @@ public static class ConversationBroker
     /// <summary>Committed events. Direct; the routing key is the conversation id.</summary>
     public const string EventExchange = "fleet.conversations.events";
 
-    /// <summary>The agent's durable inbound queue. One agent per deployment in this slice.</summary>
+    /// <summary>
+    /// An agent's durable inbound queue, bound to <see cref="CommandExchange"/> under the agent's
+    /// name. The agent's name is its unique orchestrator name (#530 D9).
+    /// </summary>
     public static string CommandQueue(string agentName) =>
         $"fleet.conversations.inbound.{agentName}";
+
+    /// <summary>The command queue's arguments. One definition: a mismatch is a broker error.</summary>
+    public static Dictionary<string, object?> CommandQueueArguments() => new() { ["x-queue-type"] = "quorum" };
 }
 
 /// <summary>
@@ -48,6 +54,13 @@ public sealed class RabbitMqOutboxTransport : IOutboxTransport, IAsyncDisposable
     private IConnection? _connection;
     private IChannel? _channel;
 
+    /// <summary>
+    /// The agents whose queue this connection has declared. Forgotten with the channel, so a broker
+    /// that lost its state (a new volume) gets the queue declared again rather than a publish to an
+    /// exchange with nothing bound.
+    /// </summary>
+    private readonly HashSet<string> _declaredQueues = new(StringComparer.Ordinal);
+
     public RabbitMqOutboxTransport(
         string connectionString, string exchange, ILogger logger, string exchangeType = ExchangeType.Direct)
     {
@@ -71,6 +84,13 @@ public sealed class RabbitMqOutboxTransport : IOutboxTransport, IAsyncDisposable
     /// </remarks>
     public async Task DeclareTopologyAsync(string agentName, CancellationToken ct)
     {
+        await DeclareExchangesAsync(ct);
+        await DeclareCommandQueueAsync(await ChannelAsync(ct), agentName, ct);
+    }
+
+    /// <summary>Declares the two durable exchanges. Idempotent.</summary>
+    public async Task DeclareExchangesAsync(CancellationToken ct)
+    {
         var channel = await ChannelAsync(ct);
 
         await channel.ExchangeDeclareAsync(
@@ -80,14 +100,21 @@ public sealed class RabbitMqOutboxTransport : IOutboxTransport, IAsyncDisposable
         await channel.ExchangeDeclareAsync(
             ConversationBroker.EventExchange, ExchangeType.Direct,
             durable: true, autoDelete: false, cancellationToken: ct);
+    }
 
+    /// <summary>
+    /// Declares one agent's queue and binds it. The same arguments the agent declares it with, so
+    /// whichever side comes first, the other's declaration is a no-op.
+    /// </summary>
+    public static async Task DeclareCommandQueueAsync(IChannel channel, string agentName, CancellationToken ct)
+    {
         var queue = ConversationBroker.CommandQueue(agentName);
 
         // Quorum, because a command is a durable client submission: a classic queue on a restarted
         // node can lose one, and the submission row would then say it was dispatched forever.
         await channel.QueueDeclareAsync(
             queue, durable: true, exclusive: false, autoDelete: false,
-            arguments: new Dictionary<string, object?> { ["x-queue-type"] = "quorum" },
+            arguments: ConversationBroker.CommandQueueArguments(),
             cancellationToken: ct);
 
         await channel.QueueBindAsync(
@@ -102,6 +129,24 @@ public sealed class RabbitMqOutboxTransport : IOutboxTransport, IAsyncDisposable
 
         foreach (var message in batch)
         {
+            // A command's routing key is its agent. That agent's queue is declared before the first
+            // publish to it (#530 D9); a failure leaves this row and the rest pending.
+            if (Exchange == ConversationBroker.CommandExchange && !_declaredQueues.Contains(message.RoutingKey))
+            {
+                try
+                {
+                    await DeclareCommandQueueAsync(channel, message.RoutingKey, ct);
+                    _declaredQueues.Add(message.RoutingKey);
+                }
+                catch (Exception e)
+                {
+                    _logger.LogWarning(
+                        "declaring an agent's command queue failed: {Error}", e.GetType().Name);
+                    await ResetAsync();
+                    break;
+                }
+            }
+
             var properties = new BasicProperties
             {
                 DeliveryMode = DeliveryModes.Persistent,
@@ -158,6 +203,7 @@ public sealed class RabbitMqOutboxTransport : IOutboxTransport, IAsyncDisposable
                 AutomaticRecoveryEnabled = true,
             };
 
+            _declaredQueues.Clear();
             _connection = await factory.CreateConnectionAsync(ct);
 
             // Confirmations AND tracking. Without tracking, BasicPublishAsync returns as soon as the
@@ -181,6 +227,7 @@ public sealed class RabbitMqOutboxTransport : IOutboxTransport, IAsyncDisposable
     {
         var channel = _channel;
         _channel = null;
+        _declaredQueues.Clear();
 
         if (channel is not null)
         {

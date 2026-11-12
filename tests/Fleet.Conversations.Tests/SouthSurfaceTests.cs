@@ -486,6 +486,71 @@ public sealed class SouthSurfaceTests(MySqlFixture fixture)
             await response.Content.ReadAsStringAsync());
     }
 
+    // ── one agent's token acts on that agent's conversations only (#530 MUST NOT 5) ──
+
+    [Fact]
+    public async Task Another_agents_token_cannot_claim_this_agents_command_and_writes_nothing()
+    {
+        await using var host = await SouthTestHost.StartAsync(_store);
+
+        var conversation = await OpenAsync();
+        var accept = await AcceptAsync(conversation.ConversationId);
+        var messageId = await MessageIdForAsync(accept.SubmissionId!);
+
+        var foreign = await host.PostAsAsync("/deliveries:claim",
+            new ClaimDeliveryRequest { MessageId = messageId, Owner = "intruder" },
+            SouthTestHost.TokenFor("another-agent"));
+
+        // Answered as an unknown conversation: no oracle for what another agent is doing.
+        Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+        Assert.Contains("conversation_not_found", await foreign.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        // Nothing was claimed by the refused call: the owning agent's claim is the first.
+        var own = await SouthTestHost.ReadAsync<ClaimDeliveryResult>(await host.PostAsync("/deliveries:claim",
+            new ClaimDeliveryRequest { MessageId = messageId, Owner = "agent-1" }));
+        Assert.Equal(ClaimOutcome.Claimed, own.Outcome);
+    }
+
+    [Fact]
+    public async Task Another_agents_token_cannot_touch_this_agents_attempt_or_conversation()
+    {
+        await using var host = await SouthTestHost.StartAsync(_store);
+        var (_, claim) = await ClaimedAsync(host);
+        var other = SouthTestHost.TokenFor("another-agent");
+
+        var heartbeat = await host.PostAsAsync("/leases:heartbeat", new HeartbeatRequest
+        {
+            AttemptIds = [claim.AttemptId!],
+            Owner = "intruder",
+        }, other);
+
+        var append = await host.PostAsAsync("/events:append", new AppendBatchRequest
+        {
+            ConversationId = claim.ConversationId!,
+            Epoch = Ulid.NewUlid(),
+            Events = [],
+        }, other);
+
+        Assert.Equal(HttpStatusCode.NotFound, heartbeat.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, append.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("read")]
+    [InlineData("ingest")]
+    [InlineData("auth-check")]
+    public async Task A_token_of_another_purpose_is_not_a_south_token(string purpose)
+    {
+        await using var host = await SouthTestHost.StartAsync(_store);
+        var token = Fleet.Conversations.Journal.JournalTokens.Mint(
+            Fleet.Conversations.Journal.JournalTokens.ParseKeys(SouthTestHost.Key)[0], purpose, SouthTestHost.Agent);
+
+        var response = await host.PostAsAsync("/deliveries:claim",
+            new ClaimDeliveryRequest { MessageId = Ulid.NewUlid(), Owner = "agent-1" }, token);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     private async Task<(string MessageId, ClaimDeliveryResult Result)> ClaimedAsync(SouthTestHost host)
     {
         var conversation = await OpenAsync();
@@ -504,7 +569,7 @@ public sealed class SouthSurfaceTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = "p_owner",
+            PrincipalId = "p_owner", AgentName = SouthTestHost.Agent,
         });
 
     private async Task<AcceptSubmissionResult> AcceptAsync(string conversationId) =>

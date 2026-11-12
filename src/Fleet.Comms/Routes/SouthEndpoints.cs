@@ -1,10 +1,10 @@
-using System.Security.Cryptography;
-using System.Text;
 using Fleet.Comms.Configuration;
 using Fleet.Comms.Contracts;
 using Fleet.Conversations;
 using Fleet.Conversations.Contracts;
+using Fleet.Conversations.Journal;
 using Fleet.Protocol;
+using Fleet.Shared;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 
@@ -24,6 +24,13 @@ namespace Fleet.Comms.Routes;
 /// claim, which #276 §8.7 originally showed the consumer inserting directly — happens through these
 /// endpoints, because that direct insert and "the agent holds no credential" cannot both be true.
 /// </para>
+/// <para>
+/// <b>Each agent holds its own token</b> (#530 D8, D9): <c>cj1.south.&lt;agent name&gt;</c>, minted by
+/// the orchestrator at provisioning under the key the two services share. Every call names what it
+/// acts on — a command, a submission, an attempt, a conversation or an attachment — and is refused,
+/// as an unknown conversation, unless that belongs to a conversation with the token's agent. One
+/// agent's token cannot act on another agent's conversation (#530 MUST NOT 5).
+/// </para>
 /// </remarks>
 public static class SouthEndpoints
 {
@@ -35,7 +42,7 @@ public static class SouthEndpoints
         WebApplication app, IConversationStore store, CommsOptions options,
         AttachmentStore? attachments = null)
     {
-        var expected = Encoding.UTF8.GetBytes(options.SouthBearerToken);
+        var keys = options.Journal.Keys();
 
         // MIDDLEWARE, not an endpoint filter, and the difference is not stylistic.
         //
@@ -51,8 +58,9 @@ public static class SouthEndpoints
         // the surface does not answer "that route exists" either.
         app.Use(async (context, next) =>
         {
-            if (Authorized(context, expected))
+            if (AgentOf(context, keys) is { } agent)
             {
+                context.Items[AgentItem] = agent;
                 await next(context);
                 return;
             }
@@ -65,11 +73,18 @@ public static class SouthEndpoints
 
         var group = app.MapGroup(string.Empty);
 
-        group.MapPost("/deliveries:claim", async Task<IResult> (ClaimDeliveryRequest request, CancellationToken ct) =>
-            Results.Json(await store.ClaimDeliveryAsync(request, ct), FleetProtocolJson.Options));
+        group.MapPost("/deliveries:claim", async Task<IResult> (HttpContext http, ClaimDeliveryRequest request, CancellationToken ct) =>
+            await RefuseForeignAsync(http, store, ct, (AgentTargetKind.Message, request.MessageId))
+            ?? Results.Json(await store.ClaimDeliveryAsync(request, ct), FleetProtocolJson.Options));
 
-        group.MapPost("/submissions:disposition", async Task<IResult> (RecordDispositionRequest request, CancellationToken ct) =>
+        group.MapPost("/submissions:disposition", async Task<IResult> (HttpContext http, RecordDispositionRequest request, CancellationToken ct) =>
         {
+            if (await RefuseForeignAsync(http, store, ct,
+                    (AgentTargetKind.Message, request.MessageId),
+                    (AgentTargetKind.Submission, request.SubmissionId),
+                    (AgentTargetKind.Attempt, request.AttemptId)) is { } refusal)
+                return refusal;
+
             try
             {
                 return Results.Json(await store.RecordDispositionAsync(request, ct), FleetProtocolJson.Options);
@@ -82,8 +97,14 @@ public static class SouthEndpoints
             }
         });
 
-        group.MapPost("/deliveries:complete", async Task<IResult> (CompleteDeliveryRequest request, CancellationToken ct) =>
+        group.MapPost("/deliveries:complete", async Task<IResult> (HttpContext http, CompleteDeliveryRequest request, CancellationToken ct) =>
         {
+            if (await RefuseForeignAsync(http, store, ct,
+                    (AgentTargetKind.Message, request.MessageId),
+                    (AgentTargetKind.Submission, request.SubmissionId),
+                    (AgentTargetKind.Attempt, request.AttemptId)) is { } refusal)
+                return refusal;
+
             try
             {
                 return Results.Json(await store.CompleteDeliveryAsync(request, ct), FleetProtocolJson.Options);
@@ -94,8 +115,12 @@ public static class SouthEndpoints
             }
         });
 
-        group.MapPost("/turns:start", async Task<IResult> (StartTurnRequest request, CancellationToken ct) =>
+        group.MapPost("/turns:start", async Task<IResult> (HttpContext http, StartTurnRequest request, CancellationToken ct) =>
         {
+            if (await RefuseForeignAsync(http, store, ct,
+                    [(AgentTargetKind.Attempt, request.AttemptId), .. Submissions(request.MergedSubmissionIds)]) is { } refusal)
+                return refusal;
+
             try
             {
                 return Results.Json(await store.StartTurnAsync(request, ct), FleetProtocolJson.Options);
@@ -108,14 +133,24 @@ public static class SouthEndpoints
             }
         });
 
-        group.MapPost("/turns:commit", async Task<IResult> (CommitTerminalRequest request, CancellationToken ct) =>
-            Results.Json(await store.CommitTerminalAsync(request, ct), FleetProtocolJson.Options));
+        group.MapPost("/turns:commit", async Task<IResult> (HttpContext http, CommitTerminalRequest request, CancellationToken ct) =>
+            await RefuseForeignAsync(http, store, ct,
+                [(AgentTargetKind.Attempt, request.AttemptId), .. Submissions(request.MergedSubmissionIds)])
+            ?? Results.Json(await store.CommitTerminalAsync(request, ct), FleetProtocolJson.Options));
 
-        group.MapPost("/events:append", async Task<IResult> (AppendBatchRequest request, CancellationToken ct) =>
-            Results.Json(await store.AppendBatchAsync(request, ct), FleetProtocolJson.Options));
+        group.MapPost("/events:append", async Task<IResult> (HttpContext http, AppendBatchRequest request, CancellationToken ct) =>
+            await RefuseForeignAsync(http, store, ct,
+                [
+                    (AgentTargetKind.Conversation, request.ConversationId),
+                    .. (request.Events ?? []).Select(e => (AgentTargetKind.Submission, e.SubmissionId)),
+                    .. (request.Events ?? []).Select(e => (AgentTargetKind.Attempt, e.AttemptId)),
+                ])
+            ?? Results.Json(await store.AppendBatchAsync(request, ct), FleetProtocolJson.Options));
 
-        group.MapPost("/leases:heartbeat", async Task<IResult> (HeartbeatRequest request, CancellationToken ct) =>
-            Results.Json(await store.HeartbeatAsync(request, ct), FleetProtocolJson.Options));
+        group.MapPost("/leases:heartbeat", async Task<IResult> (HttpContext http, HeartbeatRequest request, CancellationToken ct) =>
+            await RefuseForeignAsync(http, store, ct,
+                [.. (request.AttemptIds ?? []).Select(id => (AgentTargetKind.Attempt, (string?)id))])
+            ?? Results.Json(await store.HeartbeatAsync(request, ct), FleetProtocolJson.Options));
 
         // ── attachment bytes, for the agent (#308 D7) ────────────────────────
         //
@@ -126,14 +161,18 @@ public static class SouthEndpoints
         // It sits inside the pre-routing middleware above, so it inherits the indistinguishable 401
         // for free — an unauthenticated caller cannot even learn that the route exists.
         //
-        // The south bearer is already an administrative credential that can write a terminal outcome
-        // for any turn. Adding a byte-read to it widens nothing.
+        // An agent reads only attachments in its own conversations: a foreign one is the same
+        // not-found as one that does not exist.
         if (attachments is not null)
         {
             group.MapGet("/attachments/{attachmentId}/content",
-                async Task<IResult> (string attachmentId, CancellationToken ct) =>
+                async Task<IResult> (HttpContext http, string attachmentId, CancellationToken ct) =>
                 {
                     if (!AttachmentStore.IsSafeId(attachmentId))
+                        return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status404NotFound);
+
+                    var owner = await store.FindAgentAsync(AgentTargetKind.Attachment, attachmentId, ct);
+                    if (!string.Equals(owner, (string)http.Items[AgentItem]!, StringComparison.Ordinal))
                         return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status404NotFound);
 
                     var row = await store.GetAttachmentAsync(attachmentId, ct);
@@ -157,11 +196,50 @@ public static class SouthEndpoints
         }
     }
 
+    /// <summary>Where the middleware leaves the calling agent's name for the routes.</summary>
+    private const string AgentItem = "south.agent";
+
+    private static IEnumerable<(AgentTargetKind, string?)> Submissions(IReadOnlyList<string>? ids) =>
+        (ids ?? []).Select(id => (AgentTargetKind.Submission, (string?)id));
+
+    /// <summary>
+    /// Null when nothing named belongs to another agent's conversation; otherwise the answer to give.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Asked BEFORE the store acts. A target that belongs to another agent — or to a conversation
+    /// from before conversations named their agent — is answered as an unknown conversation, so the
+    /// route is not an oracle for what other agents are doing.
+    /// </para>
+    /// <para>
+    /// A target that does not exist at all passes, and the store gives its ordinary answer: an
+    /// attempt is named here before the disposition that creates it, and refusing it would refuse
+    /// the agent's own first call.
+    /// </para>
+    /// </remarks>
+    private static async Task<IResult?> RefuseForeignAsync(
+        HttpContext http, IConversationStore store, CancellationToken ct,
+        params (AgentTargetKind Kind, string? Id)[] targets)
+    {
+        var agent = (string)http.Items[AgentItem]!;
+
+        foreach (var (kind, id) in targets.Distinct())
+        {
+            if (string.IsNullOrEmpty(id)) continue;
+
+            var owner = await store.FindAgentAsync(kind, id, ct);
+            if (owner is not null && !string.Equals(owner, agent, StringComparison.Ordinal))
+                return Error(ProtocolErrorCode.ConversationNotFound, StatusCodes.Status404NotFound);
+        }
+
+        return null;
+    }
+
     private static IResult Error(ProtocolErrorCode code, int status) =>
         Results.Json(ErrorResponse.For(code), FleetProtocolJson.Options, statusCode: status);
 
     /// <summary>
-    /// Fixed-time bearer comparison.
+    /// The agent a request's token names, or null.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -169,19 +247,16 @@ public static class SouthEndpoints
     /// path and produce the same body, so a caller learns nothing from which it got.
     /// </para>
     /// <para>
-    /// The comparison runs even when the header is missing, against an empty candidate, so the
-    /// absent case cannot be timed apart from the wrong one.
+    /// The MAC is checked even when the header is missing, against an empty candidate, so the absent
+    /// case cannot be timed apart from the wrong one. A journal token, the chat service's own
+    /// sign-in token and any other purpose verify as nothing here.
     /// </para>
     /// </remarks>
-    private static bool Authorized(HttpContext context, byte[] expected)
+    private static string? AgentOf(HttpContext context, IReadOnlyList<byte[]> keys)
     {
         var header = context.Request.Headers.Authorization.ToString();
+        var presented = header.StartsWith("Bearer ", StringComparison.Ordinal) ? header["Bearer ".Length..] : "";
 
-        var presented = header.StartsWith("Bearer ", StringComparison.Ordinal)
-            ? Encoding.UTF8.GetBytes(header["Bearer ".Length..])
-            : [];
-
-        return CryptographicOperations.FixedTimeEquals(
-            SHA256.HashData(presented), SHA256.HashData(expected));
+        return JournalTokens.TryVerify(presented, SignIn.AgentTokenPurpose, keys, out var agent) ? agent : null;
     }
 }

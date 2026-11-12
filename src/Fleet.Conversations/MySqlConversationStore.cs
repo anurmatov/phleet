@@ -96,23 +96,29 @@ public sealed partial class MySqlConversationStore : IConversationStore
 
     // ────────────────────────────────────────────────────────────── open
 
-    public async Task<OpenConversationResult> OpenConversationAsync(
-        OpenConversationRequest request, CancellationToken ct = default)
+    public Task<OpenConversationResult> OpenConversationAsync(
+        OpenConversationRequest request, CancellationToken ct = default) =>
+        OpenConversationAsync(request, afterLostRace: false, ct);
+
+    private async Task<OpenConversationResult> OpenConversationAsync(
+        OpenConversationRequest request, bool afterLostRace, CancellationToken ct)
     {
         await using var connection = await OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
 
-        var existing = await ReadConversationByRefAsync(
-            connection, transaction, request.ChannelId, request.ExternalRef, forUpdate: true, ct);
+        // A new conversation always names its agent. An empty name is what rows from before
+        // conversations had agents carry, and opening one of those would hand back a conversation
+        // nothing can route.
+        if (string.IsNullOrEmpty(request.AgentName))
+            throw new ArgumentException("A conversation names its agent.", nameof(request));
+
+        var existing = await ReadConversationByIdentityAsync(connection, transaction, request, forUpdate: true, ct);
 
         if (existing is { } row)
         {
-            // Wire identity is (channel_id, external_ref). A conversation belonging to a different
-            // principal is reported as not-found rather than as a conflict, so there is no oracle
-            // telling a caller that someone else's conversation exists.
-            if (!string.Equals(row.PrincipalId, request.PrincipalId, StringComparison.Ordinal))
-                throw new ConversationNotFoundException();
-
+            // Identity is (channel, principal, agent, reference), so a row found here is the
+            // caller's own by construction. Someone else's conversation under the same reference is
+            // a different row, which this lookup never sees.
             await transaction.CommitAsync(ct);
 
             return new OpenConversationResult
@@ -127,13 +133,14 @@ public sealed partial class MySqlConversationStore : IConversationStore
 
         await using (var insert = Command(
             """
-            INSERT INTO conversations (id, channel_id, principal_id, external_ref)
-            VALUES (@id, @channel, @principal, @ref)
+            INSERT INTO conversations (id, channel_id, principal_id, agent_name, external_ref)
+            VALUES (@id, @channel, @principal, @agent, @ref)
             """, connection, transaction))
         {
             insert.Parameters.AddWithValue("@id", id);
             insert.Parameters.AddWithValue("@channel", request.ChannelId);
             insert.Parameters.AddWithValue("@principal", request.PrincipalId);
+            insert.Parameters.AddWithValue("@agent", request.AgentName);
             insert.Parameters.AddWithValue("@ref", request.ExternalRef);
 
             try
@@ -142,11 +149,17 @@ public sealed partial class MySqlConversationStore : IConversationStore
             }
             catch (MySqlException e) when (e.Number == DuplicateKeyError)
             {
-                // Another opener won the race on ux_conv_channel_ref. Re-read and return the
+                // Another opener won the race on ux_conv_identity. Re-read and return the
                 // winner's row — the filter is that narrow on purpose, because a broad
                 // swallow-and-reread turns a genuine write failure into a fabricated success.
                 await transaction.RollbackAsync(ct);
-                return await OpenConversationAsync(request, ct);
+
+                // Once. The winner's row is found by the re-read; if it is not, the key collided
+                // with a row this lookup does not consider the caller's (the index compares the
+                // principal without regard to case, the lookup does not), and trying again would
+                // collide again, forever.
+                if (afterLostRace) throw new ConversationNotFoundException();
+                return await OpenConversationAsync(request, afterLostRace: true, ct);
             }
         }
 
@@ -164,28 +177,143 @@ public sealed partial class MySqlConversationStore : IConversationStore
         string Id, string PrincipalId, ulong NextSeq, ulong RetainedFloorSeq,
         string? AppenderEpoch, ulong LastOrdinal);
 
-    private static async Task<ConversationRow?> ReadConversationByRefAsync(
+    private static async Task<ConversationRow?> ReadConversationByIdentityAsync(
         MySqlConnection connection, MySqlTransaction transaction,
-        string channelId, string externalRef, bool forUpdate, CancellationToken ct)
+        OpenConversationRequest request, bool forUpdate, CancellationToken ct)
     {
         var sql = """
             SELECT id, principal_id, next_seq, retained_floor_seq, appender_epoch, last_ordinal
             FROM conversations
-            WHERE channel_id = @channel AND external_ref = @ref
+            WHERE channel_id = @channel AND principal_id = @principal
+              AND agent_name = @agent AND external_ref = @ref
             """ + (forUpdate ? " FOR UPDATE" : string.Empty);
 
         await using var command = Command(sql, connection, transaction);
-        command.Parameters.AddWithValue("@channel", channelId);
-        command.Parameters.AddWithValue("@ref", externalRef);
+        command.Parameters.AddWithValue("@channel", request.ChannelId);
+        command.Parameters.AddWithValue("@principal", request.PrincipalId);
+        command.Parameters.AddWithValue("@agent", request.AgentName);
+        command.Parameters.AddWithValue("@ref", request.ExternalRef);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            // The principal column compares without regard to case and a principal id does not.
+            // Believe only the exact one.
+            if (!string.Equals(reader.GetString(1), request.PrincipalId, StringComparison.Ordinal))
+                continue;
+
+            return new ConversationRow(
+                reader.GetString(0), reader.GetString(1),
+                reader.GetUInt64(2), reader.GetUInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.GetUInt64(5));
+        }
+
+        return null;
+    }
+
+    // ────────────────────────────────────────────────────────────── find, list
+
+    public async Task<ConversationSummary?> FindConversationAsync(
+        string conversationId, string principalId, CancellationToken ct = default)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = new MySqlCommand(
+            """
+            SELECT id, principal_id, agent_name, external_ref, next_seq, retained_floor_seq, last_activity_at
+            FROM conversations WHERE id = @id
+            """, connection);
+        command.Parameters.AddWithValue("@id", conversationId);
 
         await using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) return null;
 
-        return new ConversationRow(
-            reader.GetString(0), reader.GetString(1),
-            reader.GetUInt64(2), reader.GetUInt64(3),
-            reader.IsDBNull(4) ? null : reader.GetString(4),
-            reader.GetUInt64(5));
+        // Someone else's conversation is the same answer as none at all.
+        return string.Equals(reader.GetString(1), principalId, StringComparison.Ordinal)
+            ? ReadSummary(reader)
+            : null;
+    }
+
+    public async Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(
+        string channelId, string principalId, int limit, CancellationToken ct = default)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = new MySqlCommand(
+            """
+            SELECT id, principal_id, agent_name, external_ref, next_seq, retained_floor_seq, last_activity_at
+            FROM conversations
+            WHERE principal_id = @principal AND channel_id = @channel AND agent_name <> ''
+            ORDER BY last_activity_at DESC, id DESC
+            LIMIT @limit
+            """, connection);
+        command.Parameters.AddWithValue("@principal", principalId);
+        command.Parameters.AddWithValue("@channel", channelId);
+        command.Parameters.AddWithValue("@limit", Math.Max(1, limit));
+
+        var result = new List<ConversationSummary>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (string.Equals(reader.GetString(1), principalId, StringComparison.Ordinal))
+                result.Add(ReadSummary(reader));
+        }
+
+        return result;
+    }
+
+    private static ConversationSummary ReadSummary(MySqlDataReader reader) => new()
+    {
+        ConversationId = reader.GetString(0),
+        AgentName = reader.GetString(2),
+        ExternalRef = reader.GetString(3),
+        NextSeq = reader.GetUInt64(4),
+        RetainedFloorSeq = reader.GetUInt64(5),
+        LastActivityAt = new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc)),
+    };
+
+    // ────────────────────────────────────────────────────────────── whose is it
+
+    public async Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default)
+    {
+        // One indexed lookup each. The relation these read never changes — a command, a submission,
+        // an attempt and an attachment belong to one conversation for life, and a conversation to
+        // one agent — so answering before the caller acts is sound, not a race.
+        var sql = kind switch
+        {
+            AgentTargetKind.Conversation =>
+                "SELECT agent_name FROM conversations WHERE id = @id",
+            AgentTargetKind.Message =>
+                """
+                SELECT c.agent_name FROM command_outbox o
+                  JOIN conversations c ON c.id = o.conversation_id
+                 WHERE o.message_id = @id
+                """,
+            AgentTargetKind.Submission =>
+                """
+                SELECT c.agent_name FROM submissions s
+                  JOIN conversations c ON c.id = s.conversation_id
+                 WHERE s.id = @id
+                """,
+            AgentTargetKind.Attempt =>
+                """
+                SELECT c.agent_name FROM execution_attempts a
+                  JOIN submissions s ON s.id = a.submission_id
+                  JOIN conversations c ON c.id = s.conversation_id
+                 WHERE a.id = @id
+                """,
+            AgentTargetKind.Attachment =>
+                """
+                SELECT c.agent_name FROM conversation_attachments t
+                  JOIN conversations c ON c.id = t.conversation_id
+                 WHERE t.id = @id
+                """,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        await using var connection = await OpenAsync(ct);
+        await using var command = new MySqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@id", id);
+        return await command.ExecuteScalarAsync(ct) as string;
     }
 
     private static async Task<ConversationRow?> LockConversationAsync(

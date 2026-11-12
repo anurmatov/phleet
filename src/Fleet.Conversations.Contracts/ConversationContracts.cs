@@ -77,11 +77,23 @@ public enum EventRetentionClass
 /// <param name="ClientInstanceId">
 /// Opaque bookkeeping label, never a credential and never device identity.
 /// </param>
+/// <remarks>
+/// A conversation's identity is (<see cref="ChannelId"/>, <see cref="PrincipalId"/>,
+/// <see cref="AgentName"/>, <see cref="ExternalRef"/>): the same four always open the same
+/// conversation, and no two people, and no two agents, ever share one.
+/// </remarks>
 public sealed record OpenConversationRequest
 {
     public required string ChannelId { get; init; }
     public required string ExternalRef { get; init; }
     public required string PrincipalId { get; init; }
+
+    /// <summary>
+    /// The agent this conversation is with: the routing key its commands are published under, and
+    /// the subject an agent's token must carry to act on it. Never empty for a new conversation.
+    /// </summary>
+    public required string AgentName { get; init; }
+
     public string? ClientInstanceId { get; init; }
 }
 
@@ -90,6 +102,31 @@ public sealed record OpenConversationResult
     public required string ConversationId { get; init; }
     public required ulong NextSeq { get; init; }
     public required ulong RetainedFloorSeq { get; init; }
+}
+
+/// <summary>One conversation as its owner sees it in a list.</summary>
+public sealed record ConversationSummary
+{
+    public required string ConversationId { get; init; }
+    public required string AgentName { get; init; }
+    public required string ExternalRef { get; init; }
+    public required ulong NextSeq { get; init; }
+    public required ulong RetainedFloorSeq { get; init; }
+    public required DateTimeOffset LastActivityAt { get; init; }
+}
+
+/// <summary>
+/// What an agent-facing request names, so the conversation it belongs to — and so the agent that
+/// may act on it — can be found before anything is changed.
+/// </summary>
+public enum AgentTargetKind
+{
+    /// <summary>A command's broker message id (<c>command_outbox.message_id</c>).</summary>
+    Message,
+    Submission,
+    Attempt,
+    Conversation,
+    Attachment,
 }
 
 // ─────────────────────────────────────────────────────────────── accept (TX1a)

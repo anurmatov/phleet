@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text.Json;
-using Fleet.Comms.Auth;
 using Fleet.Comms.Contracts;
 using Fleet.Protocol;
 
@@ -15,37 +14,15 @@ namespace Fleet.Comms.Tests;
 public class NorthSerializationTests
 {
     [Fact]
-    public async Task RegisterDeviceResponse_HasExactlyTheContractFields()
-    {
-        await using var host = await NorthTestHost.StartAsync();
-
-        var response = await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        AssertFieldSet(await response.Content.ReadAsStringAsync(),
-            "protocol", "deviceId", "deviceSecret");
-    }
-
-    [Fact]
-    public async Task TokenResponse_HasExactlyTheContractFields_AndNoRefreshToken()
-    {
-        await using var host = await NorthTestHost.StartAsync();
-        var (deviceId, secret, _) = await host.EnrolledDeviceAsync();
-
-        var body = await (await host.TokenAsync(deviceId, secret)).Content.ReadAsStringAsync();
-
-        AssertFieldSet(body, "protocol", "accessToken", "expiresInSeconds");
-    }
-
-    [Fact]
     public async Task SessionResponse_HasExactlyTheContractFields()
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
         var (_, _, token) = await host.EnrolledDeviceAsync();
 
         var body = await (await host.SessionAsync(token)).Content.ReadAsStringAsync();
 
-        AssertFieldSet(body, "protocol", "principalId", "agentLabel", "limits");
+        // No agent label since #530: a person chats with many agents, named per conversation.
+        AssertFieldSet(body, "protocol", "principalId", "limits");
         using var document = JsonDocument.Parse(body);
         AssertFieldSet(document.RootElement.GetProperty("limits").GetRawText(),
             "inboundTextBytes", "catchUpLimitDefault", "catchUpLimitMax",
@@ -53,23 +30,42 @@ public class NorthSerializationTests
     }
 
     [Fact]
-    public async Task RevokeResponse_HasExactlyTheContractFields()
+    public async Task OpenConversationResponse_HasExactlyTheContractFields()
     {
-        await using var host = await NorthTestHost.StartAsync();
-        var (deviceId, _, token) = await host.EnrolledDeviceAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
+        var (_, _, token) = await host.EnrolledDeviceAsync();
 
-        var body = await (await host.RevokeAsync(deviceId, token)).Content.ReadAsStringAsync();
+        var response = await host.Client.SendAsync(Authorized(OpenBody(), "application/json", token));
 
-        AssertFieldSet(body, "protocol", "revoked");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        AssertFieldSet(await response.Content.ReadAsStringAsync(),
+            "protocol", "conversationId", "agent", "nextSeq", "retainedFloorSeq");
+    }
+
+    [Fact]
+    public async Task ConversationListResponse_HasExactlyTheContractFields()
+    {
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/conversations");
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        var body = await (await host.Client.SendAsync(request)).Content.ReadAsStringAsync();
+
+        AssertFieldSet(body, "protocol", "conversations");
+        using var document = JsonDocument.Parse(body);
+        AssertFieldSet(document.RootElement.GetProperty("conversations")[0].GetRawText(),
+            "conversationId", "agent", "externalRef", "nextSeq", "retainedFloorSeq", "lastActivityAt");
     }
 
     [Fact]
     public async Task EveryErrorBody_IsProtocolCodeMessage_WithTheFixedMessage()
     {
-        await using var host = await NorthTestHost.StartAsync();
-        await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
+        var (_, _, token) = await host.EnrolledDeviceAsync();
 
-        var conflict = await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
+        var conflict = await host.Client.SendAsync(
+            Authorized(OpenBody(agent: "not-a-chat-agent"), "application/json", token));
         var body = await conflict.Content.ReadAsStringAsync();
 
         AssertFieldSet(body, "protocol", "code", "message");
@@ -77,74 +73,66 @@ public class NorthSerializationTests
         Assert.Equal(ProtocolVersion.Current, document.RootElement.GetProperty("protocol").GetString());
 
         // The wire value is the protocol's snake_case form, not the C# member name.
-        Assert.Equal("device_limit", document.RootElement.GetProperty("code").GetString());
-        Assert.Equal(ProtocolErrors.DeviceLimit, document.RootElement.GetProperty("message").GetString());
+        Assert.Equal("agent_unavailable", document.RootElement.GetProperty("code").GetString());
+        Assert.Equal(ProtocolErrors.AgentUnavailable, document.RootElement.GetProperty("message").GetString());
     }
 
     /// <summary>
-    /// §5.2 status mapping for the codes this slice can produce. A code with the right body and the
-    /// wrong status is still a contract break — the status line is what a client branches on.
+    /// §5.2 status mapping for the codes the open route can produce. A code with the right body and
+    /// the wrong status is still a contract break — the status line is what a client branches on.
     /// </summary>
     [Fact]
     public async Task StatusMappingMatchesTheContract()
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
+        var (_, _, token) = await host.EnrolledDeviceAsync();
 
         // unsupported_protocol -> 400
-        var wrongProtocol = await host.Client.PostAsync("/v1/auth/token",
-            JsonContent("""{"protocol":"fleet.conversation.v2","deviceId":"d","deviceSecret":"s"}"""));
+        var wrongProtocol = await host.Client.SendAsync(Authorized(
+            """{"protocol":"fleet.conversation.v2","externalRef":"main","agent":"example-agent"}""",
+            "application/json", token));
         Assert.Equal(HttpStatusCode.BadRequest, wrongProtocol.StatusCode);
         Assert.Equal("unsupported_protocol", await CodeOf(wrongProtocol));
 
         // unsupported_kind -> 400 (malformed body)
-        var malformed = await host.Client.PostAsync("/v1/auth/token", JsonContent("{not json"));
+        var malformed = await host.Client.SendAsync(Authorized("{not json", "application/json", token));
         Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
         Assert.Equal("unsupported_kind", await CodeOf(malformed));
 
-        // unsupported_kind -> 400 for bad request METADATA too, on BOTH auth POST routes.
+        // unsupported_kind -> 400 for bad request METADATA too.
         //
         // These used to be 500. `ReadFromJsonAsync` throws InvalidOperationException — not
         // JsonException — for an unsupported or absent media type, so the catch missed it and the
         // edge handler answered `internal`. §5.2 tells a client 500 means "the server is broken,
-        // report this", which is the wrong instruction for a request the client got wrong, and it
-        // hides a client bug behind an operator alert.
-        foreach (var route in new[] { "/v1/auth/token", "/v1/auth/devices" })
+        // report this", which is the wrong instruction for a request the client got wrong.
+        foreach (var (body, contentType) in new[]
+                 {
+                     (OpenBody(), "text/plain"),
+                     ("", "application/json"),
+                     ("null", "application/json"),
+                 })
         {
-            var wrongContentType = await host.Client.PostAsync(route,
-                new StringContent("""{"protocol":"fleet.conversation.v1"}""",
-                    System.Text.Encoding.UTF8, "text/plain"));
-            Assert.Equal(HttpStatusCode.BadRequest, wrongContentType.StatusCode);
-            Assert.Equal("unsupported_kind", await CodeOf(wrongContentType));
+            var refused = await host.Client.SendAsync(Authorized(body, contentType, token));
+            Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+            Assert.Equal("unsupported_kind", await CodeOf(refused));
+        }
 
-            var noBody = await host.Client.PostAsync(route, new StringContent(""));
-            Assert.Equal(HttpStatusCode.BadRequest, noBody.StatusCode);
-            Assert.Equal("unsupported_kind", await CodeOf(noBody));
-
-            var emptyJson = await host.Client.PostAsync(route, JsonContent(""));
-            Assert.Equal(HttpStatusCode.BadRequest, emptyJson.StatusCode);
-            Assert.Equal("unsupported_kind", await CodeOf(emptyJson));
-
-            var jsonNull = await host.Client.PostAsync(route, JsonContent("null"));
-            Assert.Equal(HttpStatusCode.BadRequest, jsonNull.StatusCode);
-            Assert.Equal("unsupported_kind", await CodeOf(jsonNull));
-
-            // `HasJsonContentType()` checks the media type and IGNORES the charset, so a bogus one
-            // got past it and then failed inside the JSON reader with a non-JsonException —
-            // reaching the client as `500 internal` over a parameter the client chose. The body
-            // here is valid JSON; only the charset is wrong.
-            foreach (var charset in new[]
-                     {
-                         "not-a-real-encoding", "iso-8859-1", "utf-32",
-                         // Quoted too: a bogus value is no more acceptable for being quoted, and
-                         // unquoting must not turn the rejection into an acceptance.
-                         "\"not-a-real-encoding\"", "\"utf-32\"",
-                     })
-            {
-                var badCharset = await host.Client.PostAsync(route,
-                    Raw("""{"protocol":"fleet.conversation.v1"}""", $"application/json; charset={charset}"));
-                Assert.Equal(HttpStatusCode.BadRequest, badCharset.StatusCode);
-                Assert.Equal("unsupported_kind", await CodeOf(badCharset));
-            }
+        // `HasJsonContentType()` checks the media type and IGNORES the charset, so a bogus one got
+        // past it and then failed inside the JSON reader with a non-JsonException — reaching the
+        // client as `500 internal` over a parameter the client chose. The body is valid JSON; only
+        // the charset is wrong.
+        foreach (var charset in new[]
+                 {
+                     "not-a-real-encoding", "iso-8859-1", "utf-32",
+                     // Quoted too: a bogus value is no more acceptable for being quoted, and
+                     // unquoting must not turn the rejection into an acceptance.
+                     "\"not-a-real-encoding\"", "\"utf-32\"",
+                 })
+        {
+            var badCharset = await host.Client.SendAsync(
+                Authorized(OpenBody(), $"application/json; charset={charset}", token));
+            Assert.Equal(HttpStatusCode.BadRequest, badCharset.StatusCode);
+            Assert.Equal("unsupported_kind", await CodeOf(badCharset));
         }
 
         // unauthorized -> 401
@@ -152,15 +140,15 @@ public class NorthSerializationTests
         Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
         Assert.Equal("unauthorized", await CodeOf(unauthorized));
 
-        // device_limit -> 409
-        await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
-        var conflict = await host.RegisterAsync(await host.IssueEnrollmentCodeAsync());
-        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
-        Assert.Equal("device_limit", await CodeOf(conflict));
+        // agent_unavailable -> 409
+        var unavailable = await host.Client.SendAsync(
+            Authorized(OpenBody(agent: "not-a-chat-agent"), "application/json", token));
+        Assert.Equal(HttpStatusCode.Conflict, unavailable.StatusCode);
+        Assert.Equal("agent_unavailable", await CodeOf(unavailable));
     }
 
     /// <summary>
-    /// Every spelling of UTF-8 a legal client may send must reach credential validation.
+    /// Every spelling of UTF-8 a legal client may send must be read.
     ///
     /// <para>RFC 9110 §5.6.6 lets a parameter value be a token <b>or</b> a quoted-string, so
     /// <c>charset="utf-8"</c> is exactly as legal as <c>charset=utf-8</c>. Comparing
@@ -168,35 +156,24 @@ public class NorthSerializationTests
     /// a validation meant to catch a client mistake inventing one instead, with no way for the
     /// client to discover which spelling the server wanted.</para>
     ///
-    /// <para>`401` is the pass condition: it means the request got past the reader and was judged on
-    /// its credentials, which is the whole point. A `400` here means it never got that far.</para>
+    /// <para>`200` is the pass condition: the body was read and the conversation opened. A `400`
+    /// here means it never got that far.</para>
     /// </summary>
     [Theory]
-    [InlineData("/v1/auth/token", "application/json")]
-    [InlineData("/v1/auth/token", "application/json; charset=utf-8")]
-    [InlineData("/v1/auth/token", "application/json; charset=\"utf-8\"")]
-    [InlineData("/v1/auth/token", "application/json; charset=UTF-8")]
-    [InlineData("/v1/auth/token", "application/json; charset=\"UTF-8\"")]
-    [InlineData("/v1/auth/token", "application/json;charset=\"utf-8\"")]
-    [InlineData("/v1/auth/devices", "application/json")]
-    [InlineData("/v1/auth/devices", "application/json; charset=utf-8")]
-    [InlineData("/v1/auth/devices", "application/json; charset=\"utf-8\"")]
-    [InlineData("/v1/auth/devices", "application/json; charset=UTF-8")]
-    [InlineData("/v1/auth/devices", "application/json; charset=\"UTF-8\"")]
-    [InlineData("/v1/auth/devices", "application/json;charset=\"utf-8\"")]
-    public async Task EverySpellingOfUtf8ReachesCredentialValidation(string route, string contentType)
+    [InlineData("application/json")]
+    [InlineData("application/json; charset=utf-8")]
+    [InlineData("application/json; charset=\"utf-8\"")]
+    [InlineData("application/json; charset=UTF-8")]
+    [InlineData("application/json; charset=\"UTF-8\"")]
+    [InlineData("application/json;charset=\"utf-8\"")]
+    public async Task EverySpellingOfUtf8IsRead(string contentType)
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
+        var (_, _, token) = await host.EnrolledDeviceAsync();
 
-        var response = await host.Client.PostAsync(route, Raw(
-            """
-            {"protocol":"fleet.conversation.v1","deviceId":"d","deviceSecret":"s",
-             "enrollmentCode":"nosuchid.nosuchsecret"}
-            """,
-            contentType));
+        var response = await host.Client.SendAsync(Authorized(OpenBody(), contentType, token));
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        Assert.Equal("unauthorized", await CodeOf(response));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     /// <summary>
@@ -243,6 +220,9 @@ public class NorthSerializationTests
                 ProtocolErrorCode.AttachmentLimit,
                 ProtocolErrorCode.UnsupportedMediaType,
                 ProtocolErrorCode.AttachmentGone,
+
+                // #530.
+                ProtocolErrorCode.AgentUnavailable,
             ],
             Enum.GetValues<ProtocolErrorCode>());
     }
@@ -269,6 +249,7 @@ public class NorthSerializationTests
     [InlineData(ProtocolErrorCode.AttachmentLimit, "\"attachment_limit\"")]
     [InlineData(ProtocolErrorCode.UnsupportedMediaType, "\"unsupported_media_type\"")]
     [InlineData(ProtocolErrorCode.AttachmentGone, "\"attachment_gone\"")]
+    [InlineData(ProtocolErrorCode.AgentUnavailable, "\"agent_unavailable\"")]
     public void ConversationErrorCodes_HaveFixedMessagesAndWireForms(ProtocolErrorCode code, string wire)
     {
         Assert.Equal(wire, JsonSerializer.Serialize(code, FleetProtocolJson.Options));
@@ -278,8 +259,15 @@ public class NorthSerializationTests
         Assert.False(string.IsNullOrWhiteSpace(message));
     }
 
-    private static StringContent JsonContent(string raw) =>
-        new(raw, System.Text.Encoding.UTF8, "application/json");
+    private static string OpenBody(string agent = NorthTestHost.ChatAgent) =>
+        $$"""{"protocol":"{{ProtocolVersion.Current}}","externalRef":"main-thread","agent":"{{agent}}"}""";
+
+    private static HttpRequestMessage Authorized(string body, string contentType, string token)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/v1/conversations") { Content = Raw(body, contentType) };
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        return request;
+    }
 
     /// <summary>
     /// A body with the Content-Type set verbatim. <see cref="StringContent"/> appends its own

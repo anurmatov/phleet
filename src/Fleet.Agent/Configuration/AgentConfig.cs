@@ -274,11 +274,9 @@ public sealed class ConversationsOptions
     /// segment, so a value the two sides read differently means the agent binds and drains a queue
     /// nobody publishes to while the real one grows.
     /// <para>
-    /// It is validated against <see cref="AgentOptions.ShortName"/> at startup. There is deliberately
-    /// no agent-name field here: <c>ShortName</c> is already this agent's identity on this broker —
-    /// <c>GroupRelayService</c> builds <c>fleet.agent.{shortName}</c> from it and binds it as a
-    /// routing key — and a second field for one identity is the divergence this pattern exists to
-    /// catch, installed as a feature.
+    /// It is validated against <see cref="AgentOptions.Name"/> at startup (#530 D9). There is
+    /// deliberately no agent-name field here: <c>Name</c> is already this agent's unique identity,
+    /// and a second field for one identity is the divergence this pattern exists to catch.
     /// </para>
     /// </remarks>
     public const string AgentNamePattern = "^[A-Za-z0-9_-]{1,128}$";
@@ -286,7 +284,11 @@ public sealed class ConversationsOptions
     /// <summary>Base URL of the south listener. Absent disables the whole feature.</summary>
     public string SouthBaseUrl { get; set; } = "";
 
-    /// <summary>Bearer credential for the south listener. Required when enabled.</summary>
+    /// <summary>
+    /// This agent's own token for the south listener, <c>cj1.south.&lt;agent name&gt;</c>, written by
+    /// provisioning for a chat-enabled agent (#530 D8). It acts only on this agent's conversations.
+    /// Required when enabled.
+    /// </summary>
     public string SouthBearerToken { get; set; } = "";
 
     /// <summary>

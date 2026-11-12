@@ -207,10 +207,13 @@ public static class AuthEndpoints
             [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
         {
             var presented = CallerAuthenticator.BearerOf(http.Request.Headers.Authorization.FirstOrDefault());
+            // 403, never 401: a 401 here means "the caller in the question is not signed in". A
+            // refused service token is the two services holding different keys, and the chat service
+            // says that as itself rather than refusing every person as though they signed in wrong.
             if (!tokens.TryVerify(presented, CheckTokenPurpose, out var subject)
                 || !string.Equals(subject, CheckTokenSubject, StringComparison.Ordinal))
             {
-                return Unauthorized();
+                return Results.Json(new { error = "check_token_invalid" }, statusCode: StatusCodes.Status403Forbidden);
             }
 
             if (body is null) return Results.BadRequest(new { error = "body_required" });

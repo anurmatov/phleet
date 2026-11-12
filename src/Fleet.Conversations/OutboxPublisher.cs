@@ -75,7 +75,11 @@ public sealed class OutboxPublisher(
     /// Claims up to one batch, publishes it, and records the outcome.
     /// </summary>
     /// <returns>How many rows the broker confirmed.</returns>
-    public async Task<int> DrainOnceAsync(string routingKey, CancellationToken ct = default)
+    /// <remarks>
+    /// Every row carries its own routing key: a command its conversation's agent, an event its
+    /// conversation.
+    /// </remarks>
+    public async Task<int> DrainOnceAsync(CancellationToken ct = default)
     {
         await using var connection = new MySqlConnection(connectionString);
         await connection.OpenAsync(ct);
@@ -92,7 +96,7 @@ public sealed class OutboxPublisher(
         // the answer is a visibility lease written INSIDE the claim, not an early commit.
         await using var transaction = await connection.BeginTransactionAsync(ct);
 
-        var batch = await ClaimAsync(connection, transaction, routingKey, ct);
+        var batch = await ClaimAsync(connection, transaction, ct);
 
         if (batch.Count == 0)
         {
@@ -150,20 +154,29 @@ public sealed class OutboxPublisher(
     }
 
     private async Task<List<OutboxMessage>> ClaimAsync(
-        MySqlConnection connection, MySqlTransaction transaction, string routingKey, CancellationToken ct)
+        MySqlConnection connection, MySqlTransaction transaction, CancellationToken ct)
     {
         var isCommand = table == CommandTable;
 
+        // A command is routed to its conversation's agent (#530 D9), read in the claim itself.
+        //
+        // `FOR UPDATE OF o`: only the outbox rows are locked. Locking the conversation row as well
+        // would hold it across the broker round-trip and make the client's next submission to that
+        // conversation wait on a publish.
+        //
+        // A conversation from before conversations named their agent has the empty name and is never
+        // claimed: there is no queue for it. Migration 0007 retired the commands it had pending.
         var sql = isCommand
             ? """
-              SELECT id, conversation_id, message_id, kind, payload_json, attempts
-                FROM command_outbox
-               WHERE state = 'pending' AND next_attempt_at <= UTC_TIMESTAMP(6)
-               ORDER BY id LIMIT @batch
-                 FOR UPDATE SKIP LOCKED
+              SELECT o.id, o.conversation_id, o.message_id, o.kind, o.payload_json, o.attempts, c.agent_name
+                FROM command_outbox o
+                JOIN conversations c ON c.id = o.conversation_id
+               WHERE o.state = 'pending' AND o.next_attempt_at <= UTC_TIMESTAMP(6) AND c.agent_name <> ''
+               ORDER BY o.id LIMIT @batch
+                 FOR UPDATE OF o SKIP LOCKED
               """
             : """
-              SELECT id, conversation_id, event_id, NULL, NULL, attempts
+              SELECT id, conversation_id, event_id, NULL, NULL, attempts, NULL
                 FROM event_outbox
                WHERE state = 'pending' AND next_attempt_at <= UTC_TIMESTAMP(6)
                ORDER BY id LIMIT @batch
@@ -189,8 +202,8 @@ public sealed class OutboxPublisher(
                 PayloadJson = reader.IsDBNull(4) ? null : reader.GetString(4),
                 Attempts = reader.GetUInt16(5),
 
-                // Commands route to one agent; events route per conversation.
-                RoutingKey = isCommand ? routingKey : conversationId,
+                // Commands route to their conversation's agent; events route per conversation.
+                RoutingKey = isCommand ? reader.GetString(6) : conversationId,
             });
         }
 

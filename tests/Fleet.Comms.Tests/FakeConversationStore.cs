@@ -27,6 +27,12 @@ internal sealed class FakeConversationStore : IConversationStore
 
     public string ConversationId { get; set; } = "01JCONVERSATION00000000001";
 
+    /// <summary>The agent the fake conversation is with (#530 D9).</summary>
+    public string AgentName { get; set; } = NorthTestHost.ChatAgent;
+
+    /// <summary>Every open this store was asked for, in order.</summary>
+    public List<OpenConversationRequest> Opened { get; } = [];
+
     public ulong NextSeq { get; set; } = 41;
 
     public ulong RetainedFloorSeq { get; set; } = 1;
@@ -44,14 +50,50 @@ internal sealed class FakeConversationStore : IConversationStore
 
     public ConversationReplayGapPayload? Gap { get; set; }
 
+    /// <summary>When set, every read fails as an unreachable database would.</summary>
+    public bool Unavailable { get; set; }
+
     public Task<OpenConversationResult> OpenConversationAsync(
-        OpenConversationRequest request, CancellationToken ct = default) =>
-        Task.FromResult(new OpenConversationResult
+        OpenConversationRequest request, CancellationToken ct = default)
+    {
+        Opened.Add(request);
+
+        return Task.FromResult(new OpenConversationResult
         {
             ConversationId = ConversationId,
             NextSeq = NextSeq,
             RetainedFloorSeq = RetainedFloorSeq,
         });
+    }
+
+    private ConversationSummary Summary() => new()
+    {
+        ConversationId = ConversationId,
+        AgentName = AgentName,
+        ExternalRef = "main-thread",
+        NextSeq = NextSeq,
+        RetainedFloorSeq = RetainedFloorSeq,
+        LastActivityAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+    };
+
+    public Task<ConversationSummary?> FindConversationAsync(
+        string conversationId, string principalId, CancellationToken ct = default) =>
+        Task.FromResult(
+            string.Equals(conversationId, ConversationId, StringComparison.Ordinal)
+            && string.Equals(principalId, OwnerPrincipalId, StringComparison.Ordinal)
+                ? Summary()
+                : null);
+
+    public Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(
+        string channelId, string principalId, int limit, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<ConversationSummary>>(
+            string.Equals(principalId, OwnerPrincipalId, StringComparison.Ordinal) ? [Summary()] : []);
+
+    public Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default) =>
+        Task.FromResult<string?>(
+            kind == AgentTargetKind.Conversation && string.Equals(id, ConversationId, StringComparison.Ordinal)
+                ? AgentName
+                : null);
 
     public Task<AcceptSubmissionResult> AcceptSubmissionAsync(
         AcceptSubmissionRequest request, CancellationToken ct = default)
@@ -72,6 +114,8 @@ internal sealed class FakeConversationStore : IConversationStore
     public Task<ReadConversationResult> ReadAsync(
         ReadConversationRequest request, CancellationToken ct = default)
     {
+        if (Unavailable) throw new InvalidOperationException("the conversation database is unreachable");
+
         // The existence oracle the real store closes, closed here too: a conversation belonging to
         // someone else is reported exactly as one that does not exist.
         if (!string.Equals(request.PrincipalId, OwnerPrincipalId, StringComparison.Ordinal))

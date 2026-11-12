@@ -541,15 +541,12 @@ public sealed class JournalConfigurationTests : IDisposable
     {
         ["DOTNET_CONTENTROOT"] = _directory,
         ["ASPNETCORE_URLS"] = "http://127.0.0.1:0",
-        ["Comms__AuthStorePath"] = Path.Combine(_directory, "auth.db"),
     };
 
     private static void AddConversations(Dictionary<string, string> env)
     {
         // Never dialled: validation stops the process before any host starts.
         env["Comms__ConversationConnectionString"] = "Server=127.0.0.1;Port=1;Database=unused;User ID=unused;Password=unused;";
-        env["Comms__SouthBearerToken"] = "a-south-credential";
-        env["Comms__AgentName"] = "example-agent";
         env["Comms__SouthUrl"] = $"http://127.0.0.1:{FreePort()}";
         env["Comms__OpsUrl"] = $"http://127.0.0.1:{FreePort()}";
     }

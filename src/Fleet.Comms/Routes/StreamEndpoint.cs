@@ -62,7 +62,7 @@ public static class StreamEndpoint
     private static readonly ConcurrentDictionary<string, CancellationTokenSource> Live = new();
 
     public static async Task HandleAsync(
-        HttpContext http, string id, AuthService auth, IConversationStore store,
+        HttpContext http, string id, ISignInCheck signIn, IConversationStore store,
         ILoggerFactory loggerFactory, CancellationToken ct)
     {
         var logger = loggerFactory.CreateLogger(typeof(StreamEndpoint).FullName!);
@@ -76,7 +76,7 @@ public static class StreamEndpoint
         // The ordering matters for a second reason: checking `IsWebSocketRequest` first would answer
         // an unauthenticated caller `400` for a malformed upgrade and `401` for a well-formed one,
         // which tells them the difference without a credential.
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null)
         {
             http.Response.StatusCode = StatusCodes.Status401Unauthorized;
@@ -91,7 +91,8 @@ public static class StreamEndpoint
 
         // Kept for the per-tick re-validation below. It is held in a local for the lifetime of one
         // socket and is never logged, never written to a frame and never put in a metric label.
-        var bearer = http.Request.Headers.Authorization.ToString()["Bearer ".Length..];
+        // A browser's socket carries its session cookie, which is why this is not only a bearer.
+        var credential = PresentedCredential.Of(http.Request)!;
 
         var clientInstanceId = http.Request.Query["clientInstanceId"].ToString();
         if (!ConversationEndpoints.IsValidIdentifier(clientInstanceId))
@@ -145,7 +146,7 @@ public static class StreamEndpoint
 
         try
         {
-            await PumpAsync(socket, store, auth, caller, bearer, id, afterSeq, head, lifetime, logger);
+            await PumpAsync(socket, store, signIn, caller, credential, id, afterSeq, head, lifetime, logger);
         }
         finally
         {
@@ -154,8 +155,8 @@ public static class StreamEndpoint
     }
 
     private static async Task PumpAsync(
-        WebSocket socket, IConversationStore store, AuthService auth, AuthenticatedPrincipal caller,
-        string bearer, string conversationId, ulong afterSeq, ReadConversationResult head,
+        WebSocket socket, IConversationStore store, ISignInCheck signIn, AuthenticatedPrincipal caller,
+        PresentedCredential credential, string conversationId, ulong afterSeq, ReadConversationResult head,
         CancellationTokenSource lifetime, ILogger logger)
     {
         // Bounded, and DropWrite is deliberately NOT used: §9 says the server closes 4413 and drops
@@ -235,7 +236,14 @@ public static class StreamEndpoint
 
                 // Ping tick. Re-validate the credential FIRST: this is the mechanism behind the
                 // 30-second revocation bound, and without it that bound is a hope.
-                if (!(await auth.AuthenticateAsync(bearer, CancellationToken.None)).Succeeded)
+                //
+                // FRESH, past the ten-second memory, so the bound is one tick. Anything but a signed
+                // answer for the same person closes the socket — an orchestrator that cannot be
+                // reached included, because a check that did not happen is not a pass (#530 MUST
+                // NOT 3). The client reconnects, and its upgrade is answered 503 until it can be.
+                var recheck = await signIn.CheckAsync(credential, agent: null, fresh: true, CancellationToken.None);
+                if (recheck.Outcome != SignInOutcome.Signed
+                    || !string.Equals(recheck.Caller?.PrincipalId, caller.PrincipalId, StringComparison.Ordinal))
                 {
                     closeCode = Close.Unauthorized;
                     closeReason = "unauthorized";

@@ -552,7 +552,7 @@ public static class AgentHostRegistration
 
         ValidateConversationsOptions(
             options,
-            shortName: configuration[$"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)}"],
+            agentName: configuration[$"{AgentOptions.Section}:{nameof(AgentOptions.Name)}"],
             brokerHost: configuration[$"{RabbitMqOptions.Section}:{nameof(RabbitMqOptions.Host)}"]);
 
         // The agent's ONE connection to this broker, exposed through the service that owns it. The
@@ -598,7 +598,7 @@ public static class AgentHostRegistration
     /// borrowed value — and a check is not a second field.
     /// </remarks>
     internal static void ValidateConversationsOptions(
-        ConversationsOptions options, string? shortName = null, string? brokerHost = null)
+        ConversationsOptions options, string? agentName = null, string? brokerHost = null)
     {
         Required(options.SouthBearerToken, nameof(ConversationsOptions.SouthBearerToken));
 
@@ -614,20 +614,19 @@ public static class AgentHostRegistration
                 + "absolute http or https URI.");
         }
 
-        // The agent's OWN short name, against the SAME pattern the service enforces on its side.
-        // It is both the routing key and a queue-name segment, so a value the two sides read
-        // differently means this agent binds and drains a queue nobody publishes to while the real
-        // one grows — with no error anywhere. Checked here, carried nowhere: a second field for one
-        // identity is what this replaced.
-        if (string.IsNullOrWhiteSpace(shortName)
+        // The agent's OWN name, against the SAME pattern the service enforces on its side (#530 D9).
+        // It is the routing key, a queue-name segment and the subject of this agent's chat token, so
+        // a value the two sides read differently means this agent binds and drains a queue nobody
+        // publishes to while the real one grows — with no error anywhere.
+        if (string.IsNullOrWhiteSpace(agentName)
             || !System.Text.RegularExpressions.Regex.IsMatch(
-                shortName, ConversationsOptions.AgentNamePattern))
+                agentName, ConversationsOptions.AgentNamePattern))
         {
             throw new InvalidOperationException(
-                $"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)} must match "
+                $"{AgentOptions.Section}:{nameof(AgentOptions.Name)} must match "
                 + $"{ConversationsOptions.AgentNamePattern} when "
                 + $"{ConversationsOptions.Section}:{nameof(ConversationsOptions.SouthBaseUrl)} is set. "
-                + "It is this agent's queue segment on the broker, not a display name.");
+                + "It is this agent's queue segment on the broker and its chat identity.");
         }
 
         // The inbound queue is consumed on the agent's existing connection, so the broker it already

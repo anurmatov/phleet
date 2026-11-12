@@ -30,6 +30,7 @@ public static class ProtocolErrors
     public const string AttachmentLimit = "The attachment exceeds an accepted limit.";
     public const string UnsupportedMediaType = "The media type is not accepted.";
     public const string AttachmentGone = "The attachment is no longer available.";
+    public const string AgentUnavailable = "This agent does not accept chat.";
 
     /// <summary>Look up the fixed message for a code. Never returns runtime-derived text.</summary>
     public static string MessageFor(ProtocolErrorCode code) => code switch
@@ -52,6 +53,7 @@ public static class ProtocolErrors
         ProtocolErrorCode.AttachmentLimit => AttachmentLimit,
         ProtocolErrorCode.UnsupportedMediaType => UnsupportedMediaType,
         ProtocolErrorCode.AttachmentGone => AttachmentGone,
+        ProtocolErrorCode.AgentUnavailable => AgentUnavailable,
         _ => Internal,
     };
 }

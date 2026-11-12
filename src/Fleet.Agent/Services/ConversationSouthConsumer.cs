@@ -63,7 +63,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
     public static readonly TimeSpan ShutdownDrainBudget = TimeSpan.FromSeconds(15);
 
     private readonly ConversationsOptions _options;
-    private readonly string _agentShortName;
+    private readonly string _agentName;
     private readonly IAgentBrokerConnection _broker;
     private readonly ConversationSouthClient _client;
     private readonly ConversationSouthHandoff _handoff;
@@ -100,10 +100,11 @@ public sealed class ConversationSouthConsumer : BackgroundService
     {
         _options = options.Value;
 
-        // Verbatim, NOT lowercased. GroupRelayService lowercases for its own routing key; this
-        // segment has to match the name the SERVICE published under, and a case fold applied on one
-        // side only is exactly the divergence the pattern check exists to prevent.
-        _agentShortName = agent.Value.ShortName;
+        // The agent's unique NAME, verbatim (#530 D9): the routing key the chat service publishes
+        // this agent's commands under and the subject of the token it presents back. Not the short
+        // name, which is not unique, and not lowercased — a case fold applied on one side only is
+        // exactly the divergence the pattern check exists to prevent.
+        _agentName = agent.Value.Name;
         _broker = broker;
         _client = client;
         _handoff = handoff;
@@ -123,7 +124,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
     /// ULID minted at construction, so it separates them without inventing a second identity. It is
     /// an identity, never a credential.
     /// </remarks>
-    public string Owner => $"{_agentShortName}:{_allocator.Epoch}";
+    public string Owner => $"{_agentName}:{_allocator.Epoch}";
 
     /// <summary>
     /// Every attempt this process owns and has not committed — running and
@@ -202,14 +203,30 @@ public sealed class ConversationSouthConsumer : BackgroundService
             }
         };
 
+        // Declared here as well as by the publishing service, with the same arguments, so whichever
+        // side comes first the other's declaration is a no-op. An agent whose chat was just turned on
+        // otherwise retries a missing queue until someone sends it a first message.
+        await _channel.ExchangeDeclareAsync(
+            CommandExchange, ExchangeType.Direct, durable: true, autoDelete: false, cancellationToken: ct);
+        await _channel.QueueDeclareAsync(
+            QueueName, durable: true, exclusive: false, autoDelete: false,
+            arguments: new Dictionary<string, object?> { ["x-queue-type"] = "quorum" },
+            cancellationToken: ct);
+        await _channel.QueueBindAsync(QueueName, CommandExchange, routingKey: _agentName, cancellationToken: ct);
+
         _consumerTag = await _channel.BasicConsumeAsync(
             QueueName, autoAck: false, consumer: consumer, cancellationToken: ct);
 
         _logger.LogInformation("South conversation consumer attached to {Queue}", QueueName);
     }
 
-    /// <summary>The per-agent inbound queue. Declared and bound by the publishing service.</summary>
-    private string QueueName => $"fleet.conversations.inbound.{_agentShortName}";
+    /// <summary>
+    /// The per-agent inbound queue and the exchange it is bound to. The same literals as the chat
+    /// service's <c>ConversationBroker</c>, which this assembly may not reference (#303 MUST NOT 14).
+    /// </summary>
+    private string QueueName => $"fleet.conversations.inbound.{_agentName}";
+
+    private const string CommandExchange = "fleet.conversations";
 
     // ── one delivery ─────────────────────────────────────────────────────────
 

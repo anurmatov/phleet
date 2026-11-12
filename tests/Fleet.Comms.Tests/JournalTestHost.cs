@@ -20,6 +20,10 @@ internal sealed class JournalTestHost : IAsyncDisposable
     public static readonly string KeyA = Key(1);
     public static readonly string KeyB = Key(101);
 
+    /// <summary>An agent's south token under <see cref="KeyA"/>, as provisioning mints it (#530).</summary>
+    public static string SouthToken(string agent) =>
+        JournalTokens.Mint(JournalTokens.ParseKeys(KeyA)[0], Fleet.Shared.SignIn.AgentTokenPurpose, agent);
+
     private readonly WebApplication _app;
 
     private JournalTestHost(WebApplication app, FakeJournalStore store, JournalRuntimeStats stats)

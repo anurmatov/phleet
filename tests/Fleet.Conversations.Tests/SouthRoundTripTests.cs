@@ -611,6 +611,7 @@ public sealed class SouthRoundTripTests(
             ChannelId = ChannelId,
             ExternalRef = $"ref-{Guid.NewGuid():N}",
             PrincipalId = PrincipalId,
+            AgentName = _agentName,
         });
 
         return result.ConversationId;
@@ -633,7 +634,7 @@ public sealed class SouthRoundTripTests(
                 ConversationEventKind.SubmissionCreate, conversationId, submissionId, text),
         });
 
-        var published = await _publisher.DrainOnceAsync(_agentName);
+        var published = await _publisher.DrainOnceAsync();
         Assert.True(published > 0, "the command outbox published nothing — the agent will never see it");
 
         return submissionId;
@@ -654,7 +655,7 @@ public sealed class SouthRoundTripTests(
                 ConversationEventKind.SubmissionCancel, conversationId, submissionId, text: null),
         });
 
-        var published = await _publisher.DrainOnceAsync(_agentName);
+        var published = await _publisher.DrainOnceAsync();
         Assert.True(published > 0, "the command outbox published nothing — the agent will never see it");
 
         return submissionId;
@@ -667,7 +668,7 @@ public sealed class SouthRoundTripTests(
             "UPDATE command_outbox SET state = 'pending', next_attempt_at = UTC_TIMESTAMP(6) "
             + $"WHERE message_id IS NOT NULL AND payload_json LIKE '%{submissionId}%'");
 
-        await _publisher.DrainOnceAsync(_agentName);
+        await _publisher.DrainOnceAsync();
     }
 
     private static string Envelope(string kind, string conversationId, string submissionId, string? text) =>
@@ -836,7 +837,7 @@ public sealed class SouthRoundTripTests(
         {
             // The base address is nominal: the handler below routes to the in-process listener.
             SouthBaseUrl = "http://south.test",
-            SouthBearerToken = SouthTestHost.Token,
+            SouthBearerToken = SouthTestHost.TokenFor(_agentName),
 
             // Paired with the shortened lease by hand. The agent validates its interval against the
             // shared CONSTANT, not against the store's configured lease, so a shortened lease here

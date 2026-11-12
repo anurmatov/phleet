@@ -28,8 +28,22 @@ namespace Fleet.Conversations.Tests;
 /// </remarks>
 internal sealed class SouthTestHost : IAsyncDisposable
 {
-    /// <summary>The credential the host is configured with. Not a secret; this is a test fixture.</summary>
-    public const string Token = "south-suite-bearer-token";
+    /// <summary>The agent every conversation in these suites is with, and the subject of <see cref="Token"/>.</summary>
+    public const string Agent = "test-agent";
+
+    /// <summary>The shared key the host is configured with. Not a secret; this is a test fixture.</summary>
+    public const string Key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+
+    /// <summary>
+    /// <see cref="Agent"/>'s own south token, as provisioning mints it (#530): it acts only on that
+    /// agent's conversations.
+    /// </summary>
+    public static readonly string Token = TokenFor(Agent);
+
+    /// <summary>Another agent's token under the same key.</summary>
+    public static string TokenFor(string agent) =>
+        Fleet.Conversations.Journal.JournalTokens.Mint(
+            Fleet.Conversations.Journal.JournalTokens.ParseKeys(Key)[0], Fleet.Shared.SignIn.AgentTokenPurpose, agent);
 
     private readonly WebApplication _app;
 
@@ -63,9 +77,8 @@ internal sealed class SouthTestHost : IAsyncDisposable
 
         var app = CommsApp.BuildSouthApp(builder, store, new CommsOptions
         {
-            SouthBearerToken = Token,
-            AgentName = "test-agent",
             ConversationConnectionString = "configured",
+            Journal = new() { TokenKeys = Key },
         });
 
         await app.StartAsync();
@@ -75,6 +88,10 @@ internal sealed class SouthTestHost : IAsyncDisposable
     /// <summary>POST with the correct credential.</summary>
     public Task<HttpResponseMessage> PostAsync<T>(string path, T body) =>
         Send(path, body, Token);
+
+    /// <summary>POST with a given credential: another agent's token, or a token of another purpose.</summary>
+    public Task<HttpResponseMessage> PostAsAsync<T>(string path, T body, string token) =>
+        Send(path, body, token);
 
     /// <summary>POST with a credential that is present and wrong.</summary>
     public Task<HttpResponseMessage> PostWithWrongTokenAsync<T>(string path, T body) =>

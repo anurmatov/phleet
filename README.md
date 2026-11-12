@@ -216,9 +216,7 @@ docker build -t fleet:memory -f src/Fleet.Memory/Dockerfile .
 docker build -t fleet:temporal-bridge -f Dockerfile.temporal .
 docker build -t fleet:bridge -f src/Fleet.Bridge/Dockerfile .
 docker build -t fleet:secrets -f src/Fleet.SecretProxy/Dockerfile .
-docker build -t fleet:dashboard \
-  --build-arg VITE_AUTH_TOKEN=your-token \
-  -f src/fleet-dashboard/Dockerfile .
+docker build -t fleet:dashboard -f src/fleet-dashboard/Dockerfile .
 
 # Dashboard dev server
 cd src/fleet-dashboard && npm install && npm run dev

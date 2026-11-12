@@ -815,9 +815,8 @@ if $PROMPT_GITHUB; then
   fi
 fi
 
-# Note: no separate prompt for VITE_AUTH_TOKEN. The dashboard build arg is
-# sourced directly from ${ORCHESTRATOR_AUTH_TOKEN} in docker-compose.example.yml
-# and in the `docker build` call below, so the two values can't diverge.
+# Note: the dashboard is built without any token. A browser signs in at runtime with
+# ORCHESTRATOR_AUTH_TOKEN (docs/sign-in.md).
 
 # ── Local-only credentials ────────────────────────────────────────────────────
 # These five values are internal-only — no external service needs to match them.
@@ -1013,11 +1012,6 @@ section "[5/7] Building Docker images..."
 if $SKIP_BUILD; then
   warn "Skipping image builds (--skip-build)"
 else
-  # Both tokens are baked into the dashboard bundle at build time so it can
-  # call the general API (VITE_AUTH_TOKEN) and the config API (VITE_CONFIG_TOKEN).
-  VITE_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
-  CONFIG_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_CONFIG_TOKEN")
-
   # Download ONNX model + vocab into models/fleet-memory/ before building fleet:memory.
   # Fleet.Memory's Dockerfile bakes them in via `COPY models/fleet-memory/ /app/models/`.
   onnx_model="$SCRIPT_DIR/models/fleet-memory/all-MiniLM-L6-v2.onnx"
@@ -1061,11 +1055,7 @@ else
   build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
   build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"      "$SCRIPT_DIR"
   build_image "fleet:whisper"         "$SCRIPT_DIR/whisper/Dockerfile"                "$SCRIPT_DIR/whisper"
-  # No quotes around $VITE_TOKEN / $CONFIG_TOKEN — the `docker build $extra_args`
-  # call in build_image() relies on word-splitting, and escaped quotes here would
-  # become literal characters inside the baked-in tokens → 401s.
-  build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR" \
-    "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN --build-arg VITE_CONFIG_TOKEN=$CONFIG_TOKEN"
+  build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR"
 
   if [[ "$_comms_enabled" == true ]]; then
     build_image "fleet:comms" "$SCRIPT_DIR/src/Fleet.Comms/Dockerfile" "$SCRIPT_DIR"

@@ -181,9 +181,6 @@ fi
 # ── Build images ─────────────────────────────────────────────────────────────
 section "[3/4] Building Docker images..."
 
-VITE_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
-CONFIG_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_CONFIG_TOKEN")
-
 build_image() {
   local tag="$1" dockerfile="$2" context="$3" extra_args="${4:-}"
   echo -n "  Building $tag ... "
@@ -206,8 +203,8 @@ build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"   
 build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
 build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"     "$SCRIPT_DIR"
-build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR" \
-  "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN --build-arg VITE_CONFIG_TOKEN=$CONFIG_TOKEN"
+# No build arguments: the dashboard holds no token. A browser signs in at runtime.
+build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR"
 
 # Only when the user opted in. Someone who never enabled Fleet.Comms should not pay its build
 # time on every upgrade, and an image built for a service that never starts is pure cost.

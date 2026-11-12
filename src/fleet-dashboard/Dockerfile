@@ -1,10 +1,7 @@
 FROM node:20-slim AS build
 
-ARG VITE_AUTH_TOKEN=""
-ENV VITE_AUTH_TOKEN=${VITE_AUTH_TOKEN}
-
-ARG VITE_CONFIG_TOKEN=""
-ENV VITE_CONFIG_TOKEN=${VITE_CONFIG_TOKEN}
+# No token is built into the page. A browser signs in at runtime (docs/sign-in.md), and the
+# VITE_AUTH_TOKEN / VITE_CONFIG_TOKEN build arguments this image used to take are gone.
 
 WORKDIR /app
 COPY src/fleet-dashboard/package.json src/fleet-dashboard/package-lock.json ./

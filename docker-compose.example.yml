@@ -850,9 +850,8 @@ services:
     build:
       context: .
       dockerfile: src/fleet-dashboard/Dockerfile
-      args:
-        VITE_AUTH_TOKEN: ${ORCHESTRATOR_AUTH_TOKEN:-changeme}
-        VITE_CONFIG_TOKEN: ${ORCHESTRATOR_CONFIG_TOKEN:-}
+      # No build arguments: no token is built into the page. A browser signs in at runtime with
+      # ORCHESTRATOR_AUTH_TOKEN and holds a session cookie (docs/sign-in.md).
     image: fleet:dashboard
     container_name: fleet-dashboard
     ports:

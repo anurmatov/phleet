@@ -1,17 +1,26 @@
 import type { WorkflowSummary } from './types'
+import { REQUEST_HEADER, isWrite } from './session'
 
 export const TEMPORAL_UI  = import.meta.env.VITE_TEMPORAL_UI_URL ?? ''
-export const AUTH_TOKEN   = import.meta.env.VITE_AUTH_TOKEN ?? ''
-export const CONFIG_TOKEN = import.meta.env.VITE_CONFIG_TOKEN ?? ''
 
-export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
-  // /api/config/* requires ORCHESTRATOR_CONFIG_TOKEN (separate from the admin token)
-  const isConfigApi = url.startsWith('/api/config') || url.includes('/api/config/')
-  const token = isConfigApi ? CONFIG_TOKEN : AUTH_TOKEN
-  const headers: HeadersInit = token
-    ? { ...init?.headers, Authorization: `Bearer ${token}` }
-    : { ...init?.headers }
-  return fetch(url, { ...init, headers })
+/** Sent on the window when the orchestrator answers a request with 401: this browser may have been signed out. */
+export const SIGNED_OUT_EVENT = 'fleet:unauthorized'
+
+/**
+ * Every request this page makes to the orchestrator and the chat service.
+ *
+ * The page holds no token. The session cookie is sent by the browser on its own (same origin), and
+ * a write adds the one header the orchestrator requires of a cookie-authenticated write.
+ */
+export async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers)
+  if (isWrite(init?.method)) headers.set(REQUEST_HEADER, '1')
+
+  const response = await fetch(url, { ...init, headers, credentials: 'same-origin' })
+  // Announced, not acted on here: whether this browser is really signed out is the session
+  // route's answer to give, and one route's 401 is not always that.
+  if (response.status === 401) window.dispatchEvent(new Event(SIGNED_OUT_EVENT))
+  return response
 }
 
 export function statusDot(effective: string) {

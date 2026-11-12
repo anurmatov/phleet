@@ -11,6 +11,8 @@ const LAST_AGENT_KEY = 'fleet.chat.lastAgent'
 
 /** Unsent text per agent, kept while the page is open so switching agents loses nothing. */
 const drafts = new Map<string, string>()
+/** Per-agent state survives tab/page navigation, but never a page reload or sign-out reload. */
+const threads = new Map<string, ChatState>()
 
 function storage(): Storage | null {
   try { return window.localStorage } catch { return null }
@@ -145,7 +147,10 @@ function ChatThread({ agent }: { agent: ChatAgent }) {
   const input = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
-    const chat = new ChatConnection(agent.agentName, browserDeps(), setState)
+    const chat = new ChatConnection(agent.agentName, browserDeps(), next => {
+      threads.set(agent.agentName, next)
+      setState(next)
+    }, threads.get(agent.agentName))
     connection.current = chat
     setState(chat.current)
     chat.start()

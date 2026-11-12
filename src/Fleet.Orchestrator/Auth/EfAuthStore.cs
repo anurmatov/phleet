@@ -224,6 +224,13 @@ public sealed class EfAuthStore(IServiceScopeFactory scopes) : IAuthStore
                 t => t.DeviceId == deviceId && t.RevokedAt == null && t.ExpiresAt > moment, ct);
         }
 
+        public async Task RemovePushDevicesAsync(string deviceId, CancellationToken ct)
+        {
+            var rows = await db.PushDevices.Where(d => d.AuthDeviceId == deviceId).ToListAsync(ct);
+            db.PushDevices.RemoveRange(rows.Where(d => Same(d.AuthDeviceId!, deviceId)));
+            await db.SaveChangesAsync(ct);
+        }
+
         public async Task RevokeTokensForDeviceAsync(string deviceId, DateTimeOffset at, CancellationToken ct)
         {
             var rows = await db.AuthTokens

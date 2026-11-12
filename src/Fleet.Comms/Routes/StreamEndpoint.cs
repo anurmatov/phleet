@@ -179,6 +179,33 @@ public static class StreamEndpoint
 
         var pongs = Channel.CreateUnbounded<bool>();
         var overflow = 0;
+        var unauthorized = 0;
+
+        // Authentication runs independently of outbound traffic and blocked sends. A busy
+        // conversation must not be able to postpone revocation by resetting the ping timer.
+        var auth = Task.Run(async () =>
+        {
+            try
+            {
+                while (!lifetime.IsCancellationRequested)
+                {
+                    await Task.Delay(PingInterval, lifetime.Token);
+                    var answer = await signIn.CheckAsync(credential, agent: null, fresh: true, lifetime.Token)
+                        .WaitAsync(TimeSpan.FromSeconds(5), lifetime.Token);
+                    if (answer.Outcome == SignInOutcome.Signed
+                        && answer.Caller == caller) continue;
+                    Interlocked.Exchange(ref unauthorized, 1);
+                    await lifetime.CancelAsync();
+                    return;
+                }
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                Interlocked.Exchange(ref unauthorized, 1);
+                await lifetime.CancelAsync();
+            }
+        });
 
         var reader = Task.Run(() => ReadFramesAsync(socket, pongs, lifetime, logger));
 
@@ -214,19 +241,18 @@ public static class StreamEndpoint
         // the probe page happened to reach the tail, and the second reports a floor of 0 — a
         // position that does not exist — whenever no gap was produced, which is almost always. A
         // client sizing its catch-up from either would ask for the wrong range.
-        await SendAsync(socket, FleetProtocolJson.Serialize(new StreamHello
-        {
-            ConversationId = conversationId,
-            NextSeq = head.NextSeq,
-            RetainedFloorSeq = head.RetainedFloorSeq,
-            Limits = SessionLimitsSnapshot,
-        }), lifetime.Token);
-
         var closeCode = Close.Internal;
         var closeReason = "internal";
 
         try
         {
+            await SendAsync(socket, FleetProtocolJson.Serialize(new StreamHello
+            {
+                ConversationId = conversationId,
+                NextSeq = head.NextSeq,
+                RetainedFloorSeq = head.RetainedFloorSeq,
+                Limits = SessionLimitsSnapshot,
+            }), lifetime.Token);
             while (!lifetime.IsCancellationRequested)
             {
                 var send = outbound.Reader.WaitToReadAsync(lifetime.Token).AsTask();
@@ -240,22 +266,6 @@ public static class StreamEndpoint
                         await SendAsync(socket, frame, lifetime.Token);
 
                     continue;
-                }
-
-                // Ping tick. Re-validate the credential FIRST: this is the mechanism behind the
-                // 30-second revocation bound, and without it that bound is a hope.
-                //
-                // FRESH, past the ten-second memory, so the bound is one tick. Anything but a signed
-                // answer for the same person closes the socket — an orchestrator that cannot be
-                // reached included, because a check that did not happen is not a pass (#530 MUST
-                // NOT 3). The client reconnects, and its upgrade is answered 503 until it can be.
-                var recheck = await signIn.CheckAsync(credential, agent: null, fresh: true, CancellationToken.None);
-                if (recheck.Outcome != SignInOutcome.Signed
-                    || !string.Equals(recheck.Caller?.PrincipalId, caller.PrincipalId, StringComparison.Ordinal))
-                {
-                    closeCode = Close.Unauthorized;
-                    closeReason = "unauthorized";
-                    break;
                 }
 
                 await SendAsync(socket, """{"kind":"ping"}""", lifetime.Token);
@@ -310,8 +320,13 @@ public static class StreamEndpoint
                 // Already torn down; nothing left to cancel.
             }
 
+            if (Volatile.Read(ref unauthorized) == 1)
+            {
+                closeCode = Close.Unauthorized;
+                closeReason = "unauthorized";
+            }
             await CloseAsync(socket, closeCode, closeReason);
-            await Task.WhenAll(reader, tail);
+            await Task.WhenAll(reader, tail, auth);
         }
     }
 
@@ -373,12 +388,13 @@ public static class StreamEndpoint
 
         try
         {
-            await socket.CloseAsync(
-                (WebSocketCloseStatus)code, reason, CancellationToken.None);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await socket.CloseAsync((WebSocketCloseStatus)code, reason, deadline.Token);
         }
-        catch (WebSocketException)
+        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException)
         {
-            // The peer is already gone; there is nothing to tell it.
+            // A peer that never acknowledges cannot hold a revoked stream open indefinitely.
+            socket.Abort();
         }
     }
 

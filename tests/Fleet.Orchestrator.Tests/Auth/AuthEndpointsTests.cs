@@ -519,4 +519,43 @@ public class AuthEndpointsTests
             (await host.SendAsync(Post, $"/api/auth/devices/{deviceId}/revoke", cookie: cookie, requestHeader: true)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: accessToken)).StatusCode);
     }
+    [Fact]
+    public async Task OpenModeBrowser_CannotReadConfigSecrets()
+    {
+        await using var host = await SignInHost.StartAsync(serviceToken: null);
+        var cookie = await host.SignInBrowserAsync(token: null);
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await host.SendAsync(Get, "/api/config/values", cookie: cookie)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.SendAsync(Get, "/api/config/values", bearer: SignInHost.ConfigToken)).StatusCode);
+    }
+
+    [Fact]
+    public async Task JunkFlood_DoesNotSpendTheVerificationBudget_OrEvictKnownCallers()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, _, _, token) = await host.EnrolledAppAsync();
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+        host.Time.Advance(TimeSpan.FromSeconds(31));
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow * 2; i++)
+            Assert.Equal(HttpStatusCode.Unauthorized,
+                (await host.SendAsync(Get, "/api/agents", bearer: "junk" + i)).StatusCode);
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow; i++)
+            _ = await host.SendAsync(Get, "/api/agents", bearer: Credentials.Compose(Credentials.NewRecordId(), Credentials.NewSecret()));
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: cookie)).StatusCode);
+    }
+
+    [Fact]
+    public async Task CachedAccessToken_ExpiresAcrossBackwardWallClockJump()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (_, _, _, token) = await host.EnrolledAppAsync();
+        host.Time.Advance(AuthService.AccessTokenTtl - TimeSpan.FromSeconds(5));
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+        host.Time.SetBackwards(TimeSpan.FromHours(1));
+        host.Time.Advance(TimeSpan.FromSeconds(6));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+    }
+
 }

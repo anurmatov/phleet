@@ -106,12 +106,12 @@ export class ChatConnection {
   private readonly deps: ChatDeps
   private readonly onChange: (state: ChatState) => void
 
-  constructor(agent: string, deps: ChatDeps, onChange: (state: ChatState) => void) {
+  constructor(agent: string, deps: ChatDeps, onChange: (state: ChatState) => void, retained?: ChatState) {
     this.agent = agent
     this.deps = deps
     this.onChange = onChange
     this.newId = deps.newId ?? (() => newIdentifier())
-    this.state = {
+    this.state = retained ? { ...retained, phase: 'connecting', stopping: false } : {
       phase: 'connecting', connectedOnce: false, stopReason: null, problem: null, conversationId: null,
       transcript: emptyTranscript(), pending: [], limits: DEFAULT_LIMITS, stopping: false, notice: null,
     }
@@ -134,6 +134,11 @@ export class ChatConnection {
   }
 
   dispose(): void {
+    // Navigation cannot tell whether an in-flight POST committed. Retain its text and IDs as
+    // uncertain, with an explicit same-ID retry, rather than discarding it or auto-resending.
+    this.update({ pending: this.state.pending.map(p => p.status === 'sending'
+      ? { ...p, status: 'failed', problem: 'The send outcome is unknown. Retry with the same message id.', canRetry: true }
+      : p) })
     this.disposed = true
     this.generation++
     this.clearTimer()

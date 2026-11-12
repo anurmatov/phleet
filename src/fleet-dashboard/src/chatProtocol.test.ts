@@ -97,7 +97,7 @@ test('urls encode the conversation id and carry no credential', () => {
 
 test('the stream uses wss on an https page and ws on an http one, on the same host', () => {
   assert.equal(wsBaseFor({ protocol: 'https:', host: 'fleet.example' }), 'wss://fleet.example')
-  assert.equal(wsBaseFor({ protocol: 'http:', host: '192.168.1.3:3700' }), 'ws://192.168.1.3:3700')
+  assert.equal(wsBaseFor({ protocol: 'http:', host: '192.0.2.1:8080' }), 'ws://192.0.2.1:8080')
 })
 
 // ── answers ─────────────────────────────────────────────────────────────────

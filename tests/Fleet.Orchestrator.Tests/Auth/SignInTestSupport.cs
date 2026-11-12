@@ -2,6 +2,11 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Fleet.Orchestrator.Auth;
+using Fleet.Orchestrator.Configuration;
+using Fleet.Orchestrator.Services.Push;
+using System.Security.Cryptography;
+using System.Text;
+using System.Net.WebSockets;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Services;
@@ -97,6 +102,8 @@ internal sealed class SignInHost : IAsyncDisposable
     public CountingSecretHasher Hasher { get; }
     public InMemoryAuthStore? MemoryStore { get; }
     public AuthService Auth => _app.Services.GetRequiredService<AuthService>();
+    public IServiceProvider Services => _app.Services;
+
     public JournalTokenService Tokens => _app.Services.GetRequiredService<JournalTokenService>();
 
     private SignInHost(WebApplication app, SqliteConnection? connection, TestTimeProvider time,
@@ -114,7 +121,7 @@ internal sealed class SignInHost : IAsyncDisposable
     /// <param name="tokenKey">The key shared with the chat service. Null starts a deployment that has none.</param>
     public static async Task<SignInHost> StartAsync(
         string? serviceToken = ServiceToken, string? configToken = ConfigToken, bool durable = false,
-        string? tokenKey = "default")
+        string? tokenKey = "default", IWorkflowSignalClient? signalClient = null, bool push = false, bool sockets = false)
     {
         if (tokenKey == "default") tokenKey = TokenKey;
 
@@ -156,6 +163,17 @@ internal sealed class SignInHost : IAsyncDisposable
             rl.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
         });
 
+        if (signalClient is not null) builder.Services.AddSingleton(signalClient);
+        if (push)
+        {
+            builder.Services.Configure<PushOptions>(o => {
+                o.Enabled = true;
+                o.ApnsKeyBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(ECDsa.Create(ECCurve.NamedCurves.nistP256).ExportPkcs8PrivateKeyPem()));
+                o.ApnsKeyId = "SYNTHETIC"; o.ApnsTeamId = "SYNTHETIC"; o.ApnsTopic = "example.invalid";
+            });
+            builder.Services.AddSingleton<PushReadiness>();
+            builder.Services.AddSingleton<ChatReplyPushes>();
+        }
         var app = builder.Build();
         if (durable)
         {
@@ -165,14 +183,29 @@ internal sealed class SignInHost : IAsyncDisposable
 
         await app.Services.GetRequiredService<AuthService>().EnsureOwnerAsync(null);
 
+        app.UseWebSockets();
         app.UseRateLimiter();
         app.UseFleetAccess();
         app.MapAuthEndpoints();
+        if (signalClient is not null) app.MapWorkflowSignalEndpoints();
+        if (push) app.MapPushEndpoints();
         app.MapGet("/api/agents", () => Results.Ok(new { read = true }));
         app.MapPost("/api/agents/example/restart", () => Results.Ok(new { wrote = true }));
         app.MapGet("/api/config/values", () => Results.Ok(new { config = true }));
         app.MapPut("/api/config/values", () => Results.Ok(new { config = true }));
-        app.MapGet("/ws", () => Results.Ok(new { socket = true }));
+        if (!sockets) app.MapGet("/ws", () => Results.Ok(new { socket = true }));
+        else app.Map("/ws", async (HttpContext http) => {
+            using var socket = await http.WebSockets.AcceptWebSocketAsync();
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted);
+            var watch = ControlSocketAccess.WatchAsync(http, socket, lifetime);
+            try {
+                while (!lifetime.IsCancellationRequested) {
+                    await socket.SendAsync(new byte[] { 1 }, WebSocketMessageType.Binary, true, lifetime.Token);
+                    await Task.Delay(25, lifetime.Token);
+                }
+            } catch (Exception) when (lifetime.IsCancellationRequested || socket.State != WebSocketState.Open) { }
+            finally { await lifetime.CancelAsync(); await watch; }
+        });
         app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
         await app.StartAsync();
@@ -207,6 +240,7 @@ internal sealed class SignInHost : IAsyncDisposable
 
     /// <summary>A client that keeps no cookies of its own: every credential a request carries is put there by the test.</summary>
     public HttpClient Client() => _app.GetTestClient();
+    public WebSocketClient SocketClient() => _app.GetTestServer().CreateWebSocketClient();
 
     // ── requests ─────────────────────────────────────────────────────────────
 

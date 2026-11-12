@@ -1,4 +1,5 @@
 using System.Net;
+using Fleet.Orchestrator.Auth;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Fleet.Orchestrator.Endpoints;
@@ -175,7 +176,8 @@ public class SignalGateIdentityTests
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["Orchestrator:AuthToken"] = token });
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Services.AddSingleton<IWorkflowSignalClient>(fake);
-        var app = builder.Build(); app.MapWorkflowSignalEndpoints(); await app.StartAsync(); return app;
+        builder.Services.AddFleetSignIn(durable: false);
+        var app = builder.Build(); app.UseFleetAccess(); app.MapWorkflowSignalEndpoints(); await app.StartAsync(); return app;
     }
     private sealed class FakeSignalClient : IWorkflowSignalClient
     {

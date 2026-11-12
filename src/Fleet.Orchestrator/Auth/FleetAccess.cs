@@ -87,6 +87,12 @@ public static class FleetAccess
                 return;
             }
 
+            if (context.WebSockets.IsWebSocketRequest && caller.Kind == CallerKind.Browser
+                && !ControlSocketAccess.SameOrigin(request))
+            {
+                await RefuseAsync(context, StatusCodes.Status403Forbidden, "origin_refused");
+                return;
+            }
             caller.AttachTo(context);
             if (caller.SessionExpiresAt is { } extendedTo)
             {
@@ -140,7 +146,7 @@ public static class FleetAccess
             }
 
             var caller = CallerIdentity.Of(context);
-            if (caller.Kind == CallerKind.Browser)
+            if (authenticator.IsRequired && caller.Kind == CallerKind.Browser)
             {
                 if (OrchestratorAuth.IsBrowserWriteWithoutHeader(
                         context.Request.Method, caller.Kind,

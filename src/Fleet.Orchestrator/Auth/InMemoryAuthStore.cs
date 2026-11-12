@@ -118,6 +118,9 @@ public sealed class InMemoryAuthStore : IAuthStore
                 && t.RevokedAt is null
                 && t.ExpiresAt > now));
 
+        // Without a database push registration is unavailable, so there are no rows to remove.
+        public Task RemovePushDevicesAsync(string deviceId, CancellationToken ct) => Task.CompletedTask;
+
         public Task RevokeTokensForDeviceAsync(string deviceId, DateTimeOffset at, CancellationToken ct)
         {
             foreach (var token in _tokens.Values

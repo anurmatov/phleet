@@ -134,7 +134,8 @@ public sealed class PushDelivery(IServiceScopeFactory scopes, IApnsClient client
         var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
         if (db is null) return;
 
-        var devices = await db.PushDevices.ToListAsync(ct);
+        var devices = await db.PushDevices.Where(d => d.AuthDeviceId == null
+            || db.AuthDevices.Any(a => a.DeviceId == d.AuthDeviceId && a.RevokedAt == null)).ToListAsync(ct);
         var byId = devices.ToDictionary(d => d.DeviceId, StringComparer.Ordinal);
         foreach (var removed in _owed.Keys.Where(k => !byId.ContainsKey(k.DeviceId)).ToList()) _owed.Remove(removed);
 
@@ -156,6 +157,14 @@ public sealed class PushDelivery(IServiceScopeFactory scopes, IApnsClient client
             var device = byId[key.DeviceId];
             if (forget.Contains(device)) continue;
             var (message, attempts) = _owed[key];
+            // A pass may hold a snapshot while another request revokes the phone. Check again
+            // just before each send, including retries and rows created by a concurrent PUT.
+            if (!await db.PushDevices.AsNoTracking().AnyAsync(d => d.Id == device.Id && d.Token == device.Token
+                && (d.AuthDeviceId == null || db.AuthDevices.Any(a => a.DeviceId == d.AuthDeviceId && a.RevokedAt == null)), ct))
+            {
+                _owed.Remove(key);
+                continue;
+            }
             var result = await client.SendAsync(device.Token, message, ct);
             switch (result.Outcome)
             {

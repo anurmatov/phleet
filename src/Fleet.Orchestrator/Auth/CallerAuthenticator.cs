@@ -63,9 +63,9 @@ public sealed class AuthBusyException() : Exception("Too many sign-in checks at 
 /// would let any page that can make the browser send a request choose which identity it carries.
 /// </para>
 /// <para>
-/// <b>A verified credential is remembered briefly.</b> Verification is one Argon2id evaluation, so
+/// <b>A verified credential is remembered until its next policy deadline.</b> Verification is one Argon2id evaluation, so
 /// a dashboard that polls several routes would otherwise spend it on every request. A credential
-/// that verified is remembered for <see cref="CacheLifetime"/> under a hash of its value, and
+/// that verified is remembered under a hash of its value, and
 /// never past its own deadline. <see cref="Forget"/> empties the memory, and every revocation
 /// calls it, so on this process a revoked device stops authenticating at once.
 /// </para>
@@ -81,21 +81,23 @@ public sealed class CallerAuthenticator : IDisposable
     /// <summary>The cookie a signed-in browser carries.</summary>
     public const string SessionCookie = SignIn.SessionCookie;
 
-    public static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan MissWindow = TimeSpan.FromSeconds(10);
     public const int MissesPerWindow = 40;
 
     private const int MaxRemembered = 512;
 
     private readonly AuthService _auth;
-    private readonly TimeProvider _time;
+    private readonly MonotonicClock _time;
     private readonly byte[]? _serviceTokenDigest;
     private readonly ConcurrentDictionary<string, Remembered> _remembered = new(StringComparer.Ordinal);
     private readonly FixedWindowRateLimiter _misses;
 
+    private long _generation;
+    private readonly Lock _cacheGate = new();
+
     private sealed record Remembered(AuthenticatedDevice Device, DateTimeOffset Until);
 
-    public CallerAuthenticator(AuthService auth, IConfiguration configuration, TimeProvider time)
+    public CallerAuthenticator(AuthService auth, IConfiguration configuration, MonotonicClock time)
     {
         _auth = auth;
         _time = time;
@@ -128,7 +130,7 @@ public sealed class CallerAuthenticator : IDisposable
     /// <exception cref="AuthStoreUnavailableException">The lookup could not complete. Never a pass.</exception>
     /// <exception cref="AuthBusyException">The budget for unverified credentials is spent.</exception>
     public async Task<CallerIdentity> ResolveAsync(
-        string? authorizationHeader, string? cookieHeader, CancellationToken ct = default)
+        string? authorizationHeader, string? cookieHeader, CancellationToken ct = default, bool fresh = false)
     {
         var bearer = BearerOf(authorizationHeader);
         if (bearer is not null)
@@ -136,7 +138,7 @@ public sealed class CallerAuthenticator : IDisposable
             if (IsServiceToken(bearer))
                 return CallerIdentity.ServiceCaller;
 
-            var device = await VerifyAsync(bearer, TokenKind.Access, ct);
+            var device = await VerifyAsync(bearer, TokenKind.Access, ct, fresh);
             return device is null
                 ? CallerIdentity.Anonymous
                 : new CallerIdentity(CallerKind.App, device.PrincipalId, device.DeviceId, device.TokenId);
@@ -145,7 +147,7 @@ public sealed class CallerAuthenticator : IDisposable
         var session = CookieOf(cookieHeader, SessionCookie);
         if (session is not null)
         {
-            var device = await VerifyAsync(session, TokenKind.Session, ct);
+            var device = await VerifyAsync(session, TokenKind.Session, ct, fresh);
             return device is null
                 ? CallerIdentity.Anonymous
                 : new CallerIdentity(CallerKind.Browser, device.PrincipalId, device.DeviceId, device.TokenId,
@@ -156,42 +158,60 @@ public sealed class CallerAuthenticator : IDisposable
     }
 
     /// <summary>Forget every remembered credential. Called by anything that revokes.</summary>
-    public void Forget() => _remembered.Clear();
-
-    private async Task<AuthenticatedDevice?> VerifyAsync(string presented, TokenKind kind, CancellationToken ct)
+    public void Forget()
     {
+        lock (_cacheGate)
+        {
+            Interlocked.Increment(ref _generation);
+            _remembered.Clear();
+        }
+    }
+
+    private async Task<AuthenticatedDevice?> VerifyAsync(string presented, TokenKind kind, CancellationToken ct, bool fresh)
+    {
+        // Malformed strings require no KDF and must not consume the shared verification budget.
+        if (!Credentials.TryParse(presented, out _, out _)) return null;
+        var generation = Volatile.Read(ref _generation);
         // The kind is part of the key: the same value remembered as a bearer must not answer for a cookie.
         var key = $"{(int)kind}:{Convert.ToHexString(Digest(presented))}";
         var now = _time.GetUtcNow();
 
-        if (_remembered.TryGetValue(key, out var hit))
-        {
-            if (now < hit.Until)
-                return hit.Device;
+        var known = _remembered.TryGetValue(key, out var hit) && now < hit.Until;
+        if (known && !fresh) return hit!.Device;
+        if (!known) _remembered.TryRemove(key, out _);
 
-            _remembered.TryRemove(key, out _);
+        // A socket's mandatory store recheck is not an unknown credential, even during a flood.
+        if (!known)
+        {
+            using var lease = _misses.AttemptAcquire();
+            if (!lease.IsAcquired) throw new AuthBusyException();
         }
 
-        using (var lease = _misses.AttemptAcquire())
-        {
-            if (!lease.IsAcquired)
-                throw new AuthBusyException();
-        }
-
-        var result = await _auth.AuthenticateAsync(presented, kind, ct);
+        AuthResult<AuthenticatedDevice> result;
+        try { result = await _auth.AuthenticateAsync(presented, kind, ct); }
+        catch { _remembered.TryRemove(key, out _); throw; }
         if (!result.Succeeded)
+        {
+            _remembered.TryRemove(key, out _);
             return null;
+        }
 
         var device = result.Value!;
         if (_remembered.Count >= MaxRemembered)
             _remembered.Clear();
 
-        var until = now + CacheLifetime;
+        // Keep known callers out of the miss budget until expiry. Browser sessions are checked
+        // again when eligible for sliding renewal, rather than silently losing that renewal.
+        var until = kind == TokenKind.Session
+            ? device.ExpiresAt - AuthService.SessionExtendBelow + TimeSpan.FromTicks(1)
+            : device.ExpiresAt;
         // An extension is reported once, by the request that caused it; a remembered copy must not
-        // make every request in the next half minute send the cookie again.
-        _remembered[key] = new Remembered(
-            device with { Extended = false },
-            until < device.ExpiresAt ? until : device.ExpiresAt);
+        // make every cached request send the cookie again.
+        lock (_cacheGate)
+        {
+            if (generation == _generation)
+                _remembered[key] = new Remembered(device with { Extended = false }, until);
+        }
         return device;
     }
 

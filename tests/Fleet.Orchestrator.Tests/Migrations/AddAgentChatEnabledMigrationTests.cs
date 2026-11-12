@@ -117,6 +117,28 @@ public sealed class AddAgentChatEnabledMigrationTests : IAsyncLifetime
             """));
     }
 
+    [Fact]
+    public async Task Push_binding_invalidates_unowned_registrations_and_preserves_agents()
+    {
+        await MigrateAsync(Target);
+        await InsertAgentAsync("preserved-agent");
+        await ExecAsync(_connectionString, """
+            INSERT INTO push_devices (DeviceId, Token, CreatedAt, UpdatedAt)
+            VALUES ('synthetic-install', 'synthetic-token', UTC_TIMESTAMP(), UTC_TIMESTAMP())
+            """);
+        await MigrateAsync("20261112211417_BindPushSignInDevice");
+        Assert.Equal(0L, await ScalarAsync<long>("SELECT COUNT(*) FROM push_devices"));
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'preserved-agent'"));
+        Assert.Equal("varchar(32)|YES", await ScalarAsync<string>("""
+            SELECT CONCAT(COLUMN_TYPE, '|', IS_NULLABLE)
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'push_devices' AND COLUMN_NAME = 'AuthDeviceId'
+            """));
+        await MigrateAsync(Target);
+        await MigrateAsync("20261112211417_BindPushSignInDevice");
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM agents WHERE Name = 'preserved-agent'"));
+    }
+
     private Task InsertAgentAsync(string name) => ExecAsync(_connectionString, $"""
         INSERT INTO agents (Name, DisplayName, Role, Model, ContainerName, MemoryLimitMb, IsEnabled,
                             GroupDebounceSeconds, PrefixMessages, ProactiveIntervalMinutes, ShowStats, TelegramSendOnly)

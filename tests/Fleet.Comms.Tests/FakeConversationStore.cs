@@ -147,12 +147,21 @@ internal sealed class FakeConversationStore : IConversationStore
         return Task.CompletedTask;
     }
 
+    public bool ContinuousTraffic { get; set; }
+
     public async IAsyncEnumerable<StoredEvent> TailAsync(
         string conversationId, ulong afterSeq, [EnumeratorCancellation] CancellationToken ct = default)
     {
         foreach (var stored in Events.Where(e => e.Seq > afterSeq))
             yield return stored;
 
+        // A busy conversation can keep emitting without ever being idle for a ping interval.
+        var seq = afterSeq + 1;
+        while (ContinuousTraffic)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            yield return Stored(seq++, ConversationEventKind.TurnStarted);
+        }
         // Then wait, like the real tail does, rather than completing and closing the socket.
         await Task.Delay(Timeout.InfiniteTimeSpan, ct);
     }

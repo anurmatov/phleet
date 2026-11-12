@@ -223,6 +223,8 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.ToTable("push_devices");
             e.HasKey(x => x.Id);
             e.Property(x => x.DeviceId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.AuthDeviceId).HasMaxLength(32);
+            e.HasIndex(x => x.AuthDeviceId);
             e.Property(x => x.Token).HasMaxLength(200).IsRequired();
             e.HasIndex(x => x.DeviceId).IsUnique();
         });

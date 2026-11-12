@@ -823,16 +823,26 @@ app.Map("/ws", async (HttpContext context, AgentRegistry registry) =>
     }
 
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
-    registry.AddSocket(socket);
-    await registry.BroadcastAllToSocket(socket);
-
-    // Keep socket alive until client disconnects
-    var buffer = new byte[256];
-    while (socket.State == WebSocketState.Open)
+    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+    var authWatch = ControlSocketAccess.WatchAsync(context, socket, lifetime);
+    try
     {
-        var result = await socket.ReceiveAsync(buffer, context.RequestAborted);
-        if (result.MessageType == WebSocketMessageType.Close)
-            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by client", CancellationToken.None);
+        registry.AddSocket(socket);
+        await registry.BroadcastAllToSocket(socket);
+        var buffer = new byte[256];
+        while (socket.State == WebSocketState.Open)
+        {
+            var result = await socket.ReceiveAsync(buffer, lifetime.Token);
+            if (result.MessageType == WebSocketMessageType.Close)
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by client", lifetime.Token);
+        }
+    }
+    catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+    catch (WebSocketException) { }
+    finally
+    {
+        await lifetime.CancelAsync();
+        await authWatch;
     }
 });
 
@@ -852,8 +862,9 @@ app.Map("/ws/logs/{agentName}", async (string agentName, HttpContext context, Ag
 
     using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
 
+    var authWatch = ControlSocketAccess.WatchAsync(context, socket, cts);
     // Receive loop — detect client-initiated close
-    _ = Task.Run(async () =>
+    var receiver = Task.Run(async () =>
     {
         var buf = new byte[64];
         try
@@ -885,6 +896,8 @@ app.Map("/ws/logs/{agentName}", async (string agentName, HttpContext context, Ag
         logger.LogDebug(ex, "Log stream for {Agent} ended", agentName);
     }
 
+    await cts.CancelAsync();
+    await Task.WhenAll(receiver, authWatch);
     if (socket.State == WebSocketState.Open)
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stream ended", CancellationToken.None);
 });

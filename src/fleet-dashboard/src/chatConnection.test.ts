@@ -613,3 +613,36 @@ test('frames and closes from a stream that was replaced are ignored', async () =
   assert.equal(last().phase, 'connecting')
   chat.dispose()
 })
+
+test('navigation retains an unconfirmed send and retries only with its original id', async () => {
+  let release!: (value: Reply) => void
+  const server = chatService().on('POST', /\/submissions$/, () => new Promise<Reply>(resolve => { release = resolve }))
+  const first = connect(server, { ids: ['original-id'] })
+  first.chat.start()
+  await settle()
+  first.stream().hello()
+  assert.equal(first.chat.send('do not lose this'), null)
+  await settle()
+  first.chat.dispose()
+  const retained = first.chat.current
+  release('network-error')
+  await settle()
+  const resumed = new ChatConnection('cto', {
+    fetch: server.fetch,
+    openStream: () => ({ send() {}, close() {} }),
+    schedule: first.clock.schedule, random: () => 1, now: () => first.clock.now,
+    wsBase: 'wss://example.invalid', clientInstanceId: 'browser-1', newId: () => 'WRONG-new-id',
+  }, () => {}, retained)
+  resumed.start()
+  await settle()
+  assert.equal(resumed.current.pending[0].text, 'do not lose this')
+  assert.equal(resumed.current.pending[0].submissionId, 'original-id')
+  assert.equal(resumed.current.pending[0].status, 'failed')
+  assert.equal(server.callsTo('POST', /\/submissions$/).length, 1, 'returning never resends automatically')
+  server.on('POST', /\/submissions$/, { status: 202 })
+  resumed.retry('original-id')
+  await settle()
+  const calls = server.callsTo('POST', /\/submissions$/)
+  assert.deepEqual(calls[1].body, calls[0].body)
+  resumed.dispose()
+})

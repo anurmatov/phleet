@@ -1121,6 +1121,10 @@ namespace Fleet.Orchestrator.Migrations
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
 
+                    b.Property<string>("AuthDeviceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
 
@@ -1138,6 +1142,8 @@ namespace Fleet.Orchestrator.Migrations
                         .HasColumnType("datetime(6)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AuthDeviceId");
 
                     b.HasIndex("DeviceId")
                         .IsUnique();

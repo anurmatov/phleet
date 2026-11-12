@@ -666,6 +666,8 @@ public class PushDevice
 {
     public int Id { get; set; }
     public required string DeviceId { get; set; }
+    /// <summary>Server-derived sign-in device. Null only for legacy service registrations.</summary>
+    public string? AuthDeviceId { get; set; }
     public required string Token { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

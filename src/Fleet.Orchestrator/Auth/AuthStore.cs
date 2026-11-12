@@ -158,6 +158,9 @@ public interface IAuthStoreTransaction
     /// <summary>Whether a device still has a token that is neither revoked nor past its deadline.</summary>
     Task<bool> HasLiveTokenAsync(string deviceId, DateTimeOffset now, CancellationToken ct);
 
+    /// <summary>Remove registrations in the same transaction as their sign-in device's revocation.</summary>
+    Task RemovePushDevicesAsync(string deviceId, CancellationToken ct);
+
     /// <summary>Revoke every token belonging to a device, in the same unit as the device itself.</summary>
     Task RevokeTokensForDeviceAsync(string deviceId, DateTimeOffset at, CancellationToken ct);
 

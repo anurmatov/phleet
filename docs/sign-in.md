@@ -40,8 +40,21 @@ request — a service on the Docker network calling `fleet-orchestrator:3600` di
 older rule (writes need the service bearer, reads do not), so internal services need no new
 credential. `/mcp`, `/health` and `/internal/*` are unchanged.
 
-With `ORCHESTRATOR_AUTH_TOKEN` empty nothing is gated, and the sign-in page issues a browser session
-without asking, so that chat still has a credential to present.
+With `ORCHESTRATOR_AUTH_TOKEN` empty the ordinary API stays open, and the sign-in page issues a
+browser session without asking so chat still has a credential to present; that open-mode cookie
+never substitutes for `ORCHESTRATOR_CONFIG_TOKEN`, and HumanInput still requires configured auth.
+
+Control and log WebSockets recheck their original credential independently of traffic every
+20 seconds, with a five-second lookup deadline, and abort on expiry, revocation or unavailable
+auth; browser upgrades also require the same Origin, using the edge's forwarded scheme.
+
+Push registrations created by a signed-in device carry its server-derived device identity,
+and revocation removes those registrations in the same transaction as its tokens; apps may
+change only their own registrations, while explicit service-created rows remain service-managed.
+The migration invalidates pre-sign-in push registrations because their owner cannot be established:
+clients must register again after enrollment, and rolling back the column cannot restore those rows.
+Delivery also excludes revoked owners before each attempt, although a push already handed to
+Apple cannot be recalled.
 
 ## Routes
 
@@ -76,8 +89,8 @@ For every request, the chat service forwards the caller's `Authorization` header
 to `POST /internal/auth/check`, under a `cj1.auth-check.fleet-comms` token signed with the key the two
 services share (`FLEET_COMMS_JOURNAL_KEY`). The answer names the person, the device and the kind;
 with `agent` in the question it also says whether that agent accepts chat. The chat service
-remembers a definite answer for at most 10 seconds and asks again, fresh, on every ping of an open
-stream (every 20 seconds). An orchestrator that cannot be reached is `503`, never a pass. A token
+remembers a definite answer for at most 10 seconds and asks again, fresh, on an independent
+20-second timer for an open stream, even while replies are arriving continuously. An orchestrator that cannot be reached is `503`, never a pass. A token
 the orchestrator does not accept is answered `403`, which the chat service logs as the two services
 holding different keys.
 

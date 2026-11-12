@@ -518,6 +518,7 @@ public sealed class AuthService(
             // Same transaction as the device itself: a device marked revoked while its tokens
             // still authenticate is not a revocation.
             await tx.RevokeTokensForDeviceAsync(deviceId, now, token);
+            await tx.RemovePushDevicesAsync(deviceId, token);
 
             logger.LogInformation("Device revoked");
             return true;

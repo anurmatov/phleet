@@ -185,6 +185,8 @@ export interface AgentConfig {
   autoMemoryEnabled: boolean
   journalEnabled: boolean
   journalCrossChatEnabled: boolean
+  /** Absent from an orchestrator older than #530. */
+  chatEnabled?: boolean
   hostPort: number | null
   telegramSendOnly: boolean
   provider: string
@@ -235,6 +237,7 @@ export interface ConfigEdits {
   autoMemoryEnabled: boolean
   journalEnabled: boolean
   journalCrossChatEnabled: boolean
+  chatEnabled: boolean
   hostPort: string
   telegramSendOnly: boolean
   provider?: string

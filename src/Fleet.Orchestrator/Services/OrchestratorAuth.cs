@@ -1,4 +1,5 @@
 using Fleet.Orchestrator.Auth;
+using Fleet.Shared;
 
 namespace Fleet.Orchestrator.Services;
 
@@ -55,23 +56,11 @@ public static class OrchestratorAuth
         return !isReadOnly && !isExemptPath;
     }
 
-    /// <summary>
-    /// Set to <c>1</c> by the dashboard's proxy on every request it forwards, replacing whatever
-    /// the client sent. A request that carries it came from outside; one that does not was made by
-    /// a service on the internal network straight to this process.
-    /// </summary>
-    /// <remarks>
-    /// The header can only ADD a requirement. A client that forges it is asked for a credential it
-    /// would not otherwise have needed; a client cannot remove it, because the proxy overwrites it.
-    /// </remarks>
-    public const string EdgeHeader = "X-Fleet-Edge";
+    /// <summary>The proxy's mark on a request from outside. See <see cref="SignIn.EdgeHeader"/>.</summary>
+    public const string EdgeHeader = SignIn.EdgeHeader;
 
-    /// <summary>
-    /// What a browser's write must carry besides its cookie. A page on another site cannot add a
-    /// custom header to a request without this origin's permission, and the session cookie is
-    /// <c>SameSite=Strict</c>, so the two together close cross-site request forgery.
-    /// </summary>
-    public const string RequestHeader = "X-Fleet-Request";
+    /// <summary>What a browser's write must carry. See <see cref="SignIn.RequestHeader"/>.</summary>
+    public const string RequestHeader = SignIn.RequestHeader;
 
     /// <summary>
     /// The routes anyone may call: they are how a credential is obtained, or they answer "am I
@@ -127,10 +116,8 @@ public static class OrchestratorAuth
 
     /// <summary>
     /// A cookie-authenticated request that changes something and lacks <see cref="RequestHeader"/>.
-    /// A bearer is never ambient, so only a browser is asked for the header.
+    /// The rule itself is shared with the chat service: <see cref="SignIn.IsBrowserWriteWithoutHeader"/>.
     /// </summary>
     public static bool IsBrowserWriteWithoutHeader(string method, CallerKind caller, bool hasRequestHeader) =>
-        caller == CallerKind.Browser
-        && !hasRequestHeader
-        && !(HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method));
+        SignIn.IsBrowserWriteWithoutHeader(method, caller == CallerKind.Browser, hasRequestHeader);
 }

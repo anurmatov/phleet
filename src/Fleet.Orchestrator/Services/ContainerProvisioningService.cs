@@ -433,6 +433,8 @@ public sealed class ContainerProvisioningService(
             return ProvisionResult.Fail(agentName, providerFault);
         if (DescribeJournalProvisioningFault(agent) is { } journalFault)
             return ProvisionResult.Fail(agentName, journalFault);
+        if (ChatAgents.DescribeProvisioningFault(agent, journalTokens) is { } chatFault)
+            return ProvisionResult.Fail(agentName, chatFault);
 
         // Bound secrets: decided before Docker is called or any file is generated. A fault here means
         // the agent would otherwise start without a way to use a secret it is meant to hold.
@@ -1088,7 +1090,8 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
+        var chat = ChatAgents.BuildProvisioning(agent, journalTokens, config["Chat:SouthUrl"], PrimaryHumanUserIdOrNull());
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), chat));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
@@ -1442,7 +1445,8 @@ public sealed class ContainerProvisioningService(
         Agent agent,
         string ctoAgentName,
         OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null,
+        ChatProvisioning? chat = null)
     {
         var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
@@ -1533,7 +1537,8 @@ public sealed class ContainerProvisioningService(
             && journal?.ReadToken is null
             && !codexLocal
             && !HasTelegramBot(agent)
-            && agent.HarnessExtra is null)
+            && agent.HarnessExtra is null
+            && chat is null)
             return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
@@ -1586,6 +1591,21 @@ public sealed class ContainerProvisioningService(
             }
             if (journal.MediaEnabled)
                 node["Journal"]!.AsObject()["MediaEnabled"] = true;
+        }
+
+        // #530. Written only for a chat-enabled agent, so every other agent keeps its bytes. The
+        // section's presence is what turns the agent's chat path on; it names no agent and no
+        // broker, because the agent already holds both.
+        if (chat is not null)
+        {
+            var conversations = new System.Text.Json.Nodes.JsonObject
+            {
+                ["SouthBaseUrl"] = chat.SouthBaseUrl,
+                ["SouthBearerToken"] = chat.SouthToken,
+            };
+            if (chat.PrimaryHumanPrincipalId is not null)
+                conversations["PrimaryHumanPrincipalId"] = chat.PrimaryHumanPrincipalId;
+            node["Conversations"] = conversations;
         }
         return node.ToJsonString(IndentedJson);
     }
@@ -1757,7 +1777,11 @@ public sealed class ContainerProvisioningService(
             .Include(a => a.EnvRefs)
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        return agent is null ? null : DescribeJournalProvisioningFault(agent);
+        // Chat faults ride the same check for the same reason: found before DeprovisionAsync, so
+        // a refusal leaves the old container running.
+        return agent is null
+            ? null
+            : DescribeJournalProvisioningFault(agent) ?? ChatAgents.DescribeProvisioningFault(agent, journalTokens);
     }
 
     private async Task<string?> DescribeProviderPreflightFaultAsync(string agentName, CancellationToken ct)

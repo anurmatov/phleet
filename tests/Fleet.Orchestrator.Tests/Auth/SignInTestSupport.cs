@@ -111,9 +111,13 @@ internal sealed class SignInHost : IAsyncDisposable
 
     /// <param name="serviceToken">Null starts an orchestrator that gates nothing.</param>
     /// <param name="durable">True runs on the database store (SQLite in memory); false on the in-memory store.</param>
+    /// <param name="tokenKey">The key shared with the chat service. Null starts a deployment that has none.</param>
     public static async Task<SignInHost> StartAsync(
-        string? serviceToken = ServiceToken, string? configToken = ConfigToken, bool durable = false)
+        string? serviceToken = ServiceToken, string? configToken = ConfigToken, bool durable = false,
+        string? tokenKey = "default")
     {
+        if (tokenKey == "default") tokenKey = TokenKey;
+
         var time = new TestTimeProvider();
         // Real Argon2id at a fraction of the production cost: the property under test is how many
         // times it runs, never how long it takes.
@@ -128,7 +132,7 @@ internal sealed class SignInHost : IAsyncDisposable
         {
             ["Orchestrator:AuthToken"] = serviceToken,
             ["Orchestrator:ConfigToken"] = configToken,
-            ["Journal:TokenKey"] = TokenKey,
+            ["Journal:TokenKey"] = tokenKey,
         });
 
         builder.Services.AddSingleton<TimeProvider>(time);
@@ -180,6 +184,25 @@ internal sealed class SignInHost : IAsyncDisposable
         await _app.StopAsync();
         await _app.DisposeAsync();
         if (_connection is not null) await _connection.DisposeAsync();
+    }
+
+    /// <summary>Add an agent row. Needs the database store (<c>durable: true</c>).</summary>
+    public async Task SeedAgentAsync(string name, bool chatEnabled, string? displayName = null)
+    {
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        db.Agents.Add(new Agent
+        {
+            Name = name,
+            DisplayName = displayName ?? name,
+            Role = "test",
+            Model = "example-model",
+            Provider = "claude",
+            MemoryLimitMb = 1024,
+            ContainerName = $"fleet-{name}",
+            ChatEnabled = chatEnabled,
+        });
+        await db.SaveChangesAsync();
     }
 
     /// <summary>A client that keeps no cookies of its own: every credential a request carries is put there by the test.</summary>

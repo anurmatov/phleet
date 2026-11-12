@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
+using Fleet.Shared;
 
 namespace Fleet.Orchestrator.Auth;
 
@@ -78,7 +79,7 @@ public sealed class AuthBusyException() : Exception("Too many sign-in checks at 
 public sealed class CallerAuthenticator : IDisposable
 {
     /// <summary>The cookie a signed-in browser carries.</summary>
-    public const string SessionCookie = "fleet_session";
+    public const string SessionCookie = SignIn.SessionCookie;
 
     public static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan MissWindow = TimeSpan.FromSeconds(10);

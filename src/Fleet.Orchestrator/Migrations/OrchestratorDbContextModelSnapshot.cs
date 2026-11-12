@@ -43,6 +43,12 @@ namespace Fleet.Orchestrator.Migrations
                         .HasColumnType("tinyint(1)")
                         .HasDefaultValue(false);
 
+                    b.Property<bool>("ChatEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false)
+                        .HasColumnName("chat_enabled");
+
                     b.Property<string>("CodexSandboxMode")
                         .HasMaxLength(30)
                         .HasColumnType("varchar(30)");

@@ -48,6 +48,12 @@ public class Agent
     /// </summary>
     public bool JournalEnabled { get; set; } = false;
     public bool JournalCrossChatEnabled { get; set; } = false;
+    /// <summary>
+    /// Lets a signed-in person chat with this agent from the dashboard and the app (#530).
+    /// Provisioning writes the agent's <c>Conversations</c> section only while this is true, and
+    /// the chat service refuses a conversation with an agent for which it is false.
+    /// </summary>
+    public bool ChatEnabled { get; set; } = false;
     [MaxLength(30)]
     public string? CodexSandboxMode { get; set; }
 

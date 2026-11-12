@@ -1,6 +1,8 @@
 using Fleet.Orchestrator.Auth;
 using Fleet.Orchestrator.Services;
+using Fleet.Shared;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Orchestrator.Endpoints;
 
@@ -27,20 +29,20 @@ namespace Fleet.Orchestrator.Endpoints;
 public static class AuthEndpoints
 {
     /// <summary>Where the chat service asks who a caller is. Not proxied; carries its own bearer.</summary>
-    public const string CheckPath = "/internal/auth/check";
+    public const string CheckPath = SignIn.CheckPath;
 
     /// <summary>The fixed-window limit on the routes that take no credential.</summary>
     public const string RateLimitPolicy = "auth-public";
 
     /// <summary>The purpose and subject of the token the chat service presents on <see cref="CheckPath"/>.</summary>
-    public const string CheckTokenPurpose = "auth-check";
-    public const string CheckTokenSubject = "fleet-comms";
+    public const string CheckTokenPurpose = SignIn.CheckTokenPurpose;
+    public const string CheckTokenSubject = SignIn.CheckTokenSubject;
 
     public sealed record BrowserSessionBody(string? Token, string? DeviceName);
     public sealed record EnrollmentBody(string? DeviceName);
     public sealed record RegisterDeviceBody(string? EnrollmentCode, string? DeviceName);
     public sealed record TokenBody(string? DeviceId, string? DeviceSecret);
-    public sealed record CheckBody(string? Authorization, string? Cookie, string? Method, bool RequestHeader, string? Agent);
+    public sealed record CheckBody(string? Authorization, string? Cookie, string? Agent);
 
     public static IEndpointRouteBuilder MapAuthEndpoints(this IEndpointRouteBuilder app)
     {
@@ -202,7 +204,7 @@ public static class AuthEndpoints
 
         app.MapPost(CheckPath, async (HttpContext http, [FromBody] CheckBody? body,
             [FromServices] JournalTokenService tokens, [FromServices] CallerAuthenticator authenticator,
-            CancellationToken ct) =>
+            [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
         {
             var presented = CallerAuthenticator.BearerOf(http.Request.Headers.Authorization.FirstOrDefault());
             if (!tokens.TryVerify(presented, CheckTokenPurpose, out var subject)
@@ -213,15 +215,45 @@ public static class AuthEndpoints
 
             if (body is null) return Results.BadRequest(new { error = "body_required" });
 
-            var caller = await authenticator.ResolveAsync(body.Authorization, body.Cookie, ct);
+            CallerIdentity caller;
+            try
+            {
+                caller = await authenticator.ResolveAsync(body.Authorization, body.Cookie, ct);
+            }
+            catch (AuthStoreUnavailableException)
+            {
+                // Said as itself. The chat service answers its own caller 503, never a pass.
+                return Results.Json(new { error = "sign_in_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+            catch (AuthBusyException)
+            {
+                return Results.Json(new { error = "too_many_requests" }, statusCode: StatusCodes.Status429TooManyRequests);
+            }
 
             // A device or a browser. The service bearer is the deployment's secret for automation
             // against this API; it names no device, and a conversation belongs to one.
             if (caller.Kind is not (CallerKind.App or CallerKind.Browser))
                 return Unauthorized();
 
-            if (OrchestratorAuth.IsBrowserWriteWithoutHeader(body.Method ?? "GET", caller.Kind, body.RequestHeader))
-                return Results.Json(new { error = "request_header_required" }, statusCode: StatusCodes.Status403Forbidden);
+            // Asked only when the chat service is about to open or use a conversation with an
+            // agent. Answered for a verified caller alone, so the route says nothing about which
+            // agents exist to anyone else. Null when no agent was named.
+            bool? agentChatEnabled = null;
+            if (!string.IsNullOrEmpty(body.Agent))
+            {
+                await using var scope = scopes.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetService<Data.OrchestratorDbContext>();
+                agentChatEnabled = db is not null
+                    && ChatAgents.IsAvailable(tokens)
+                    && ChatAgents.IsUsableName(body.Agent)
+                    // Ordinal, after the query: the database compares names without regard to
+                    // case, and an agent's chat identity is its exact name.
+                    && (await db.Agents.AsNoTracking()
+                            .Where(a => a.Name == body.Agent && a.ChatEnabled)
+                            .Select(a => a.Name)
+                            .ToListAsync(ct))
+                        .Any(name => string.Equals(name, body.Agent, StringComparison.Ordinal));
+            }
 
             return Results.Ok(new
             {
@@ -229,6 +261,36 @@ public static class AuthEndpoints
                 deviceId = caller.DeviceId,
                 credentialId = caller.CredentialId,
                 kind = KindName(caller.Kind),
+                agentChatEnabled,
+            });
+        });
+
+        // ── which agents a person can chat with ──────────────────────────────
+
+        app.MapGet("/api/chat/agents", async ([FromServices] JournalTokenService tokens,
+            [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+        {
+            await using var scope = scopes.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetService<Data.OrchestratorDbContext>();
+            if (db is null || !ChatAgents.IsAvailable(tokens))
+                return Results.Ok(new { available = false, agents = Array.Empty<object>() });
+
+            var rows = await db.Agents.AsNoTracking()
+                .Where(a => a.ChatEnabled)
+                .OrderBy(a => a.Name)
+                .Select(a => new { a.Name, a.DisplayName })
+                .ToListAsync(ct);
+
+            return Results.Ok(new
+            {
+                available = true,
+                agents = rows
+                    .Where(a => ChatAgents.IsUsableName(a.Name))
+                    .Select(a => new
+                    {
+                        agentName = a.Name,
+                        displayName = string.IsNullOrWhiteSpace(a.DisplayName) ? a.Name : a.DisplayName,
+                    }),
             });
         });
 

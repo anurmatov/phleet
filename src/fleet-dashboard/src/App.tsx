@@ -849,6 +849,7 @@ export default function App() {
           autoMemoryEnabled: cfg.autoMemoryEnabled,
           journalEnabled: cfg.journalEnabled ?? false,
           journalCrossChatEnabled: cfg.journalCrossChatEnabled ?? false,
+          chatEnabled: cfg.chatEnabled ?? false,
           hostPort: cfg.hostPort != null ? String(cfg.hostPort) : '',
           tools: cfg.tools.map(t => t.toolName).join(', '),
           projects: cfg.projects,
@@ -910,7 +911,7 @@ export default function App() {
   function saveConfig(agentName: string, andReprovision: boolean) {
     if (!configEdits) return
     // The body is built in agentConfigSave.ts (#460 AC-D2: the same body the unsectioned dialog sent).
-    const save = configSaveBody(configEdits, configData?.harnessExtra)
+    const save = configSaveBody(configEdits, configData?.harnessExtra, configData?.chatEnabled)
     if (!save.ok) { setConfigSaveMsg(save.error); setConfigSaveState('error'); return }
     const projects = save.body.projects as string[]
     const newTelegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
@@ -940,7 +941,7 @@ export default function App() {
         if (andReprovision) return apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' }).then(r2 => { if (!r2.ok) throw new Error('Reprovision failed') })
       })
       .then(() => {
-        setConfigData(prev => prev ? { ...prev, projects, harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra } : prev)
+        setConfigData(prev => prev ? { ...prev, projects, harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra, chatEnabled: configEdits.chatEnabled } : prev)
         setConfigSaveState('success')
         setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
         setTimeout(() => setConfigSaveState('idle'), 4000)

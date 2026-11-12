@@ -75,6 +75,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.AutoMemoryEnabled,
         agent.JournalEnabled,
         agent.JournalCrossChatEnabled,
+        agent.ChatEnabled,
         agent.Provider,
         agent.CodexSandboxMode,
         agent.OutputStyle,
@@ -133,6 +134,13 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
         return Results.BadRequest(new { error = "journal_not_configured", detail = journalFault });
 
+    // Chat likewise: only turning it ON needs anything. The key is the one the orchestrator and
+    // the chat service share, which mints this agent's token; the name is that token's subject and
+    // the agent's queue segment, so it must be usable as both.
+    if (body.ChatEnabled == true && !agent.ChatEnabled &&
+        ChatAgents.DescribeEnableFault(agent, scope.ServiceProvider.GetRequiredService<JournalTokenService>()) is { } chatFault)
+        return Results.BadRequest(new { error = "chat_not_configured", detail = chatFault });
+
     var oldCrossChat = agent.JournalCrossChatEnabled;
 
     // Scalar fields
@@ -174,6 +182,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.AutoMemoryEnabled is not null) agent.AutoMemoryEnabled = body.AutoMemoryEnabled.Value;
     if (body.JournalEnabled is not null) agent.JournalEnabled = body.JournalEnabled.Value;
     if (body.JournalCrossChatEnabled is not null) agent.JournalCrossChatEnabled = body.JournalCrossChatEnabled.Value;
+    if (body.ChatEnabled is not null) agent.ChatEnabled = body.ChatEnabled.Value;
     if (body.Provider is not null)
     {
         // PV1 (#386): an unknown provider is refused, never served as claude. "" stays claude.
@@ -426,4 +435,5 @@ internal sealed record AgentConfigUpdateRequest(
     int? ContextWindow,
     string? LocalBaseUrl = null,
     bool? JournalCrossChatEnabled = null,
-    string? HarnessExtra = null);
+    string? HarnessExtra = null,
+    bool? ChatEnabled = null);

@@ -55,6 +55,17 @@ export function JournalToggle({ checked, disabled, onChange }: {
   </div>
 }
 
+/** Chat (#530): whether a signed-in person can talk to this agent from the dashboard and the app. */
+export function ChatToggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return <div className="config-field">
+    <label className="config-field config-field-checkbox">
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} />
+      <span className="config-label">Chat</span>
+    </label>
+    <FieldHint>Lets you chat with this agent from the dashboard&apos;s Chat view and the phone app. Needs the chat service (Fleet.Comms) and <code>FLEET_COMMS_JOURNAL_KEY</code>. Takes effect on reprovision.</FieldHint>
+  </div>
+}
+
 export function CrossChatToggle({ checked, reason, onChange }: {
   checked: boolean; reason: string | null; onChange: (checked: boolean) => void
 }) {
@@ -172,6 +183,7 @@ export default function AgentConfigModal({
                     <FieldHint>Short alias shown in group chat references (e.g. <code>Acto</code>). Used as the display handle in Telegram group messages.</FieldHint>
                     <input className="config-input config-input-short" value={configEdits.shortName} onChange={e => onEditsChange({ shortName: e.target.value })} placeholder="e.g. my-agent" />
                   </div>
+                  <ChatToggle checked={configEdits.chatEnabled} onChange={chatEnabled => onEditsChange({ chatEnabled })} />
                 </SectionPanel>
                 <SectionPanel {...panel('model')}>
                   <div className="config-field">

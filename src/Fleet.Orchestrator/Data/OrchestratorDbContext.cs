@@ -84,6 +84,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.AutoMemoryEnabled).HasDefaultValue(true);
             e.Property(x => x.JournalEnabled).HasColumnName("journal_enabled").HasDefaultValue(false);
             e.Property(x => x.JournalCrossChatEnabled).HasColumnName("journal_cross_chat_enabled").HasDefaultValue(false);
+            e.Property(x => x.ChatEnabled).HasColumnName("chat_enabled").HasDefaultValue(false);
             e.Property(x => x.HarnessExtra).HasColumnName("harness_extra").HasColumnType("text");
             e.Property(x => x.CanReceiveChatRequests).HasDefaultValue(false);
             e.Property(x => x.RequestReceivedMessage).HasMaxLength(500);

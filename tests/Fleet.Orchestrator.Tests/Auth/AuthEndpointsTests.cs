@@ -352,7 +352,7 @@ public class AuthEndpointsTests
         await using var host = await SignInHost.StartAsync();
         var (cookie, deviceId, _, accessToken) = await host.EnrolledAppAsync();
 
-        var app = await CheckAsync(host, CheckToken(host), new { authorization = $"Bearer {accessToken}", method = "POST" });
+        var app = await CheckAsync(host, CheckToken(host), new { authorization = $"Bearer {accessToken}" });
         Assert.Equal(HttpStatusCode.OK, app.StatusCode);
         var appBody = await SignInHost.JsonAsync(app);
         Assert.Equal("owner", appBody.GetProperty("principalId").GetString());
@@ -360,23 +360,93 @@ public class AuthEndpointsTests
         Assert.Equal("app", appBody.GetProperty("kind").GetString());
 
         var browser = await CheckAsync(host, CheckToken(host),
-            new { cookie = $"other=1; {CallerAuthenticator.SessionCookie}={cookie}", method = "GET" });
+            new { cookie = $"other=1; {CallerAuthenticator.SessionCookie}={cookie}" });
         Assert.Equal(HttpStatusCode.OK, browser.StatusCode);
         Assert.Equal("browser", (await SignInHost.JsonAsync(browser)).GetProperty("kind").GetString());
     }
 
     [Fact]
-    public async Task TheCheck_AppliesTheBrowserWriteRule()
+    public async Task TheCheck_SaysWhichKindOfCallerItIs_SoTheChatServiceCanApplyTheBrowserWriteRule()
     {
         await using var host = await SignInHost.StartAsync();
+        var (cookie, _, _, accessToken) = await host.EnrolledAppAsync();
+
+        // Identity only. Whether THIS request is a write without its header is for the service
+        // that received the request to decide, with the rule both services share.
+        var browser = await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
+            new { cookie = $"{CallerAuthenticator.SessionCookie}={cookie}" }));
+        var app = await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
+            new { authorization = $"Bearer {accessToken}" }));
+
+        Assert.Equal("browser", browser.GetProperty("kind").GetString());
+        Assert.Equal("app", app.GetProperty("kind").GetString());
+        Assert.Equal(JsonValueKind.Null, app.GetProperty("agentChatEnabled").ValueKind);
+    }
+
+    [Fact]
+    public async Task TheCheck_SaysWhetherAnAgentAcceptsChat_ByItsExactName()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true);
+        await host.SeedAgentAsync("builder", chatEnabled: true);
+        await host.SeedAgentAsync("reviewer", chatEnabled: false);
+        var (_, _, _, accessToken) = await host.EnrolledAppAsync();
+
+        async Task<bool> Asks(string agent) => (await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
+            new { authorization = $"Bearer {accessToken}", agent }))).GetProperty("agentChatEnabled").GetBoolean();
+
+        Assert.True(await Asks("builder"));
+        Assert.False(await Asks("reviewer"));
+        Assert.False(await Asks("nobody"));
+        // An agent's chat identity is its exact name: it is a routing key and a queue segment.
+        Assert.False(await Asks("Builder"));
+        Assert.False(await Asks("not a name"));
+    }
+
+    [Fact]
+    public async Task TheCheck_NeverSaysAnythingAboutAgentsToAnUnverifiedCaller()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true);
+        await host.SeedAgentAsync("builder", chatEnabled: true);
+
+        var response = await CheckAsync(host, CheckToken(host), new { authorization = "Bearer not-a-token", agent = "builder" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.DoesNotContain("agentChatEnabled", await response.Content.ReadAsStringAsync());
+    }
+
+    // ── which agents a person can chat with ──────────────────────────────────
+
+    [Fact]
+    public async Task ChatAgents_ListsOnlyTheAgentsWithChatOn_ByName()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true);
+        await host.SeedAgentAsync("reviewer", chatEnabled: true, displayName: "Reviewer");
+        await host.SeedAgentAsync("builder", chatEnabled: true, displayName: " ");
+        await host.SeedAgentAsync("planner", chatEnabled: false);
         var cookie = await host.SignInBrowserAsync();
-        var header = $"{CallerAuthenticator.SessionCookie}={cookie}";
 
-        var without = await CheckAsync(host, CheckToken(host), new { cookie = header, method = "POST", requestHeader = false });
-        var with = await CheckAsync(host, CheckToken(host), new { cookie = header, method = "POST", requestHeader = true });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/chat/agents")).StatusCode);
 
-        Assert.Equal(HttpStatusCode.Forbidden, without.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, with.StatusCode);
+        var body = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/chat/agents", cookie: cookie));
+        Assert.True(body.GetProperty("available").GetBoolean());
+        Assert.Equal(
+            [("builder", "builder"), ("reviewer", "Reviewer")],
+            body.GetProperty("agents").EnumerateArray()
+                .Select(a => (a.GetProperty("agentName").GetString(), a.GetProperty("displayName").GetString()))
+                .ToArray());
+    }
+
+    [Fact]
+    public async Task ChatAgents_SaysChatIsNotAvailable_WhenTheSharedKeyIsMissing()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true, tokenKey: null);
+        await host.SeedAgentAsync("builder", chatEnabled: true);
+        var cookie = await host.SignInBrowserAsync();
+
+        var body = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/chat/agents", cookie: cookie));
+
+        Assert.False(body.GetProperty("available").GetBoolean());
+        Assert.Empty(body.GetProperty("agents").EnumerateArray());
     }
 
     [Fact]
@@ -386,9 +456,9 @@ public class AuthEndpointsTests
 
         foreach (var body in new object[]
                  {
-                     new { authorization = $"Bearer {SignInHost.ServiceToken}", method = "GET" },
-                     new { authorization = "Bearer not-a-token", method = "GET" },
-                     new { method = "GET" },
+                     new { authorization = $"Bearer {SignInHost.ServiceToken}" },
+                     new { authorization = "Bearer not-a-token" },
+                     new { cookie = "unrelated=1" },
                  })
         {
             Assert.Equal(HttpStatusCode.Unauthorized, (await CheckAsync(host, CheckToken(host), body)).StatusCode);
@@ -400,7 +470,7 @@ public class AuthEndpointsTests
     {
         await using var host = await SignInHost.StartAsync();
         var (_, _, _, accessToken) = await host.EnrolledAppAsync();
-        var question = new { authorization = $"Bearer {accessToken}", method = "GET" };
+        var question = new { authorization = $"Bearer {accessToken}" };
 
         // No bearer, the admin bearer, a token minted for another purpose, and one for another subject.
         Assert.Equal(HttpStatusCode.Unauthorized, (await CheckAsync(host, null, question)).StatusCode);

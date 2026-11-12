@@ -72,9 +72,9 @@ test('AC-D1: every field of the old modal is in exactly one section, the one the
     assert.equal(homes.length, 1, `${label} (${key}) is in ${homes.length} sections`)
     assert.equal(homes[0].section, section, label)
   }
-  // The only additions are the two #460 Part 3 fields.
+  // The only additions are the Chat switch (#530) and the two #460 Part 3 fields.
   const added = placed.map(p => p.key).filter(k => !Object.values(TODAY).some(t => t.key === k))
-  assert.deepEqual(added, ['effectiveHarness', 'harnessExtra'])
+  assert.deepEqual(added, ['chatEnabled', 'effectiveHarness', 'harnessExtra'])
   assert.deepEqual(CONFIG_SECTIONS.map(s => s.label), ['General', 'Model & runtime', 'Instructions & projects', 'Tools & MCP', 'Telegram', 'Advanced'])
 })
 
@@ -106,6 +106,27 @@ test('AC-D2: the save body equals the body recorded from the old modal; harnessE
   const cleared = configSaveBody(edits('claude-cloud', ''), 'web_search = "disabled"')
   assert.ok(cleared.ok)
   assert.equal(cleared.body.harnessExtra, '')
+})
+
+test('#530: the Chat switch is sent only when it was moved', () => {
+  const base = edits('claude-cloud')
+  // The recorded edits predate the switch: nothing is sent, and the body is the recorded one.
+  const untouched = configSaveBody(base, null, false)
+  assert.ok(untouched.ok && !('chatEnabled' in untouched.body))
+
+  const unchangedOff = configSaveBody({ ...base, chatEnabled: false }, null, false)
+  const unchangedOn = configSaveBody({ ...base, chatEnabled: true }, null, true)
+  assert.ok(unchangedOff.ok && !('chatEnabled' in unchangedOff.body))
+  assert.ok(unchangedOn.ok && !('chatEnabled' in unchangedOn.body))
+
+  const turnedOn = configSaveBody({ ...base, chatEnabled: true }, null, false)
+  const turnedOff = configSaveBody({ ...base, chatEnabled: false }, null, true)
+  assert.ok(turnedOn.ok && turnedOn.body.chatEnabled === true)
+  assert.ok(turnedOff.ok && turnedOff.body.chatEnabled === false)
+
+  // An orchestrator older than the switch reports nothing; that reads as off.
+  const fromOlder = configSaveBody({ ...base, chatEnabled: true }, null, undefined)
+  assert.ok(fromOlder.ok && fromOlder.body.chatEnabled === true)
 })
 
 test('sections: a provider sees only its fields; no section is ever empty for a real provider', () => {

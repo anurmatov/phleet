@@ -14,9 +14,12 @@ export type ConfigSaveBody =
 /**
  * The request body for `edits`. `savedHarnessExtra` is the stored `harnessExtra` the dialog loaded:
  * the field is sent only when it was edited, so every other save sends exactly what it sent before
- * #460, and an older orchestrator never sees the key.
+ * #460, and an older orchestrator never sees the key. `savedChatEnabled` (#530) follows the same
+ * rule: `chatEnabled` is sent only when the switch was moved.
  */
-export function configSaveBody(edits: ConfigEdits, savedHarnessExtra: string | null | undefined): ConfigSaveBody {
+export function configSaveBody(
+  edits: ConfigEdits, savedHarnessExtra: string | null | undefined, savedChatEnabled?: boolean,
+): ConfigSaveBody {
   const provider = (edits.provider ?? 'claude').trim()
   // Model, local server URL (sent as `localBaseUrl` only) and context window, with the empty-URL rule;
   const localModel = localModelSaveBody({ ...edits, provider })
@@ -67,5 +70,9 @@ export function configSaveBody(edits: ConfigEdits, savedHarnessExtra: string | n
   }
   // #460 Part 3b: "" clears the stored value; sent only when the dialog's text differs from it.
   if (edits.harnessExtra !== (savedHarnessExtra ?? '')) body.harnessExtra = edits.harnessExtra
+  // Turning chat on is refused by an orchestrator with no shared key, and that refusal fails the
+  // whole save. Sending the switch only when it moved keeps every other save unaffected by it.
+  if (typeof edits.chatEnabled === 'boolean' && edits.chatEnabled !== (savedChatEnabled ?? false))
+    body.chatEnabled = edits.chatEnabled
   return { ok: true, body }
 }

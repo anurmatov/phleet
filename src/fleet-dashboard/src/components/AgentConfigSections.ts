@@ -24,7 +24,7 @@ const LOCAL_HARNESSES = ['claude', 'codex'] as const
 const HARNESS_EXTRA = ['claude', 'codex'] as const
 
 export const CONFIG_SECTIONS: readonly ConfigSection[] = [
-  { id: 'general', label: 'General', fields: [{ key: 'isEnabled' }, { key: 'shortName' }] },
+  { id: 'general', label: 'General', fields: [{ key: 'isEnabled' }, { key: 'shortName' }, { key: 'chatEnabled' }] },
   {
     id: 'model', label: 'Model & runtime', fields: [
       { key: 'provider' },

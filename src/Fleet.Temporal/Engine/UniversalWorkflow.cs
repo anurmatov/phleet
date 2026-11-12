@@ -190,6 +190,12 @@ public class UniversalWorkflow
         // 6. Execute the step tree
         await ExecuteStepAsync(definition.Root);
 
+        // The report-only callback uses ignoreFailure, which can also swallow an activity
+        // cancellation. Never return an approval result once this request was canceled.
+        // Legacy workflows retain their existing cancellation/ignoreFailure behavior.
+        if (HumanApprovalRequestContract.IsWorkflowType(Workflow.Info.WorkflowType))
+            Workflow.CancellationToken.ThrowIfCancellationRequested();
+
         return _variables.GetValueOrDefault("_result");
     }
 

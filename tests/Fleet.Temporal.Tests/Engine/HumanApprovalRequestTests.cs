@@ -195,9 +195,11 @@ public class HumanApprovalRequestTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Cancellation_CoBatchedWithDecision_NoApprovalOrRequesterCallback(bool cancelFirst)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task Cancellation_CoBatchedWithDecision_NoApprovalOrRequesterCallback(bool cancelFirst, bool fireTimer)
     {
         var run = await RunWithWorkerStopped(async (_, handle) =>
         {
@@ -205,7 +207,7 @@ public class HumanApprovalRequestTests
             await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new
             { Decision = "approved", Ref = handle.ResultRunId, VisitId = Signal + ":1" })]);
             if (!cancelFirst) await handle.CancelAsync();
-        }, canceled: true);
+        }, canceled: true, fireTimer: fireTimer);
         var canceled = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionCancelRequested);
         var signal = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionSignaled);
         Assert.Equal(cancelFirst, canceled.EventId < signal.EventId);
@@ -214,10 +216,64 @@ public class HumanApprovalRequestTests
         var activation = Assert.Single(run.History.Events.Where(e =>
             e.EventType == EventType.WorkflowTaskStarted && e.EventId > Math.Min(canceled.EventId, signal.EventId)).Take(1));
         Assert.True(activation.EventId > Math.Max(canceled.EventId, signal.EventId), Describe(run));
+        if (fireTimer)
+        {
+            var timer = Assert.Single(run.History.Events, e => e.EventType == EventType.TimerFired);
+            Assert.True(timer.EventId < Math.Min(canceled.EventId, signal.EventId), Describe(run));
+        }
+        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.ActivityTaskScheduled &&
+            e.ActivityTaskScheduledEventAttributes.ActivityType.Name == "DelegateToAgent");
         Assert.True(run.Failure is WorkflowFailedException, Describe(run));
         Assert.Null(run.Result);
         Assert.Empty(run.Activities.Calls);
         Assert.Equal(EventType.WorkflowExecutionCanceled, run.History.Events.Last().EventType);
+        await Replay(run.History);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Cancellation_AfterDecisionBeforeCallbackStarts_ApprovalCancelsButLegacyStillCompletes(bool approvalRequest)
+    {
+        var run = await RunWithWorkerStopped(async (_, handle) =>
+        {
+            await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new
+            { Decision = "approved", Ref = handle.ResultRunId, VisitId = Signal + ":1" })]);
+        }, canceled: approvalRequest, workflowType: approvalRequest ? Type : "LegacyCallbackCancellationControl",
+            pollActivities: false, afterResume: async handle =>
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (!(await handle.FetchHistoryAsync()).Events.Any(e =>
+                e.EventType == EventType.ActivityTaskScheduled &&
+                e.ActivityTaskScheduledEventAttributes.ActivityType.Name == "DelegateToAgent"))
+            {
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("Callback was not scheduled");
+                await Task.Delay(20);
+            }
+            await handle.CancelAsync();
+        });
+        var signal = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionSignaled);
+        var callback = Assert.Single(run.History.Events, e => e.EventType == EventType.ActivityTaskScheduled &&
+            e.ActivityTaskScheduledEventAttributes.ActivityType.Name == "DelegateToAgent");
+        var canceled = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionCancelRequested);
+        Assert.True(signal.EventId < callback.EventId && callback.EventId < canceled.EventId, Describe(run));
+        Assert.Contains(run.History.Events, e => e.EventType == EventType.ActivityTaskCanceled &&
+            e.ActivityTaskCanceledEventAttributes.ScheduledEventId == callback.EventId);
+        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.ActivityTaskStarted &&
+            e.ActivityTaskStartedEventAttributes.ScheduledEventId == callback.EventId);
+        Assert.Empty(run.Activities.Calls);
+        if (approvalRequest)
+        {
+            Assert.True(run.Failure is WorkflowFailedException, Describe(run));
+            Assert.Null(run.Result);
+            Assert.Equal(EventType.WorkflowExecutionCanceled, run.History.Events.Last().EventType);
+        }
+        else
+        {
+            Assert.Null(run.Failure);
+            Assert.Equal("approved", JsonSerializer.Deserialize<JsonElement>(run.Result!).GetProperty("Decision").GetString());
+            Assert.Equal(EventType.WorkflowExecutionCompleted, run.History.Events.Last().EventType);
+        }
         await Replay(run.History);
     }
 
@@ -228,20 +284,20 @@ public class HumanApprovalRequestTests
     private static string Describe(BatchedRun run) =>
         $"Result={run.Result}; failure={run.Failure}; history=" +
         string.Join(",", run.History.Events.Select(e => $"{e.EventId}:{e.EventType}"));
-    private static async Task<BatchedRun> RunWithWorkerStopped(Func<WorkflowEnvironment, WorkflowHandle, Task> submit, bool canceled = false, bool fireTimer = false)
+    private static async Task<BatchedRun> RunWithWorkerStopped(Func<WorkflowEnvironment, WorkflowHandle, Task> submit, bool canceled = false, bool fireTimer = false, bool pollActivities = true, Func<WorkflowHandle, Task>? afterResume = null, string workflowType = Type)
     {
         await using var env = await WorkflowEnvironment.StartTimeSkippingAsync(new() { Namespace = "fleet" });
         await env.Client.Connection.OperatorService.AddSearchAttributesAsync(new AddSearchAttributesRequest
         { Namespace = "fleet", SearchAttributes = { ["Phase"] = IndexedValueType.Keyword, ["GateRef"] = IndexedValueType.Keyword, ["GateVisit"] = IndexedValueType.Keyword } });
         var activities = new ApprovalActivities(new WorkflowDefinitionModel
-        { Name = Type, Namespace = "fleet", TaskQueue = "fleet", Root = SeedHarness.Parse(Type) }, "matching");
+        { Name = workflowType, Namespace = "fleet", TaskQueue = "fleet", Root = SeedHarness.Parse(Type) }, "matching");
         WorkflowHandle handle = null!;
         // Stop the worker, not the workflow, so external events cannot be consumed separately.
         // Disable sticky queues so the stopped worker cannot retain the next activation.
         using (var worker = new TemporalWorker(env.Client, new TemporalWorkerOptions("fleet") { MaxCachedWorkflows = 0 }.AddWorkflow<UniversalWorkflow>().AddAllActivities(activities)))
             await worker.ExecuteAsync(async () =>
             {
-                handle = await env.Client.StartWorkflowAsync(Type, [Input()], new WorkflowOptions(Id(), "fleet")
+                handle = await env.Client.StartWorkflowAsync(workflowType, [Input()], new WorkflowOptions(Id(), "fleet")
                 { Memo = new Dictionary<string, object> { [HumanApprovalRequestContract.RequesterMemo] = "agent1" } });
                 await Parked(handle);
             });
@@ -261,9 +317,12 @@ public class HumanApprovalRequestTests
         await submit(env, handle);
         string? result = null;
         Exception? failure = null;
-        using (var resumed = new TemporalWorker(env.Client, new TemporalWorkerOptions("fleet") { MaxCachedWorkflows = 0 }.AddWorkflow<UniversalWorkflow>().AddAllActivities(activities)))
+        var resumedOptions = new TemporalWorkerOptions("fleet") { MaxCachedWorkflows = 0 }.AddWorkflow<UniversalWorkflow>();
+        if (pollActivities) resumedOptions.AddAllActivities(activities);
+        using (var resumed = new TemporalWorker(env.Client, resumedOptions))
             await resumed.ExecuteAsync(async () =>
             {
+                if (afterResume is not null) await afterResume(handle);
                 // Capture failure AND history before the caller asserts cancellation. A thrown
                 // terminal assertion used to discard the only evidence needed to diagnose CI.
                 failure = await Record.ExceptionAsync(async () =>

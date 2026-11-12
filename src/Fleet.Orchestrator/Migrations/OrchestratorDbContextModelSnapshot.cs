@@ -476,6 +476,152 @@ namespace Fleet.Orchestrator.Migrations
                     b.ToTable("agent_tools", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Orchestrator.Data.AuthDevice", b =>
+                {
+                    b.Property<string>("DeviceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("EnrollmentId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<DateTime?>("FirstTokenMintedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<DateTime?>("LastSeenAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTime>("RegisteredAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("SecretHash")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.HasKey("DeviceId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("auth_devices", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.AuthEnrollment", b =>
+                {
+                    b.Property<string>("EnrollmentId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("CodeHash")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<DateTime?>("ConsumedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("DeviceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("DeviceName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.HasKey("EnrollmentId");
+
+                    b.ToTable("auth_enrollments", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.AuthToken", b =>
+                {
+                    b.Property<string>("TokenId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("DeviceId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.HasKey("TokenId");
+
+                    b.HasIndex("DeviceId");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.ToTable("auth_tokens", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.AuthUser", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<long?>("TelegramUserId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("auth_users", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Orchestrator.Data.CredentialFile", b =>
                 {
                     b.Property<int>("Id")
@@ -1304,6 +1450,17 @@ namespace Fleet.Orchestrator.Migrations
                         .IsRequired();
 
                     b.Navigation("Agent");
+                });
+
+            modelBuilder.Entity("Fleet.Orchestrator.Data.AuthDevice", b =>
+                {
+                    b.HasOne("Fleet.Orchestrator.Data.AuthUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("Fleet.Orchestrator.Data.EpicGrantBinding", b =>

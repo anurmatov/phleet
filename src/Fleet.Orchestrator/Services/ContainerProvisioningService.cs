@@ -1698,6 +1698,16 @@ public sealed class ContainerProvisioningService(
     private string? PrimaryHumanRawValue() =>
         LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env").GetValueOrDefault("FLEET_PRIMARY_HUMAN_USER_ID");
 
+    /// <summary>
+    /// The deployment's primary human on Telegram, or null when it is blank or not a valid id.
+    /// For startup, which must not fail on a value provisioning already refuses by name.
+    /// </summary>
+    public long? PrimaryHumanUserIdOrNull()
+    {
+        try { return ParsePrimaryHumanUserId(PrimaryHumanRawValue()); }
+        catch (InvalidOperationException) { return null; }
+    }
+
     private string? DescribePrimaryHumanFault()
     {
         try { ParsePrimaryHumanUserId(PrimaryHumanRawValue()); return null; }

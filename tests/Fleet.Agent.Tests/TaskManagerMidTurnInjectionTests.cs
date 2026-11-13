@@ -521,7 +521,7 @@ public class TaskManagerMidTurnInjectionTests
     public async Task ProcessTask_RecoveredAnswerEvent_IsDeliveredToSinkImmediately()
     {
         // When the executor emits a "recovered_answer" event (a stale answer preserved
-        // during DrainStaleTurnEvents), ProcessTask must send it directly to the sink
+        // during DrainStaleTurnEvents), TurnRun.RunAsync must send it directly to the sink
         // so the user receives the prior turn's response that would otherwise be lost.
         var executor = new ControllableExecutor { InjectionResult = MidTurnInjectionResult.Injected };
         var counter = new InjectionOutcomeCounter();

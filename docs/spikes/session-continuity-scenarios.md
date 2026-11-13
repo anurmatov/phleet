@@ -135,13 +135,13 @@ emits — including its terminal.
 ### The typing heartbeat is not bounded by the terminal either
 
 Third instance of the same class, found while fixing the second. `TaskManager` cancels the typing
-loop in `ProcessTask`'s `finally`, which runs **after** every terminal publish — so a heartbeat
+loop in `TurnRun.RunAsync`'s `finally`, which runs **after** every terminal publish — so a heartbeat
 landing in that window legitimately takes a later `seq` than the terminal it appears to follow.
 
 An assertion requiring every heartbeat to precede the final terminal has been removed. Unlike the
 first two, this one was never observed failing — it was found by reading `TaskManager` while
 chasing a different red run, and removed because it is unsound whether or not it has fired yet.
-What remains is the causal fact: the typing loop starts inside `ProcessTask`, which only runs after
+What remains is the causal fact: the typing loop starts inside `TurnRun.RunAsync`, which only runs after
 registration published `turn.started`, so no heartbeat can precede that.
 
 The pattern across all three is worth naming: **every ordering claim in this suite that spanned two

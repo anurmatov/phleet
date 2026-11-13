@@ -98,6 +98,15 @@ public class UniversalWorkflow
     internal const string DelegatedDiscardLogTemplate =
         "delegated signal discarded: stale visit or artifact (signal={Signal} visit={Visit})";
 
+    /// <summary>
+    /// Logged when a wait registers for a signal name another wait is still parked on. The engine
+    /// keeps one waiter per name, so the earlier wait is no longer reachable by a signal and ends
+    /// only by its own timeout, if it has one. Operators search for the leading text. Only the
+    /// signal name is logged.
+    /// </summary>
+    internal const string WaiterReplacedLogTemplate =
+        "signal waiter replaced while still pending: two waits are parked on '{Signal}' at once and only the newer one can be woken";
+
     /// <summary>A signal that arrived with no waiter registered, plus its arrival ordinal.</summary>
     private readonly record struct BufferedSignal(JsonElement Payload, long Seq);
 
@@ -654,7 +663,7 @@ public class UniversalWorkflow
                     //    This ordering, not the epoch, is what covers a reply sent while the
                     //    notification activity is still in flight (#280 F20).
                     var tcs = new TaskCompletionSource<JsonElement>();
-                    _signalWaiters["escalation-decision"] = tcs;
+                    RegisterSignalWaiter("escalation-decision", tcs);
 
                     // 4. Best-effort notification to escalation target. It carries no Repo: it
                     //    is about the workflow, not the repository, and stays a five-argument
@@ -810,7 +819,7 @@ public class UniversalWorkflow
 
         // Register signal waiter
         var tcs = new TaskCompletionSource<JsonElement>();
-        _signalWaiters[signalName] = tcs;
+        RegisterSignalWaiter(signalName, tcs);
 
         // Initial notification before waiting
         if (step.NotifyStep != null)
@@ -900,6 +909,27 @@ public class UniversalWorkflow
         WriteBindMatch(step, bindTo, payload, engineTimeout: false);
         if (step.OutputVar != null) SetVar(step.OutputVar, payload);
         return payload;
+    }
+
+    /// <summary>
+    /// Registers the waiter a wait is about to park on.
+    ///
+    /// <para>
+    /// One waiter per signal name is all <c>_signalWaiters</c> holds. Two waits on the same name
+    /// can only be parked together from parallel branches; the second registration then replaces
+    /// the first, and the first wait is stranded. A definition that spells that out with literal
+    /// names is refused at load (<see cref="WorkflowDefinitionValidator"/>), but a templated name
+    /// is unknowable there and two failed <c>delegate_with_escalation</c> branches share
+    /// <c>escalation-decision</c>, so it is said here when it happens. The behaviour is unchanged:
+    /// the newer waiter still takes the name, exactly as before. Workflow.Logger is replay-safe.
+    /// </para>
+    /// </summary>
+    private void RegisterSignalWaiter(string signalName, TaskCompletionSource<JsonElement> waiter)
+    {
+        if (_signalWaiters.TryGetValue(signalName, out var prior) && !prior.Task.IsCompleted)
+            Workflow.Logger.LogWarning(WaiterReplacedLogTemplate, signalName);
+
+        _signalWaiters[signalName] = waiter;
     }
 
     // -------------------------------------------------------------------------

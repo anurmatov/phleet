@@ -1,0 +1,25 @@
+{
+  "Agent": {
+    "Name": "example-codex",
+    "ContainerName": "fleet-example-codex",
+    "Role": "developer",
+    "Model": "gpt-5.5",
+    "Provider": "codex",
+    "Projects": ["example"],
+    "AllowedTools": ["Bash(git *)", "mcp__10__ten", "mcp__alpha__memory_get", "mcp__alpha__memory_search", "mcp__fleet-journal-files__fetch_attachment", "mcp__gamma__send", "mcp__quoted__a\"b", "mcp__ünï.code__tööl", "Read"],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ShortName": "cdx",
+    "Effort": "high",
+    "CodexSandboxMode": "danger-full-access",
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "InstructionOrder": ["_base", "developer"]
+  },
+  "Telegram": {
+    "AllowedUserIds": [],
+    "AllowedGroupIds": []
+  }
+}

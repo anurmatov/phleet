@@ -13,6 +13,14 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
+// `prepare <verb>`: the one-shot mode entrypoint.sh calls before it starts the agent. It reads the
+// generated configuration through the same options the host binds and never builds a host.
+if (args.Length > 0 && args[0] == Fleet.Agent.Prepare.EntrypointPrepare.Command)
+{
+    Environment.ExitCode = Fleet.Agent.Prepare.EntrypointPrepare.Run(args[1..], Console.Out, Console.Error);
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddAgentCoreServices(builder.Configuration);

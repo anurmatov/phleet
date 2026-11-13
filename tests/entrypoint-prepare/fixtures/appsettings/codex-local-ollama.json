@@ -1,0 +1,17 @@
+{
+  "Agent": {
+    "Name": "example-ollama",
+    "ContainerName": "fleet-example-ollama",
+    "Role": "developer",
+    "Model": "ollama/gpt-oss:20b",
+    "Provider": "codex",
+    "AllowedTools": ["mcp__alpha__memory_get", "mcp__fleet-memory__memory_get"],
+    "WorkDir": "/workspace",
+    "ShortName": "oll",
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "CodexOssBaseUrl": "http://inference.example:11434/v1",
+    "ContextWindow": 32768
+  }
+}

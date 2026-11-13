@@ -1,0 +1,17 @@
+{
+  "Agent": {
+    "Name": "example-lmstudio",
+    "ContainerName": "fleet-example-lmstudio",
+    "Role": "developer",
+    "Model": "lmstudio/qwen3-coder",
+    "Provider": "codex",
+    "AllowedTools": ["mcp__alpha__memory_search"],
+    "WorkDir": "/workspace",
+    "ShortName": "lms",
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "CodexOssBaseUrl": "http://inference.example:1234/v1",
+    "ContextWindow": 65536
+  }
+}

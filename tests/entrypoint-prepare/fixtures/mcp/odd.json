@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "zeta": {"type": "http", "url": "http://zeta:1/mcp?q=ünï&x=\"y\"", "headers": {"X-Quote": "a\"b\\c", "X-Unicode": "héllo ✓ 😀", "X-Control": "tab\there\u0001", "X-Number": 42, "X-Bool": true, "X-Null": null, "X-Float": 1.5, "X-Big": 1e21, "X-Small": 1e-7, "X-List": ["a", null, 2]}},
+    "10": {"url": "http://ten:10"},
+    "2": {"url": "http://two:2"},
+    "ünï.code": {"url": "http://unicode:3"},
+    "quoted": {"url": "http://quoted:first"},
+    "empty-headers": {"url": "http://empty:5", "headers": {}},
+    "null-headers": {"url": "http://null:6", "headers": null},
+    "empty-url": {"url": ""},
+    "null-url": {"url": null},
+    "stdio": {"command": "node", "args": ["server.js"]},
+    "alpha": {"url": "http://alpha:3100?agent=first", "url": "http://alpha:3100?agent=last"},
+    "fleet-journal-files": {"url": "http://127.0.0.1:8091/journal-files/v1/mcp"},
+    "quoted": {"url": "http://quoted:last"}
+  }
+}

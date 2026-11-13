@@ -1,0 +1,16 @@
+{
+  "Agent": {
+    "Name": "example-gemini",
+    "ContainerName": "fleet-example-gemini",
+    "Role": "developer",
+    "Model": "gemini-3-pro",
+    "Provider": "gemini",
+    "AllowedTools": ["mcp__alpha__memory_get"],
+    "WorkDir": "/workspace",
+    "ShortName": "gem",
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "McpHeaderSupport": true
+  }
+}

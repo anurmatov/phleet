@@ -1,4 +1,5 @@
 using Fleet.Orchestrator.Auth;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
@@ -84,8 +85,7 @@ public static class CredentialEndpoints
             if (await db.CredentialFiles.AnyAsync(f => f.Name == name))
                 return Results.Conflict(new { error = $"Credential file '{name}' already exists" });
 
-            var baseDir = config["Provisioning:BaseDir"]
-                ?? throw new InvalidOperationException("Provisioning:BaseDir not configured");
+            var baseDir = ProvisioningOptions.From(config).RequireBaseDir();
             var credDir = Path.Combine(baseDir, "credentials");
             Directory.CreateDirectory(credDir);
 

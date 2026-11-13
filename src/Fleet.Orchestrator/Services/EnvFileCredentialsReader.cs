@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -24,7 +25,7 @@ public sealed class EnvFileCredentialsReader : ICredentialsReader
 
     public EnvFileCredentialsReader(IConfiguration config, ILogger<EnvFileCredentialsReader> logger)
     {
-        _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
+        _envFilePath = ProvisioningOptions.From(config).EnvFilePath;
         _logger = logger;
     }
 

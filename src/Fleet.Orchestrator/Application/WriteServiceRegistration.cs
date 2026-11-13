@@ -1,4 +1,5 @@
 using Fleet.Orchestrator.Services;
+using Fleet.Orchestrator.Services.Push;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Fleet.Orchestrator.Application;
@@ -20,9 +21,11 @@ public static class WriteServiceRegistration
         services.TryAddSingleton<ITelegramSetup>(sp => sp.GetRequiredService<SetupService>());
         services.TryAddSingleton<IAclChangeNotifier>(sp => sp.GetRequiredService<ConfigService>());
         services.TryAddSingleton<IConfigWriter>(sp => sp.GetRequiredService<ConfigService>());
+        services.TryAddSingleton<OperatorStops>();
 
         services.TryAddSingleton<AgentConfigWriter>();
         services.TryAddSingleton<AgentCreator>();
+        services.TryAddSingleton<AgentLifecycle>();
         return services;
     }
 }

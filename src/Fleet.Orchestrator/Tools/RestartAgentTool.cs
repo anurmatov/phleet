@@ -1,44 +1,34 @@
 using System.ComponentModel;
 using System.Text;
-using Fleet.Orchestrator.Data;
-using Fleet.Orchestrator.Services;
-using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Application;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
+/// <summary>The MCP adapter over <see cref="AgentLifecycle.RestartAsync"/>, which the REST restart route calls too.</summary>
 [McpServerToolType]
-public sealed class RestartAgentTool(AgentRegistry registry, DockerService docker, IServiceScopeFactory scopeFactory)
+public sealed class RestartAgentTool(AgentLifecycle lifecycle)
 {
     [McpServerTool(Name = "restart_agent")]
     [Description("Restart a fleet agent's Docker container. Use with caution — the agent will be briefly unavailable.")]
     public async Task<string> RestartAgentAsync(
         [Description("Agent name (e.g. my-agent)")] string name)
     {
-        // Prefer registry (live state), fall back to DB for container name (handles stopped/crashed agents)
-        var containerName = registry.Get(name)?.ContainerName;
-        if (containerName is null)
-        {
-            using var scope = scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-            var dbAgent = db is null ? null : await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name);
-            containerName = dbAgent?.ContainerName;
-        }
+        var outcome = await lifecycle.RestartAsync(name);
+        if (outcome.Fault is { } fault)
+            return fault.Code == "agent_not_found"
+                ? $"Agent '{name}' not found in registry or DB. Use list_agents to see available agents."
+                : fault.Message.Replace(" — check orchestrator logs", ". Docker socket may be unavailable — check orchestrator logs.");
 
-        if (containerName is null)
-            return $"Agent '{name}' not found in registry or DB. Use list_agents to see available agents.";
-        var ok = await docker.RestartContainerAsync(containerName);
+        var containerName = outcome.Value!.ContainerName;
 
-        if (!ok)
-            return $"Failed to restart container '{containerName}'. Docker socket may be unavailable — check orchestrator logs.";
-
-        // Give Docker a moment before polling the new status
+        // Give Docker a moment before reading the new status. Presentation only: the restart is done.
         await Task.Delay(TimeSpan.FromSeconds(3));
-        var newDockerStatus = await docker.GetContainerStatusAsync(containerName);
+        var status = await lifecycle.DescribeContainerAsync(containerName);
 
         var sb = new StringBuilder();
         sb.AppendLine($"Container '{containerName}' restart requested successfully.");
-        sb.AppendLine($"Docker status: {newDockerStatus ?? "unknown"}");
+        sb.AppendLine($"Docker status: {status ?? "unknown"}");
         sb.AppendLine($"Orchestrator will update agent status once the next heartbeat is received.");
         return sb.ToString();
     }

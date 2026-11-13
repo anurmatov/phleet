@@ -55,11 +55,13 @@ public sealed class ConversationSouthConsumerTests
     {
         private readonly Func<string, HttpStatusCode>? _status;
         private readonly Action<string>? _onCall;
+        private readonly Func<string, string>? _claimResponse;
 
-        public RecordingSouth(Func<string, HttpStatusCode>? status = null, Action<string>? onCall = null)
+        public RecordingSouth(Func<string, HttpStatusCode>? status = null, Action<string>? onCall = null, Func<string, string>? claimResponse = null)
         {
             _status = status;
             _onCall = onCall;
+            _claimResponse = claimResponse;
         }
 
         protected override async Task<HttpResponseMessage> SendAsync(
@@ -77,7 +79,8 @@ public sealed class ConversationSouthConsumerTests
 
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(ResponseFor(path), Encoding.UTF8, "application/json"),
+                Content = new StringContent(path == "/deliveries:claim" && _claimResponse is not null
+                    ? _claimResponse(body) : ResponseFor(path), Encoding.UTF8, "application/json"),
             };
         }
 
@@ -126,7 +129,7 @@ public sealed class ConversationSouthConsumerTests
 
     private static (ConversationSouthConsumer Consumer, ConversationSouthHandoff Handoff,
         ConversationSouthCounters Counters, ConversationOrdinalAllocator Allocator)
-        Build(RecordingHandler south, ConversationIntake? intake = null)
+        Build(RecordingHandler south, ConversationIntake? intake = null, ConversationSouthHandoff? sharedHandoff = null)
     {
         var options = Microsoft.Extensions.Options.Options.Create(SouthOptions());
         var client = new ConversationSouthClient(
@@ -137,7 +140,7 @@ public sealed class ConversationSouthConsumerTests
             RetryScheduleOverride = TimeSpan.FromMilliseconds(1),
         };
 
-        var handoff = new ConversationSouthHandoff();
+        var handoff = sharedHandoff ?? new ConversationSouthHandoff();
         var counters = new ConversationSouthCounters();
         var allocator = new ConversationOrdinalAllocator();
 
@@ -886,6 +889,131 @@ public sealed class ConversationSouthConsumerTests
         // A DIFFERENT attempt in the same conversation is untouched.
         Assert.False(state.AppendsStopped("a_other"));
     }
+
+    // Real intake → event bus/pump → south adapter → recording HTTP, not hand-built events.
+    [Theory]
+    [InlineData("queued", "submission.create", false)]
+    [InlineData("queued", "submission.steer", false)]
+    [InlineData("injected", "submission.create", false)]
+    [InlineData("injected", "submission.steer", false)]
+    [InlineData("coalesced", "submission.create", false)]
+    [InlineData("coalesced", "submission.steer", false)]
+    [InlineData("queued", "submission.create", true)]
+    public async Task RuntimeReplyOwnership_PreservesHostMergedAttemptsAndIndependentCallback(
+        string mode, string kind, bool failCommit)
+    {
+        var south = new RecordingSouth(
+            status: path => failCommit && path == "/turns:commit" ? HttpStatusCode.InternalServerError : HttpStatusCode.OK,
+            claimResponse: body =>
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(body);
+                var id = doc.RootElement.GetProperty("messageId").GetString()!;
+                return FleetProtocolJson.Serialize(new ClaimDeliveryResult
+                {
+                    Outcome = ClaimOutcome.Claimed, SubmissionId = id, AttemptId = "a_" + id,
+                    ConversationId = ConversationId,
+                });
+            });
+        var handoff = new ConversationSouthHandoff();
+        var adapter = new ConversationSouthAdapter(handoff, new ConversationSouthCounters(),
+            NullLogger<ConversationSouthAdapter>.Instance);
+        await using var h = new ClientReplyOwnershipTests.Harness(adapter);
+        var (consumer, _, counters, _) = Build(south, h.Intake, handoff);
+        var acked = new ConcurrentQueue<ulong>();
+        consumer.AckHook = tag => { acked.Enqueue(tag); return Task.CompletedTask; };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var workflow = mode is "queued" or "coalesced";
+        try
+        {
+            if (workflow) await h.StartWorkflowAsync();
+            await consumer.HandleDeliveryAsync(OwnershipDelivery(kind, "s_host", 1), timeout.Token);
+            if (!workflow)
+            {
+                await h.Executor.WaitForTurnsAsync(1);
+                // Transmit host start before injecting the child, exercising the running-merge path.
+                await h.Pump.DrainOnceAsync(timeout.Token);
+                await ClientReplyOwnershipTests.Harness.WaitAsync(() => counters.TurnStartedCount == 1);
+            }
+            if (mode is "injected" or "coalesced")
+                await consumer.HandleDeliveryAsync(OwnershipDelivery(kind, "s_child", 2), timeout.Token);
+            if (workflow)
+            {
+                Assert.Empty(h.Executor.Injected);
+                h.Executor.Release(0, ClientReplyOwnershipTests.Result(ClientReplyOwnershipTests.Stale));
+                await h.Executor.WaitForTurnsAsync(2);
+            }
+            h.Executor.Release(workflow ? 1 : 0,
+                ClientReplyOwnershipTests.Recovery("mixed", true),
+                ClientReplyOwnershipTests.Result(ClientReplyOwnershipTests.Owned));
+            await h.WaitIdleAsync();
+            await h.Pump.DrainOnceAsync(timeout.Token);
+            await ClientReplyOwnershipTests.Harness.WaitAsync(() => failCommit
+                ? south.Calls.Count(c => c.Path == "/turns:commit") == 8
+                : counters.CommitCount == 1 && acked.Count == (mode == "queued" ? 1 : 2));
+            // The final HTTP attempt may have been recorded before the consumer sees its result.
+            await ClientReplyOwnershipTests.Harness.WaitAsync(() => handoff.Depth(ConversationId) == 0);
+
+            var start = Assert.Single(south.Calls, c => c.Path == "/turns:start");
+            using var startDoc = System.Text.Json.JsonDocument.Parse(start.Body);
+            Assert.Equal("a_s_host", startDoc.RootElement.GetProperty("attemptId").GetString());
+            var startHasChildren = startDoc.RootElement.TryGetProperty("mergedSubmissionIds", out var startChildren);
+            if (mode == "coalesced")
+                Assert.Equal("s_child", Assert.Single(startChildren.EnumerateArray()).GetString());
+            else Assert.False(startHasChildren);
+            var commits = south.Calls.Where(c => c.Path == "/turns:commit").ToArray();
+            Assert.Equal(failCommit ? 8 : 1, commits.Length);
+            using var commitDoc = System.Text.Json.JsonDocument.Parse(commits[0].Body);
+            var commit = commitDoc.RootElement;
+            Assert.Equal("a_s_host", commit.GetProperty("attemptId").GetString());
+            var hasChildren = commit.TryGetProperty("mergedSubmissionIds", out var children);
+            if (mode == "queued") Assert.False(hasChildren);
+            else Assert.Equal("s_child", Assert.Single(children.EnumerateArray()).GetString());
+            var final = Assert.Single(h.Adapter.Events, e => e.Kind == ConversationEventKind.TurnFinal);
+            Assert.Equal("s_host", final.Identity.SubmissionId);
+            Assert.Equal(ConversationId, final.Identity.ConversationId);
+            Assert.Equal("p_owner", final.Identity.PrincipalId);
+            Assert.Equal(mode == "queued" ? new[] { "s_host" } : ["s_host", "s_child"],
+                final.PayloadAs<TurnFinalPayload>()!.MergedSubmissionIds);
+            Assert.All(south.Calls, c =>
+            {
+                Assert.DoesNotContain(ClientReplyOwnershipTests.Stale, c.Body);
+                Assert.DoesNotContain("synthetic-correlation", c.Body);
+                Assert.DoesNotContain("synthetic-task", c.Body);
+            });
+            Assert.Contains(ClientReplyOwnershipTests.Owned, commits[0].Body);
+            Assert.DoesNotContain(h.Adapter.Events, e => e.Kind == ConversationEventKind.TurnRecoveredAnswer);
+            if (failCommit)
+            {
+                Assert.Empty(acked);
+                Assert.True(consumer.OwnsForTesting("s_host"));
+                Assert.Equal(0, counters.CommitCount);
+            }
+            else Assert.False(consumer.OwnsForTesting("s_host"));
+            if (workflow) await h.AssertWorkflowEnvelopeAsync();
+            else Assert.Empty(h.Envelopes);
+        }
+        finally
+        {
+            handoff.CompleteAll();
+            await timeout.CancelAsync();
+            // Join the per-conversation drain started by real command dispatch before disposing.
+            var drain = (Task?)typeof(ConversationState).GetField("_drain",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(consumer.Conversation(ConversationId));
+            if (drain is not null) await drain;
+            consumer.Dispose();
+        }
+    }
+
+    private static BasicDeliverEventArgs OwnershipDelivery(string kind, string id, ulong tag) => new(
+        consumerTag: "ct", deliveryTag: tag, redelivered: false,
+        exchange: "fleet.conversations", routingKey: "example-agent",
+        properties: new BasicProperties { MessageId = id },
+        body: Encoding.UTF8.GetBytes($$$"""
+            {"kind":"{{{kind}}}","principalId":"p_owner","channelId":"client",
+             "conversationId":"{{{ConversationId}}}","submissionId":"{{{id}}}",
+             "payload":{"text":"{{{id}}}"}}
+            """));
 
     // ── helpers ──────────────────────────────────────────────────────────────
 

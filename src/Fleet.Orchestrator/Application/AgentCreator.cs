@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Helpers;
 using Fleet.Orchestrator.Services;
@@ -189,7 +190,7 @@ public sealed class AgentCreator(
         // services, so an agent created without one gets the default (Provisioning:DefaultNetwork).
         var networks = Clean(request.Networks);
         if (networks.Count == 0)
-            networks.Add(configuration["Provisioning:DefaultNetwork"] ?? "fleet-net");
+            networks.Add(ProvisioningOptions.From(configuration).DefaultNetwork);
         foreach (var network in networks)
             agent.Networks.Add(new AgentNetwork { NetworkName = network });
 

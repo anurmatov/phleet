@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 
@@ -10,23 +11,21 @@ namespace Fleet.Orchestrator.Services;
 /// </summary>
 internal static class ContainerSpecBuilder
 {
-    internal const string DefaultAgentImage = "fleet:agent";
-
     // Actual Docker network names as reported by the Docker API.
     // fleet-net is declared with an explicit name so it keeps its name (not prefixed by Docker Compose).
-    internal const string FleetNetwork = "fleet-net";
+    internal const string FleetNetwork = ProvisioningOptions.DefaultNetworkName;
 
     /// <summary>The whole spec for one agent, from values already read from configuration and <c>.env</c>.</summary>
-    /// <param name="defaultImage">The deployment's agent image (<c>Provisioning:AgentImage</c>), or null for <see cref="DefaultAgentImage"/>.</param>
+    /// <param name="defaultImage">The image of an agent whose row names none (<see cref="ProvisioningOptions.AgentImage"/>).</param>
     internal static ContainerSpec Build(
         Agent agent, Dictionary<string, string> envValues, IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets,
-        string baseDir, string whisperServiceUrl, string kokoroServiceUrl, string? defaultImage)
+        string baseDir, string whisperServiceUrl, string kokoroServiceUrl, string defaultImage)
     {
         var env      = BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl, bindings, secrets);
         var binds    = BuildBinds(agent, baseDir);
         var networks = BuildNetworks(agent);
         var memBytes = (long)agent.MemoryLimitMb * 1024 * 1024;
-        var image    = agent.Image ?? defaultImage ?? DefaultAgentImage;
+        var image    = agent.Image ?? defaultImage;
 
         // Bound secrets: the CA the agent trusts, and its place on the internal secrets network.
         if (secrets.Bind is { } caBind)

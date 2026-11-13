@@ -137,15 +137,25 @@ if (epicGrantOptions.DisableMisconfiguredAutonomy())
 var promptSizePolicy = app.Services.GetRequiredService<PromptSizePolicy>();
 promptSizePolicy.LogStartup();
 
+// The Provisioning section. With a database configured this service provisions agents, so a
+// section it cannot provision from ends the process here with exit code 1, as the preflights
+// below do, and not at the first provision.
+var provisioningOptions = ProvisioningOptions.From(app.Configuration);
+if (!string.IsNullOrEmpty(connectionString) && provisioningOptions.DescribeFault() is { } provisioningFault)
+{
+    Console.Error.WriteLine($"Fleet.Orchestrator startup aborted, exiting 1: {provisioningFault}");
+    Environment.Exit(1);
+}
+
 // Auto-migrate and seed DB on startup
 if (!string.IsNullOrEmpty(connectionString))
 {
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
     var startupLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-    var rolesDir      = app.Configuration["Provisioning:RolesDir"]     ?? "/app/roles";
-    var projectsDir   = app.Configuration["Provisioning:ProjectsDir"]  ?? "/app/projects";
-    var seedFilePath  = app.Configuration["Provisioning:SeedFilePath"];
+    var rolesDir      = provisioningOptions.RolesDir;
+    var projectsDir   = provisioningOptions.ProjectsDir;
+    var seedFilePath  = provisioningOptions.SeedFilePath;
     var temporalAddr  = app.Configuration["Temporal:Address"] ?? "";
     var temporalReg   = string.IsNullOrWhiteSpace(temporalAddr)
         ? null

@@ -194,7 +194,7 @@ public class EmissionOwnershipInventoryTests
         Assert.Equal(new Dictionary<string, int>(StringComparer.Ordinal)
         {
             ["Interfaces/AgentTransport.cs"] = 4,   // render-path guards (#274 Constraint 1)
-            ["Services/GroupBehavior.cs"] = 1,      // SaveBuffers persistence filter
+            ["Services/GroupChat/GroupChatHistoryStore.cs"] = 1, // Save persistence filter (was GroupBehavior.SaveBuffers)
             ["Services/TurnBindingPublisher.cs"] = 2, // #401 observed-chat and dispatch binding filters
         }, byFile);
     }

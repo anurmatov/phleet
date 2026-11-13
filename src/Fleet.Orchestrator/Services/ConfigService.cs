@@ -405,12 +405,12 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
             var channel = await EnsurePublishChannelAsync(ct);
             if (channel is null) return false;
 
-            var payload = JsonSerializer.SerializeToUtf8Bytes(new { changedKeys });
+            var payload = JsonSerializer.SerializeToUtf8Bytes(new ConfigChangedEvent(changedKeys));
             var props = new BasicProperties { ContentType = "application/json", DeliveryMode = DeliveryModes.Persistent };
 
             await channel.BasicPublishAsync(
                 exchange: _rabbitExchange,
-                routingKey: "config.changed",
+                routingKey: OrchestratorBroker.ConfigChanged,
                 mandatory: false,
                 basicProperties: props,
                 body: payload,

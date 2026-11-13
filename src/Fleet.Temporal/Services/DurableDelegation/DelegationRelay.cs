@@ -35,7 +35,7 @@ public interface IDelegationRelay
 /// </summary>
 public sealed class DelegationRelay : IDelegationRelay
 {
-    private const string BridgeSender = "temporal-bridge";
+    private const string BridgeSender = RelaySender.TemporalBridge;
 
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TemporalBridgeOptions _bridgeConfig;
@@ -146,7 +146,7 @@ public sealed class DelegationRelay : IDelegationRelay
             TaskId: taskId,
             Repo: repo);
 
-        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+        var body = RelayWire.Serialize(message, RelayShape.Delegation);
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
         var routingKey = agentName.ToLowerInvariant();
 

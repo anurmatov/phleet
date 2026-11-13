@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { CreateForm, InstructionSummary } from '../types'
+import type { InstructionSummary } from '../types'
+import type { CreateAgentState } from '../hooks/useCreateAgent'
 import { PROVIDER_OPTIONS } from '../constants'
 import { isLocalHarness, switchProvider } from '../localModel'
 import { createFormLocalEdits } from '../agentCreate'
@@ -9,34 +10,23 @@ import FieldHint from './FieldHint'
 import InstructionPicker from './InstructionPicker'
 
 interface CreateAgentModalProps {
-  createForm: CreateForm
-  createState: 'idle' | 'creating' | 'success' | 'error'
-  createMsg: string
+  /** The dialog's form and requests (hooks/useCreateAgent.ts). */
+  create: CreateAgentState
   agentNames: string[]
-  copyFrom: string
-  copyFromLoading: boolean
   allInstructions: InstructionSummary[]
-  templateName?: string
-  onCopyFrom: (name: string) => void
-  onFormChange: (patch: Partial<CreateForm>) => void
-  onSubmit: () => void
-  onClose: () => void
 }
 
-export default function CreateAgentModal({
-  createForm,
-  createState,
-  createMsg,
-  agentNames,
-  copyFrom,
-  copyFromLoading,
-  allInstructions,
-  templateName,
-  onCopyFrom,
-  onFormChange,
-  onSubmit,
-  onClose,
-}: CreateAgentModalProps) {
+export default function CreateAgentModal({ create, agentNames, allInstructions }: CreateAgentModalProps) {
+  const {
+    form: createForm,
+    state: createState,
+    msg: createMsg,
+    copyFrom, copyFromLoading, templateName,
+    copy: onCopyFrom,
+    change: onFormChange,
+    submit: onSubmit,
+    close: onClose,
+  } = create
   const [shortNameTouched, setShortNameTouched] = useState(false)
   const provider = createForm.provider || 'claude'
   // The same local-model rules and fields as the config dialog, so an agent can be created (or

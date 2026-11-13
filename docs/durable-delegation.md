@@ -54,6 +54,16 @@ does not return delays relay effects and nothing else. What that means in number
   replaced by a later attempt under the same task id;
 - what is owed is in the state file, so a restart sends it.
 
+### At start-up
+
+Heartbeats start with the process. Relay sends do not: they are held until the bridge has fetched
+its configuration from the orchestrator (the peer-config bootstrap), because until then it does not
+know who the escalation target is or which chat its directives belong to. The bootstrap retries for
+up to five minutes, which is longer than any heartbeat timeout, so the two cannot wait for each
+other. A record that ran out of budget while the bridge was down is failed in Temporal at once and
+keeps its timeout notice until the escalation target is known; the notice is then sent once. The
+log says `relay sends are held` and `relay sends resumed`, once each.
+
 ## The switch
 
 | setting | default | meaning |

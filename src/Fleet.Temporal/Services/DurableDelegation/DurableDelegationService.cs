@@ -106,6 +106,8 @@ public sealed class DurableDelegationService : BackgroundService
     // True while a pass is going round. The relay lane starts nothing new meanwhile: the pass is
     // the part with a deadline, and what it finds owed is sent when it has finished.
     private volatile bool _passInProgress;
+    // Guarded by _gate: whether the last relay pass was held back, so it is said once.
+    private bool _heldForConfiguration;
     private bool _pumpRunning;
     private bool _pumpRequested;
     private Task _pump = Task.CompletedTask;
@@ -657,6 +659,21 @@ public sealed class DurableDelegationService : BackgroundService
         {
             // The pass asks for a relay pass when it ends, so nothing is missed by standing aside.
             if (_passInProgress) return;
+
+            // Nothing is sent until the relay knows where to send. Everything owed stays owed in
+            // the records, and every pass asks again.
+            if (!_relay.Ready)
+            {
+                if (!_heldForConfiguration)
+                    _logger.LogInformation(
+                        "Durable delegation relay sends are held until the bridge has its configuration from the orchestrator");
+                _heldForConfiguration = true;
+                return;
+            }
+
+            if (_heldForConfiguration)
+                _logger.LogInformation("Durable delegation relay sends resumed");
+            _heldForConfiguration = false;
 
             var now = _time.GetUtcNow();
             foreach (var record in _store.All)

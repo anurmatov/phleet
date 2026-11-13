@@ -97,6 +97,13 @@ builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>()
 // in the bridge's state directory and its activity is completed from that record, so a bridge
 // restart no longer fails it. Registered always: switched off it loads nothing and does nothing, and
 // DelegateToAgentActivity and the relay listener take their old paths.
+//
+// It is registered BEFORE the peer-config bootstrap on purpose, and the two halves of it start at
+// different times. Heartbeats start with the host: the bootstrap below retries the orchestrator for
+// up to five minutes, and a pending activity nobody heartbeats is timed out after 90 seconds. Relay
+// sends (re-sent directives, cancels, timeout notices) are held until the bootstrap has succeeded
+// (IDelegationRelay.Ready), because until then the escalation target and the group chat id are not
+// the deployment's. What is owed meanwhile stays in the records.
 builder.Services.AddSingleton<IDelegationRelay, DelegationRelay>();
 builder.Services.AddSingleton<IAsyncActivityGateway, TemporalAsyncActivityGateway>();
 builder.Services.AddSingleton<DurableDelegationService>();

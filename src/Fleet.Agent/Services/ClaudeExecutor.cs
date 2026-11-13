@@ -22,15 +22,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private readonly AgentOptions _config;
     private readonly ILogger<ClaudeExecutor> _logger;
     private readonly AgentHarness _harness;
-    // #460 failure at start: set by the stdout reader when the process's stdout ends on its own
-    // before its system/init, read once by the next EnsureProcess. Never set by a kill Fleet asked
-    // for: the kill cancels the reader first, and clears the flag when it stops a live process.
-    private volatile bool _initSeen;
+    // #460 failure at start: set by a stdout reader when its own process's stdout ends on its own
+    // before that process's system/init, read once by the next EnsureProcess. Never set by a kill
+    // Fleet asked for: the kill cancels the reader first, and clears the flag when it stops a live
+    // process. Whether init was seen is the reader's own local, one per process generation.
     private volatile bool _exitedBeforeInit;
 
     private Process? _process;
     private TextWriter? _stdin;
-    private StreamReader? _stdout;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly SemaphoreSlim _stdinWriteLock = new(1, 1);
     private string? _lastSessionId;
@@ -68,6 +67,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
     // Separating stdout reads from the turn read-loop prevents stale events (e.g. a
     // background subagent's task_notification + result that arrives after the main turn
     // completes) from corrupting the next turn's response stream.
+    // This field is the CURRENT process generation's channel. Each generation's reader is handed
+    // its own stdout and its own channel writer when it starts and never reads this field, so a
+    // reader that outlives its process cannot write to, or complete, a later generation's channel.
     private Channel<ClaudeStreamEvent>? _eventChannel;
     private CancellationTokenSource? _readerCts;
 
@@ -794,12 +796,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
     /// </summary>
     internal Task RunStdoutReaderForTests(StreamReader stdout, CancellationToken ct = default)
     {
-        _stdout = stdout;
-        _eventChannel ??= Channel.CreateUnbounded<ClaudeStreamEvent>(
+        var channel = _eventChannel ??= Channel.CreateUnbounded<ClaudeStreamEvent>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
         _readerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var token = _readerCts.Token;
-        return Task.Run(() => ReadStdoutLoopAsync(token), CancellationToken.None);
+        return Task.Run(() => ReadStdoutLoopAsync(stdout, channel.Writer, token), CancellationToken.None);
     }
 
     // --- Stdout channel helpers ---
@@ -870,39 +871,28 @@ public sealed class ClaudeExecutor : IAgentExecutor
     }
 
     /// <summary>
-    /// Long-running background task for the lifetime of the claude process.
-    /// Reads every NDJSON line from stdout and writes the parsed event to
-    /// <see cref="_eventChannel"/>.  System events are also processed inline so
-    /// <see cref="_backgroundTasks"/> stays accurate between turns (the heartbeat
+    /// Long-running background task for the lifetime of ONE claude process generation.
+    /// Reads every NDJSON line from that process's <paramref name="stdout"/> and writes the parsed
+    /// event to that generation's <paramref name="events"/>.  System events are also processed
+    /// inline so <see cref="_backgroundTasks"/> stays accurate between turns (the heartbeat
     /// reads it independently of any active turn).
     /// When the process exits or the token is cancelled, the channel writer is
     /// completed so any blocked ReadAsync in ExecuteAsync/SendCommandAsync returns.
     /// </summary>
-    private async Task ReadStdoutLoopAsync(CancellationToken ct)
+    /// <remarks>
+    /// The stream and the writer are arguments, never re-read from fields. A kill does not wait
+    /// for this task, and a process that died on its own is replaced without cancelling it, so it
+    /// can still be running when the next process has started. It then reads only its own stream,
+    /// completes only its own channel, and judges "exited before init" by its own process's init.
+    /// </remarks>
+    private async Task ReadStdoutLoopAsync(
+        StreamReader stdout, ChannelWriter<ClaudeStreamEvent> events, CancellationToken ct)
     {
+        var initSeen = false;
         try
         {
-            while (!ct.IsCancellationRequested)
+            var endedOnItsOwn = await ProviderChildProcess.ReadLinesAsync(stdout, line =>
             {
-                string? line;
-                try
-                {
-                    line = await _stdout!.ReadLineAsync(ct);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-
-                if (line is null)
-                {
-                    // End of stdout before the first system/init is the harnessExtra start failure
-                    // (#460) only when nothing asked for it: a kill cancels this token first.
-                    if (!_initSeen && !ct.IsCancellationRequested) _exitedBeforeInit = true;
-                    break;
-                }
-                if (string.IsNullOrWhiteSpace(line)) continue;
-
                 ClaudeStreamEvent? evt;
                 try
                 {
@@ -911,10 +901,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 catch (JsonException ex)
                 {
                     _logger.LogDebug("Skipping non-JSON stdout line: {Line} ({Error})", line, ex.Message);
-                    continue;
+                    return ValueTask.CompletedTask;
                 }
 
-                if (evt is null) continue;
+                if (evt is null) return ValueTask.CompletedTask;
 
                 if (evt.SessionId is not null)
                     _lastSessionId = evt.SessionId;
@@ -923,14 +913,19 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 // _backgroundTasks is current even when no turn is active.
                 if (evt.Type == "system")
                 {
-                    if (evt.Subtype == "init") _initSeen = true;
+                    if (evt.Subtype == "init") initSeen = true;
                     ParseProgress(evt);
                 }
 
                 // Buffer for the active turn's read loop. Stale events that land
                 // between turns will be drained by DrainStaleTurnEvents().
-                _eventChannel!.Writer.TryWrite(evt);
-            }
+                events.TryWrite(evt);
+                return ValueTask.CompletedTask;
+            }, ct);
+
+            // End of stdout before the first system/init is the harnessExtra start failure
+            // (#460) only when nothing asked for it: a kill cancels this token first.
+            if (endedOnItsOwn && !initSeen && !ct.IsCancellationRequested) _exitedBeforeInit = true;
         }
         catch (ObjectDisposedException) { }
         catch (Exception ex)
@@ -939,7 +934,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
         finally
         {
-            _eventChannel?.Writer.TryComplete();
+            events.TryComplete();
             _logger.LogDebug("Background stdout reader stopped");
         }
     }
@@ -959,12 +954,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _process?.Dispose();
         _process = null;
         _stdin = null;
-        _stdout = null;
         _messageCount = 0;
         _previousCumulativeStats = null;
 
         FallBackIfExitedBeforeInit();
-        _initSeen = false;
 
         var args = BuildArgs(resumeId);
         _logger.LogInformation("Starting persistent claude process: {Args}", args);
@@ -993,7 +986,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         _process.StandardInput.AutoFlush = false;
         _stdin = TextWriter.Synchronized(_process.StandardInput);
-        _stdout = _process.StandardOutput;
 
         // Read stderr in background for logging (lives for process lifetime)
         _ = ProviderChildProcess.PumpStderr(
@@ -1001,10 +993,15 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         // Start continuous stdout reader — all NDJSON events flow through the channel
         // so stale between-turn events never corrupt the next turn's read loop.
+        // The reader gets this generation's stream, writer and token as values: by the time
+        // its task runs, the fields may already belong to a later generation.
         _readerCts = new CancellationTokenSource();
         _eventChannel = Channel.CreateUnbounded<ClaudeStreamEvent>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-        _ = Task.Run(() => ReadStdoutLoopAsync(_readerCts.Token));
+        var stdout = _process.StandardOutput;
+        var events = _eventChannel.Writer;
+        var readerToken = _readerCts.Token;
+        _ = Task.Run(() => ReadStdoutLoopAsync(stdout, events, readerToken));
 
         if (resumeId is not null)
             _logger.LogInformation("Restarted claude process with --resume {SessionId} (PID {Pid})", resumeId, _process.Id);
@@ -1147,7 +1144,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _process.Dispose();
         _process = null;
         _stdin = null;
-        _stdout = null;
     }
 
     // --- Argument building ---

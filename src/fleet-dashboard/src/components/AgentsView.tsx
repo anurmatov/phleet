@@ -1,12 +1,5 @@
-import type {
-  AgentState,
-  TaskRecord,
-  RestartState,
-  ReprovisionState,
-  StopStartState,
-  CancelState,
-  WorkflowSummary,
-} from '../types'
+import type { AgentState, WorkflowSummary } from '../types'
+import type { AgentActions } from '../hooks/useAgentActions'
 import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
 import AgentCard from './AgentCard'
@@ -14,105 +7,51 @@ import CommsJournalPanel from './CommsJournalPanel'
 
 interface AgentsViewProps {
   sorted: AgentState[]
-  expandedAgent: string | null
-  taskHistory: Record<string, TaskRecord[]>
-  historyLoading: Record<string, boolean>
-  restartStates: Record<string, RestartState>
-  restartMsg: Record<string, string>
-  reprovisionStates: Record<string, ReprovisionState>
-  reprovisionMsg: Record<string, string>
-  stopStates: Record<string, StopStartState>
-  stopMsg: Record<string, string>
-  startStates: Record<string, StopStartState>
-  startMsg: Record<string, string>
-  cancelStates: Record<string, CancelState>
-  cancelMsg: Record<string, string>
-  deleteStates: Record<string, 'idle' | 'confirming' | 'deleting' | 'success' | 'error'>
-  deleteMsg: Record<string, string>
-  bgCancelStates: Record<string, 'idle' | 'cancelling' | 'done' | 'error'>
-  expandedTasks: Set<string>
-  copiedContainer: string | null
+  /** Per-agent actions and what the page has open (hooks/useAgentActions.ts). */
+  actions: AgentActions
+  /** The agent whose config dialog is open, if any. */
   configAgent: string | null
+  /** The agent whose log viewer is open, if any. */
   logViewer: string | null
+  onViewLogs: (agentName: string) => void
+  onEditConfig: (agentName: string) => void
   workflowByAgent: Record<string, string>
   workflows: WorkflowSummary[]
-  // Workflow section
   agentByWorkflow: Record<string, string>
   /** Signals, cancel/restart/kill and the history panel (hooks/useWorkflowActions.ts). */
   workflowActions: WorkflowActions
-  onExpandAgent: (agentName: string) => void
-  onRestart: (agentName: string) => void
-  onRestartConfirm: (agentName: string) => void
-  onRestartCancel: (agentName: string) => void
-  onReprovision: (agentName: string) => void
-  onReprovisionConfirm: (agentName: string) => void
-  onReprovisionCancel: (agentName: string) => void
-  onStop: (agentName: string) => void
-  onStart: (agentName: string) => void
-  onCancel: (agentName: string) => void
-  onCancelConfirm: (agentName: string) => void
-  onCancelCancel: (agentName: string) => void
-  onDeleteClick: (agentName: string) => void
-  onDeleteConfirm: (agentName: string) => void
-  onDeleteCancel: (agentName: string) => void
-  onBgCancel: (agentName: string, taskId: string) => void
-  onViewLogs: (agentName: string) => void
-  onEditConfig: (agentName: string) => void
-  onToggleTask: (key: string) => void
-  onCopyContainer: (name: string) => void
   highlightedEntityId: string | null
   onClearHighlight: () => void
 }
 
 export default function AgentsView({
-  sorted,
-  expandedAgent,
-  taskHistory,
-  historyLoading,
-  restartStates,
-  restartMsg,
-  reprovisionStates,
-  reprovisionMsg,
-  stopStates,
-  stopMsg,
-  startStates,
-  startMsg,
-  cancelStates,
-  cancelMsg,
-  deleteStates,
-  deleteMsg,
-  bgCancelStates,
-  expandedTasks,
-  copiedContainer,
-  configAgent,
-  logViewer,
-  workflowByAgent,
-  workflows,
-  agentByWorkflow,
-  workflowActions,
-  onExpandAgent,
-  onRestart,
-  onRestartConfirm,
-  onRestartCancel,
-  onReprovision,
-  onReprovisionConfirm,
-  onReprovisionCancel,
-  onStop,
-  onStart,
-  onCancel,
-  onCancelConfirm,
-  onCancelCancel,
-  onDeleteClick,
-  onDeleteConfirm,
-  onDeleteCancel,
-  onBgCancel,
-  onViewLogs,
-  onEditConfig,
-  onToggleTask,
-  onCopyContainer,
-  highlightedEntityId,
-  onClearHighlight,
+  sorted, actions, configAgent, logViewer, onViewLogs, onEditConfig,
+  workflowByAgent, workflows, agentByWorkflow, workflowActions,
+  highlightedEntityId, onClearHighlight,
 }: AgentsViewProps) {
+  const {
+    expandedAgent, taskHistory, historyLoading, expandedTasks, copiedContainer,
+    restartStates, restartMsg, reprovisionStates, reprovisionMsg, stopStates, stopMsg, startStates, startMsg,
+    cancelStates, cancelMsg, deleteStates, deleteMsg, bgCancelStates,
+    toggleExpanded: onExpandAgent,
+    restart: onRestart,
+    restartConfirm: onRestartConfirm,
+    restartCancel: onRestartCancel,
+    reprovision: onReprovision,
+    reprovisionConfirm: onReprovisionConfirm,
+    reprovisionCancel: onReprovisionCancel,
+    stop: onStop,
+    start: onStart,
+    cancel: onCancel,
+    cancelConfirm: onCancelConfirm,
+    cancelCancel: onCancelCancel,
+    deleteClick: onDeleteClick,
+    deleteConfirm: onDeleteConfirm,
+    deleteCancel: onDeleteCancel,
+    bgCancel: onBgCancel,
+    toggleTask: onToggleTask,
+    copyContainer: onCopyContainer,
+  } = actions
   const {
     wfActionMsg, signalStates, signalMsg, signalConfirm, selectedWf, expandedEvents,
     menuOpen: wfMenuOpen,

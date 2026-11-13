@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react'
 import type { AgentState, WorkflowTypeInfo } from '../types'
 import { apiFetch } from '../utils'
 import { parseSchema, formToJson, jsonToForm, initFormValues, SchemaField, useRepositories } from './WorkflowEditor/schemaUtils'
-import type { FormValues, ParsedSchema } from './WorkflowEditor/schemaUtils'
+import type { FormValues } from './WorkflowEditor/schemaUtils'
 import FieldHint from './FieldHint'
 
 // ── Props ─────────────────────────────────────────────────────────────────────
@@ -78,20 +78,6 @@ export default function StartWorkflowModal({ workflowTypes, agents, onClose }: S
       setRawError(null)
       setIsRawMode(false)
     }
-  }
-
-  function buildInputJson(): string | null {
-    if (!selectedType || !schema) return null // null schema → pass rawJson
-    if (schema === null) {
-      // UWE type
-      return rawJson.replace(/\s/g, '') === '{}' ? null : rawJson
-    }
-    if (!schema.hasFields) return null // no input needed
-    if (isRawMode) {
-      return rawJson.replace(/\s/g, '') === '{}' ? null : rawJson
-    }
-    const json = formToJson(formValues, schema)
-    return JSON.parse(json) && Object.keys(JSON.parse(json)).length === 0 ? null : json
   }
 
   // If null schema (UWE) the raw JSON is the input

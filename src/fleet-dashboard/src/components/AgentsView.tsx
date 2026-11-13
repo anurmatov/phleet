@@ -116,7 +116,6 @@ export default function AgentsView({
   workflowByAgent,
   workflows,
   agentByWorkflow,
-  wfActionStates,
   wfActionMsg,
   signalStates,
   signalMsg,

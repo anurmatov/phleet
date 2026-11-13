@@ -97,6 +97,9 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
       document.getElementById(`output-style-${initialStyle}`)
         ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
     })
+    // One-shot, guarded by the ref above. `open` is a new function on every render; listing it
+    // would re-run this each render for nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialStyle, styles])
 
   /** Expands a style, seeding its editor buffer from the row on first open. */

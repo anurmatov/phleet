@@ -139,7 +139,7 @@ function agentStateJsonNames(): Set<string> {
   const body = text.slice(open + 1, end - 1)
   assert.equal(/\[JsonIgnore|\[JsonPropertyName/.test(body), false, 'AgentState now renames or hides a property; teach this test')
   const names = new Set<string>()
-  for (const match of body.matchAll(/^\s*public\s+(?:required\s+)?[\w<>\[\]?,. ]+?\s+(\w+)\s*(?:\{|=>)/gm))
+  for (const match of body.matchAll(/^\s*public\s+(?:required\s+)?[\w<>[\]?,. ]+?\s+(\w+)\s*(?:\{|=>)/gm))
     names.add(camel(match[1]))
   assert.ok(names.has('agentName') && names.has('effectiveStatus'), 'AgentState parsed without its known properties')
   return names

@@ -33,7 +33,7 @@ import type {
   PromptSizeLimits,
   PromptSizeReport,
 } from './types'
-import { apiFetch, apiGet, apiSend, errorMessage, firstFailure, heartbeatAge } from './utils'
+import { apiFetch, apiGet, apiSend, errorMessage, firstFailure } from './utils'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
 import { humanInputIdentity } from './humanInputRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
@@ -300,6 +300,9 @@ export default function App() {
   useEffect(() => {
     if (activeView === 'wf-definitions' && !wfDefsLoaded) loadWfDefs()
     if ((activeView === 'schedules' || activeView === 'namespaces') && !schedulesLoaded) loadSchedules()
+    // Runs when the view changes. The two flags only guard the calls, and are declared further
+    // down this component, where a dependency list here cannot reach them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView])
   const [navOpen, setNavOpen] = useState(false)
 
@@ -381,7 +384,7 @@ export default function App() {
       setActiveView('agents')
       setTimeout(() => setHighlightedEntityId(alert.agentName!), 50)
     }
-  }, [workflows, addAlert])
+  }, [workflows, addAlert, setActiveView])
 
   // Replaces the list with what the server lists now (see reconcileAgents). On failure the rows
   // held so far stay.
@@ -536,7 +539,7 @@ export default function App() {
     fetchCompleted()
 
     loadSetupStatus()
-  }, [])
+  }, [refreshAgents])
 
   useEffect(() => {
     unmounted.current = false
@@ -1584,7 +1587,10 @@ export default function App() {
     }
     const templateParam = params.get('template')
     if (templateParam) handleNewAgentFromTemplate(templateParam)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    // Once, on load: this reads the URL the page was opened with, and must not run again when the
+    // handlers it calls are re-created.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
 

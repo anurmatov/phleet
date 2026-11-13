@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import type { AnyStep, StepPath, StepType } from './editorTypes'
 import { STEP_COLORS, STEP_TYPES } from './editorTypes'
-import { updateStepAtPath, updateBranchCase, removeBranchCase, renameBranchCase, genId, ensureIds, getStepAtPath } from './treeUtils'
+import { updateStepAtPath, updateBranchCase, removeBranchCase, renameBranchCase, ensureIds, getStepAtPath } from './treeUtils'
 import { makeStep } from './stepDefaults'
 import KeyValueEditor from './KeyValueEditor'
 import { apiGet } from '../../utils'
@@ -328,7 +328,6 @@ function BranchFields({ step, path, root, onChange }: BranchFieldsProps) {
   }
 
   function clearDefault() {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     onChange(updateStepAtPath(root, path, ({ default: _d, ...rest }) => rest as AnyStep))
   }
 

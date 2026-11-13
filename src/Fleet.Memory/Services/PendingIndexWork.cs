@@ -12,9 +12,23 @@ namespace Fleet.Memory.Services;
 /// asked again until the service restarted: the memory existed and no search or list could find it.
 ///
 /// A path is held here until the index agrees with the disk for it. What "agrees" means is decided
-/// when the retry runs, never when the failure was recorded: a file that exists is indexed, a file
+/// when the work runs, never when the failure was recorded: a file that exists is indexed, a file
 /// that is gone is removed from the index. So an edit or a delete that arrives while a path is
 /// waiting needs no bookkeeping of its own.
+///
+/// Two things can work on the same path at once: a retry pass and the watcher's event for that file.
+/// Indexing reads the file and writes the index some time later (the embedding sits between), so
+/// without care a retry that read a file before it was deleted, or before it was edited, could write
+/// the index after the delete or the edit had been handled, and the older state would win with
+/// nothing left waiting to repair it. Two rules prevent that:
+///
+/// - One path is worked on by one caller at a time. The gate is per path: a slow embedding holds up
+///   work on its own file and on no other.
+/// - What the disk held is noted before the work and looked at again after it. The path stops
+///   waiting only if the two agree. If the file changed or went away while it was being indexed, the
+///   index may hold the older state, so the path keeps waiting and the next pass does it again.
+///   This second rule does not depend on anyone else taking the gate, so it also covers a change
+///   whose event never arrives and one made by a writer that does not come through here.
 ///
 /// While the index is down the retries do not hammer it or the embedder. A pass stops at the first
 /// failure, so one file is embedded per pass however many are waiting, and the wait before the next
@@ -25,23 +39,37 @@ namespace Fleet.Memory.Services;
 /// never be indexed (an input the embedder rejects, say) ends up last and costs one attempt per
 /// pass; it cannot keep the files behind it from being reached.
 /// </summary>
+/// <param name="observe">
+/// What the disk holds for a path right now: null when there is no file, otherwise a value that
+/// changes whenever the file does. The default is the file's last write time and length.
+/// </param>
 public sealed class PendingIndexWork(
     Func<string, CancellationToken, Task> index,
     Func<string, CancellationToken, Task> remove,
     TimeProvider time,
     ILogger logger,
-    Func<string, bool>? exists = null)
+    Func<string, object?>? observe = null)
 {
     public static readonly TimeSpan FirstDelay = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan MaxDelay = TimeSpan.FromMinutes(5);
 
-    private readonly Func<string, bool> _exists = exists ?? File.Exists;
+    private readonly Func<string, object?> _observe = observe ?? ObserveFile;
     // Path → when it was last tried, as a counter (0 = not yet). The counter orders a pass.
     private readonly ConcurrentDictionary<string, long> _pending = new(StringComparer.Ordinal);
     private long _attempts;
     private readonly object _gate = new();
     private TimeSpan _delay = FirstDelay;
     private DateTimeOffset _notBefore = DateTimeOffset.MinValue;
+
+    // One entry per path that is being worked on or waited for, counted so it can be dropped when
+    // the last user leaves. Guarded by itself.
+    private readonly Dictionary<string, PathGate> _pathGates = new(StringComparer.Ordinal);
+
+    private sealed class PathGate
+    {
+        public readonly SemaphoreSlim Turn = new(1, 1);
+        public int Users;
+    }
 
     public enum Outcome
     {
@@ -53,6 +81,11 @@ public sealed class PendingIndexWork(
         Corrupt,
         /// <summary>The index or the embedder failed. The path is waiting for a retry.</summary>
         Deferred,
+        /// <summary>
+        /// The work went through, and the file changed or went away while it ran, so the index may
+        /// hold the older state. The path is waiting for another pass.
+        /// </summary>
+        Stale,
     }
 
     /// <summary>How many paths are waiting.</summary>
@@ -70,17 +103,9 @@ public sealed class PendingIndexWork(
     {
         try
         {
-            var outcome = await ReconcileAsync(path, ct);
-            _pending.TryRemove(path, out _);
-            return outcome;
+            return await ReconcileAsync(path, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (InvalidDataException ex)
-        {
-            _pending.TryRemove(path, out _);
-            logger.LogError(ex, "Corrupt memory file skipped: {Path}", path);
-            return Outcome.Corrupt;
-        }
         catch (Exception ex)
         {
             Defer(path);
@@ -120,16 +145,11 @@ public sealed class PendingIndexWork(
             ct.ThrowIfCancellationRequested();
             try
             {
-                await ReconcileAsync(path, ct);
-                _pending.TryRemove(path, out _);
-                done++;
+                // Indexed or removed: caught up. Stale: the index answered and the file moved on
+                // meanwhile; it stays waiting and is no reason to stop the pass or to wait longer.
+                if (await ReconcileAsync(path, ct) is Outcome.Indexed or Outcome.Removed) done++;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (InvalidDataException ex)
-            {
-                _pending.TryRemove(path, out _);
-                logger.LogError(ex, "Corrupt memory file dropped from the index retries: {Path}", path);
-            }
             catch (Exception ex)
             {
                 // Tried most recently now, so the next pass reaches the others first.
@@ -159,15 +179,84 @@ public sealed class PendingIndexWork(
         return done;
     }
 
+    /// <summary>
+    /// One path, one caller at a time. Decides from what the disk holds once it has the path to
+    /// itself, and stops the path waiting only if the disk still holds the same when the work is done.
+    /// A failure of the index or the embedder is thrown, with the path's waiting state untouched.
+    /// </summary>
     private async Task<Outcome> ReconcileAsync(string path, CancellationToken ct)
     {
-        if (_exists(path))
+        var gate = await EnterAsync(path, ct);
+        try
         {
-            await index(path, ct);
-            return Outcome.Indexed;
+            var before = _observe(path);
+            Outcome outcome;
+            try
+            {
+                if (before is not null)
+                {
+                    await index(path, ct);
+                    outcome = Outcome.Indexed;
+                }
+                else
+                {
+                    await remove(path, ct);
+                    outcome = Outcome.Removed;
+                }
+            }
+            catch (InvalidDataException ex)
+            {
+                logger.LogError(ex, "Corrupt memory file skipped: {Path}", path);
+                outcome = Outcome.Corrupt;
+            }
+
+            if (!Equals(before, _observe(path)))
+            {
+                // The file changed or went away while this ran. What was written may be the older
+                // state, and nothing says the change will be reported: keep the path.
+                Defer(path);
+                return Outcome.Stale;
+            }
+            _pending.TryRemove(path, out _);
+            return outcome;
         }
-        await remove(path, ct);
-        return Outcome.Removed;
+        finally
+        {
+            Leave(path, gate, held: true);
+        }
+    }
+
+    private async Task<PathGate> EnterAsync(string path, CancellationToken ct)
+    {
+        PathGate gate;
+        lock (_pathGates)
+        {
+            if (!_pathGates.TryGetValue(path, out gate!)) _pathGates[path] = gate = new PathGate();
+            gate.Users++;
+        }
+        try
+        {
+            await gate.Turn.WaitAsync(ct);
+        }
+        catch
+        {
+            Leave(path, gate, held: false);
+            throw;
+        }
+        return gate;
+    }
+
+    private void Leave(string path, PathGate gate, bool held)
+    {
+        if (held) gate.Turn.Release();
+        lock (_pathGates)
+            if (--gate.Users == 0) _pathGates.Remove(path);
+    }
+
+    private static object? ObserveFile(string path)
+    {
+        var file = new FileInfo(path);
+        return file.Exists ? (file.LastWriteTimeUtc, file.Length) : null;
     }
 
     private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;

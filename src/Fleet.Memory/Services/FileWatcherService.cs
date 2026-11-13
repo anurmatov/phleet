@@ -95,31 +95,30 @@ public sealed class FileWatcherService(
         foreach (var doc in allDocs)
         {
             filePathsOnDisk.Add(doc.FilePath);
-            try
-            {
-                await memoryService.IndexFileAsync(doc.FilePath, ct);
-                indexed++;
 
-                // Track file timestamp for polling
-                var fileInfo = new FileInfo(doc.FilePath);
-                if (fileInfo.Exists)
-                    _knownFiles[doc.FilePath] = fileInfo.LastWriteTimeUtc;
-            }
-            catch (InvalidDataException ex)
+            // Through the same door as the watcher's events and the retries: one caller per path,
+            // and a file that changes while the scan is embedding it (a write through the API, say)
+            // is done again instead of being left with its older content indexed.
+            switch (await _pendingIndex.ApplyAsync(doc.FilePath, ct))
             {
-                corrupt++;
-                logger.LogError(ex, "Corrupt memory file skipped during full scan: {Path}", doc.FilePath);
+                case PendingIndexWork.Outcome.Indexed:
+                case PendingIndexWork.Outcome.Stale:
+                    indexed++;
+                    break;
+                case PendingIndexWork.Outcome.Corrupt:
+                    corrupt++;
+                    // Not recorded as seen, as before: the polling loop reports it once more.
+                    continue;
+                case PendingIndexWork.Outcome.Deferred:
+                    indexFailures++;
+                    break;
             }
-            catch (Exception ex)
-            {
-                indexFailures++;
-                logger.LogWarning(ex, "Failed to index {Path} during full scan; it will be retried", doc.FilePath);
-                _pendingIndex.Defer(doc.FilePath);
-                // Known to the polling loop as it is now, so the retries are the only thing asking again.
-                var failedInfo = new FileInfo(doc.FilePath);
-                if (failedInfo.Exists)
-                    _knownFiles[doc.FilePath] = failedInfo.LastWriteTimeUtc;
-            }
+
+            // Known to the polling loop as it is now. A file that is still waiting is asked about
+            // again by the retries, not by the polling loop.
+            var fileInfo = new FileInfo(doc.FilePath);
+            if (fileInfo.Exists)
+                _knownFiles[doc.FilePath] = fileInfo.LastWriteTimeUtc;
         }
 
         // Remove orphaned Qdrant points (files that no longer exist)

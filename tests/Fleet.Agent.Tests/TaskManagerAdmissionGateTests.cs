@@ -1,0 +1,322 @@
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
+using Fleet.Agent.Abstractions;
+using Fleet.Agent.Configuration;
+using Fleet.Agent.Models;
+using Fleet.Agent.Services;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using NSubstitute;
+
+namespace Fleet.Agent.Tests;
+
+/// <summary>
+/// The agent runs one turn at a time. These tests drive the three places where that used to depend
+/// on timing: two admissions deciding at once, an arrival between a turn leaving and the queue
+/// being drained, and a message that reaches the queue after the drain already ran.
+/// </summary>
+public class TaskManagerAdmissionGateTests
+{
+    private static readonly TimeSpan Wait = TimeSpan.FromSeconds(5);
+
+    [Fact]
+    public async Task TwoAdmissionsDecidingAtOnce_RegisterOneTurnAndQueueTheOther()
+    {
+        var executor = new HeldExecutor();
+        var manager = BuildManager(executor);
+        using var firstInside = new ManualResetEventSlim();
+        using var secondInside = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var decisions = 0;
+        manager.DispatchCheckpointForTest = checkpoint =>
+        {
+            if (checkpoint != "admission_idle") return;
+            if (Interlocked.Increment(ref decisions) == 1)
+            {
+                firstInside.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+            }
+            else
+            {
+                secondInside.Set();
+            }
+        };
+
+        var first = Task.Run(() => manager.StartTask(1, "first", "first", isSessionTask: true));
+        Assert.True(firstInside.Wait(Wait));
+        var second = Task.Run(() => manager.StartTask(2, "second", "second", isSessionTask: true));
+
+        // The first admission has found the agent idle and has not registered its turn yet. A
+        // second admission must not reach the same conclusion while it is there.
+        Assert.False(secondInside.Wait(TimeSpan.FromMilliseconds(300)));
+
+        release.Set();
+        Assert.Equal(TaskDispatchOutcome.Ran, await first.WaitAsync(Wait));
+        Assert.Equal(TaskDispatchOutcome.Queued, await second.WaitAsync(Wait));
+        await executor.WaitForExecuteCountAsync(1);
+
+        Assert.Equal(["first"], executor.ExecutedTasks);
+        Assert.True(manager.HasRunningTasks(1));
+        Assert.False(manager.HasRunningTasks(2));
+        Assert.Single(manager.GetQueueSnapshot());
+
+        executor.ReleaseAllTurns();
+        await executor.WaitForExecuteCountAsync(2);
+        Assert.Equal(["first", "second"], executor.ExecutedTasks);
+        await WaitUntilAsync(() => !manager.HasRunningTasks(1) && !manager.HasRunningTasks(2));
+    }
+
+    [Fact]
+    public async Task ArrivalBetweenTurnEndAndQueueDrain_WaitsBehindQueuedWork()
+    {
+        var executor = new HeldExecutor();
+        var manager = BuildManager(executor);
+
+        _ = manager.StartTask(1, "running", "running", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+        Assert.Equal(TaskDispatchOutcome.Queued,
+            await manager.StartTask(2, "queued", "queued", isSessionTask: true));
+
+        // OnStatusChanged is raised by the finishing turn after it has left the running set and
+        // before it starts the next queued entry: the exact gap an arrival used to slip through.
+        Task<TaskDispatchOutcome>? late = null;
+        var fired = 0;
+        manager.OnStatusChanged += () =>
+        {
+            if (manager.HasRunningTasks(1) || manager.HasRunningTasks(2)) return;
+            if (Interlocked.Exchange(ref fired, 1) == 1) return;
+            late = manager.StartTask(3, "late", "late", isSessionTask: true);
+        };
+
+        executor.ReleaseAllTurns();
+        await executor.WaitForExecuteCountAsync(3);
+
+        Assert.NotNull(late);
+        Assert.Equal(TaskDispatchOutcome.Queued, await late!.WaitAsync(Wait));
+        Assert.Equal(["running", "queued", "late"], executor.ExecutedTasks);
+    }
+
+    [Fact]
+    public async Task MessageQueuedAfterTheDrainAlreadyRan_StillStartsItsTurn()
+    {
+        var executor = new HeldExecutor();
+        var manager = BuildManager(executor);
+        using var parked = new ManualResetEventSlim();
+        using var resume = new ManualResetEventSlim();
+        manager.DispatchCheckpointForTest = checkpoint =>
+        {
+            if (checkpoint != "mid_turn_delivery") return;
+            parked.Set();
+            resume.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        _ = manager.StartTask(1, "running", "running", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        // The second message has seen the running turn and is about to be delivered into it.
+        var late = Task.Run(() => manager.StartTask(1, "late", "late", isSessionTask: true));
+        Assert.True(parked.Wait(Wait));
+
+        // The turn ends, finds an empty queue and goes idle while that message is still in hand.
+        executor.ReleaseAllTurns();
+        await WaitUntilAsync(() => !manager.HasRunningTasks(1));
+        // Lets the finishing turn get past its (empty) drain. It only makes a regression easier to
+        // see: with the fix the outcome is the same whichever side runs first.
+        await Task.Delay(100);
+
+        resume.Set();
+        Assert.Equal(TaskDispatchOutcome.Queued, await late.WaitAsync(Wait));
+
+        // Nothing is running, so nothing would ever drain the queue: the enqueue must start it.
+        await executor.WaitForExecuteCountAsync(2);
+        Assert.Equal(["running", "late"], executor.ExecutedTasks);
+        await WaitUntilAsync(() => manager.GetQueueSnapshot().Count == 0);
+    }
+
+    [Fact]
+    public async Task CancelWhileAnInjectionIsRecorded_PublishesTheCancelWithoutFaulting()
+    {
+        // The cancel path reads the turn's merged submission ids while a mid-turn delivery may be
+        // appending to them. This is a smoke test of that overlap, not a reproduction: it passed
+        // before the ids were guarded too, because the overlap cannot be forced from outside.
+        for (var round = 0; round < 20; round++)
+        {
+            var executor = new HeldExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+            var events = new RecordingEvents();
+            var manager = BuildManager(executor, events);
+
+            _ = manager.StartTask(1, "running", "running", isSessionTask: true, identity: Identity("s0"));
+            await executor.WaitForExecuteCountAsync(1);
+
+            var injections = Enumerable.Range(1, 3).Select(i => Task.Run(() =>
+                manager.StartTask(1, $"m{i}", $"m{i}", isSessionTask: true, identity: Identity($"s{i}")))).ToArray();
+            var cancel = Task.Run(() => manager.HandleCancel(1, "all"));
+
+            await Task.WhenAll(injections).WaitAsync(Wait);
+            await cancel.WaitAsync(Wait);
+            // A message that lost the race with the cancel runs as a turn of its own.
+            executor.ReleaseAllTurns();
+            await WaitUntilAsync(() => manager.GetQueueSnapshot().Count == 0 && !manager.HasRunningTasks(1));
+
+            Assert.DoesNotContain(Fleet.Protocol.ConversationEventKind.TurnOutcomeUnknown, events.Kinds);
+        }
+    }
+
+    [Fact]
+    public async Task MergedSubmissionIds_ReadWhileAnotherThreadAdds_NeverFaults()
+    {
+        // The interleaving the turn above cannot force: one thread snapshots for a terminal event
+        // while another records injected submissions. Every snapshot must be a consistent copy.
+        var running = new RunningTask
+        {
+            Id = 1,
+            Description = "test",
+            StartedAt = DateTimeOffset.UtcNow,
+            Cts = new CancellationTokenSource(),
+            IsSessionTask = true,
+        };
+        const int Rounds = 20_000;
+        using var start = new ManualResetEventSlim();
+
+        var writer = Task.Run(() =>
+        {
+            start.Wait();
+            for (var i = 0; i < Rounds; i++)
+            {
+                running.AddMergedSubmissionId($"s{i}");
+                if (i % 64 == 0) running.ReplaceMergedSubmissionIds([$"r{i}"]);
+            }
+        });
+        var reader = Task.Run(() =>
+        {
+            start.Wait();
+            for (var i = 0; i < Rounds; i++)
+            {
+                var snapshot = running.SnapshotMergedSubmissionIds();
+                Assert.DoesNotContain(null, snapshot);
+                Assert.Equal(snapshot.Count, snapshot.Distinct().Count());
+            }
+        });
+
+        start.Set();
+        await writer.WaitAsync(TimeSpan.FromSeconds(30));
+        await reader.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.False(running.AddMergedSubmissionId($"s{Rounds - 1}"));
+    }
+
+    [Fact]
+    public void MergedSubmissionIds_KeepOrderDropDuplicatesAndHandOutCopies()
+    {
+        var running = new RunningTask
+        {
+            Id = 1,
+            Description = "test",
+            StartedAt = DateTimeOffset.UtcNow,
+            Cts = new CancellationTokenSource(),
+            IsSessionTask = true,
+        };
+
+        Assert.True(running.AddMergedSubmissionId("a"));
+        Assert.True(running.AddMergedSubmissionId("b"));
+        Assert.False(running.AddMergedSubmissionId("a"));
+        var before = running.SnapshotMergedSubmissionIds();
+
+        running.ReplaceMergedSubmissionIds(["c", "c", "d"]);
+
+        Assert.Equal(["a", "b"], before);
+        Assert.Equal(["c", "d"], running.SnapshotMergedSubmissionIds());
+    }
+
+    private static Fleet.Protocol.ConversationIdentity Identity(string submission) => new()
+    {
+        PrincipalId = "p",
+        Role = Fleet.Protocol.PrincipalRole.Owner,
+        ChannelId = ChannelIds.Telegram,
+        ConversationId = "1",
+        SubmissionId = submission,
+        Attempt = 1,
+    };
+
+    private static TaskManager BuildManager(IAgentExecutor executor, IConversationEventPublisher? events = null)
+    {
+        var options = Options.Create(new AgentOptions
+        {
+            Name = "test",
+            Role = "test",
+            WorkDir = "/tmp",
+            Provider = "claude",
+        });
+        return new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance,
+            events: events, sink: Substitute.For<IMessageSink>());
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        using var cts = new CancellationTokenSource(Wait);
+        while (!condition())
+            await Task.Delay(10, cts.Token);
+    }
+
+    private sealed class RecordingEvents : IConversationEventPublisher
+    {
+        private readonly ConcurrentQueue<string> _kinds = new();
+        public IReadOnlyCollection<string> Kinds => _kinds.ToArray();
+
+        public void Publish(Fleet.Protocol.ConversationEvent evt) => _kinds.Enqueue(evt.Kind);
+
+        public bool Publish<TPayload>(long chatId, string kind, Fleet.Protocol.ConversationIdentity identity, TPayload? payload)
+            where TPayload : class
+        {
+            _kinds.Enqueue(kind);
+            return true;
+        }
+    }
+
+    /// <summary>Every turn waits for <see cref="ReleaseAllTurns"/>, then answers with its own task text.</summary>
+    private sealed class HeldExecutor : IAgentExecutor
+    {
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentQueue<string> _executed = new();
+
+        public MidTurnInjectionResult InjectionResult { get; init; } = MidTurnInjectionResult.Unsupported;
+        public IReadOnlyList<string> ExecutedTasks => _executed.ToList();
+        public string? LastSessionId => "session";
+        public DateTimeOffset LastActivity => DateTimeOffset.UtcNow;
+        public bool IsProcessWarm => true;
+
+        public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
+            string task,
+            IReadOnlyList<MessageImage>? images = null,
+            IReadOnlyList<MessageDocument>? documents = null,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            _executed.Enqueue(task);
+            await _release.Task.WaitAsync(ct);
+            yield return new AgentProgress { EventType = "result", Summary = task, FinalResult = task };
+        }
+
+        public Task<MidTurnInjectionResult> TryInjectMessageAsync(
+            string task,
+            IReadOnlyList<MessageImage>? images = null,
+            IReadOnlyList<MessageDocument>? documents = null,
+            CancellationToken ct = default) => Task.FromResult(InjectionResult);
+
+        public void ReleaseAllTurns() => _release.TrySetResult();
+        public Task StopProcessAsync() => Task.CompletedTask;
+        public Task<bool> TryStopProcessAsync() => Task.FromResult(false);
+        public void RequestRestart() { }
+        public IAsyncEnumerable<AgentProgress> SendCommandAsync(string command, CancellationToken ct = default) =>
+            ExecuteAsync(command, ct: ct);
+        public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() => [];
+        public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) => Task.FromResult(false);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        public async Task WaitForExecuteCountAsync(int expected)
+        {
+            using var cts = new CancellationTokenSource(Wait);
+            while (_executed.Count < expected)
+                await Task.Delay(10, cts.Token);
+        }
+    }
+}

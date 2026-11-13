@@ -161,14 +161,17 @@ esac
 # Qdrant, like the MinIO check above: before anything is stopped, while the old container can still
 # be read. The compose file pins a release and FLEET_QDRANT_VERSION in .env may name another; either
 # way the release the next start WOULD run is checked against the one this host runs now. Setting
-# the variable is not a way past this.
-QDRANT_TARGET=$(qdrant_target_version "$ENV_FILE" "$COMPOSE_EXAMPLE")
+# the variable is not a way past this. The target is Compose's own answer for the definition, env
+# file and profiles the `up` below uses ($COMPOSE_NEXT becomes $COMPOSE_FILE in the same directory),
+# never a second reading of .env.
+QDRANT_TARGET=$(qdrant_target_version "$FLEET_BASE_DIR" "$COMPOSE_PROJECT" "$COMPOSE_NEXT" "${COMMS_PROFILE_ARGS[@]}")
 QDRANT_SEEN=$(qdrant_observe "$COMPOSE_PROJECT")
 if ! QDRANT_DECISION=$(qdrant_upgrade_decision "$QDRANT_SEEN" "$QDRANT_TARGET"); then
-  fail "Qdrant: this upgrade is refused ($QDRANT_DECISION)."
+  fail "Qdrant: this upgrade is refused ($QDRANT_DECISION). Compose target: ${QDRANT_TARGET:-unknown}"
   qdrant_refusal_message "$QDRANT_DECISION" "$QDRANT_SEEN" "$QDRANT_TARGET" "$COMPOSE_PROJECT"
   exit 1
 fi
+ok "Qdrant release check passed ($QDRANT_DECISION). Compose target: ${QDRANT_TARGET:-unknown}"
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
@@ -359,8 +362,10 @@ fi
 
 # Said once per upgrade until the operator records a choice: these four used to be reachable from
 # other machines.
-if [[ -z "$(read_env_var "$ENV_FILE" "FLEET_INTERNAL_BIND_ADDRESS")" ]]; then
-  warn "Ports 7233, 8080, 3100 and 3300 (Temporal, its UI, fleet-memory, fleet-bridge) are published on 127.0.0.1 only."
+# Any assignment Compose would read counts as a choice (a leading blank, `export`, a repeat), so this
+# never says "loopback" over a line that opens the ports. It states the default, not this host's state.
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?FLEET_INTERNAL_BIND_ADDRESS[[:space:]]*=' "$ENV_FILE"; then
+  warn "Ports 7233, 8080, 3100 and 3300 (Temporal, its UI, fleet-memory, fleet-bridge) are published on 127.0.0.1 only by default."
   warn "  From another machine use an SSH tunnel, or set FLEET_INTERNAL_BIND_ADDRESS in .env: docs/upgrading/internal-ports-loopback.md"
 fi
 

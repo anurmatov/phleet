@@ -49,6 +49,29 @@ public class UniversalWorkflow
     internal const string LoopFinalContinuePatchId = "uwe-loop-final-continue-v1";
 
     /// <summary>
+    /// Patch id gating the branch discriminator on a delegation's task id. It is consulted ONLY by
+    /// a delegation that runs inside a parallel branch, so a run that never delegates from one
+    /// records no marker and keeps the history it always had. A run that already scheduled such a
+    /// delegation before this shipped replays without the marker and keeps its old ids for life.
+    /// </summary>
+    internal const string BranchTaskIdPatchId = "uwe-branch-task-id-v1";
+
+    /// <summary>
+    /// Patch id gating the deterministic id of a <c>cross_namespace_start</c> that names none.
+    /// Consulted only by such a step; see <see cref="NewCrossNamespaceWorkflowId"/> for why a
+    /// value replay never compares still needs one.
+    /// </summary>
+    internal const string CrossNamespaceIdPatchId = "uwe-cross-namespace-id-v1";
+
+    /// <summary>
+    /// Separates a step's name from its branch position in a task id. Chosen because it is a URL
+    /// unreserved character — the id travels in the cancel route, escaped twice — and because the
+    /// position after it is digits and dots only, so the id splits back at the LAST separator
+    /// whatever the step is called.
+    /// </summary>
+    internal const char BranchSeparator = '~';
+
+    /// <summary>
     /// Error type stamped on the refusal to emit an approver-only gate signal.
     ///
     /// It exists so the refusal can be excluded from the <c>ignoreFailure</c> catch by TYPE rather
@@ -81,6 +104,17 @@ public class UniversalWorkflow
     /// </summary>
     internal const string DelegatedDiscardLogTemplate =
         "delegated signal discarded: stale visit or artifact (signal={Signal} visit={Visit})";
+
+    /// <summary>
+    /// Logged when a wait registers for a signal name another wait is still parked on. The engine
+    /// keeps one waiter per name, so the earlier wait is no longer reachable by a signal and ends
+    /// only by its own timeout, if it has one. The usual cause is two parallel branches waiting on
+    /// one name; the other is a wait that failed after registering (a notify step that threw) and
+    /// left its waiter behind. Operators search for the leading text. Only the signal name is
+    /// logged.
+    /// </summary>
+    internal const string WaiterReplacedLogTemplate =
+        "signal waiter replaced while still pending: an earlier wait on '{Signal}' never completed, and only the newer one can be woken";
 
     /// <summary>A signal that arrived with no waiter registered, plus its arrival ordinal.</summary>
     private readonly record struct BufferedSignal(JsonElement Payload, long Seq);
@@ -121,6 +155,20 @@ public class UniversalWorkflow
     /// deterministic.
     /// </summary>
     private int _gateVisitCount;
+
+    /// <summary>
+    /// Where the running code sits among parallel branches: the zero-based index of its branch at
+    /// each enclosing <c>parallel</c>, outermost first and dot-separated (<c>"2"</c>,
+    /// <c>"0.3"</c>), or null outside every parallel step.
+    ///
+    /// <para>
+    /// An <see cref="AsyncLocal{T}"/>, like <c>TemplateEngine.IterationOverlay</c>: each branch
+    /// captures its own value at its first await, so interleaved branches never read each other's.
+    /// Setting it is workflow state only — no command — and it is derived from the definition and
+    /// the resolved item list, so it is the same on replay.
+    /// </para>
+    /// </summary>
+    private readonly AsyncLocal<string?> _branchPath = new();
 
     private TemplateEngine _template = null!;
     private bool _skipRemaining;
@@ -346,10 +394,28 @@ public class UniversalWorkflow
 
     private async Task<object?> ExecuteParallelAsync(ParallelStep step)
     {
+        // Read once, before any branch starts: this parallel's own position, which its branches
+        // extend. Null when it is not itself inside a branch.
+        var parentPath = _branchPath.Value;
+
         if (step.Steps is { Length: > 0 })
         {
-            // Static parallel: all branches run concurrently
-            await WhenAllBranchesAsync(step.Steps.Select(s => (Task)ExecuteStepAsync(s)).ToList());
+            // Static parallel: all branches run concurrently.
+            //
+            // Each branch is started exactly as before — a direct call, in order, with nothing
+            // awaited in between — so the commands it emits and when its continuations run are
+            // unchanged. The position is set just before the call: the branch runs on this
+            // execution context until its first await and captures the value there, and the next
+            // assignment here cannot reach what it captured.
+            var branches = new List<Task>(step.Steps.Length);
+            for (var i = 0; i < step.Steps.Length; i++)
+            {
+                _branchPath.Value = BranchPath(parentPath, i);
+                branches.Add(ExecuteStepAsync(step.Steps[i]));
+            }
+            _branchPath.Value = parentPath;
+
+            await WhenAllBranchesAsync(branches);
             return null;
         }
 
@@ -368,6 +434,7 @@ public class UniversalWorkflow
             // overwrites when tasks interleave at activity await boundaries. (#686)
             var tasks = itemList.Select((item, idx) => (Func<Task>)(async () =>
             {
+                _branchPath.Value = BranchPath(parentPath, idx);
                 _template.IterationOverlay.Value = new Dictionary<string, object?> { [step.ItemVar!] = item };
                 var result = await ExecuteStepAsync(step.Step!);
                 results[idx] = result;
@@ -467,7 +534,7 @@ public class UniversalWorkflow
 
         var target = _template.ResolveString(step.Target);
         var instruction = await ResolveInstructionAsync(step);
-        var taskId = $"{Workflow.Info.WorkflowId}/{step.Name ?? "delegate"}";
+        var taskId = DelegationTaskId(step);
         var timeout = TimeSpan.FromMinutes(step.TimeoutMinutes);
         var repo = step.Repo is null ? null : _template.ResolveString(step.Repo);
 
@@ -498,6 +565,41 @@ public class UniversalWorkflow
 
         return result.Text;
     }
+
+    /// <summary>
+    /// The id a delegation is correlated by: the bridge keeps ONE waiter per id, the agent drops a
+    /// directive whose id it is already working on, and the agent's reply is matched back by it.
+    ///
+    /// <para>
+    /// It used to be <c>{workflowId}/{step name}</c> everywhere. That is unique only while one
+    /// delegation of a step is in flight at a time, and a parallel fan-out runs the same step once
+    /// per item: every branch registered under the same id, the last one took the waiter, and the
+    /// first reply completed that branch while the others ran to their timeout.
+    /// </para>
+    ///
+    /// <para>
+    /// A delegation inside a parallel branch now carries its branch position after
+    /// <see cref="BranchSeparator"/> — <c>wf/review~2</c>, or <c>wf/inner~1.0</c> when nested.
+    /// Outside any branch the id is exactly what it was, and the patch is not even consulted, so
+    /// those runs record nothing new. The escalation notification, a wait's reminder and a retried
+    /// attempt all come through here and get the same position as the step they belong to; inside
+    /// one branch they run one after another, as they always did.
+    /// </para>
+    /// </summary>
+    private string DelegationTaskId(DelegateStep step)
+    {
+        var taskId = $"{Workflow.Info.WorkflowId}/{step.Name ?? "delegate"}";
+
+        if (_branchPath.Value is not { } branch) return taskId;
+
+        return Workflow.Patched(BranchTaskIdPatchId)
+            ? $"{taskId}{BranchSeparator}{branch}"
+            : taskId;
+    }
+
+    private static string BranchPath(string? parent, int index) =>
+        parent is null ? index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                       : $"{parent}.{index.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     /// <summary>
     /// The status a definition sees in <c>statusVar</c>: the relay token trimmed and lower-cased,
@@ -570,7 +672,7 @@ public class UniversalWorkflow
                     //    This ordering, not the epoch, is what covers a reply sent while the
                     //    notification activity is still in flight (#280 F20).
                     var tcs = new TaskCompletionSource<JsonElement>();
-                    _signalWaiters["escalation-decision"] = tcs;
+                    RegisterSignalWaiter("escalation-decision", tcs);
 
                     // 4. Best-effort notification to escalation target. It carries no Repo: it
                     //    is about the workflow, not the repository, and stays a five-argument
@@ -726,7 +828,7 @@ public class UniversalWorkflow
 
         // Register signal waiter
         var tcs = new TaskCompletionSource<JsonElement>();
-        _signalWaiters[signalName] = tcs;
+        RegisterSignalWaiter(signalName, tcs);
 
         // Initial notification before waiting
         if (step.NotifyStep != null)
@@ -816,6 +918,27 @@ public class UniversalWorkflow
         WriteBindMatch(step, bindTo, payload, engineTimeout: false);
         if (step.OutputVar != null) SetVar(step.OutputVar, payload);
         return payload;
+    }
+
+    /// <summary>
+    /// Registers the waiter a wait is about to park on.
+    ///
+    /// <para>
+    /// One waiter per signal name is all <c>_signalWaiters</c> holds. Two waits on the same name
+    /// are parked together only from parallel branches; the second registration then replaces
+    /// the first, and the first wait is stranded. A definition that spells that out with literal
+    /// names is refused at load (<see cref="WorkflowDefinitionValidator"/>), but a templated name
+    /// is unknowable there and two failed <c>delegate_with_escalation</c> branches share
+    /// <c>escalation-decision</c>, so it is said here when it happens. The behaviour is unchanged:
+    /// the newer waiter still takes the name, exactly as before. Workflow.Logger is replay-safe.
+    /// </para>
+    /// </summary>
+    private void RegisterSignalWaiter(string signalName, TaskCompletionSource<JsonElement> waiter)
+    {
+        if (_signalWaiters.TryGetValue(signalName, out var prior) && !prior.Task.IsCompleted)
+            Workflow.Logger.LogWarning(WaiterReplacedLogTemplate, signalName);
+
+        _signalWaiters[signalName] = waiter;
     }
 
     // -------------------------------------------------------------------------
@@ -1151,12 +1274,36 @@ public class UniversalWorkflow
         // Arg order matches StartAsync(targetNamespace, workflowType, workflowId, taskQueue, input). (#685)
         var result = await Workflow.ExecuteActivityAsync<string>(
             "StartCrossNamespaceWorkflow",
-            new object?[] { step.Namespace, workflowType, workflowId ?? Guid.NewGuid().ToString(), step.TaskQueue, args },
+            new object?[] { step.Namespace, workflowType, workflowId ?? NewCrossNamespaceWorkflowId(), step.TaskQueue, args },
             new ActivityOptions { StartToCloseTimeout = TimeSpan.FromSeconds(30) });
 
         if (step.OutputVar != null) SetVar(step.OutputVar, result);
         return result;
     }
+
+    /// <summary>
+    /// The id for a <c>cross_namespace_start</c> that names none.
+    ///
+    /// <para>
+    /// It used to be <c>Guid.NewGuid()</c>, which is not replay-stable: workflow code produced a
+    /// different value every time it ran. Nothing compared it — it is an activity argument, and
+    /// replay checks an activity's id and type only — so it never failed, but it had no business
+    /// in workflow code. It is now <c>Workflow.NewGuid()</c>, from the run's seeded source.
+    /// </para>
+    ///
+    /// <para>
+    /// The patch is there for a different value than this one. The seeded source also names a
+    /// human-input child (<c>"human-input-" + Workflow.NewGuid()</c>), and a child workflow id IS
+    /// compared on replay. A run recorded before this change never drew from the source here, so
+    /// drawing from it on replay would shift the child's id and fail the run. Unpatched histories
+    /// therefore keep the old call exactly; only a run that reaches this for the first time on the
+    /// new engine takes the deterministic id.
+    /// </para>
+    /// </summary>
+    private static string NewCrossNamespaceWorkflowId() =>
+        Workflow.Patched(CrossNamespaceIdPatchId)
+            ? Workflow.NewGuid().ToString()
+            : Guid.NewGuid().ToString();
 
     // -------------------------------------------------------------------------
     // Variable assignment

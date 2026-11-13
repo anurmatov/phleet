@@ -226,6 +226,14 @@ an `<img src>` without a header — is worthless to a native client that fetches
 ordinary inject-or-queue dispatch (#274 D5). Two routes would imply two code paths and invite a
 client to believe steer modifies an existing submission. It does not.
 
+**Reply ownership (#533).** Both types retain ordinary injection, Inbox continuation and coalescing,
+so one combined answer may close several legitimate same-conversation submissions rather than
+acknowledging each separately.
+The runtime suppresses unowned generic provider recovery before accumulation or delivery, not owned
+finals or scoped injected answers; see [the recovery ownership contract](conversation-protocol.md#first-party-recovery-ownership-533).
+South retry, fencing, commit/ack and unknown/failure meanings are unchanged, and a workflow callback
+remains independent of the client's reply path.
+
 ### 5.1 Worked requests and responses
 
 **Session.**

@@ -909,6 +909,18 @@ public sealed class TaskManager
                 {
                     var guardsThisEvent = steeringResidue && firstEvent;
                     firstEvent = false;
+                    // Generic provider recovery has no original conversation/submission owner.
+                    // Segment tags describe provenance, not ownership. Suppress before even a
+                    // recovered FinalResult can enter this client's completion text or sinks.
+                    // Scoped injected answers use DeliverInjectedTurnAnswersAsync instead.
+                    if (progress.EventType == "recovered_answer"
+                        && identity.ChannelId == ConversationSouthAdapter.ClientChannel)
+                    {
+                        _injectionCounter.Increment(_agentConfig.Provider,
+                            InjectionOutcomeCounter.UnownedClientRecoverySuppressed);
+                        continue;
+                    }
+
                     if (isSessionTask && progress.SessionId is not null)
                         _sessions.SetSession(chatId, progress.SessionId);
 

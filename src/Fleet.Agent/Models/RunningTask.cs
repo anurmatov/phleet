@@ -21,6 +21,18 @@ public sealed class RunningTask
     public Channel<MidTurnMessage> Inbox { get; } = Channel.CreateUnbounded<MidTurnMessage>(
         new UnboundedChannelOptions { SingleReader = true });
 
+    /// <summary>
+    /// Set once the turn's task is about to be started. A turn is registered, and counts as
+    /// running, slightly before that; a message for its chat is delivered into it only from here.
+    /// </summary>
+    public bool Launched
+    {
+        get => Volatile.Read(ref _launched);
+        set => Volatile.Write(ref _launched, value);
+    }
+
+    private bool _launched;
+
     /// <summary>Serializes the live/closed decision against turn completion.</summary>
     public SemaphoreSlim TurnDispatchLock { get; } = new(1, 1);
 

@@ -501,7 +501,7 @@ public sealed class ContainerProvisioningService(
         var baseDir   = config["Provisioning:BaseDir"]
             ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
         var envValues = LoadEnvFile(envFile);
-        envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
+        var ctoAgentName = CtoAgentSetting.Resolve(envValues, config);
 
         if (DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
             return Refuse(serverUrlFault);
@@ -1111,25 +1111,8 @@ public sealed class ContainerProvisioningService(
         _           => $"{bytes}B",
     };
 
-    internal static Dictionary<string, string> LoadEnvFile(string path)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (!File.Exists(path)) return result;
-        try
-        {
-            foreach (var line in File.ReadAllLines(path))
-            {
-                var trimmed = line.Trim();
-                if (trimmed.StartsWith('#') || !trimmed.Contains('=')) continue;
-                var idx = trimmed.IndexOf('=');
-                var key = trimmed[..idx].Trim();
-                var val = trimmed[(idx + 1)..].Trim().Trim('"');
-                result[key] = val;
-            }
-        }
-        catch (Exception) { /* non-fatal */ }
-        return result;
-    }
+    /// <summary>The deployment's <c>.env</c>, by the one rule in <see cref="EnvFile"/>. Never throws.</summary>
+    internal static Dictionary<string, string> LoadEnvFile(string path) => EnvFile.Read(path);
 
     private static string DeriveGitName(string role) => role switch
     {

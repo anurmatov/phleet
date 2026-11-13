@@ -84,10 +84,6 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
         return "•••" + value[^4..];
     }
 
-    // ── Write mutex ───────────────────────────────────────────────────────────
-
-    private static readonly SemaphoreSlim WriteMutex = new(1, 1);
-
     // ── Fields ────────────────────────────────────────────────────────────────
 
     private readonly string _envFilePath;
@@ -127,7 +123,7 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
         {
             if (_cache is not null && DateTime.UtcNow < _cacheExpiry)
                 return _cache;
-            _cache = EnvFileCredentialsReader.LoadEnvFile(_envFilePath);
+            _cache = EnvFile.Read(_envFilePath);
             _cacheExpiry = DateTime.UtcNow.AddSeconds(30);
             return _cache;
         }
@@ -260,7 +256,7 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
     private async Task<List<string>> ReloadCoreAsync(Dictionary<string, string> before, CancellationToken ct)
     {
         InvalidateCache();
-        var after = EnvFileCredentialsReader.LoadEnvFile(_envFilePath);
+        var after = EnvFile.Read(_envFilePath);
 
         lock (_cacheLock)
         {
@@ -305,20 +301,14 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
                 throw new DenylistedException($"Key '{key}' is not writable via the config API.");
         }
 
-        if (!await WriteMutex.WaitAsync(TimeSpan.FromSeconds(30), ct))
-            throw new TimeoutException("Another config write is in progress. Try again shortly.");
-
+        // The one .env write lock (EnvFile), shared with setup's writes.
         Dictionary<string, string> before;
-        try
+        using (await EnvFile.LockAsync(ct))
         {
-            // Capture the pre-write snapshot while holding the mutex so the diff in
+            // Capture the pre-write snapshot while holding the lock so the diff in
             // ReloadCoreAsync sees the actual delta, not an empty diff (B2/M2 fix).
             before = LoadCache();
             await AtomicWriteAsync(kvs, ct);
-        }
-        finally
-        {
-            WriteMutex.Release();
         }
 
         return await ReloadCoreAsync(before, ct);
@@ -328,7 +318,7 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
 
     /// <summary>
     /// Writes multiple key-value pairs atomically to .env.
-    /// Must be called with <see cref="WriteMutex"/> held.
+    /// Must be called with <see cref="EnvFile.LockAsync"/> held.
     /// </summary>
     internal async Task AtomicWriteAsync(Dictionary<string, string> kvs, CancellationToken ct)
     {
@@ -338,26 +328,9 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
                 throw new ArgumentException($"Value for '{k}' contains a newline — not allowed in .env files");
         }
 
-        var lines = File.Exists(_envFilePath)
-            ? await File.ReadAllLinesAsync(_envFilePath, ct)
-            : [];
-
-        var updated = SetupService.UpsertEnvLines(lines, kvs);
-
-        if (File.Exists(_envFilePath))
-        {
-            try { File.Copy(_envFilePath, _envFilePath + ".bak", overwrite: true); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Could not write .env.bak"); }
-        }
-
-        var tmp = _envFilePath + ".tmp";
-        await File.WriteAllLinesAsync(tmp, updated, ct);
-        try { File.Move(tmp, _envFilePath, overwrite: true); }
-        catch
-        {
-            try { File.Delete(tmp); } catch { /* best effort */ }
-            throw;
-        }
+        await EnvFile.EditWhileLockedAsync(
+            _envFilePath, lines => EnvFile.Upsert(lines, kvs), ct,
+            backup: true, backupFailed: ex => _logger.LogWarning(ex, "Could not write .env.bak"));
 
         InvalidateCache();
     }

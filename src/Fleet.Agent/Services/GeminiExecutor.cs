@@ -77,7 +77,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         _promptBuilder = promptBuilder;
         _logger = logger;
         _processStarter = processStarter;
-        _terminate = terminate ?? KillAndConfirmExitAsync;
+        _terminate = terminate ?? (process => ProviderChildProcess.KillAndConfirmExitAsync(process, KillExitWait));
 
         _logger.LogInformation(
             "GeminiExecutor: CLI-per-task mode. " +
@@ -185,22 +185,14 @@ public sealed class GeminiExecutor : IAgentExecutor
                 argList.Add("Attachments to consider: " + string.Join(" ", atRefs));
             }
 
-            var psi = new ProcessStartInfo
-            {
-                FileName = "gemini",
-                // --output-format stream-json: emit NDJSON events on stdout for incremental parsing.
-                // -m <model>: specify model; defaults to gemini-2.5-flash if omitted.
-                // --yolo (-y): suppress interactive MCP tool-call approval prompts.
-                //   Without this, the CLI blocks waiting for user confirmation on every tool call
-                //   — the agent hangs indefinitely in headless mode.
-                // -p (optional): when attachments are present, carries the @-reference fragment
-                //   that triggers handleAtCommand's binary inlineData path.
-                UseShellExecute = false,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                WorkingDirectory = attachmentDir,
-            };
+            // --output-format stream-json: emit NDJSON events on stdout for incremental parsing.
+            // -m <model>: specify model; defaults to gemini-2.5-flash if omitted.
+            // --yolo (-y): suppress interactive MCP tool-call approval prompts.
+            //   Without this, the CLI blocks waiting for user confirmation on every tool call
+            //   — the agent hangs indefinitely in headless mode.
+            // -p (optional): when attachments are present, carries the @-reference fragment
+            //   that triggers handleAtCommand's binary inlineData path.
+            var psi = ProviderChildProcess.CreateStartInfo("gemini", attachmentDir, createNoWindow: false);
             foreach (var a in argList) psi.ArgumentList.Add(a);
 
             // GEMINI_SYSTEM_MD: CLI reads this env var at startup and treats the file content
@@ -232,25 +224,17 @@ public sealed class GeminiExecutor : IAgentExecutor
                 ? "--dns-result-order=ipv4first"
                 : existingNodeOpts + " --dns-result-order=ipv4first";
 
-            process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start gemini CLI process");
+            process = ProviderChildProcess.Start(_processStarter, psi, "Failed to start gemini CLI process");
 
             // Read stderr in background — non-fatal; logged at Warning level.
             // Collected for the turn.failed error message on non-zero exit.
             // CancellationToken.None is intentional: the outer ct cancels via process.Kill in
             // the finally block. Passing ct here would abort the drain mid-read and lose stderr
             // lines we need for the error message before WaitForExitAsync returns.
-            var stderrTask = Task.Run(async () =>
+            var stderrTask = ProviderChildProcess.PumpStderr(process.StandardError, line =>
             {
-                try
-                {
-                    string? line;
-                    while ((line = await process.StandardError.ReadLineAsync()) is not null)
-                    {
-                        stderrLines.AppendLine(line);
-                        _logger.LogWarning("GeminiExecutor stderr: {Line}", line);
-                    }
-                }
-                catch { /* non-fatal */ }
+                stderrLines.AppendLine(line);
+                _logger.LogWarning("GeminiExecutor stderr: {Line}", line);
             }, CancellationToken.None);
 
             // Write task text to stdin; close stdin to signal EOF to the CLI.
@@ -354,23 +338,6 @@ public sealed class GeminiExecutor : IAgentExecutor
             }
             catch { /* non-fatal */ }
         }
-    }
-
-    /// <summary>Kills the CLI and waits a bounded time for the exit. True only when the exit is confirmed.</summary>
-    private static async Task<bool> KillAndConfirmExitAsync(Process process)
-    {
-        try { process.Kill(entireProcessTree: true); }
-        catch { /* the exit check below decides */ }
-
-        try
-        {
-            using var wait = new CancellationTokenSource(KillExitWait);
-            await process.WaitForExitAsync(wait.Token);
-        }
-        catch { /* not confirmed within the bound */ }
-
-        try { return process.HasExited; }
-        catch { return false; }
     }
 
     private static async Task CloseOnExitAsync(Process process)

@@ -932,17 +932,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
         var args = BuildArgs(resumeId);
         _logger.LogInformation("Starting persistent claude process: {Args}", args);
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "claude",
-            Arguments = args,
-            WorkingDirectory = _config.WorkDir,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+        var psi = ProviderChildProcess.CreateStartInfo("claude", _config.WorkDir);
+        psi.Arguments = args;
 
         // #460: the plan's env on the child only — the local-model entries (#340 D2) and the mode
         // defaults. Cloud adds only CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
@@ -961,28 +952,15 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 _config.Effort == "off" ? "none" : effortArg);
         }
 
-        _process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start claude process");
+        _process = ProviderChildProcess.Start(Process.Start, psi, "Failed to start claude process");
 
         _process.StandardInput.AutoFlush = false;
         _stdin = TextWriter.Synchronized(_process.StandardInput);
         _stdout = _process.StandardOutput;
 
         // Read stderr in background for logging (lives for process lifetime)
-        var stderr = _process.StandardError;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                while (true)
-                {
-                    var line = await stderr.ReadLineAsync(CancellationToken.None);
-                    if (line is null) break;
-                    _logger.LogWarning("[claude stderr] {Line}", line);
-                }
-            }
-            catch (ObjectDisposedException) { }
-        });
+        _ = ProviderChildProcess.PumpStderr(
+            _process.StandardError, line => _logger.LogWarning("[claude stderr] {Line}", line));
 
         // Start continuous stdout reader — all NDJSON events flow through the channel
         // so stale between-turn events never corrupt the next turn's read loop.
@@ -1117,11 +1095,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         try
         {
-            if (!_process.HasExited)
+            var process = _process;
+            if (await ProviderChildProcess.KillAsync(
+                    process, () => _logger.LogInformation("Killing claude process (PID {Pid})", process.Id)))
             {
-                _logger.LogInformation("Killing claude process (PID {Pid})", _process.Id);
-                _process.Kill(entireProcessTree: true);
-                await _process.WaitForExitAsync();
                 // A prompted kill of a live process is never the harnessExtra start failure (#460).
                 // A process that already exited on its own keeps the flag for the next start.
                 _exitedBeforeInit = false;

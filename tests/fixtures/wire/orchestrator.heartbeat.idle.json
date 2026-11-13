@@ -1,0 +1,1 @@
+{"AgentName":"agent1","Status":"idle","Timestamp":"<ts>","CurrentTask":null,"CurrentTaskId":null,"Version":"<env>","ContainerName":"<env>","Role":"developer","Model":"the-model","Projects":["alpha","beta"],"UptimeSeconds":0,"QueuedCount":0,"QueuedMessages":[],"BackgroundTasks":null,"TelegramConnected":true,"PriorityQueuedCount":0}

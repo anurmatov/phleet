@@ -115,6 +115,16 @@ public sealed class TaskManager
 
     private readonly TurnBindingPublisher? _turnBindings;
 
+    /// <summary>The clock the stall watchdog runs on. A parameter so a test can move it.</summary>
+    private readonly TimeProvider _time;
+
+    /// <summary>
+    /// Starts the silence limit for one read of the executor's event stream. See
+    /// <see cref="TurnStallWatch"/>; <c>Agent:TurnStallTimeoutMinutes</c> = 0 disables it.
+    /// </summary>
+    private TurnStallWatch WatchForStall(CancellationToken turnToken) =>
+        new(TimeSpan.FromMinutes(_agentConfig.TurnStallTimeoutMinutes), turnToken, _time);
+
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
         IAgentExecutor executor,
@@ -126,8 +136,10 @@ public sealed class TaskManager
         ConversationEventCounters? counters = null,
         IMessageSink? sink = null,
         TurnBindingPublisher? turnBindings = null,
-        QueueLaneCounter? queueCounter = null)
+        QueueLaneCounter? queueCounter = null,
+        TimeProvider? timeProvider = null)
     {
+        _time = timeProvider ?? TimeProvider.System;
         _queueCounter = queueCounter ?? new();
         _messageQueue = new DispatchQueue(_queueCounter);
         _turnBindings = turnBindings;
@@ -1015,8 +1027,12 @@ public sealed class TaskManager
         async Task DeliverInjectedTurnAnswersAsync(int injectedCount)
         {
             if (injectedCount <= 0) return;
-            await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, ct))
+            using var injectedStall = WatchForStall(ct);
+            try
             {
+            await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, injectedStall.Token))
+            {
+                injectedStall.Touch();
                 if (extra.FinalResult is not { Length: > 0 } text || ProtocolSanitizer.IsIdleMarker(text))
                     continue;
 
@@ -1038,6 +1054,14 @@ public sealed class TaskManager
                 PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
                     new TurnRecoveredAnswerPayload { Text = extraText, Truncated = extraTruncated ? true : null });
             }
+            }
+            catch (OperationCanceledException) when (injectedStall.Stalled)
+            {
+                // The turn's own answer is already delivered. Only this extra answer is given up on.
+                _logger.LogError(
+                    "Task #{TaskId} for chat {ChatId}: no executor event for {Minutes} minutes while reading the answer to an injected message; stopped waiting for it",
+                    taskId, chatId, (int)injectedStall.Timeout.TotalMinutes);
+            }
         }
 
         // #406: a steering copy that ran as its own Claude turn produced an answer that belongs to
@@ -1049,13 +1073,25 @@ public sealed class TaskManager
             var steerCount = state.Get(taskId)?.SteerCount ?? 0;
             if (steerCount <= 0 || processExitResult) return;
             var read = 0;
+            using var steerStall = WatchForStall(ct);
+            try
             {
-                await foreach (var _ in _executor.ReadInjectedTurnAnswersAsync(steerCount, ct))
+                await foreach (var _ in _executor.ReadInjectedTurnAnswersAsync(steerCount, steerStall.Token))
                 {
+                    steerStall.Touch();
                     read++;
                     _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.SteerAnswerDiscarded);
                     _logger.LogInformation("Task #{TaskId}: discarded the answer to a steering message that ran as its own turn", taskId);
                 }
+            }
+            catch (OperationCanceledException) when (steerStall.Stalled)
+            {
+                // The executor stopped its process when the read was cancelled, so no late answer
+                // can follow: nothing to guard the next turn against.
+                _logger.LogError(
+                    "Task #{TaskId} for chat {ChatId}: no executor event for {Minutes} minutes while discarding a steering answer; stopped waiting for it",
+                    taskId, chatId, (int)steerStall.Timeout.TotalMinutes);
+                return;
             }
             // A steering own turn that did not start in time may still finish before the next send;
             // its text then arrives as that turn's leading recovered_answer, tagged `user`.
@@ -1064,6 +1100,9 @@ public sealed class TaskManager
 
         // Grab the inbox for this task to receive mid-execution messages
         var inboxReader = state.Get(taskId)?.Inbox.Reader;
+
+        // The silence limit for the executor read in flight; a fresh one for every read.
+        TurnStallWatch? stall = null;
 
         try
         {
@@ -1077,8 +1116,11 @@ public sealed class TaskManager
                 // #406: this executor turn consumes the late-result guard whatever its first event is.
                 var steeringResidue = Interlocked.Exchange(ref _steeringResidue, 0) == 1;
                 var firstEvent = true;
-                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
+                stall?.Dispose();
+                stall = WatchForStall(ct);
+                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, stall.Token))
                 {
+                    stall.Touch();
                     var guardsThisEvent = steeringResidue && firstEvent;
                     firstEvent = false;
                     if (isSessionTask && progress.SessionId is not null)
@@ -1165,6 +1207,11 @@ public sealed class TaskManager
                             });
                     }
                 }
+
+                // The read is over. The watch must not outlive it: a timer that ran out later, while
+                // the answer is being delivered, would make an unrelated cancellation look like a stall.
+                stall.Dispose();
+                stall = null;
 
                 var completingTask = state.Get(taskId);
                 if (completingTask is not null)
@@ -1474,6 +1521,21 @@ public sealed class TaskManager
                     });
             }
         }
+        catch (OperationCanceledException) when (stall is { Stalled: true })
+        {
+            // Nobody cancelled this turn: the executor yielded nothing for the whole limit, so the
+            // watchdog cancelled its read, and the executor's own cancel path has stopped the
+            // provider process. Reported as a failure, never as "Task cancelled.", with a fixed
+            // message that carries the limit and nothing else. The session is kept: the next
+            // message resumes it.
+            var errorMsg = TurnStallTimeout.FailureMessage(stall.Timeout);
+            _logger.LogError(
+                "Task #{TaskId} for chat {ChatId} stalled: no executor event for {Minutes} minutes; turn stopped (source={Source}, provider={Provider})",
+                taskId, chatId, (int)stall.Timeout.TotalMinutes, source, _agentConfig.Provider);
+            await SendWithStatsAsync($"{Prefix()}{errorMsg}");
+            OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+            PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.ExecutorError);
+        }
         catch (OperationCanceledException)
         {
             _logger.LogInformation("Task #{TaskId} cancelled for chat {ChatId}", taskId, chatId);
@@ -1500,6 +1562,7 @@ public sealed class TaskManager
         }
         finally
         {
+            stall?.Dispose();
             await typingCts.CancelAsync();
             await typingTask;
         }

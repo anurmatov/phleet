@@ -31,6 +31,14 @@ public sealed class AgentOptions
     /// re-clamped here.
     /// </summary>
     public int WarmupTimeoutSeconds { get; set; } = WarmupTimeout.DefaultSeconds;
+
+    /// <summary>
+    /// Minutes a running turn may go without one event from its provider process before the agent
+    /// stops it and reports it failed. A limit on silence, never on how long a turn runs.
+    /// <c>0</c> turns it off. Bounds, default and the reasoning for the default are in
+    /// <see cref="TurnStallTimeout"/>; an out-of-range value stops the host at startup.
+    /// </summary>
+    public int TurnStallTimeoutMinutes { get; set; } = TurnStallTimeout.DefaultMinutes;
     public string ShortName { get; set; } = "";
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;

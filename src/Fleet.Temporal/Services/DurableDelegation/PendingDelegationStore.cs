@@ -86,6 +86,8 @@ public sealed class PendingDelegationStore
             try
             {
                 File.Move(_path, aside, overwrite: true);
+                // It may be a file someone restored by hand; what it holds is still payload.
+                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(aside, OwnerOnlyFile);
                 _logger.LogError(
                     "Pending delegation state {Path} unreadable ({Reason}); moved to {Aside}. Delegations it held will not be resumed",
                     _path, ex.GetType().Name, aside);
@@ -120,14 +122,21 @@ public sealed class PendingDelegationStore
         if (_path is null) return;
         try
         {
-            var full = Path.GetFullPath(_path);
-            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            var directory = Path.GetDirectoryName(Path.GetFullPath(_path))!;
+            // A directory this store has to create is the owner's alone. One that is already there
+            // (the bridge's mounted state directory, shared with the failure notifier) is left as
+            // it is: its mode is the operator's.
+            if (!Directory.Exists(directory))
+            {
+                if (OperatingSystem.IsWindows()) Directory.CreateDirectory(directory);
+                else Directory.CreateDirectory(directory, OwnerOnlyDirectory);
+            }
+
             var temp = _path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(All, Json));
-            // The file holds instructions and partial answers. Owner-only where the platform has
-            // the notion; the rename keeps the mode of the file being moved into place.
-            if (!OperatingSystem.IsWindows())
-                File.SetUnixFileMode(temp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            // A leftover from a crash keeps whatever mode it was given; ours is created anew.
+            File.Delete(temp);
+            WriteOwnerOnly(temp, JsonSerializer.Serialize(All, Json));
+            // The rename keeps the mode of the file being moved into place.
             File.Move(temp, _path, overwrite: true);
             if (!_writable) _logger.LogInformation("Pending delegation state {Path} is writable again", _path);
             _writable = true;
@@ -140,6 +149,31 @@ public sealed class PendingDelegationStore
                     _path, ex.GetType().Name);
             _writable = false;
         }
+    }
+
+    private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+    private const UnixFileMode OwnerOnlyDirectory =
+        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+    /// <summary>
+    /// Creates the file owner-only and then writes it. The mode is given to the call that creates
+    /// the file, so there is no moment at which the task tokens, instructions and partial answers
+    /// in it are readable by anyone else: writing first and narrowing the mode afterwards left one.
+    /// </summary>
+    private static void WriteOwnerOnly(string path, string content)
+    {
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+        };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = OwnerOnlyFile;
+
+        using var stream = new FileStream(path, options);
+        using var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        writer.Write(content);
     }
 
     private static bool IsBase64(string value)

@@ -5,6 +5,7 @@ using Fleet.Shared;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Fleet.Agent.Services.JournalFiles;
+using Fleet.Agent.Services.TelegramShell;
 using Fleet.Conversations.Contracts;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -17,13 +18,15 @@ using Telegram.Bot.Types.Enums;
 namespace Fleet.Agent.Interfaces;
 
 /// <summary>
-/// Thin Telegram shell. Only file that imports Telegram.Bot.*.
-/// Builds IncomingMessage from Telegram updates, delegates to MessageRouter.
-/// Implements IMessageSink for outbound messages (splits at 4000 chars).
+/// The Telegram transport: polling, and the outbound render path.
+/// Implements IMessageSink for outbound messages (splits at 4000 chars). Inbound updates go to
+/// the parts in <c>Services/TelegramShell</c>: <see cref="TelegramMessageIntake"/> builds an
+/// IncomingMessage for MessageRouter, <see cref="TelegramReactionHandler"/> turns a reaction into
+/// a task, and <see cref="TelegramJournalRecorder"/> builds the journal records for both directions.
 /// When TELEGRAM_BOT_TOKEN is missing or empty the service enters headless mode:
 /// RabbitMQ + MCP remain fully functional; Telegram poller is disabled.
 /// </summary>
-public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramMediaSender
+public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramMediaSender, ITelegramShell
 {
     private ITelegramBotClient? _bot;
 
@@ -31,14 +34,11 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     internal ITelegramBotClient? BotForTesting { set => _bot = value; }
     private readonly AgentOptions _agentConfig;
     private readonly TelegramOptions _telegramConfig;
-    private readonly AllowlistHolder _allowlist;
     private readonly GroupRelayService _relay;
     private readonly TaskManager _taskManager;
     private readonly GroupBehavior _groupBehavior;
     private readonly MessageRouter _router;
     private readonly CommandDispatcher _commands;
-    private readonly VoiceTranscriptionService _voiceTranscription;
-    private readonly TtsService _tts;
     private readonly IFleetConnectionState _connectionState;
     private readonly ILogger<AgentTransport> _logger;
     private readonly RichFallbackCounter _richFallbackCounter;
@@ -46,7 +46,6 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     // The conversation journal (#377). Null unless Journal__IngestToken is set, and every capture
     // site is a no-op when it is null — an agent without a token sends exactly what it sent before.
     private readonly JournalCapture? _journal;
-    private readonly TurnBindingPublisher? _turnBindings;
 
     /// <summary>True when the journal was injected (a token is set). For the registration tests.</summary>
     internal bool JournalEnabled => _journal is not null;
@@ -70,10 +69,18 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     private Task RouteAsync(IncomingMessage msg)
         => (RouterHookForTesting ?? _router.HandleAsync)(msg);
 
+    ITelegramBotClient? ITelegramShell.Bot => _bot;
+    string ITelegramShell.BotUsername => _botUsername;
+    DocumentDownloadHelper ITelegramShell.DownloadHelper => DownloadHelper;
+    Task ITelegramShell.RouteAsync(IncomingMessage msg) => RouteAsync(msg);
+    Task ITelegramShell.SendTextAsync(long chatId, string text) => SendTextAsync(chatId, text);
+
+    private readonly TelegramJournalRecorder _journalRecorder;
+    private readonly TelegramMessageIntake _intake;
+    private readonly TelegramReactionHandler _reactions;
+
     private readonly ITelegramBotClient? _journalSendBot;
     private string _botUsername = "";
-    private readonly MediaGroupBuffer _mediaGroupBuffer;
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _groupSizeCapped = new();
 
     // Tracks the last Telegram message_id sent per chatId (updated in SendTextAsync).
     // Published to CompletionContextBuffer through GetLastSentMessageId so BufferBotResponse can
@@ -101,17 +108,13 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         TurnBindingPublisher? turnBindings = null)
     {
         _journal = journal;
-        _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
         _telegramConfig = telegramConfig.Value;
-        _allowlist = allowlist;
         _relay = relay;
         _taskManager = taskManager;
         _groupBehavior = groupBehavior;
         _router = router;
         _commands = commands;
-        _voiceTranscription = voiceTranscription;
-        _tts = tts;
         _connectionState = connectionState;
         _logger = logger;
         _richFallbackCounter = richFallbackCounter ?? new RichFallbackCounter();
@@ -170,7 +173,10 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         // message id that nothing else in the process can know. The value is published through the
         // IMessageSink.GetLastSentMessageId override below instead (#277 MUST NOT 19, MUST NOT 20).
 
-        _mediaGroupBuffer = new MediaGroupBuffer(telegramConfig.Value.MaxGroupBufferMs, logger);
+        _journalRecorder = new TelegramJournalRecorder(journal, () => _bot, logger);
+        _intake = new TelegramMessageIntake(this, _agentConfig, _telegramConfig, voiceTranscription, tts, turnBindings,
+            _journalRecorder, logger);
+        _reactions = new TelegramReactionHandler(allowlist, taskManager, logger);
 
         // Wire up the download helper with the real bot downloader.
         // In headless mode (_bot == null) PersistAttachments should be false;
@@ -909,437 +915,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     public long GetLastSentMessageId(long chatId) =>
         _lastSentMessageIds.TryGetValue(chatId, out var id) ? id : 0L;
 
-    internal async Task OnMessage(Message message, UpdateType type)
-    {
-        if (type != UpdateType.Message) return;
-
-        // Support text messages and media messages (with optional caption).
-        // Every file-backed type except photo is normalised to a single descriptor so one
-        // download / size-gate / persist / retention path serves documents, video, video
-        // notes, audio, voice, animations and stickers. Forwarded messages carry the same
-        // media payload plus ForwardOrigin metadata, so they map identically to direct ones.
-        var isPhoto = message.Photo is { Length: > 0 };
-        var media = TelegramMediaMapper.TryMap(message);
-        // Voice messages and round video notes are both spoken bubbles, so both are
-        // transcribed (#327). The whisper service writes the upload to a temp file and lets
-        // ffmpeg decode it, so the container does not matter to it. Nothing else is
-        // transcribed: Video and Audio have different size and intent characteristics.
-        var isSpokenMessage = media?.Kind is TelegramMediaKind.Voice or TelegramMediaKind.VideoNote;
-        var isMediaAttachment = isPhoto || media is not null;
-        var text = message.Text ?? message.Caption ?? "";
-
-        if (!isMediaAttachment && string.IsNullOrEmpty(message.Text)) return;
-
-        // TTS trigger: /tts command as a reply to any message → synthesize and send replied-to message as voice.
-        // A spoken bubble is content, not a command — and this branch returns, so letting one
-        // in here would swallow the message before transcription ever runs. Video notes carry
-        // no caption today, so including them changes nothing now and keeps it that way if
-        // that ever changes.
-        if (_tts.IsEnabled && !isSpokenMessage
-            && text.Equals("/tts", StringComparison.OrdinalIgnoreCase)
-            && message.ReplyToMessage is { } replied)
-        {
-            var sourceText = replied.Text ?? replied.Caption;
-            if (!string.IsNullOrWhiteSpace(sourceText))
-            {
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await _bot!.SendChatAction(message.Chat.Id, ChatAction.RecordVoice);
-                        var audioBytes = await _tts.SynthesizeAsync(sourceText);
-                        if (audioBytes is { Length: > 0 })
-                        {
-                            using var ms = new System.IO.MemoryStream(audioBytes);
-                            var voice = await _bot!.SendVoice(
-                                message.Chat.Id,
-                                new Telegram.Bot.Types.InputFileStream(ms, "response.ogg"),
-                                replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = replied.MessageId });
-                            JournalSentAlone(message.Chat.Id, voice, null, JournalTextFormat.Plain, new JournalMediaItem(
-                                JournalAttachmentKind.Voice, "audio/ogg", audioBytes.LongLength, "response.ogg",
-                                voice.Voice?.FileUniqueId, Bytes: audioBytes, FileId: voice.Voice?.FileId));
-                            _logger.LogInformation("TTS voice sent for message {MsgId} ({Chars} chars)", replied.MessageId, sourceText.Length);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "TTS voice send failed for message {MsgId}", replied.MessageId);
-                    }
-                });
-            }
-
-            // The command itself is a message a human sent: journaled like any other (#377).
-            JournalReceived(message, transcript: null, photoPath: null, mediaPath: null);
-            return;
-        }
-
-        var chatId = message.Chat.Id;
-        var isGroupChat = message.Chat.Type is ChatType.Group or ChatType.Supergroup;
-
-        // Download photo if present (largest available size, with size check and one retry)
-        MessageImage? downloadedImage = null;
-        if (isPhoto)
-        {
-            var largest = message.Photo!.OrderByDescending(p => p.FileSize ?? 0).First();
-            downloadedImage = await DownloadPhotoAsync(largest, chatId, message.MessageId, photoIndex: 1);
-        }
-
-        // Download any file-backed media through the shared attachment pipeline. A null
-        // result (persistence off, oversize, or download failure) is never fatal — the
-        // message still reaches the agent with its caption or placeholder below.
-        MediaDownloadResult? downloadedMedia = null;
-        if (media is not null)
-            downloadedMedia = await DownloadHelper.DownloadMediaAsync(media, chatId, message.MessageId, index: 1);
-
-        var downloadedDocument = downloadedMedia?.Document;
-
-        // Set only when speech-to-text actually returned a transcript. A spoken message that
-        // failed to transcribe, or arrived while the service is disabled, must NOT be marked
-        // — a false marker would tell the agent to distrust text the user actually typed.
-        var inputSource = MessageInputSource.Typed;
-        string? transcript = null;
-
-        // Transcribe voice messages and video notes if the whisper service is configured
-        if (isSpokenMessage && _voiceTranscription.IsEnabled)
-        {
-            try
-            {
-                // Immediate feedback — let user know we received the spoken message
-                await _bot!.SendChatAction(chatId, ChatAction.Typing);
-
-                // Reuse the bytes the attachment pipeline already fetched. Only fetch
-                // separately when persistence is off; a file the pipeline rejected as
-                // oversize or failed to download must not be re-fetched here.
-                var audioBytes = downloadedMedia?.Bytes;
-                if (audioBytes is null && !_telegramConfig.PersistAttachments)
-                {
-                    using var ms = new System.IO.MemoryStream();
-                    await _bot!.GetInfoAndDownloadFile(media!.FileId, ms);
-                    audioBytes = ms.ToArray();
-                }
-
-                // The receiving end is suffix-agnostic, but mislabelling an MP4 as audio/ogg
-                // is a lie the next reader of this code would have to unpick.
-                var isVideoNote = media!.Kind == TelegramMediaKind.VideoNote;
-                var uploadName = isVideoNote ? "video.mp4" : "voice.ogg";
-                var uploadType = isVideoNote ? "video/mp4" : "audio/ogg";
-
-                var transcribed = audioBytes is null
-                    ? null
-                    : await _voiceTranscription.TranscribeAsync(audioBytes, uploadName, uploadType);
-
-                if (transcribed is not null)
-                {
-                    text = transcribed;
-                    transcript = transcribed;
-                    // A video-note transcript carries the same speech-to-text risk as a voice
-                    // one, so it carries the same marker.
-                    inputSource = MessageInputSource.VoiceTranscription;
-                    _logger.LogInformation("{Kind} transcribed ({Chars} chars) from {Sender}",
-                        media.Kind, text.Length, message.From?.Username ?? "unknown");
-
-                    // Echo transcription back so user can verify whisper got it right. Not journaled
-                    // (#394): the inbound record already holds the transcript.
-                    await _bot!.SendMessage(
-                        chatId,
-                        $"🎤 {transcribed}",
-                        replyParameters: new Telegram.Bot.Types.ReplyParameters { MessageId = message.MessageId });
-                }
-                else
-                {
-                    // Transcription unavailable — fall through so the persisted file
-                    // and a readable placeholder still reach the agent.
-                    _logger.LogWarning("Transcription returned no text for {Kind} message from {Sender}",
-                        media!.Kind, message.From?.Username);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to transcribe {Kind} message from {Sender}",
-                    media!.Kind, message.From?.Username);
-            }
-        }
-
-        // For non-photo media with no caption, synthesize a readable placeholder so the
-        // agent receives a meaningful description of what was shared.
-        if (string.IsNullOrEmpty(text) && media is not null)
-            text = TelegramMediaMapper.DescribePlaceholder(media, message.Sticker?.Emoji);
-
-        var isMentioned = _botUsername.Length > 0
-            && text.Contains($"@{_botUsername}", StringComparison.OrdinalIgnoreCase);
-        var isReplyToMe = message.ReplyToMessage?.From?.Username is { } replyUser
-            && replyUser.Equals(_botUsername, StringComparison.OrdinalIgnoreCase);
-        var isNameMentioned = _agentConfig.ShortName.Length > 0
-            && text.Contains(_agentConfig.ShortName, StringComparison.OrdinalIgnoreCase);
-
-        var stripped = _botUsername.Length > 0
-            ? text.Replace($"@{_botUsername}", "", StringComparison.OrdinalIgnoreCase).Trim()
-            : text.Trim();
-
-        var sender = message.From?.Username is { } u ? $"@{u}" : message.From?.FirstName ?? "Unknown";
-
-        // Record platform scope before routing, never from prompt text.
-        if (ChatTypeName(message.Chat.Type) is { } observedKind)
-            _turnBindings?.ObserveChat(chatId, _bot?.BotId ?? 0, observedKind);
-
-        // Build the base IncomingMessage (no images/documents yet — filled in below)
-        var baseMsg = new IncomingMessage
-        {
-            ChatId = chatId,
-            UserId = message.From?.Id ?? 0,
-            FromIsBot = message.From?.IsBot ?? true,
-            HasSenderChat = message.SenderChat is not null,
-            Text = text,
-            Sender = sender,
-            IsGroupChat = isGroupChat,
-            TelegramMessageId = message.MessageId,
-            ReplyToTelegramMessageId = message.ReplyToMessage?.MessageId is { } rtm ? (long)rtm : null,
-            IsBotMentioned = isMentioned,
-            IsReplyToBot = isReplyToMe,
-            IsNameMentioned = isNameMentioned,
-            StrippedText = stripped,
-            HasMediaAttachment = isMediaAttachment,
-            InputSource = inputSource,
-            // Channel anchor fields — used by PromptAssembler to emit [channel: ...] tags
-            ChatTitle = message.Chat.Title,
-            ChatUsername = message.Chat.Username,
-            ChatFirstName = message.Chat.FirstName,
-        };
-
-        // One journal record per raw Telegram message, from the message itself: the raw text or
-        // caption and the downloaded files, never the placeholder, the image prompt or the hints
-        // added below. An album is one record per photo, tied by its media group id (#377).
-        JournalReceived(
-            message, transcript, downloadedImage?.FilePath, downloadedDocument?.FilePath,
-            photoDecline: isPhoto && downloadedImage is null
-                ? MediaAbsence(photoSizeOf(message), _telegramConfig.MaxImageBytes)
-                : null,
-            mediaDecline: media is not null && downloadedMedia is null
-                ? MediaAbsence(media.FileSize > 0 ? media.FileSize : null, _telegramConfig.MaxDocumentBytes)
-                : null);
-
-        // Media group: buffer all photos and flush as one IncomingMessage after debounce
-        if (message.MediaGroupId is { } mediaGroupId && isPhoto)
-        {
-            var groupKey = $"{chatId}:{mediaGroupId}";
-
-            Func<IncomingMessage, Task> flushHandler = async flushedMsg =>
-            {
-                _groupSizeCapped.TryRemove(groupKey, out _);
-                var groupHints = AttachmentSweeper.BuildHints(flushedMsg.Images, flushedMsg.Documents);
-                if (groupHints.Length > 0)
-                {
-                    var newText = flushedMsg.Text.Length > 0 ? $"{flushedMsg.Text}\n{groupHints}" : groupHints;
-                    var newStripped = flushedMsg.StrippedText.Length > 0 ? $"{flushedMsg.StrippedText}\n{groupHints}" : groupHints;
-                    flushedMsg = flushedMsg with { Text = newText, StrippedText = newStripped };
-                }
-                await RouteAsync(flushedMsg);
-            };
-
-            // TryAddPhotoWithCapAsync atomically checks and adds under the same lock.
-            var accepted = await _mediaGroupBuffer.TryAddPhotoWithCapAsync(
-                groupKey, downloadedImage, baseMsg, _telegramConfig.MaxImagesPerGroup, flushHandler);
-
-            if (!accepted)
-            {
-                // Warn once when cap is first exceeded, then keep resetting the debounce
-                if (_groupSizeCapped.TryAdd(groupKey, true))
-                    await SendTextAsync(chatId, $"({_telegramConfig.MaxImagesPerGroup} images received — only the first {_telegramConfig.MaxImagesPerGroup} will be processed.)");
-
-                await _mediaGroupBuffer.AddPhotoAsync(groupKey, null, baseMsg, flushHandler);
-            }
-            return;
-        }
-
-        // Single photo, document, or text-only: process immediately
-        var images = downloadedImage is not null
-            ? (IReadOnlyList<MessageImage>)[downloadedImage]
-            : [];
-        var documents = downloadedDocument is not null
-            ? (IReadOnlyList<MessageDocument>)[downloadedDocument]
-            : [];
-        var hints = AttachmentSweeper.BuildHints(images, documents);
-        var msg = hints.Length > 0
-            ? baseMsg with
-            {
-                Images = images,
-                Documents = documents,
-                Text = baseMsg.Text.Length > 0 ? $"{baseMsg.Text}\n{hints}" : hints,
-                StrippedText = baseMsg.StrippedText.Length > 0 ? $"{baseMsg.StrippedText}\n{hints}" : hints,
-            }
-            : baseMsg with { Images = images, Documents = documents };
-        await RouteAsync(msg);
-    }
+    internal Task OnMessage(Message message, UpdateType type) => _intake.OnMessage(message, type);
 
     // ── conversation journal (#377) ──────────────────────────────────────────
 
-    /// <summary>
-    /// Adds a message Telegram accepted to <paramref name="journal"/>. Never throws: a journal
-    /// problem must not turn a delivered message into a failed send.
-    /// </summary>
+    /// <summary>Adds a message Telegram accepted to <paramref name="journal"/>. See <see cref="TelegramJournalRecorder.Sent"/>.</summary>
     private void JournalSent(
         JournalCapture.OutboundBatch? journal, long chatId, Message? sent, string? text,
-        JournalTextFormat format, JournalMediaItem? media = null)
-    {
-        if (journal is null || sent is null) return;
-        try
-        {
-            journal.Add(new JournalMessage
-            {
-                BotId = _bot!.BotId,
-                ChatId = sent.Chat?.Id is { } id && id != 0 ? id : chatId,
-                ChatType = ChatTypeName(sent.Chat?.Type),
-                ChatTitle = sent.Chat?.Title,
-                MessageId = sent.Id,
-                ReplyToMessageId = sent.ReplyToMessage?.Id,
-                Date = sent.Date,
-                SenderKind = JournalSenderKind.Agent,
-                SenderId = (sent.From?.Id ?? _bot.BotId).ToString(System.Globalization.CultureInfo.InvariantCulture),
-                SenderDisplay = sent.From?.Username ?? sent.From?.FirstName,
-                Text = text,
-                TextFormat = format,
-                Media = media is null ? [] : [media],
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning("journal: outbound capture skipped ({Error})", ex.GetType().Name);
-        }
-    }
-
-    /// <summary>A human-facing message sent outside any IMessageSink call: the TTS voice reply.</summary>
-    private void JournalSentAlone(long chatId, Message? sent, string? text, JournalTextFormat format, JournalMediaItem? media = null)
-    {
-        var journal = _journal?.Outbound(OutboundOrigin.Human);
-        if (journal is null) return;
-        JournalSent(journal, chatId, sent, text, format, media);
-        journal.Flush();
-    }
-
-    /// <summary>
-    /// Journals one raw inbound message. Classification (rule 4 reads the live allowlist) happens
-    /// inside the capture before anything is written, so an unauthorized chat writes nothing.
-    /// </summary>
-    /// <param name="photoDecline">
-    /// Why the photo has no bytes on disk, when there are none. The download path already decided
-    /// this — the agent's own size cap refused it, or the fetch failed — and passing the answer
-    /// through is what lets the journal say <c>over_size_cap</c> rather than guessing at drain time
-    /// that a file is simply not there.
-    /// </param>
-    private void JournalReceived(
-        Message message, string? transcript, string? photoPath, string? mediaPath,
-        Fleet.Journal.Client.JournalMediaReason? photoDecline = null, Fleet.Journal.Client.JournalMediaReason? mediaDecline = null)
-    {
-        if (_journal is null) return;
-        try
-        {
-            var items = new List<JournalMediaItem>();
-            if (message.Photo is { Length: > 0 } photos)
-            {
-                var largest = photos.OrderByDescending(p => p.FileSize ?? 0).First();
-                items.Add(new JournalMediaItem(JournalAttachmentKind.Photo, "image/jpeg", largest.FileSize,
-                    FileName: null, largest.FileUniqueId, LocalPath: photoPath,
-                    Declined: photoPath is null ? photoDecline : null, FileId: largest.FileId));
-            }
-
-            if (TelegramMediaMapper.TryMap(message) is { } file)
-            {
-                items.Add(new JournalMediaItem(
-                    JournalKind(file.Kind),
-                    file.MimeType ?? InferMimeType(ExtractSafeExtension(file.FileName, file.DefaultExtension)),
-                    file.FileSize > 0 ? file.FileSize : null,
-                    file.FileName,
-                    FileUniqueIdOf(message, file.Kind),
-                    LocalPath: mediaPath,
-                    Declined: mediaPath is null ? mediaDecline : null, FileId: FileIdOf(message, file.Kind)));
-            }
-
-            // A media type the mapper declines has no download path at all, so there is nothing to
-            // have failed: the kind itself is the reason its bytes are absent.
-            if (items.Count == 0 && HasJournalMediaMetadata(message))
-            {
-                items.Add(new JournalMediaItem(JournalAttachmentKind.Other, "application/octet-stream",
-                    null, null, null, Declined: Fleet.Journal.Client.JournalMediaReason.UnsupportedKind));
-            }
-
-            var from = message.From;
-            _journal.Inbound(new JournalMessage
-            {
-                BotId = _bot?.BotId ?? 0,
-                ChatId = message.Chat.Id,
-                ChatType = ChatTypeName(message.Chat.Type),
-                ChatTitle = message.Chat.Title,
-                MessageId = message.MessageId,
-                ReplyToMessageId = message.ReplyToMessage?.MessageId,
-                MediaGroupId = message.MediaGroupId,
-                Date = message.Date,
-                SenderKind = from?.IsBot == true ? JournalSenderKind.Agent : JournalSenderKind.Human,
-                SenderId = (from?.Id ?? message.SenderChat?.Id ?? message.Chat.Id).ToString(System.Globalization.CultureInfo.InvariantCulture),
-                SenderDisplay = from?.Username ?? from?.FirstName ?? message.SenderChat?.Title,
-                Text = message.Text ?? message.Caption,
-                Transcript = transcript,
-                Media = items,
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning("journal: inbound capture skipped ({Error})", ex.GetType().Name);
-        }
-    }
-
-    private static string? ChatTypeName(ChatType? type) => type switch
-    {
-        ChatType.Private => "private",
-        ChatType.Group => "group",
-        ChatType.Supergroup => "supergroup",
-        ChatType.Channel => "channel",
-        _ => null,
-    };
-
-    private static JournalAttachmentKind JournalKind(TelegramMediaKind kind) => kind switch
-    {
-        TelegramMediaKind.Document => JournalAttachmentKind.Document,
-        TelegramMediaKind.Video => JournalAttachmentKind.Video,
-        TelegramMediaKind.VideoNote => JournalAttachmentKind.VideoNote,
-        TelegramMediaKind.Audio => JournalAttachmentKind.Audio,
-        TelegramMediaKind.Voice => JournalAttachmentKind.Voice,
-        TelegramMediaKind.Animation => JournalAttachmentKind.Animation,
-        TelegramMediaKind.Sticker => JournalAttachmentKind.Sticker,
-        _ => JournalAttachmentKind.Other,
-    };
-
-    /// <summary>The largest photo size the update declared, or null when it declared none.</summary>
-    private static long? photoSizeOf(Message message) =>
-        message.Photo is { Length: > 0 } photos
-            ? photos.OrderByDescending(p => p.FileSize ?? 0).First().FileSize
-            : null;
-
-    /// <summary>
-    /// Why the bytes are not on disk, from the platform's declared size and the agent's own cap.
-    /// </summary>
-    private static Fleet.Journal.Client.JournalMediaReason MediaAbsence(long? platformFileSize, long maxLocalBytes) =>
-        Fleet.Journal.Client.JournalMediaAbsent.Reason(platformFileSize, maxLocalBytes);
-
-    /// <summary>
-    /// True when the update carries media the agent has no descriptor for. A mapper decline is a
-    /// decision, not an oversight, and the journal should say so rather than drop the attachment.
-    /// </summary>
-    private static bool HasJournalMediaMetadata(Message message) =>
-        message.Contact is not null || message.Location is not null || message.Poll is not null
-        || message.Venue is not null || message.Game is not null || message.ProximityAlertTriggered is not null
-        || message.Invoice is not null || message.SuccessfulPayment is not null;
-
-    private static string? FileIdOf(Message message, TelegramMediaKind kind) => kind switch
-    {
-        TelegramMediaKind.Animation => message.Animation?.FileId,
-        TelegramMediaKind.Document => message.Document?.FileId,
-        TelegramMediaKind.Video => message.Video?.FileId,
-        TelegramMediaKind.VideoNote => message.VideoNote?.FileId,
-        TelegramMediaKind.Audio => message.Audio?.FileId,
-        TelegramMediaKind.Voice => message.Voice?.FileId,
-        TelegramMediaKind.Sticker => message.Sticker?.FileId,
-        _ => null,
-    };
+        JournalTextFormat format, JournalMediaItem? media = null) =>
+        _journalRecorder.Sent(journal, chatId, sent, text, format, media);
 
     public async Task<JournalMessage> SendFileIdAsync(long chatId, string kind, string fileId, CancellationToken ct)
     {
@@ -1347,7 +931,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         var field = kind == "other" ? "document" : kind;
         var method = field switch { "photo" => "sendPhoto", "video" => "sendVideo", "audio" => "sendAudio",
             "voice" => "sendVoice", "video_note" => "sendVideoNote", "animation" => "sendAnimation", "sticker" => "sendSticker", _ => "sendDocument" };
-        try { return CopiedMessage(await (_journalSendBot ?? _bot).SendRequest(new JournalFileIdRequest(method, chatId, field, fileId), ct), chatId); }
+        try { return _journalRecorder.Copied(await (_journalSendBot ?? _bot).SendRequest(new JournalFileIdRequest(method, chatId, field, fileId), ct), chatId); }
         catch (Telegram.Bot.Exceptions.ApiRequestException e)
         { throw new JournalTelegramException(e.ErrorCode, e.ErrorCode == 400 && (e.Message.Contains("wrong file identifier", StringComparison.OrdinalIgnoreCase)
             || e.Message.Contains("file_id", StringComparison.OrdinalIgnoreCase) || e.Message.Contains("type of file", StringComparison.OrdinalIgnoreCase)), e.Parameters?.RetryAfter); }
@@ -1357,110 +941,17 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
     {
         if (_bot is null) throw new JournalTelegramException(403);
         var request = new JournalUploadRequest(chatId, photo, content, fileName);
-        try { return CopiedMessage(await (_journalSendBot ?? _bot).SendRequest(request, ct), chatId); }
+        try { return _journalRecorder.Copied(await (_journalSendBot ?? _bot).SendRequest(request, ct), chatId); }
         catch (Telegram.Bot.Exceptions.ApiRequestException e) { throw new JournalTelegramException(e.ErrorCode, retryAfter: e.Parameters?.RetryAfter); }
         catch (OperationCanceledException) { throw new JournalTelegramException(request.TerminatorWritten ? 0 : -1); }
         catch (Exception e) when (e is HttpRequestException or IOException && !HasIntegrityFailure(e)) { throw new JournalTelegramException(request.TerminatorWritten ? 0 : -2); }
     }
     private static bool HasIntegrityFailure(Exception e) => e is JournalUploadIntegrityException || e.InnerException is not null && HasIntegrityFailure(e.InnerException);
-    private JournalMessage CopiedMessage(Message sent, long chatId)
-    {
-        JournalMediaItem? media = null;
-        if (sent.Photo?.LastOrDefault() is { } photo)
-            media = new(JournalAttachmentKind.Photo, "image/jpeg", photo.FileSize, null, photo.FileUniqueId, FileId: photo.FileId);
-        else if (TelegramMediaMapper.TryMap(sent) is { } file)
-            media = new(JournalKind(file.Kind), file.MimeType ?? "application/octet-stream", file.FileSize, file.FileName,
-                FileUniqueIdOf(sent, file.Kind), FileId: FileIdOf(sent, file.Kind));
-        return new JournalMessage { BotId = _bot!.BotId, ChatId = sent.Chat.Id, ChatType = ChatTypeName(sent.Chat.Type),
-            MessageId = sent.Id, Date = sent.Date, SenderKind = JournalSenderKind.Agent,
-            SenderId = _bot.BotId.ToString(System.Globalization.CultureInfo.InvariantCulture), Text = null, Media = media is null ? [] : [media] };
-    }
     private sealed class JournalFileIdRequest(string method, long chatId, string field, string fileId) : Telegram.Bot.Requests.FileRequestBase<Message>(method)
     {
         public override HttpContent ToHttpContent() => new FormUrlEncodedContent(new Dictionary<string, string>
         { ["chat_id"] = chatId.ToString(System.Globalization.CultureInfo.InvariantCulture), [field] = fileId });
     }
-
-    /// <summary>The file_unique_id the descriptor does not carry, read from the raw message.</summary>
-    private static string? FileUniqueIdOf(Message message, TelegramMediaKind kind) => kind switch
-    {
-        TelegramMediaKind.Animation => message.Animation?.FileUniqueId,
-        TelegramMediaKind.Document => message.Document?.FileUniqueId,
-        TelegramMediaKind.Video => message.Video?.FileUniqueId,
-        TelegramMediaKind.VideoNote => message.VideoNote?.FileUniqueId,
-        TelegramMediaKind.Audio => message.Audio?.FileUniqueId,
-        TelegramMediaKind.Voice => message.Voice?.FileUniqueId,
-        TelegramMediaKind.Sticker => message.Sticker?.FileUniqueId,
-        _ => null,
-    };
-
-    /// <summary>
-    /// Download a Telegram photo to memory (and optionally persist to disk).
-    /// Checks size limit, retries once on transient failure.
-    /// Returns null and warns the user if the image is oversized or both download attempts fail.
-    /// When <c>Telegram:PersistAttachments</c> is enabled the bytes are also written to
-    /// <c>{AttachmentDir}/{chatId}-{messageId}-{photoIndex}.jpg</c> and the path is stored
-    /// on <see cref="MessageImage.FilePath"/> so agent tools can reach the bytes later.
-    /// </summary>
-    private async Task<MessageImage?> DownloadPhotoAsync(Telegram.Bot.Types.PhotoSize photo, long chatId, long messageId, int photoIndex)
-    {
-        var sizeBytes = (long)(photo.FileSize ?? 0);
-        if (sizeBytes > 0 && sizeBytes > _telegramConfig.MaxImageBytes)
-        {
-            _logger.LogWarning("Photo #{Index} ({FileId}) exceeds MaxImageBytes ({Size} > {Limit}), skipping",
-                photoIndex, photo.FileId, sizeBytes, _telegramConfig.MaxImageBytes);
-            await SendTextAsync(chatId, $"(Image #{photoIndex} exceeded size limit, skipped.)");
-            return null;
-        }
-
-        for (var attempt = 0; attempt < 2; attempt++)
-        {
-            try
-            {
-                if (attempt > 0) await Task.Delay(500);
-                using var ms = new System.IO.MemoryStream();
-                await _bot!.GetInfoAndDownloadFile(photo.FileId, ms);
-                var bytes = ms.ToArray();
-
-                string? filePath = null;
-                if (_telegramConfig.PersistAttachments)
-                {
-                    try
-                    {
-                        Directory.CreateDirectory(_telegramConfig.AttachmentDir);
-                        filePath = Path.Combine(_telegramConfig.AttachmentDir, $"{chatId}-{messageId}-{photoIndex}.jpg");
-                        await File.WriteAllBytesAsync(filePath, bytes);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Disk IO failure must not break vision: the agent still sees the image via
-                        // multimodal content blocks; we just lose the filesystem reference.
-                        _logger.LogWarning(ex, "Photo #{Index}: failed to persist attachment to disk, continuing without file path", photoIndex);
-                        filePath = null;
-                    }
-
-                    // Opportunistic cleanup — called after the write try/catch so a sweep failure
-                    // cannot misfire the catch and nullify a successfully written filePath.
-                    if (filePath != null)
-                        AttachmentSweeper.SweepExpired(_telegramConfig.AttachmentDir, _telegramConfig.AttachmentRetentionHours, _logger);
-                }
-
-                return new MessageImage(bytes, "image/jpeg") { FilePath = filePath };
-            }
-            catch (Exception ex) when (attempt == 0)
-            {
-                _logger.LogWarning(ex, "Photo #{Index} ({FileId}) download failed on attempt 1, retrying in 500ms", photoIndex, photo.FileId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Photo #{Index} ({FileId}) download failed after retry, skipping", photoIndex, photo.FileId);
-                await SendTextAsync(chatId, $"(Image #{photoIndex} download failed, skipped.)");
-            }
-        }
-        return null;
-    }
-
-
 
     /// <summary>
     /// Dispatch wrapper used by <see cref="TelegramBotClientExtensions.StartReceiving"/> to route
@@ -1493,91 +984,15 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         return Task.CompletedTask;
     }
 
-    private void HandleReaction(MessageReactionUpdated reaction)
-    {
-        // Anonymous group admins have no User context (Telegram uses actor_chat instead).
-        // We can't attribute the reaction to a specific user, so discard it.
-        if (reaction.User is null)
-        {
-            _logger.LogWarning(
-                "Ignoring reaction on message {MsgId} in chat {ChatId} — anonymous admin (no user context)",
-                reaction.MessageId, reaction.Chat.Id);
-            return;
-        }
+    private void HandleReaction(MessageReactionUpdated reaction) => _reactions.Handle(reaction);
 
-        var chatId = reaction.Chat.Id;
-        var userId = reaction.User.Id;
-        var messageId = reaction.MessageId;
+    /// <summary>See <see cref="TelegramReactionHandler.BuildChannelAnchorFromChat"/>.</summary>
+    internal static string BuildChannelAnchorFromChat(Chat chat) => TelegramReactionHandler.BuildChannelAnchorFromChat(chat);
 
-        // Authorization: same rules as regular messages
-        var isGroupChat = reaction.Chat.Type is ChatType.Group or ChatType.Supergroup;
-        if (isGroupChat)
-        {
-            if (!_allowlist.IsGroupAllowed(chatId))
-            {
-                _logger.LogDebug("Ignoring reaction from unauthorized group {ChatId}", chatId);
-                return;
-            }
-        }
-        else
-        {
-            if (userId == 0 || !_allowlist.IsUserAllowed(userId))
-            {
-                _logger.LogDebug("Ignoring reaction from unauthorized user {UserId}", userId);
-                return;
-            }
-        }
-
-        var (added, removed) = DiffReactions(reaction.NewReaction, reaction.OldReaction);
-        if (added.Count == 0 && removed.Count == 0) return; // no net change
-
-        var channelAnchor = BuildChannelAnchorFromChat(reaction.Chat);
-        foreach (var emoji in added)
-        {
-            var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}]";
-            _taskManager.StartTaskDetached(chatId, text, text, isSessionTask: true, userId: userId);
-        }
-
-        foreach (var emoji in removed)
-        {
-            var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}]";
-            _taskManager.StartTaskDetached(chatId, text, text, isSessionTask: true, userId: userId);
-        }
-    }
-
-    /// <summary>
-    /// Builds a <c>[channel: ...]</c> anchor string from a Telegram <see cref="Chat"/> object.
-    /// Used for reaction events where the full Chat is available directly.
-    /// </summary>
-    internal static string BuildChannelAnchorFromChat(Chat chat)
-    {
-        var chatId = chat.Id;
-        if (chatId < 0)
-        {
-            return chat.Title is { Length: > 0 }
-                ? $"[channel: group chat_id={chatId} title=\"{chat.Title.Replace("\"", "\\\"")}\"]"
-                : $"[channel: group chat_id={chatId}]";
-        }
-        // DM
-        if (chat.Username is { Length: > 0 })
-            return $"[channel: dm chat_id={chatId} user=@{chat.Username}]";
-        if (chat.FirstName is { Length: > 0 })
-            return $"[channel: dm chat_id={chatId} name=\"{chat.FirstName.Replace("\"", "\\\"")}\"]";
-        return $"[channel: dm chat_id={chatId}]";
-    }
-
-    /// <summary>
-    /// Diffs two reaction lists, returning only standard emoji (<see cref="ReactionTypeEmoji"/>)
-    /// that were added or removed. Custom emoji and paid reactions are silently ignored.
-    /// </summary>
+    /// <summary>See <see cref="TelegramReactionHandler.DiffReactions"/>.</summary>
     internal static (HashSet<string> added, HashSet<string> removed) DiffReactions(
         IEnumerable<ReactionType>? newReaction,
-        IEnumerable<ReactionType>? oldReaction)
-    {
-        var newEmojis = (newReaction ?? []).OfType<ReactionTypeEmoji>().Select(r => r.Emoji).ToHashSet();
-        var oldEmojis = (oldReaction ?? []).OfType<ReactionTypeEmoji>().Select(r => r.Emoji).ToHashSet();
-        return ([.. newEmojis.Except(oldEmojis)], [.. oldEmojis.Except(newEmojis)]);
-    }
+        IEnumerable<ReactionType>? oldReaction) => TelegramReactionHandler.DiffReactions(newReaction, oldReaction);
 
     private Task OnError(Exception exception, HandleErrorSource source)
     {

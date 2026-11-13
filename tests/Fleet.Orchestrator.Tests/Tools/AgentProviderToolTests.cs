@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
@@ -32,9 +33,9 @@ public class AgentProviderToolTests
         return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
     }
 
-    private CreateAgentTool Create() => new(Scopes(), new ConfigurationBuilder().Build());
+    private CreateAgentTool Create() => Writers.CreateAgentTool(Scopes(), new ConfigurationBuilder().Build());
 
-    private UpdateAgentConfigTool Update() => new(Scopes(), new NoOpAclChangeNotifier());
+    private UpdateAgentConfigTool Update() => Writers.UpdateConfigTool(Scopes(), new NoOpAclChangeNotifier());
 
     private static string Pv1(string provider) => $"Unknown provider '{provider}'; use claude, codex or gemini.";
 
@@ -81,7 +82,8 @@ public class AgentProviderToolTests
     [InlineData("gemini", "gemini")]
     public async Task Create_AKnownOrEmptyProvider_IsAccepted(string? provider, string stored)
     {
-        var result = await Create().CreateAgentAsync("agent1", "developer", "model-x", provider: provider);
+        // A co-cto: the first agent of a fleet must be one, on create_agent as on POST /api/agents.
+        var result = await Create().CreateAgentAsync("agent1", "co-cto", "model-x", provider: provider);
 
         Assert.StartsWith("Agent 'agent1' created in DB", result);
         var agent = Assert.Single(Agents());

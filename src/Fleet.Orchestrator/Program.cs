@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading.RateLimiting;
+using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Auth;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
@@ -121,6 +122,9 @@ builder.Services.AddHostedService<EpicDriverWatcherService>();
 
 // Push notifications to the first-party iOS app (off by default).
 builder.Services.AddPushNotifications(builder.Configuration);
+
+// The writers REST routes and MCP tools both call (Application/): one implementation per write.
+builder.Services.AddAgentWrites();
 
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services

@@ -45,6 +45,10 @@ public sealed class CardRemovalSurfaceTests : IAsyncLifetime
         builder.Services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
         builder.Services.AddSingleton(new PromptSizePolicy(10_000, 10_000, NullLogger.Instance));
         builder.Services.AddSingleton<IAclChangeNotifier, NoopAclNotifier>();
+        // The tools are adapters over the writers; these are what update_agent_config's writer needs.
+        builder.Services.AddSingleton(Fleet.Orchestrator.Tests.Support.Writers.InertPublisher());
+        builder.Services.AddSingleton<Fleet.Orchestrator.Application.ITelegramSetup>(new Fleet.Orchestrator.Tests.Support.Writers.TelegramSetup());
+        Fleet.Orchestrator.Application.WriteServiceRegistration.AddAgentWrites(builder.Services);
         builder.Services
             .AddMcpServer()
             .WithHttpTransport()

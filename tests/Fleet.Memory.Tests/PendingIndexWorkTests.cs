@@ -10,6 +10,8 @@ namespace Fleet.Memory.Tests;
 /// </summary>
 public sealed class PendingIndexWorkTests
 {
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(10);
+
     private sealed class Clock : TimeProvider
     {
         public DateTimeOffset Now = new(2026, 1, 15, 10, 0, 0, TimeSpan.Zero);
@@ -17,30 +19,57 @@ public sealed class PendingIndexWorkTests
         public void Advance(TimeSpan by) => Now += by;
     }
 
-    /// <summary>The index and the disk, as far as this class can see them.</summary>
+    /// <summary>One call into the index that the test holds open between its read and its write.</summary>
+    private sealed class Hold
+    {
+        public readonly TaskCompletionSource Reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>
+    /// The index and the disk, as far as this class can see them. A file is a path and the version of
+    /// its content; indexing reads the version first and writes it to the index last, as the real
+    /// thing reads the file, embeds it, and only then upserts.
+    /// </summary>
     private sealed class Index
     {
         public bool Down = true;
-        public readonly HashSet<string> OnDisk = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, int> OnDisk = new(StringComparer.Ordinal);
         public readonly HashSet<string> Corrupt = new(StringComparer.Ordinal);
-        public readonly HashSet<string> Indexed = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, int> Indexed = new(StringComparer.Ordinal);
         public readonly List<string> Attempts = [];
+        /// <summary>Holds the next call open after its read. One call only; later ones run through.</summary>
+        public Hold? HoldNext;
 
-        public Task IndexAsync(string path, CancellationToken ct)
+        public object? Observe(string path) { lock (OnDisk) return OnDisk.TryGetValue(path, out var version) ? version : null; }
+        public void Write(string path, int version) { lock (OnDisk) OnDisk[path] = version; }
+        public void Delete(string path) { lock (OnDisk) OnDisk.Remove(path); }
+        public int? IndexedVersion(string path) { lock (Indexed) return Indexed.TryGetValue(path, out var version) ? version : null; }
+
+        public async Task IndexAsync(string path, CancellationToken ct)
         {
-            Attempts.Add("index " + path);
+            lock (Attempts) Attempts.Add("index " + path);
             if (Corrupt.Contains(path)) throw new InvalidDataException("synthetic corrupt file");
             if (Down) throw new HttpRequestException("synthetic index outage");
-            Indexed.Add(path);
-            return Task.CompletedTask;
+            int read;
+            lock (OnDisk) read = OnDisk[path];
+            await HeldAsync(ct);
+            lock (Indexed) Indexed[path] = read;
         }
 
-        public Task RemoveAsync(string path, CancellationToken ct)
+        public async Task RemoveAsync(string path, CancellationToken ct)
         {
-            Attempts.Add("remove " + path);
+            lock (Attempts) Attempts.Add("remove " + path);
             if (Down) throw new HttpRequestException("synthetic index outage");
-            Indexed.Remove(path);
-            return Task.CompletedTask;
+            await HeldAsync(ct);
+            lock (Indexed) Indexed.Remove(path);
+        }
+
+        private async Task HeldAsync(CancellationToken ct)
+        {
+            if (Interlocked.Exchange(ref HoldNext, null) is not { } hold) return;
+            hold.Reached.TrySetResult();
+            await hold.Release.Task.WaitAsync(ct);
         }
     }
 
@@ -49,12 +78,23 @@ public sealed class PendingIndexWorkTests
     private readonly PendingIndexWork _work;
 
     public PendingIndexWorkTests() =>
-        _work = new PendingIndexWork(_index.IndexAsync, _index.RemoveAsync, _clock, NullLogger.Instance, _index.OnDisk.Contains);
+        _work = new PendingIndexWork(_index.IndexAsync, _index.RemoveAsync, _clock, NullLogger.Instance, _index.Observe);
 
-    private async Task<PendingIndexWork.Outcome> Write(string path)
+    private async Task<PendingIndexWork.Outcome> Write(string path, int version = 1)
     {
-        _index.OnDisk.Add(path);
+        _index.Write(path, version);
         return await _work.ApplyAsync(path, CancellationToken.None);
+    }
+
+    /// <summary>a.md is waiting, the index is back, and the retry pass is held inside its call into it.</summary>
+    private async Task<(Task<int> Retry, Hold Hold)> ARetryHeldInsideTheIndexAsync()
+    {
+        _index.Down = false;
+        var hold = _index.HoldNext = new Hold();
+        _clock.Advance(PendingIndexWork.FirstDelay);
+        var retry = _work.RetryDueAsync(CancellationToken.None);
+        await hold.Reached.Task.WaitAsync(Patience);
+        return (retry, hold);
     }
 
     [Fact]
@@ -70,13 +110,13 @@ public sealed class PendingIndexWorkTests
             Assert.Equal(0, await _work.RetryDueAsync(CancellationToken.None));
             Assert.Equal(1, _work.Count);
         }
-        Assert.DoesNotContain("a.md", _index.Indexed);
+        Assert.Null(_index.IndexedVersion("a.md"));
 
         _index.Down = false;
         _clock.Advance(PendingIndexWork.MaxDelay);
         Assert.Equal(1, await _work.RetryDueAsync(CancellationToken.None));
 
-        Assert.Contains("a.md", _index.Indexed);
+        Assert.Equal(1, _index.IndexedVersion("a.md"));
         Assert.Equal(0, _work.Count);
     }
 
@@ -159,15 +199,15 @@ public sealed class PendingIndexWorkTests
         await Write("a.md");
         _index.Down = true;
 
-        _index.OnDisk.Remove("a.md");
+        _index.Delete("a.md");
         Assert.Equal(PendingIndexWork.Outcome.Deferred, await _work.ApplyAsync("a.md", CancellationToken.None));
-        Assert.Contains("a.md", _index.Indexed);
+        Assert.Equal(1, _index.IndexedVersion("a.md"));
 
         _index.Down = false;
         _clock.Advance(PendingIndexWork.FirstDelay);
         await _work.RetryDueAsync(CancellationToken.None);
 
-        Assert.DoesNotContain("a.md", _index.Indexed);
+        Assert.Null(_index.IndexedVersion("a.md"));
         Assert.Equal(0, _work.Count);
     }
 
@@ -175,7 +215,7 @@ public sealed class PendingIndexWorkTests
     public async Task AFileDeletedWhileItWaits_IsRemovedFromTheIndex_NotIndexed()
     {
         await Write("a.md");
-        _index.OnDisk.Remove("a.md");
+        _index.Delete("a.md");
         _index.Attempts.Clear();
         _index.Down = false;
 
@@ -184,7 +224,7 @@ public sealed class PendingIndexWorkTests
 
         // The disk is the truth at the moment of the retry, not what failed earlier.
         Assert.Equal(["remove a.md"], _index.Attempts);
-        Assert.DoesNotContain("a.md", _index.Indexed);
+        Assert.Null(_index.IndexedVersion("a.md"));
     }
 
     [Fact]
@@ -198,7 +238,7 @@ public sealed class PendingIndexWorkTests
         _clock.Advance(PendingIndexWork.FirstDelay);
         Assert.Equal(1, await _work.RetryDueAsync(CancellationToken.None));
 
-        Assert.Contains("b.md", _index.Indexed);
+        Assert.Equal(1, _index.IndexedVersion("b.md"));
         Assert.Equal(0, _work.Count);
         Assert.Equal(PendingIndexWork.Outcome.Corrupt, await _work.ApplyAsync("a.md", CancellationToken.None));
         Assert.Equal(0, _work.Count);
@@ -224,9 +264,10 @@ public sealed class PendingIndexWorkTests
     {
         // The index is up, one file's upsert fails (an embedding timeout on that text, say).
         var flaky = new Index { Down = false };
+        foreach (var name in new[] { "a.md", "b.md", "c.md" }) flaky.Write(name, 1);
         var work = new PendingIndexWork(
             (path, ct) => path == "b.md" ? throw new TimeoutException("synthetic") : flaky.IndexAsync(path, ct),
-            flaky.RemoveAsync, _clock, NullLogger.Instance, _ => true);
+            flaky.RemoveAsync, _clock, NullLogger.Instance, flaky.Observe);
         work.Defer("a.md");
         work.Defer("b.md");
         work.Defer("c.md");
@@ -236,13 +277,13 @@ public sealed class PendingIndexWorkTests
 
         // a.md got through, so the wait starts over instead of doubling.
         Assert.Equal(PendingIndexWork.FirstDelay, work.NotBefore - _clock.Now);
-        Assert.Contains("a.md", flaky.Indexed);
+        Assert.Equal(1, flaky.IndexedVersion("a.md"));
         Assert.Equal(2, work.Count);
 
         // The next pass reaches c.md before it tries b.md again: the file that failed goes last.
         _clock.Advance(PendingIndexWork.FirstDelay);
         Assert.Equal(1, await work.RetryDueAsync(CancellationToken.None));
-        Assert.Contains("c.md", flaky.Indexed);
+        Assert.Equal(1, flaky.IndexedVersion("c.md"));
         Assert.Equal(1, work.Count);
 
         // Alone, the failing file is asked less and less often, up to the cap.
@@ -262,5 +303,136 @@ public sealed class PendingIndexWorkTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _work.RetryDueAsync(cts.Token));
 
         Assert.Equal(1, _work.Count);
+    }
+
+    // ── A retry and an event for the same file ──────────────────────────────────────────────
+    //
+    // Indexing reads the file and writes the index later. Each test below holds a retry between
+    // the two, lets something else happen to the same file, releases the retry, and looks at
+    // where things ended: the disk, the index, and what is still waiting.
+
+    [Fact]
+    public async Task ADeleteHandledWhileARetryIsIndexingTheFile_DoesNotComeBackInTheIndex()
+    {
+        await Write("a.md");
+        var (retry, hold) = await ARetryHeldInsideTheIndexAsync();
+
+        // The file is deleted and the watcher's event for it is handled, while the retry still
+        // holds the content it read.
+        _index.Delete("a.md");
+        var deleted = _work.ApplyAsync("a.md", CancellationToken.None);
+        hold.Release.SetResult();
+        await retry.WaitAsync(Patience);
+        await deleted.WaitAsync(Patience);
+
+        Assert.Null(_index.Observe("a.md"));
+        Assert.Null(_index.IndexedVersion("a.md"));
+        Assert.Equal(0, _work.Count);
+    }
+
+    [Fact]
+    public async Task ADeleteNobodyReports_WhileARetryIsIndexingTheFile_KeepsThePathAndIsRepaired()
+    {
+        await Write("a.md");
+        var (retry, hold) = await ARetryHeldInsideTheIndexAsync();
+
+        // Deleted, and no event comes: the event queue was full, or the writer did not go through
+        // the watcher at all.
+        _index.Delete("a.md");
+        hold.Release.SetResult();
+        Assert.Equal(0, await retry.WaitAsync(Patience));
+
+        // The retry wrote what it had read. It must know that is no longer true.
+        Assert.Equal(1, _index.IndexedVersion("a.md"));
+        Assert.Equal(1, _work.Count);
+
+        _clock.Now = _work.NotBefore;
+        Assert.Equal(1, await _work.RetryDueAsync(CancellationToken.None));
+        Assert.Null(_index.IndexedVersion("a.md"));
+        Assert.Equal(0, _work.Count);
+    }
+
+    [Fact]
+    public async Task AnEditHandledWhileARetryIsIndexingTheFile_EndsWithTheNewContentIndexed()
+    {
+        await Write("a.md", version: 1);
+        var (retry, hold) = await ARetryHeldInsideTheIndexAsync();
+
+        // The file is edited and the watcher's event for it is handled. Another file's event is not
+        // made to wait for this one: it goes through while the retry is still held.
+        _index.Write("a.md", 2);
+        var edited = _work.ApplyAsync("a.md", CancellationToken.None);
+        Assert.Equal(PendingIndexWork.Outcome.Indexed, await Write("b.md").WaitAsync(Patience));
+        hold.Release.SetResult();
+        await retry.WaitAsync(Patience);
+        await edited.WaitAsync(Patience);
+
+        // The older content must not be the last thing written.
+        Assert.Equal(2, _index.IndexedVersion("a.md"));
+        Assert.Equal(0, _work.Count);
+    }
+
+    [Fact]
+    public async Task AnEditNobodyReports_WhileARetryIsIndexingTheFile_KeepsThePathAndIsRepaired()
+    {
+        await Write("a.md", version: 1);
+        var (retry, hold) = await ARetryHeldInsideTheIndexAsync();
+
+        _index.Write("a.md", 2);
+        hold.Release.SetResult();
+        Assert.Equal(0, await retry.WaitAsync(Patience));
+
+        Assert.Equal(1, _index.IndexedVersion("a.md"));
+        Assert.Equal(1, _work.Count);
+
+        _clock.Now = _work.NotBefore;
+        Assert.Equal(1, await _work.RetryDueAsync(CancellationToken.None));
+        Assert.Equal(2, _index.IndexedVersion("a.md"));
+        Assert.Equal(0, _work.Count);
+    }
+
+    [Fact]
+    public async Task AFileCreatedAgainWhileARetryIsRemovingIt_EndsIndexed()
+    {
+        // Indexed, then deleted during an outage: the removal is what waits.
+        _index.Down = false;
+        await Write("a.md", version: 1);
+        _index.Down = true;
+        _index.Delete("a.md");
+        await _work.ApplyAsync("a.md", CancellationToken.None);
+        var (retry, hold) = await ARetryHeldInsideTheIndexAsync();
+
+        // The file is written again and its event is handled while the retry is about to remove it.
+        _index.Write("a.md", 2);
+        var created = _work.ApplyAsync("a.md", CancellationToken.None);
+        hold.Release.SetResult();
+        await retry.WaitAsync(Patience);
+        await created.WaitAsync(Patience);
+
+        // The removal must not be the last thing done to a file that exists.
+        Assert.Equal(2, _index.IndexedVersion("a.md"));
+        Assert.Equal(0, _work.Count);
+    }
+
+    [Fact]
+    public async Task AnEventHeldInsideTheIndex_AndARetryForTheSameFile_EndWithTheNewContentIndexed()
+    {
+        // The other way round: the event is the one that read early, the retry the one that comes later.
+        _index.Down = false;
+        _index.Write("a.md", 1);
+        var hold = _index.HoldNext = new Hold();
+        var first = _work.ApplyAsync("a.md", CancellationToken.None);
+        await hold.Reached.Task.WaitAsync(Patience);
+
+        _index.Write("a.md", 2);
+        _work.Defer("a.md");
+        _clock.Advance(PendingIndexWork.FirstDelay);
+        var retry = _work.RetryDueAsync(CancellationToken.None);
+        hold.Release.SetResult();
+        Assert.Equal(PendingIndexWork.Outcome.Stale, await first.WaitAsync(Patience));
+        await retry.WaitAsync(Patience);
+
+        Assert.Equal(2, _index.IndexedVersion("a.md"));
+        Assert.Equal(0, _work.Count);
     }
 }

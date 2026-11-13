@@ -1,13 +1,15 @@
 using System.ComponentModel;
-using Fleet.Orchestrator.Data;
-using Fleet.Orchestrator.Services;
-using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Application;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
+/// <summary>
+/// The MCP adapter over <see cref="AgentProjectAccessWriter"/>, which the REST project-access routes
+/// call too. The wildcard actions are a grant and a revocation of <c>*</c>.
+/// </summary>
 [McpServerToolType]
-public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFactory, ConfigService configService)
+public sealed class ManageAgentProjectAccessTool(AgentProjectAccessWriter access)
 {
     [McpServerTool(Name = "manage_agent_project_access")]
     [Description("Manage memory project access for an agent. Actions: 'list' — show current projects; 'add' — grant access to a project; 'remove' — revoke access to a project; 'set_wildcard' — grant access to all projects (*); 'clear_wildcard' — remove wildcard, leaving only explicit project rows.")]
@@ -20,130 +22,73 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
             return "manage_agent_project_access: missing required parameter 'agent_name'.";
 
         action = action.Trim().ToLowerInvariant();
-        var agentName = agent_name.Trim().ToLowerInvariant();
-
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var agentName = AgentProjectAccessWriter.NormalizeAgent(agent_name);
+        var proj = AgentProjectAccessWriter.NormalizeProject(project);
 
         switch (action)
         {
             case "list":
             {
-                var entries = await db.AgentProjectAccess
-                    .Where(x => x.AgentName == agentName)
-                    .OrderBy(x => x.Project)
-                    .Select(x => new { x.Project, x.Source })
-                    .ToListAsync();
-
-                if (entries.Count == 0)
+                var rows = await access.ListAsync(agentName);
+                if (rows.Count == 0)
                     return $"Agent '{agentName}' has no memory project access entries.";
 
-                var rows = entries.Select(e => e.Project).ToList();
-                var isWildcard = rows.Contains("*");
                 // Provenance decides whether a row survives an unassignment, so show it: an
                 // 'assignment' row disappears when the project is unassigned, a 'manual' one does not.
-                var projects = string.Join(", ", entries.Select(e => $"{e.Project} ({e.Source})"));
-                return isWildcard
+                var projects = string.Join(", ", rows.Select(row => $"{row.Project} ({row.Source})"));
+                return rows.Any(row => row.Project == AgentProjectAccessWriter.Wildcard)
                     ? $"Agent '{agentName}' has wildcard access (*) — can read all memory projects. Rows: {projects}"
                     : $"Agent '{agentName}' project access: {projects}";
             }
 
             case "add":
             {
-                var proj = project?.Trim().ToLowerInvariant() ?? "";
-                if (string.IsNullOrEmpty(proj))
+                if (proj.Length == 0)
                     return "manage_agent_project_access: 'add' action requires 'project' parameter.";
 
-                var exists = await db.AgentProjectAccess
-                    .AnyAsync(x => x.AgentName == agentName && x.Project == proj);
-                if (exists)
-                    return $"Agent '{agentName}' already has access to project '{proj}'.";
-
-                db.AgentProjectAccess.Add(new AgentProjectAccess
-                {
-                    AgentName = agentName,
-                    Project = proj,
-                    Source = AgentProjectAccessSource.Manual,
-                });
-                await db.SaveChangesAsync();
-                if (!await configService.TryPublishAclChangedAsync())
-                    return LiveDelivery.AccessNotDelivered($"access to project '{proj}' for agent '{agentName}'");
-
-                var all = await db.AgentProjectAccess
-                    .Where(x => x.AgentName == agentName)
-                    .Select(x => x.Project)
-                    .OrderBy(p => p)
-                    .ToListAsync();
-                return $"Added project '{proj}' to agent '{agentName}'. Current access: {string.Join(", ", all)}";
+                var outcome = await access.GrantAsync(agentName, proj);
+                if (outcome.Fault is { } fault) return fault.Message;
+                if (outcome.NotDelivered is { } notDelivered) return notDelivered;
+                return outcome.Value!.Changed
+                    ? $"Added project '{proj}' to agent '{agentName}'. Current access: {string.Join(", ", outcome.Value.Projects)}"
+                    : $"Agent '{agentName}' already has access to project '{proj}'.";
             }
 
             case "remove":
             {
-                var proj = project?.Trim().ToLowerInvariant() ?? "";
-                if (string.IsNullOrEmpty(proj))
+                if (proj.Length == 0)
                     return "manage_agent_project_access: 'remove' action requires 'project' parameter.";
 
-                var row = await db.AgentProjectAccess
-                    .FirstOrDefaultAsync(x => x.AgentName == agentName && x.Project == proj);
-                if (row is null)
+                var outcome = await access.RevokeAsync(agentName, proj);
+                if (outcome.Fault is { Code: "project_access_not_found" })
                     return $"Agent '{agentName}' does not have access to project '{proj}'.";
-
-                db.AgentProjectAccess.Remove(row);
-                await db.SaveChangesAsync();
-                if (!await configService.TryPublishAclChangedAsync())
-                    return LiveDelivery.AccessNotDelivered($"the removal of project '{proj}' from agent '{agentName}'");
-
-                var all = await db.AgentProjectAccess
-                    .Where(x => x.AgentName == agentName)
-                    .Select(x => x.Project)
-                    .OrderBy(p => p)
-                    .ToListAsync();
-                var remaining = all.Count > 0 ? string.Join(", ", all) : "(none)";
-                return $"Removed project '{proj}' from agent '{agentName}'. Remaining access: {remaining}";
+                if (outcome.Fault is { } fault) return fault.Message;
+                if (outcome.NotDelivered is { } notDelivered) return notDelivered;
+                return $"Removed project '{proj}' from agent '{agentName}'. Remaining access: {Listed(outcome.Value!.Projects)}";
             }
 
             case "set_wildcard":
             {
-                var exists = await db.AgentProjectAccess
-                    .AnyAsync(x => x.AgentName == agentName && x.Project == "*");
-                if (!exists)
-                {
-                    db.AgentProjectAccess.Add(new AgentProjectAccess
-                    {
-                        AgentName = agentName,
-                        Project = "*",
-                        Source = AgentProjectAccessSource.Manual,
-                    });
-                    await db.SaveChangesAsync();
-                    if (!await configService.TryPublishAclChangedAsync())
-                        return LiveDelivery.AccessNotDelivered($"wildcard access for agent '{agentName}'");
-                }
+                var outcome = await access.GrantAsync(agentName, AgentProjectAccessWriter.Wildcard);
+                if (outcome.Fault is { } fault) return fault.Message;
+                if (outcome.NotDelivered is { } notDelivered) return notDelivered;
                 return $"Agent '{agentName}' now has wildcard access (*) — can read all memory projects.";
             }
 
             case "clear_wildcard":
             {
-                var row = await db.AgentProjectAccess
-                    .FirstOrDefaultAsync(x => x.AgentName == agentName && x.Project == "*");
-                if (row is null)
+                var outcome = await access.RevokeAsync(agentName, AgentProjectAccessWriter.Wildcard);
+                if (outcome.Fault is { Code: "project_access_not_found" })
                     return $"Agent '{agentName}' does not have a wildcard entry — nothing to clear.";
-
-                db.AgentProjectAccess.Remove(row);
-                await db.SaveChangesAsync();
-                if (!await configService.TryPublishAclChangedAsync())
-                    return LiveDelivery.AccessNotDelivered($"the removal of wildcard access from agent '{agentName}'");
-
-                var remaining = await db.AgentProjectAccess
-                    .Where(x => x.AgentName == agentName)
-                    .Select(x => x.Project)
-                    .OrderBy(p => p)
-                    .ToListAsync();
-                var remainingStr = remaining.Count > 0 ? string.Join(", ", remaining) : "(none)";
-                return $"Cleared wildcard from agent '{agentName}'. Explicit project access: {remainingStr}";
+                if (outcome.Fault is { } fault) return fault.Message;
+                if (outcome.NotDelivered is { } notDelivered) return notDelivered;
+                return $"Cleared wildcard from agent '{agentName}'. Explicit project access: {Listed(outcome.Value!.Projects)}";
             }
 
             default:
                 return $"Unknown action '{action}'. Valid actions: list, add, remove, set_wildcard, clear_wildcard.";
         }
     }
+
+    private static string Listed(IReadOnlyList<string> projects) => projects.Count > 0 ? string.Join(", ", projects) : "(none)";
 }

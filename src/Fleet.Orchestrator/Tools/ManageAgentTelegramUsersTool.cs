@@ -1,15 +1,12 @@
-using Fleet.Orchestrator.Services;
 using System.ComponentModel;
-using Fleet.Orchestrator.Data;
-using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Application;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
+/// <summary>The MCP adapter over <see cref="AgentAllowlist"/>, which the REST telegram-users routes call too.</summary>
 [McpServerToolType]
-public sealed class ManageAgentTelegramUsersTool(
-    IServiceScopeFactory scopeFactory,
-    AgentConfigPublisherService publisher)
+public sealed class ManageAgentTelegramUsersTool(AgentAllowlist allowlist)
 {
     [McpServerTool(Name = "manage_agent_telegram_users")]
     [Description("Add or remove an allowed Telegram user ID for an agent. Only listed user IDs can send DMs to the agent's bot.")]
@@ -20,51 +17,25 @@ public sealed class ManageAgentTelegramUsersTool(
         [Description("Telegram @username (without @). Optional — used in the welcome DM when a newly-approved user is greeted.")] string? username = null,
         [Description("User's first name from Telegram. Optional — used in welcome DM when username is not set.")] string? first_name = null)
     {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-        var agent = await db.Agents
-            .Include(a => a.TelegramUsers)
-            .FirstOrDefaultAsync(a => a.Name == agent_name);
-
-        if (agent is null)
-            return $"Agent '{agent_name}' not found in DB.";
-
         action = action.Trim().ToLowerInvariant();
+        if (action is not ("add" or "remove"))
+            return $"Unknown action '{action}'. Use 'add' or 'remove'.";
 
-        switch (action)
+        var outcome = action == "add"
+            ? await allowlist.AddUserAsync(agent_name, user_id, username, first_name)
+            : await allowlist.RemoveUserAsync(agent_name, user_id);
+
+        if (outcome.Fault is { } fault)
+            return fault.Code == "agent_not_found" ? $"Agent '{agent_name}' not found in DB." : fault.Message;
+        if (outcome.NotDelivered is { } notDelivered)
+            return notDelivered;
+
+        return outcome.Value switch
         {
-            case "add":
-            {
-                if (agent.TelegramUsers.Any(u => u.UserId == user_id))
-                    return $"Telegram user {user_id} already allowed for agent '{agent_name}'.";
-
-                agent.TelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = user_id });
-                await db.SaveChangesAsync();
-                if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                        addedUsers: [new AddedUserInfo { UserId = user_id, Username = username, FirstName = first_name }],
-                        removedUserIds: [], addedGroupIds: [], removedGroupIds: []))
-                    return LiveDelivery.AllowlistNotDelivered($"Telegram user {user_id}", agent_name);
-                return $"Added Telegram user {user_id} to agent '{agent_name}'.";
-            }
-
-            case "remove":
-            {
-                var existing = agent.TelegramUsers.FirstOrDefault(u => u.UserId == user_id);
-                if (existing is null)
-                    return $"Telegram user {user_id} not found for agent '{agent_name}'.";
-
-                db.AgentTelegramUsers.Remove(existing);
-                await db.SaveChangesAsync();
-                if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                        addedUsers: [], removedUserIds: [user_id],
-                        addedGroupIds: [], removedGroupIds: []))
-                    return LiveDelivery.AllowlistNotDelivered($"the removal of Telegram user {user_id}", agent_name);
-                return $"Removed Telegram user {user_id} from agent '{agent_name}'.";
-            }
-
-            default:
-                return $"Unknown action '{action}'. Use 'add' or 'remove'.";
-        }
+            AllowlistChange.Added => $"Added Telegram user {user_id} to agent '{agent_name}'.",
+            AllowlistChange.AlreadyPresent => $"Telegram user {user_id} already allowed for agent '{agent_name}'.",
+            AllowlistChange.Removed => $"Removed Telegram user {user_id} from agent '{agent_name}'.",
+            _ => $"Telegram user {user_id} not found for agent '{agent_name}'.",
+        };
     }
 }

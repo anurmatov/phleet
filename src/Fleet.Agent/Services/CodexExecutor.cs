@@ -794,17 +794,8 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private Task StartProcessAsync(CancellationToken ct)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = CodexBin,
-            Arguments = "app-server --listen stdio://",
-            WorkingDirectory = _config.WorkDir,
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
+        var psi = ProviderChildProcess.CreateStartInfo(CodexBin, _config.WorkDir);
+        psi.Arguments = "app-server --listen stdio://";
 
         // D5.5, for every model: codex runs a root shell for the model, so a key in its
         // environment is one `env` call from the transcript. entrypoint.sh already unset these
@@ -833,7 +824,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         var pending = new ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>>();
         Volatile.Write(ref _pendingRequests, pending);
-        _process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start codex app-server");
+        _process = ProviderChildProcess.Start(_processStarter, psi, "Failed to start codex app-server");
         Volatile.Write(ref _stdin, new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true });
         _notificationChannel = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions
         {
@@ -846,7 +837,11 @@ public sealed class CodexExecutor : IAgentExecutor
         var writer = _notificationChannel.Writer;
         var token = _readerCts.Token;
         _ = Task.Run(() => ReadStdoutAsync(stdout, writer, pending, token));
-        _ = Task.Run(() => ReadStderrAsync(stderr, token));
+        _ = ProviderChildProcess.PumpStderr(stderr, line =>
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+                _logger.LogWarning("[codex stderr] {Line}", line);
+        }, token);
 
         _threadId = null;
         _activeTurnId = null;
@@ -965,12 +960,8 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         try
         {
-            string? line = "";
-            while (!ct.IsCancellationRequested && (line = await reader.ReadLineAsync(ct)) is not null)
+            await ProviderChildProcess.ReadLinesAsync(reader, async line =>
             {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-
                 JsonNode? node;
                 try
                 {
@@ -979,11 +970,11 @@ public sealed class CodexExecutor : IAgentExecutor
                 catch (JsonException ex)
                 {
                     _logger.LogWarning(ex, "CodexExecutor: malformed JSON-RPC line from app-server: {Line}", line);
-                    continue;
+                    return;
                 }
 
                 if (node is not JsonObject obj)
-                    continue;
+                    return;
 
                 if (TryGetRequestId(obj, out var requestId))
                 {
@@ -994,14 +985,14 @@ public sealed class CodexExecutor : IAgentExecutor
                     // Review any future caller outside that lock against this assumption.
                     if (pending.TryRemove(requestId, out var tcs))
                         tcs.TrySetResult(new RpcOutcome(obj["result"] as JsonObject, obj["error"] as JsonObject));
-                    continue;
+                    return;
                 }
 
                 if (obj["method"] is JsonValue)
                 {
                     await writer.WriteAsync(obj, ct);
                 }
-            }
+            }, ct);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -1013,21 +1004,6 @@ public sealed class CodexExecutor : IAgentExecutor
             FailPendingRequests(pending, new InvalidOperationException("Codex app-server stdout reader stopped before the request completed."));
             writer.TryComplete();
         }
-    }
-
-    private async Task ReadStderrAsync(StreamReader reader, CancellationToken ct)
-    {
-        try
-        {
-            string? line;
-            while (!ct.IsCancellationRequested && (line = await reader.ReadLineAsync(ct)) is not null)
-            {
-                if (!string.IsNullOrWhiteSpace(line))
-                    _logger.LogWarning("[codex stderr] {Line}", line);
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
     }
 
     private async Task<JsonObject> SendRequestAsync(string method, JsonObject? @params, CancellationToken ct)
@@ -1626,12 +1602,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (_process is not null)
         {
-            try
-            {
-                if (!_process.HasExited)
-                    _process.Kill(entireProcessTree: true);
-                await _process.WaitForExitAsync();
-            }
+            try { await ProviderChildProcess.KillAsync(_process); }
             catch { }
 
             _process.Dispose();

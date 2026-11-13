@@ -41,8 +41,17 @@ jobs:
 
       # #460 AC-U6: the codex branch writes codex-root.toml first, then byte-identical MCP tables,
       # parsed with tomllib; a missing, unreadable or directory root file still keeps the MCP tables.
+      # The branch writes through the agent built above (`dotnet Fleet.Agent.dll prepare config`).
       - name: Entrypoint codex config.toml
         run: bash tests/entrypoint-codex/run.sh
+
+      # entrypoint.sh reads appsettings.json only through the agent binary. This runs the original
+      # script (inline Node and Python, kept as tests/entrypoint-prepare/entrypoint.legacy.sh) beside
+      # the current one on every fixture and requires the same provider, flags and byte-identical
+      # files; then that an unreadable configuration stops the script, and that no call to the
+      # binary can see a hosted-provider key.
+      - name: Entrypoint prepare (golden comparison, fail closed, key isolation)
+        run: bash tests/entrypoint-prepare/run.sh
 
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts

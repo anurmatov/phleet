@@ -313,4 +313,5 @@ Claude local never used an Env Ref. The URL has always been a per-agent field. W
 
 `GET` returns both REST keys with the same value. If you send both names in one call, rule A1
 applies (`local-models.md` §4). The DB column and the generated `Agent.AnthropicBaseUrl` key keep
-their old names: `entrypoint.sh` reads that key to choose its local branch.
+their old names: the agent reads that key, both as the host and in the `prepare facts` call
+`entrypoint.sh` makes to choose its local branch.

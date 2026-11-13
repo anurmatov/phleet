@@ -8,7 +8,11 @@
 #
 # Runs the codex branch exactly as it appears in entrypoint.sh, cut out at its `elif` and with every
 # `/root/`, `/app/` and `/workspace/` literal rewritten to a scratch directory, so nothing outside it
-# is touched. Every generated file is parsed with Python's tomllib: the root keys must sit at the
+# is touched. The branch writes the file through the agent binary (`fleet_prepare config`, which is
+# `dotnet Fleet.Agent.dll prepare config`); here that runs the built agent against the same scratch
+# directory, so a built agent is needed first (dotnet build src/Fleet.Agent -c Release, or AGENT_DLL).
+# tests/entrypoint-prepare/run.sh compares the same output with the script that used inline Node.
+# Every generated file is parsed with Python's tomllib: the root keys must sit at the
 # document root (a key written after a table header would belong to that table), and the
 # [mcp_servers] text must be byte-identical to what the branch wrote before #460 (the GOLDEN_* texts
 # below were captured by running that branch on the same fixtures). A missing, unreadable or
@@ -22,7 +26,9 @@ trap 'fail_infra "command failed at line $LINENO"' ERR
 
 ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
 [ -f "$ENTRYPOINT" ] || fail_infra "run from a phleet checkout"
-command -v node >/dev/null || fail_infra "node is required"
+AGENT_DLL="${AGENT_DLL:-$REPO_ROOT/src/Fleet.Agent/bin/Release/net10.0/Fleet.Agent.dll}"
+[ -f "$AGENT_DLL" ] || fail_infra "no agent build at $AGENT_DLL (dotnet build src/Fleet.Agent -c Release, or set AGENT_DLL)"
+REAL_DOTNET="$(command -v dotnet)" || fail_infra "dotnet is required"
 python3 -c 'import tomllib' 2>/dev/null || fail_infra "python3 with tomllib (3.11+) is required"
 
 WORK=$(mktemp -d)
@@ -49,7 +55,7 @@ persistence = "save-all"
 '
 
 MCP_JSON='{"mcpServers":{"alpha":{"type":"http","url":"http://alpha:3100?agent=agent1"},"beta":{"type":"http","url":"http://beta:3001"},"gamma":{"type":"http","url":"http://gamma:8083/mcp","headers":{"Authorization":"Bearer placeholder"}},"delta":{"command":"node","args":["x.js"]}}}'
-APPSETTINGS='{"Agent":{"AllowedTools":["Read","mcp__alpha__memory_get","mcp__alpha__memory_search","mcp__gamma__send","Bash(git *)"],"McpHeaderSupport":HEADERS}}'
+APPSETTINGS='{"Agent":{"Provider":"codex","AllowedTools":["Read","mcp__alpha__memory_get","mcp__alpha__memory_search","mcp__gamma__send","Bash(git *)"],"McpHeaderSupport":HEADERS}}'
 
 # Captured from the pre-#460 branch on the fixtures above.
 GOLDEN_NO_HEADERS='[mcp_servers.alpha]
@@ -74,15 +80,20 @@ awk '/^elif \[ "\$PROVIDER" = "codex" \]; then$/ {copy=1; next}
      copy && /^(elif|else|fi)([ ;]|$)/ {exit}
      copy' "$ENTRYPOINT" > "$branch"
 [ -s "$branch" ] || fail_assert "no codex branch found in entrypoint.sh"
-grep -qF '/app/codex-root.toml' "$branch" || fail_assert "the codex branch does not read /app/codex-root.toml"
+grep -qE '^ +fleet_prepare config( |$)' "$branch" || fail_assert "the codex branch does not call 'fleet_prepare config'"
+! grep -qE '(^|[^A-Za-z_])(node|python3) ' "$branch" || fail_assert "the codex branch still runs node or python"
 grep -qF '"/app/codex-root.toml"' "$REPO_ROOT/src/Fleet.Shared/HarnessDefaults.cs" \
     || fail_assert "HarnessDefaults.CodexRootTomlContainerPath is not /app/codex-root.toml"
+sed -e "s|/root/|$ROOT/|g" -e "s|/app/|$APP/|g" -e "s|/workspace/|$WS/|g" "$branch" > "$WORK/branch.rewritten"
+! grep -qE '(^|[^A-Za-z0-9_./-])/(root|app|workspace)/' "$WORK/branch.rewritten" || fail_assert "a real path survived the rewrite"
 {
     echo '#!/bin/bash'
-    sed -e "s|/root/|$ROOT/|g" -e "s|/app/|$APP/|g" -e "s|/workspace/|$WS/|g" "$branch"
+    echo 'set -u'
+    # The agent binary resolves the same container paths under $WORK: $WORK/root, /app, /workspace.
+    echo "fleet_prepare() { '$REAL_DOTNET' '$AGENT_DLL' prepare \"\$@\" --root '$WORK'; }"
+    cat "$WORK/branch.rewritten"
     echo 'echo BRANCH-COMPLETED'
 } > "$harness"
-! grep -qE '(^|[^A-Za-z0-9_./-])/(root|app|workspace)/' "$harness" || fail_assert "a real path survived the rewrite"
 chmod 0755 "$harness"
 
 as_user=()

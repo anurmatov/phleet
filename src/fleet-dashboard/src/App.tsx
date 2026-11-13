@@ -37,10 +37,12 @@ import { apiFetch, apiGet, apiSend, errorMessage, firstFailure, heartbeatAge } f
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
 import { humanInputIdentity } from './humanInputRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
-import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
+import { warmupTimeoutEditValue } from './warmupTimeout'
 import { contextWindowEditValue } from './contextWindow'
 import { localModelEditValues } from './localModel'
 import { configSaveBody } from './agentConfigSave'
+import { DEFAULT_CREATE_FORM, createAgentBody, createFormFromConfig } from './agentCreate'
+import { parseViewHash } from './activeViews'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -107,19 +109,6 @@ interface AgentTemplateDetail {
   envRefs?: string[]
   mcpEndpoints?: McpEndpointEntry[]
   instructions?: { name: string; loadOrder: number }[]
-}
-
-const DEFAULT_CREATE_FORM: CreateForm = {
-  name: '', displayName: '', role: '', model: PROVIDER_DEFAULT_MODEL['claude'],
-  containerName: '', memoryLimitMb: '4096', isEnabled: true, image: '',
-  permissionMode: 'acceptEdits', maxTurns: '50', workDir: '/workspace',
-  proactiveIntervalMinutes: '0',
-  groupListenMode: 'mention', groupDebounceSeconds: '15', warmupTimeoutSeconds: '60', shortName: '',
-  effort: '', jsonSchema: '', agentsJson: '', autoMemoryEnabled: true,
-  showStats: true, prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
-  codexSandboxMode: '',
-  tools: '', projects: '', networks: '', envRefs: '',
-  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [],
 }
 
 export default function App() {
@@ -279,19 +268,9 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
-  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
-  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
-  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
-  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
-  // Null for anything unrecognised, which leaves the current view alone exactly as before.
-  function parseHash(): { view: ActiveView; param: string } | null {
-    const raw = window.location.hash.slice(1)
-    const slash = raw.indexOf('/')
-    const head = (slash === -1 ? raw : raw.slice(0, slash)) as ActiveView
-    if (!VALID_VIEWS.includes(head)) return null
-    return { view: head, param: slash === -1 ? '' : decodeURIComponent(raw.slice(slash + 1)) }
-  }
+  // The hash is `#view` or `#view/param` (activeViews.ts). Null for anything unrecognised, which
+  // leaves the current view alone.
+  const parseHash = () => parseViewHash(window.location.hash)
   const [activeView, setActiveViewState] = useState<ActiveView>(() => parseHash()?.view ?? 'agents')
   const [viewParam, setViewParam] = useState<string>(() => parseHash()?.param ?? '')
   const setActiveView = useCallback((view: ActiveView) => {
@@ -831,7 +810,6 @@ export default function App() {
           groupDebounceSeconds: String(cfg.groupDebounceSeconds),
           warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
           shortName: cfg.shortName,
-          displayName: cfg.displayName,
           showStats: cfg.showStats,
           prefixMessages: cfg.prefixMessages,
           formattingMode: cfg.formattingMode,
@@ -1459,40 +1437,8 @@ export default function App() {
     setCopyFromLoading(true)
     try {
       const cfg = await apiGet<AgentConfig>(`/api/agents/${encodeURIComponent(sourceName)}/config`)
-      setCreateForm(prev => ({
-        ...prev,
-        role: (cfg as unknown as { role?: string }).role ?? prev.role,
-        model: cfg.model,
-        memoryLimitMb: String(cfg.memoryLimitMb),
-        image: cfg.image ?? '',
-        permissionMode: cfg.permissionMode,
-        maxTurns: String(cfg.maxTurns),
-        workDir: cfg.workDir,
-        proactiveIntervalMinutes: String(cfg.proactiveIntervalMinutes),
-        groupListenMode: cfg.groupListenMode,
-        groupDebounceSeconds: String(cfg.groupDebounceSeconds),
-        warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
-        showStats: cfg.showStats,
-        prefixMessages: cfg.prefixMessages,
-        formattingMode: cfg.formattingMode,
-        suppressToolMessages: cfg.suppressToolMessages ?? false,
-        telegramSendOnly: cfg.telegramSendOnly,
-        provider: cfg.provider ?? 'claude',
-        codexSandboxMode: cfg.codexSandboxMode ?? '',
-        effort: cfg.effort ?? '',
-        jsonSchema: cfg.jsonSchema ?? '',
-        agentsJson: cfg.agentsJson ?? '',
-        autoMemoryEnabled: cfg.autoMemoryEnabled,
-        tools: cfg.tools.filter(t => t.isEnabled).map(t => t.toolName).join('\n'),
-        projects: cfg.projects.join('\n'),
-        networks: cfg.networks.join('\n'),
-        envRefs: cfg.envRefs.join('\n'),
-        mcpEndpoints: cfg.mcpEndpoints,
-        telegramUsers: cfg.telegramUsers.join('\n'),
-        telegramGroups: cfg.telegramGroups.join('\n'),
-        localBaseUrl: cfg.localBaseUrl ?? '',
-        contextWindow: cfg.contextWindow ? String(cfg.contextWindow) : '',
-      }))
+      // The config route carries no role; the agent list does.
+      setCreateForm(prev => createFormFromConfig(prev, cfg, agents[sourceName]?.role))
     } catch { /* the form keeps what it had */
     } finally {
       setCopyFromLoading(false)
@@ -1500,53 +1446,12 @@ export default function App() {
   }
 
   async function handleCreateSubmit() {
-    if (!createForm.name.trim()) { setCreateMsg('Name is required'); return }
-    const createProvider = createForm.provider || 'claude'
-    const createModel = createForm.model.trim() || PROVIDER_DEFAULT_MODEL[createProvider] || ''
-    if (!createModel) { setCreateMsg('Model is required'); return }
-    if (!createForm.role.trim()) { setCreateMsg('Role is required'); return }
-    const createWarmupTimeout = parseWarmupTimeoutSeconds(createForm.warmupTimeoutSeconds)
-    if (!createWarmupTimeout.ok) { setCreateMsg(createWarmupTimeout.error); return }
+    // The body is built in agentCreate.ts, where a test holds it against the create route.
+    const create = createAgentBody(createForm, !!createTemplateName)
+    if (!create.ok) { setCreateMsg(create.error); return }
     setCreateState('creating'); setCreateMsg('')
     try {
-      const body = {
-        name: createForm.name.trim(),
-        displayName: createForm.displayName.trim() || createForm.name.trim(),
-        role: createForm.role.trim(),
-        model: createModel,
-        containerName: createForm.containerName.trim() || `fleet-${createForm.name.trim()}`,
-        memoryLimitMb: parseInt(createForm.memoryLimitMb) || 4096,
-        isEnabled: createForm.isEnabled,
-        image: createForm.image.trim() || null,
-        permissionMode: createForm.permissionMode || 'acceptEdits',
-        maxTurns: parseInt(createForm.maxTurns) || 50,
-        workDir: createForm.workDir || '/workspace',
-        proactiveIntervalMinutes: parseInt(createForm.proactiveIntervalMinutes) || 0,
-        groupListenMode: createForm.groupListenMode || 'mention',
-        groupDebounceSeconds: parseInt(createForm.groupDebounceSeconds) || 15,
-        warmupTimeoutSeconds: createWarmupTimeout.value,
-        shortName: createForm.shortName,
-        showStats: createForm.showStats,
-        prefixMessages: createForm.prefixMessages,
-        formattingMode: createForm.formattingMode,
-        suppressToolMessages: createForm.suppressToolMessages,
-        telegramSendOnly: createForm.telegramSendOnly,
-        effort: createForm.effort.trim() || null,
-        jsonSchema: createForm.jsonSchema.trim() || null,
-        agentsJson: createForm.agentsJson.trim() || null,
-        autoMemoryEnabled: createForm.autoMemoryEnabled,
-        provider: createForm.provider || 'claude',
-        codexSandboxMode: createForm.codexSandboxMode.trim() || null,
-        tools: createForm.tools.split('\n').map(s => s.trim()).filter(Boolean),
-        projects: createForm.projects.split('\n').map(s => s.trim()).filter(Boolean),
-        networks: createForm.networks.split('\n').map(s => s.trim()).filter(Boolean),
-        envRefs: createForm.envRefs.split('\n').map(s => s.trim()).filter(Boolean),
-        mcpEndpoints: createForm.mcpEndpoints,
-        telegramUsers: createForm.telegramUsers.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        telegramGroups: createForm.telegramGroups.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        provision: !!createTemplateName,
-      }
-      const data = await apiSend<{ message?: string } | null>('/api/agents', 'POST', body)
+      const data = await apiSend<{ message?: string } | null>('/api/agents', 'POST', create.body)
       // Apply instruction assignments if any were selected. Non-fatal (they can be set in the
       // config panel), but a refusal is said, not hidden behind "created".
       let instructionsNote = ''

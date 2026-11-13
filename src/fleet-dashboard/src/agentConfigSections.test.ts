@@ -13,7 +13,10 @@ import { configSaveBody } from './agentConfigSave.ts'
 import type { AgentConfig, ConfigEdits } from './types'
 
 // Bodies recorded by evaluating the pre-#460 inline save code of App.tsx (main at be931e7) on these
-// edits, before the dialog was sectioned.
+// edits, before the dialog was sectioned. One key has since been taken out of both sides:
+// `displayName`. The recording gave the edits a value for it, but the dialog never had one (the
+// config route sends no display name, so the edit was `undefined` and never reached the wire),
+// and the route accepts none.
 const recorded = JSON.parse(readFileSync(new URL('./fixtures/agentConfigSaveBodies.json', import.meta.url), 'utf8')) as
   Record<string, { edits: Omit<ConfigEdits, 'harnessExtra'>; body: Record<string, unknown> }>
 

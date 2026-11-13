@@ -46,7 +46,6 @@ export function configSaveBody(
     groupDebounceSeconds: parseInt(edits.groupDebounceSeconds, 10) || 15,
     warmupTimeoutSeconds: warmupTimeout.value,
     shortName: edits.shortName,
-    displayName: edits.displayName,
     showStats: edits.showStats,
     prefixMessages: edits.prefixMessages,
     formattingMode: edits.formattingMode,

@@ -25,10 +25,13 @@ export interface JournalHeartbeat {
   bindingFailed?: number
 }
 
+/** One row of `GET /api/agents` and one agent message on `/ws` (the orchestrator's `AgentState`). */
 export interface AgentState {
   agentName: string
-  displayName: string | null
-  shortName: string | null
+  /** Not sent by the orchestrator today; readers fall back to `agentName`. */
+  displayName?: string | null
+  /** Not sent by the orchestrator today. */
+  shortName?: string | null
   model: string | null
   role: string | null
   currentTask: string | null
@@ -150,6 +153,14 @@ export interface CreateForm {
   telegramSendOnly: boolean
   provider: string
   codexSandboxMode: string
+  /** True for a local-model agent, even before a URL is entered. Claude and Codex only. */
+  localMode: boolean
+  /** Local server origin, or '' for none. Sent only in local mode. */
+  localBaseUrl: string
+  /** Codex local server software; the `<server>/` prefix of a Codex local model. */
+  localServer: CodexLocalServer
+  /** Context window in tokens, or '' for not set. Sent only in local mode. */
+  contextWindow: string
   tools: string
   projects: string
   networks: string
@@ -160,8 +171,12 @@ export interface CreateForm {
   instructions: { name: string; loadOrder: number }[]
 }
 
+/**
+ * `GET /api/agents/{name}/config`. The route sends the agent's `name`; it sends no display name
+ * and no role, and `PUT` accepts neither (the role is in the agent list, `AgentState.role`).
+ */
 export interface AgentConfig {
-  agentName: string
+  name: string
   model: string
   memoryLimitMb: number
   isEnabled: boolean
@@ -174,7 +189,6 @@ export interface AgentConfig {
   groupDebounceSeconds: number
   warmupTimeoutSeconds: number
   shortName: string
-  displayName: string
   showStats: boolean
   prefixMessages: boolean
   formattingMode: number
@@ -226,7 +240,6 @@ export interface ConfigEdits {
   groupDebounceSeconds: string
   warmupTimeoutSeconds: string
   shortName: string
-  displayName: string
   showStats: boolean
   prefixMessages: boolean
   formattingMode: number
@@ -349,7 +362,8 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'chat' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
+/** A page of the dashboard. Derived from the list in activeViews.ts, which is its one definition. */
+export type { ActiveView } from './activeViews.ts'
 
 // ── Memory types ──────────────────────────────────────────────────────────────
 

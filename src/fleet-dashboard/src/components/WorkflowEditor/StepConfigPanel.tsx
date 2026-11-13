@@ -5,6 +5,7 @@ import { updateStepAtPath, updateBranchCase, removeBranchCase, renameBranchCase,
 import { makeStep } from './stepDefaults'
 import KeyValueEditor from './KeyValueEditor'
 import { apiGet } from '../../utils'
+import { agentNamesFromList } from '../../agentList'
 import { parseSchema, SchemaField, WorkflowTypeSelector, convertFieldValue } from './schemaUtils'
 import type { SchemaProperty } from './schemaUtils'
 import type { WorkflowTypeInfo } from '../../types'
@@ -34,9 +35,9 @@ export default function StepConfigPanel({ root, selectedPath, onChange, workflow
   const [attributeNames, setAttributeNames] = useState<string[]>(DEFAULT_ATTRIBUTE_NAMES)
 
   useEffect(() => {
-    apiGet<Array<{ name: string }>>('/api/agents')
-      .then((data: Array<{ name: string }>) => {
-        const names = data.map(a => a.name).filter(Boolean)
+    apiGet<unknown>('/api/agents')
+      .then(list => {
+        const names = agentNamesFromList(list)
         if (names.length > 0) setAgentNames(names)
       })
       .catch(() => {})

@@ -189,6 +189,19 @@ public partial class DashboardNginxConfigTests
         Assert.Contains(chat, d => d is { Name: "proxy_read_timeout", Value: "3600s" });
     }
 
+    [Theory]
+    [InlineData("X-Content-Type-Options \"nosniff\" always")]
+    [InlineData("X-Frame-Options \"DENY\" always")]
+    [InlineData("Referrer-Policy \"same-origin\" always")]
+    public void EveryResponse_CarriesTheBrowserHardeningHeaders(string header) =>
+        Assert.Contains(Directives.Value, d => d.Context == "server" && d.Name == "add_header" && d.Value == header);
+
+    // nginx inherits add_header only into a block that declares none of its own, so one
+    // add_header inside a location would silently drop all three headers for that location.
+    [Fact]
+    public void NoLocation_DeclaresItsOwnResponseHeaders() =>
+        Assert.DoesNotContain(Directives.Value, d => d.Context != "server" && d.Name == "add_header");
+
     [GeneratedRegex(@"\bvalid=(\d+)s\b")]
     private static partial Regex ValidRegex();
 

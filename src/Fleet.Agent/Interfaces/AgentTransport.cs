@@ -170,7 +170,7 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         // message id that nothing else in the process can know. The value is published through the
         // IMessageSink.GetLastSentMessageId override below instead (#277 MUST NOT 19, MUST NOT 20).
 
-        _mediaGroupBuffer = new MediaGroupBuffer(telegramConfig.Value.MaxGroupBufferMs);
+        _mediaGroupBuffer = new MediaGroupBuffer(telegramConfig.Value.MaxGroupBufferMs, logger);
 
         // Wire up the download helper with the real bot downloader.
         // In headless mode (_bot == null) PersistAttachments should be false;
@@ -1535,13 +1535,13 @@ public sealed class AgentTransport : BackgroundService, IMessageSink, ITelegramM
         foreach (var emoji in added)
         {
             var text = $"{channelAnchor}\n[reaction: {emoji} on message_id={messageId} from user_id={userId}]";
-            _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+            _taskManager.StartTaskDetached(chatId, text, text, isSessionTask: true, userId: userId);
         }
 
         foreach (var emoji in removed)
         {
             var text = $"{channelAnchor}\n[reaction removed: {emoji} on message_id={messageId} from user_id={userId}]";
-            _ = _taskManager.StartTask(chatId, text, text, isSessionTask: true, userId: userId);
+            _taskManager.StartTaskDetached(chatId, text, text, isSessionTask: true, userId: userId);
         }
     }
 

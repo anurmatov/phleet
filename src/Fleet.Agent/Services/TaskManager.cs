@@ -219,6 +219,46 @@ public sealed class TaskManager
     }
 
 
+    /// <summary>
+    /// <see cref="StartTask"/> for a caller that does not wait for the outcome: a transport
+    /// callback, a relay handler, a timer. The dispatch is still observed. If it throws, the
+    /// message is gone, and discarding the task meant it went without a line in the log.
+    /// </summary>
+    public void StartTaskDetached(long chatId, string task, string displayText, bool isSessionTask,
+        TaskSource source = TaskSource.UserMessage,
+        string? relaySender = null,
+        string? correlationId = null,
+        string? taskId = null,
+        IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
+        long userId = 0,
+        ConversationIdentity? identity = null,
+        TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
+        bool steeringEligible = false)
+    {
+        var dispatch = StartTask(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
+            images, documents, userId, identity, priority, telegramMessageId, steeringEligible);
+        if (dispatch.IsCompletedSuccessfully) return;
+        _ = ObserveDetachedStartAsync(dispatch, chatId, source, taskId, correlationId is not null);
+    }
+
+    private async Task ObserveDetachedStartAsync(Task<TaskDispatchOutcome> dispatch, long chatId, TaskSource source,
+        string? taskId, bool hasCorrelationId)
+    {
+        try
+        {
+            await dispatch.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Identifiers only. The prompt and the display text can carry anything a person or
+            // another agent wrote, and neither belongs in a log.
+            TryLog(LogLevel.Error, ex,
+                "Task dispatch failed and the message was dropped (chat={ChatId}, source={Source}, taskId={TaskId}, hasCorrelationId={HasCorrelationId})",
+                chatId, source, taskId ?? "none", hasCorrelationId);
+        }
+    }
+
     private async Task<TaskDispatchOutcome> StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
         string? relaySender = null,

@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using Fleet.Agent.Models;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fleet.Agent.Services;
 
@@ -18,11 +20,13 @@ internal sealed class MediaGroupBuffer
     private const int DebounceWindowMs = 1500;
 
     private readonly int _maxTotalMs;
+    private readonly ILogger _logger;
     private readonly ConcurrentDictionary<string, MediaGroupState> _groups = new();
 
-    public MediaGroupBuffer(int maxTotalMs)
+    public MediaGroupBuffer(int maxTotalMs, ILogger? logger = null)
     {
         _maxTotalMs = maxTotalMs;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>Returns the number of non-null images already buffered for a group, or 0 if the group is unknown.</summary>
@@ -86,12 +90,7 @@ internal sealed class MediaGroupBuffer
             return true;
         }
 
-        _ = Task.Run(async () =>
-        {
-            try { await Task.Delay(DebounceWindowMs, newCts!.Token); }
-            catch (OperationCanceledException) { return; }
-            await FlushGroupAsync(groupKey, flush);
-        });
+        _ = FlushAfterDebounceAsync(groupKey, newCts!.Token, flush);
 
         return true;
     }
@@ -144,15 +143,34 @@ internal sealed class MediaGroupBuffer
         oldCts?.Cancel();
         oldCts?.Dispose();
 
-        _ = Task.Run(async () =>
-        {
-            try { await Task.Delay(DebounceWindowMs, newCts.Token); }
-            catch (OperationCanceledException) { return; }
-            await FlushGroupAsync(groupKey, flush);
-        });
+        _ = FlushAfterDebounceAsync(groupKey, newCts.Token, flush);
 
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// The debounced flush, which nobody awaits. A flush that throws takes the whole album with
+    /// it, so the failure is logged here; unobserved, it left no trace at all. The group key and
+    /// the image count identify the album; captions are never logged.
+    /// </summary>
+    private Task FlushAfterDebounceAsync(string groupKey, CancellationToken debounce, Func<IncomingMessage, Task> flush) =>
+        Task.Run(async () =>
+        {
+            try { await Task.Delay(DebounceWindowMs, debounce); }
+            catch (OperationCanceledException) { return; }
+
+            var images = GetImageCount(groupKey);
+            try
+            {
+                await FlushGroupAsync(groupKey, flush);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Media group flush failed and the album was dropped (group={GroupKey}, images={ImageCount})",
+                    groupKey, images);
+            }
+        });
 
     private async Task FlushGroupAsync(string groupKey, Func<IncomingMessage, Task> flush)
     {

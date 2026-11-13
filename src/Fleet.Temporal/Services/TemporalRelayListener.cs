@@ -81,6 +81,7 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
     private readonly TaskCompletionRegistry _registry;
     private readonly ITemporalClientFactory _clientFactory;
     private readonly ILogger<TemporalRelayListener> _logger;
+    private readonly DurableDelegationService? _durable;
     private readonly CancellationTokenSource _stopping = new();
 
     private IConnection? _connection;
@@ -92,12 +93,14 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
         IOptions<RabbitMqOptions> rabbitConfig,
         TaskCompletionRegistry registry,
         ITemporalClientFactory clientFactory,
-        ILogger<TemporalRelayListener> logger)
+        ILogger<TemporalRelayListener> logger,
+        DurableDelegationService? durable = null)
     {
         _rabbitConfig = rabbitConfig.Value;
         _registry = registry;
         _clientFactory = clientFactory;
         _logger = logger;
+        _durable = durable;
         ConnectAsync = ConnectToBrokerAsync;
     }
 
@@ -302,8 +305,7 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
                 return;
             }
 
-            var result = ParseAgentResult(message.Text, message.Type);
-            var matched = _registry.TryComplete(message.TaskId, result);
+            var matched = await TryRouteReplyAsync(message, _stopping.Token);
 
             if (matched)
             {
@@ -319,12 +321,44 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
                 await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
             }
         }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested && _durable is { Enabled: true })
+        {
+            // The bridge is stopping in the middle of a reply to a durable delegation. Back to the
+            // queue: the next start handles it, and a record that was already updated answers the
+            // redelivery with "nothing changed". With durable delegation off this never applies
+            // and the catch below handles everything, as before.
+            try { await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: true); }
+            catch { /* channel may be closing; an unacked message is requeued by the broker anyway */ }
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing relay message — nacking without requeue");
             try { await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false); }
             catch { /* channel may be closing */ }
         }
+    }
+
+    /// <summary>
+    /// Hands an agent's reply to whatever is waiting for it. True when something was.
+    ///
+    /// <para>
+    /// A durable delegation (only when that is switched on) is asked first, because its record
+    /// outlives this process and an in-memory registration does not. Anything but "not pending"
+    /// from it settles the message: completed, continued, recorded for a later pass, or a repeat
+    /// that changes nothing. Otherwise the in-memory registry is asked, as it always was.
+    /// </para>
+    /// </summary>
+    internal async Task<bool> TryRouteReplyAsync(RelayMessage message, CancellationToken ct = default)
+    {
+        var result = ParseAgentResult(message.Text, message.Type);
+
+        if (_durable is { Enabled: true }
+            && await _durable.TryHandleReplyAsync(message.TaskId!, result, ct) != DurableReplyOutcome.NotPending)
+        {
+            return true;
+        }
+
+        return _registry.TryComplete(message.TaskId!, result);
     }
 
     /// <summary>

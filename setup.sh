@@ -1077,15 +1077,19 @@ if $SKIP_SERVICES; then
   warn "Skipping services (--skip-services)"
 else
   if ! $DRY_RUN; then
+    # qdrant-check:begin (scripts/test-qdrant-upgrade.sh runs the lines between the two markers)
     # Re-running setup on a host that already runs Qdrant recreates it on the pinned release. The
-    # same check upgrade.sh makes, before anything starts; a fresh host has nothing to check.
-    _qdrant_target=$(qdrant_target_version "$ENV_FILE" "$COMPOSE_EXAMPLE")
+    # same check upgrade.sh makes, before anything starts; a fresh host has nothing to check. The
+    # target is Compose's own answer for exactly the `up` below, never a second reading of .env.
+    _qdrant_target=$(qdrant_target_version "$FLEET_BASE_DIR" "$COMPOSE_PROJECT" "$COMPOSE_FILE" "${COMMS_PROFILE_ARGS[@]}")
     _qdrant_seen=$(qdrant_observe "$COMPOSE_PROJECT")
     if ! _qdrant_decision=$(qdrant_upgrade_decision "$_qdrant_seen" "$_qdrant_target"); then
-      fail "Qdrant: starting the stack is refused ($_qdrant_decision)."
+      fail "Qdrant: starting the stack is refused ($_qdrant_decision). Compose target: ${_qdrant_target:-unknown}"
       qdrant_refusal_message "$_qdrant_decision" "$_qdrant_seen" "$_qdrant_target" "$COMPOSE_PROJECT"
       exit 1
     fi
+    ok "Qdrant release check passed ($_qdrant_decision). Compose target: ${_qdrant_target:-unknown}"
+    # qdrant-check:end
     case "$_media_store" in
       seaweedfs)
         (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env --profile comms-media-seaweedfs pull comms-seaweedfs) \

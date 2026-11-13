@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+# Build settings and package versions shared by every project; restore needs both.
+COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Temporal/Fleet.Temporal.csproj src/Fleet.Temporal/
 RUN dotnet restore src/Fleet.Temporal/Fleet.Temporal.csproj
 COPY src/ src/

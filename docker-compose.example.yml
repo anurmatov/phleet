@@ -41,7 +41,11 @@ services:
       - fleet-net
 
   qdrant:
-    image: qdrant/qdrant:latest
+    # Pinned: `latest` left every host on whichever release it happened to pull first. v1.20.0 is
+    # what `latest` resolved to when this was written. Qdrant supports moving one minor version at
+    # a time, so a host whose storage was written by an older release sets FLEET_QDRANT_VERSION to
+    # the release it runs and steps up (docs/upgrading/internal-ports-loopback.md#pinned-images).
+    image: qdrant/qdrant:${FLEET_QDRANT_VERSION:-v1.20.0}
     container_name: qdrant
     volumes:
       - qdrant_data:/qdrant/storage
@@ -98,8 +102,13 @@ services:
   temporal-server:
     image: temporalio/auto-setup:1.29.1
     container_name: temporal-server
+    # Loopback by default, like RabbitMQ, MySQL and MinIO above. Temporal's frontend, its UI,
+    # fleet-memory's REST API and fleet-bridge take no credential: whoever reaches the port can
+    # signal a workflow, read memories or prompt the CTO agent. Fleet services use the Docker
+    # network and never these host ports. FLEET_INTERNAL_BIND_ADDRESS moves all four together
+    # (docs/upgrading/internal-ports-loopback.md).
     ports:
-      - "7233:7233"
+      - "${FLEET_INTERNAL_BIND_ADDRESS:-127.0.0.1}:7233:7233"
     environment:
       - DB=postgres12
       - DB_PORT=5432
@@ -125,7 +134,7 @@ services:
     image: temporalio/ui:2.34.0
     container_name: temporal-ui
     ports:
-      - "8080:8080"
+      - "${FLEET_INTERNAL_BIND_ADDRESS:-127.0.0.1}:8080:8080"
     environment:
       - TEMPORAL_ADDRESS=temporal-server:7233
     mem_limit: 256m
@@ -139,6 +148,10 @@ services:
   # ── MinIO (optional — for agent file sharing) ──────────────────────────────
 
   fleet-minio:
+    # NOT pinned, on purpose. MinIO no longer publishes this image: the registry refuses an
+    # anonymous pull of any tag, `latest` included. A host that still has `minio/minio` in its
+    # local image store keeps running it under this name; a pinned tag would be an image that
+    # host does not have and cannot fetch. The same holds for `minio/mc` just below.
     image: minio/minio
     container_name: fleet-minio
     command: server /data --console-address ":9001"
@@ -202,7 +215,8 @@ services:
         max-file: "3"
 
   fleet-kokoro-tts:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    # Pinned to the release `latest` resolved to when this was written.
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.10.0
     container_name: fleet-kokoro-tts
     mem_limit: 4g
     restart: unless-stopped
@@ -223,7 +237,7 @@ services:
     image: fleet:memory
     container_name: fleet-memory
     ports:
-      - "3100:3100"
+      - "${FLEET_INTERNAL_BIND_ADDRESS:-127.0.0.1}:3100:3100"
     volumes:
       - ${FLEET_BASE_DIR}/memories:/data/memories
     environment:
@@ -291,7 +305,7 @@ services:
     image: fleet:bridge
     container_name: fleet-bridge
     ports:
-      - "3300:3300"
+      - "${FLEET_INTERNAL_BIND_ADDRESS:-127.0.0.1}:3300:3300"
     environment:
       - RabbitMq__Host=rabbitmq
       - RabbitMq__Exchange=fleet.group

@@ -1,10 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>Fleet.Comms</RootNamespace>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,7 +14,7 @@
       The journal's read tools (#394): stateless streamable HTTP on the journal listener only.
       Pinned to the version Fleet.Telegram serves its tools with, so the fleet speaks one MCP SDK.
     -->
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.8.0-preview.1" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
   </ItemGroup>
 
   <ItemGroup>

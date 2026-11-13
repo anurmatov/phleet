@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+# Build settings and package versions shared by every project; restore needs both.
+COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Orchestrator/Fleet.Orchestrator.csproj src/Fleet.Orchestrator/
 COPY src/Fleet.Shared/Fleet.Shared.csproj src/Fleet.Shared/
 RUN dotnet restore src/Fleet.Orchestrator/Fleet.Orchestrator.csproj

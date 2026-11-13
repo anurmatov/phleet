@@ -376,9 +376,12 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     var addedGroups  = newGroupIds.Except(oldGroupIds).ToList();
     var removedGroups = oldGroupIds.Except(newGroupIds).ToList();
     if (addedUsers.Count > 0 || removedUsers.Count > 0 || addedGroups.Count > 0 || removedGroups.Count > 0)
-        await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-            addedUsers: addedUsers, removedUserIds: removedUsers,
-            addedGroupIds: addedGroups, removedGroupIds: removedGroups);
+    {
+        if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                addedUsers: addedUsers, removedUserIds: removedUsers,
+                addedGroupIds: addedGroups, removedGroupIds: removedGroups))
+            return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered("the config, with its Telegram allowlist change,", name));
+    }
 
     return Results.Ok(new { message = $"Agent '{name}' config updated" });
 });

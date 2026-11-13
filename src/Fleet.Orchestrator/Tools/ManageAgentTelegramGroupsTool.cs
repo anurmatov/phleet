@@ -39,9 +39,10 @@ public sealed class ManageAgentTelegramGroupsTool(
 
                 agent.TelegramGroups.Add(new AgentTelegramGroup { AgentId = agent.Id, GroupId = group_id });
                 await db.SaveChangesAsync();
-                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                    addedUsers: [], removedUserIds: [],
-                    addedGroupIds: [group_id], removedGroupIds: []);
+                if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                        addedUsers: [], removedUserIds: [],
+                        addedGroupIds: [group_id], removedGroupIds: []))
+                    return LiveDelivery.AllowlistNotDelivered($"Telegram group {group_id}", agent_name);
                 return $"Added Telegram group {group_id} to agent '{agent_name}'.";
             }
 
@@ -53,9 +54,10 @@ public sealed class ManageAgentTelegramGroupsTool(
 
                 db.AgentTelegramGroups.Remove(existing);
                 await db.SaveChangesAsync();
-                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                    addedUsers: [], removedUserIds: [],
-                    addedGroupIds: [], removedGroupIds: [group_id]);
+                if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                        addedUsers: [], removedUserIds: [],
+                        addedGroupIds: [], removedGroupIds: [group_id]))
+                    return LiveDelivery.AllowlistNotDelivered($"the removal of Telegram group {group_id}", agent_name);
                 return $"Removed Telegram group {group_id} from agent '{agent_name}'.";
             }
 

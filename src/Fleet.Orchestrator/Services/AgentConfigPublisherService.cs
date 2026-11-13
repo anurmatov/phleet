@@ -23,6 +23,12 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
     private volatile bool _initialized;
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
+    /// <summary>
+    /// Sends one message to an agent's routing key on <see cref="AgentDirectExchange"/>. Replaced
+    /// in tests; null means the RabbitMQ channel.
+    /// </summary>
+    internal Func<string, byte[], CancellationToken, Task>? Send { get; init; }
+
     // fleet.group is the direct exchange agents bind their individual queues to.
     // Each agent queue has a binding with routing key = agentShortName.ToLowerInvariant().
     private const string AgentDirectExchange = "fleet.group";
@@ -35,13 +41,18 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
         _logger = logger;
     }
 
-    public bool IsEnabled => !string.IsNullOrEmpty(_rabbitConfig.Host);
+    public bool IsEnabled => Send is not null || !string.IsNullOrEmpty(_rabbitConfig.Host);
 
     /// <summary>
     /// Publish a config.update diff to the named agent's queue.
-    /// No-ops gracefully when RabbitMQ is not configured or the connection fails.
     /// </summary>
-    public async Task PublishAllowlistUpdateAsync(
+    /// <returns>
+    /// False when the diff could not be handed to RabbitMQ. The change it describes is already
+    /// committed, and the running agent has not been told: the caller must say so, not report
+    /// success (<see cref="LiveDelivery"/>). True when it was published, when there was nothing to
+    /// publish, and when RabbitMQ is not configured at all, where no agent is listening either.
+    /// </returns>
+    public async Task<bool> PublishAllowlistUpdateAsync(
         string agentShortName,
         IReadOnlyList<AddedUserInfo> addedUsers,
         IReadOnlyList<long> removedUserIds,
@@ -49,15 +60,12 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
         IReadOnlyList<long> removedGroupIds,
         CancellationToken ct = default)
     {
-        if (!IsEnabled) return;
+        if (!IsEnabled) return true;
         if (addedUsers.Count == 0 && removedUserIds.Count == 0 &&
-            addedGroupIds.Count == 0 && removedGroupIds.Count == 0) return;
+            addedGroupIds.Count == 0 && removedGroupIds.Count == 0) return true;
 
         try
         {
-            await EnsureInitializedAsync(ct);
-            if (_channel is null) return;
-
             var payload = new
             {
                 schema_version = 1,
@@ -80,25 +88,41 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
             };
 
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope));
-            var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
             var routingKey = agentShortName.ToLowerInvariant();
 
-            await _channel.BasicPublishAsync(
-                exchange: AgentDirectExchange,
-                routingKey: routingKey,
-                mandatory: false,
-                basicProperties: props,
-                body: body,
-                cancellationToken: ct);
+            if (Send is not null)
+            {
+                await Send(routingKey, body, ct);
+            }
+            else
+            {
+                await EnsureInitializedAsync(ct);
+                if (_channel is null)
+                {
+                    _logger.LogError("Failed to publish config.update to agent '{Agent}': no RabbitMQ channel", agentShortName);
+                    return false;
+                }
+
+                var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
+                await _channel.BasicPublishAsync(
+                    exchange: AgentDirectExchange,
+                    routingKey: routingKey,
+                    mandatory: false,
+                    basicProperties: props,
+                    body: body,
+                    cancellationToken: ct);
+            }
 
             _logger.LogInformation(
                 "config.update published to agent '{Agent}' (+{Added} / -{Removed} users, +{AddedG} / -{RemovedG} groups)",
                 agentShortName, addedUsers.Count, removedUserIds.Count,
                 addedGroupIds.Count, removedGroupIds.Count);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to publish config.update to agent '{Agent}'", agentShortName);
+            return false;
         }
     }
 

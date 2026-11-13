@@ -34,4 +34,10 @@
     <None Update="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The wire samples under tests/fixtures/wire and the helper that reads them. Shared source,
+         not a shared assembly: each end of a pair is tested in a project that cannot see the other. -->
+    <Compile Include="..\fixtures\wire\WireGolden.cs" Link="WireGolden.cs" />
+  </ItemGroup>
+
 </Project>

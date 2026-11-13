@@ -116,6 +116,18 @@ internal sealed class TurnRun(
                     _stall.Touch();
                     var guardsThisEvent = steeringResidue && firstEvent;
                     firstEvent = false;
+                    // Generic provider recovery has no original conversation/submission owner.
+                    // Segment tags describe provenance, not ownership. Suppress before even a
+                    // recovered FinalResult can enter this client's completion text or sinks.
+                    // Scoped injected answers use DeliverInjectedTurnAnswersAsync instead.
+                    if (progress.EventType == "recovered_answer"
+                        && _identity.ChannelId == ConversationSouthAdapter.ClientChannel)
+                    {
+                        _injectionCounter.Increment(_agentConfig.Provider,
+                            InjectionOutcomeCounter.UnownedClientRecoverySuppressed);
+                        continue;
+                    }
+
                     await HandleProgressAsync(progress, guardsThisEvent);
                 }
 

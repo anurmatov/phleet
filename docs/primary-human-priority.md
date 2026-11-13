@@ -26,6 +26,14 @@ For a fresh steering-eligible queue entry, the notice is chosen after the attemp
 
 Each decision logs `Steered human message into running {Source} task #{TaskId}: {outcome}` with no text. Counters: `steered_non_human_turn`, `steer_not_delivered`, `steer_refused_other_human`, `steer_answer_discarded`. A steering copy that Claude runs as its own turn is drained and discarded before the workflow callback; after a short drain, only `user`-tagged segments of the next turn's leading recovered answer are dropped. Whether the model obeys "do not reply here" is model behavior; the runtime guarantees only the structural split.
 
+For first-party `client` reply turns, generic provider recovery without a trusted original owner
+is suppressed before result accumulation and sink/journal/event delivery, regardless of segment
+tags or primary-human mapping; see [recovery ownership](conversation-protocol.md#first-party-recovery-ownership-533).
+This does not change the separately authorized queue-first steering copy, workflow callback or
+human reply fallback, and does not enable priority or steering for an unmapped principal.
+Ordinary human injection/coalescing and scoped injected answers remain supported, without a promise
+of an independent acknowledgment per message.
+
 ## Queue rules
 
 Two in-memory FIFO lanes share one lock: 10 priority entries and 20 routine entries, with at most 10 parts per merged user entry. Dispatch takes at most three priority entries while routine work waits, then one routine entry. When no routine entry waits, that counter resets.

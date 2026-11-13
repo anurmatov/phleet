@@ -1,0 +1,166 @@
+## preview
+container: fleet-agent-local (resolved fleet-agent-local)
+image: fleet:agent-golden
+memory: 536870912
+secret network address: (none)
+env:
+  RabbitMq__Host=rabbitmq
+  GIT_USER_NAME=tester
+  GIT_USER_EMAIL=fleet-agent-local@users.noreply.github.com
+  GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
+  Whisper__ServiceUrl=http://fleet-whisper:8080
+  Tts__ServiceUrl=http://fleet-kokoro-tts:8880
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072
+binds:
+  ./workspaces/fleet-agent-local:/workspace
+  ./workspaces/fleet-agent-local/.generated/projects:/app/projects:ro
+  ./workspaces/fleet-agent-local/.generated/appsettings.json:/app/appsettings.json:ro
+  ./workspaces/fleet-agent-local/claude:/root/.claude
+  ./workspaces/fleet-agent-local/.generated/settings.json:/root/.claude/settings.json:ro
+  ./workspaces/fleet-agent-local/codex:/root/.codex
+  ./workspaces/fleet-agent-local/.generated/.mcp.json:/workspace/.mcp.json:ro
+  ./workspaces/fleet-agent-local/.generated/roles:/app/roles:ro
+networks:
+  fleet-net
+extra hosts:
+diffs:
+  container not found — not running
+
+## result
+ok: container 'fleet-agent-local' created and started (id=0123456789ab, networks=[fleet-net])
+
+## docker calls
+GET /v1.41/containers/fleet-agent-local/json
+POST /v1.41/containers/create
+POST /v1.41/containers/fleet-agent-local/start
+
+## create body
+{
+  "Image": "fleet:agent-golden",
+  "Env": [
+    "RabbitMq__Host=rabbitmq",
+    "GIT_USER_NAME=tester",
+    "GIT_USER_EMAIL=fleet-agent-local@users.noreply.github.com",
+    "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
+    "Whisper__ServiceUrl=http://fleet-whisper:8080",
+    "Tts__ServiceUrl=http://fleet-kokoro-tts:8880",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072"
+  ],
+  "ExposedPorts": {
+    "8080/tcp": {}
+  },
+  "HostConfig": {
+    "Memory": 536870912,
+    "Binds": [
+      "<base>/workspaces/fleet-agent-local:/workspace",
+      "<base>/workspaces/fleet-agent-local/.generated/projects:/app/projects:ro",
+      "<base>/workspaces/fleet-agent-local/.generated/appsettings.json:/app/appsettings.json:ro",
+      "<base>/workspaces/fleet-agent-local/claude:/root/.claude",
+      "<base>/workspaces/fleet-agent-local/.generated/settings.json:/root/.claude/settings.json:ro",
+      "<base>/workspaces/fleet-agent-local/codex:/root/.codex",
+      "<base>/workspaces/fleet-agent-local/.generated/.mcp.json:/workspace/.mcp.json:ro",
+      "<base>/workspaces/fleet-agent-local/.generated/roles:/app/roles:ro"
+    ],
+    "RestartPolicy": {
+      "Name": "unless-stopped"
+    },
+    "NetworkMode": "fleet-net",
+    "PortBindings": {
+      "8080/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "8082"
+        }
+      ]
+    },
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-size": "10m",
+        "max-file": "3"
+      }
+    }
+  },
+  "NetworkingConfig": {
+    "EndpointsConfig": {
+      "fleet-net": {}
+    }
+  }
+}
+
+## network connects
+
+## generated files
+--- .mcp.json
+{
+  "mcpServers": {
+    "fleet-memory": {
+      "type": "http",
+      "url": "http://fleet-memory:3100?agent=agent-local"
+    }
+  }
+}
+--- appsettings.json
+{
+  "Agent": {
+    "Name": "agent-local",
+    "ContainerName": "fleet-agent-local",
+    "Role": "tester",
+    "Model": "qwen3.8:27b",
+    "Provider": "claude",
+    "Projects": [],
+    "AllowedTools": [
+      "Read"
+    ],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ProactiveIntervalMinutes": 0,
+    "GroupListenMode": "mention",
+    "GroupDebounceSeconds": 15,
+    "WarmupTimeoutSeconds": 60,
+    "ShortName": "",
+    "ShowStats": true,
+    "PrefixMessages": false,
+    "FormattingMode": 0,
+    "SuppressToolMessages": false,
+    "Effort": "off",
+    "JsonSchema": null,
+    "AgentsJson": null,
+    "CodexSandboxMode": null,
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": "http://inference-host:11434",
+    "InstructionOrder": [
+      "_base"
+    ],
+    "OutputStyleBody": "Answer in one short paragraph."
+  },
+  "Telegram": {
+    "AllowedUserIds": [],
+    "AllowedGroupIds": [],
+    "SendOnly": false,
+    "CanReceiveChatRequests": false,
+    "RequestReceivedMessage": null
+  }
+}
+--- roles/_base/system.md
+Base v2: be careful.
+
+--- settings.json
+{
+  "permissions": {
+    "allow": [
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-temporal__notify_cto",
+      "Read"
+    ]
+  }
+}
+## log lines
+[Information] Generating config for 'agent-local': 1 tools [Read], 0 MCP endpoints [], permissionMode=acceptEdits
+[Information] Local model for 'agent-local': harness claude, server http://inference-host:11434/, context window 131072
+[Information] Generated config files for 'agent-local' in <base>/workspaces/fleet-agent-local/.generated
+[Information] Generated instruction files for 'agent-local' in <base>/workspaces/fleet-agent-local/.generated/roles (1 instruction(s))
+[Information] No projects configured for 'agent-local' — skipping project context file generation
+[Information] Provisioning 'agent-local' container='fleet-agent-local' image='fleet:agent-golden'

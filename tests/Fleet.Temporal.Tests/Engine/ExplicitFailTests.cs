@@ -93,7 +93,9 @@ public sealed class ExplicitFailTests
         var run = await RunAsync(new() { [RootType] = WithSentinelsAfter(parallel) });
 
         AssertExplicitFail(run);
-        Assert.Contains("sibling", run.Calls);
+        // Calls are the last segment of each task id, and a delegate in a parallel branch now
+        // carries its branch position there: the sibling is branch 1.
+        Assert.Contains("sibling~1", run.Calls);
         Assert.Single(run.History.Events, e => e.EventType == EventType.ActivityTaskCompleted && IsDelegate(run, e.ActivityTaskCompletedEventAttributes.ScheduledEventId));
         Assert.DoesNotContain("post_parent", run.Calls);
     }

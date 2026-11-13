@@ -16,6 +16,12 @@ public sealed class AgentStateMonitorService : BackgroundService
 
     private DateTimeOffset _lastContainerRefresh = DateTimeOffset.MinValue;
 
+    /// <summary>Time between checks. Shortened in tests.</summary>
+    internal TimeSpan Interval { get; init; } = CheckInterval;
+
+    /// <summary>One check. Replaced in tests; null means <see cref="CheckOnceAsync"/>.</summary>
+    internal Func<CancellationToken, Task>? Check { get; init; }
+
     public AgentStateMonitorService(AgentRegistry registry, DockerService docker, ILogger<AgentStateMonitorService> logger)
     {
         _registry = registry;
@@ -27,27 +33,43 @@ public sealed class AgentStateMonitorService : BackgroundService
     {
         _logger.LogInformation("AgentStateMonitorService started (check interval: {Interval}s)", CheckInterval.TotalSeconds);
 
+        var check = Check ?? CheckOnceAsync;
+
         while (!stoppingToken.IsCancellationRequested)
         {
-            await Task.Delay(CheckInterval, stoppingToken);
+            await Task.Delay(Interval, stoppingToken);
 
-            foreach (var agent in _registry.GetAll())
+            try
             {
-                var effective = agent.EffectiveStatus;
-
-                if (effective is "stale" or "dead")
-                {
-                    _logger.LogDebug("Agent {Agent} is {Status} (last seen {LastSeen:s}Z)", agent.AgentName, effective, agent.LastSeen);
-                    _registry.BroadcastStateIfChanged(agent);
-                }
+                await check(stoppingToken);
             }
-
-            // Refresh container start times periodically
-            if (DateTimeOffset.UtcNow - _lastContainerRefresh >= ContainerRefreshInterval)
+            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
-                _lastContainerRefresh = DateTimeOffset.UtcNow;
-                await RefreshContainerStartTimesAsync(stoppingToken);
+                // An exception that leaves ExecuteAsync stops the host, and with it the whole
+                // orchestrator. One bad check is not worth that: say so and check again.
+                _logger.LogError(ex, "Agent state check failed; the next one runs in {Interval}s", Interval.TotalSeconds);
             }
+        }
+    }
+
+    internal async Task CheckOnceAsync(CancellationToken stoppingToken)
+    {
+        foreach (var agent in _registry.GetAll())
+        {
+            var effective = agent.EffectiveStatus;
+
+            if (effective is "stale" or "dead")
+            {
+                _logger.LogDebug("Agent {Agent} is {Status} (last seen {LastSeen:s}Z)", agent.AgentName, effective, agent.LastSeen);
+                _registry.BroadcastStateIfChanged(agent);
+            }
+        }
+
+        // Refresh container start times periodically
+        if (DateTimeOffset.UtcNow - _lastContainerRefresh >= ContainerRefreshInterval)
+        {
+            _lastContainerRefresh = DateTimeOffset.UtcNow;
+            await RefreshContainerStartTimesAsync(stoppingToken);
         }
     }
 

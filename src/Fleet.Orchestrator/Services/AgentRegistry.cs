@@ -17,7 +17,18 @@ public sealed class AgentRegistry
     private readonly ConcurrentDictionary<string, AgentState> _agents = new(StringComparer.OrdinalIgnoreCase);
     // Track last-broadcast effective status + task + queue count + bg task count per agent to avoid duplicate pushes
     private readonly ConcurrentDictionary<string, BroadcastKey> _lastBroadcast = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentBag<WebSocket> _sockets = [];
+    // Each connected dashboard socket with the gate its sends go through: a WebSocket allows one
+    // send at a time, and heartbeats, the poller and the state monitor all broadcast.
+    private readonly ConcurrentDictionary<WebSocket, SemaphoreSlim> _sockets = new();
+
+    /// <summary>
+    /// How long one send may take before the client is treated as gone. Without it a client that
+    /// stopped reading would hold its gate, and every later broadcast would wait behind it.
+    /// </summary>
+    internal TimeSpan SendTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Sockets currently registered. For tests.</summary>
+    internal int SocketCount => _sockets.Count;
     private readonly TaskHistoryStore _taskHistory;
     private readonly ILogger<AgentRegistry> _logger;
 
@@ -157,7 +168,13 @@ public sealed class AgentRegistry
     public void Remove(string agentName) =>
         _agents.TryRemove(agentName, out _);
 
-    public void AddSocket(WebSocket socket) => _sockets.Add(socket);
+    public void AddSocket(WebSocket socket) => _sockets.TryAdd(socket, new SemaphoreSlim(1, 1));
+
+    /// <summary>
+    /// Forgets a socket. Its <c>/ws</c> handler calls this when the connection ends; a broadcast
+    /// that finds a socket closed, or cannot send to it, does the same.
+    /// </summary>
+    public void RemoveSocket(WebSocket socket) => _sockets.TryRemove(socket, out _);
 
     /// <summary>
     /// Sends the current state of every known agent to a single newly connected socket.
@@ -176,16 +193,49 @@ public sealed class AgentRegistry
             {
                 var json = JsonSerializer.Serialize(state, new JsonSerializerOptions(JsonSerializerDefaults.Web));
                 var bytes = Encoding.UTF8.GetBytes(json);
-                await socket.SendAsync(
-                    new ArraySegment<byte>(bytes),
-                    WebSocketMessageType.Text,
-                    endOfMessage: true,
-                    CancellationToken.None);
+                // Through the socket's gate when it is registered: a broadcast may be on its way
+                // to this socket at the same moment.
+                if (!await SendAsync(socket, new ArraySegment<byte>(bytes)))
+                    return;
             }
             catch
             {
                 // Best-effort — ignore send errors for individual agent states
             }
+        }
+    }
+
+    /// <summary>
+    /// One send to one socket, after any send already in progress on it. False when the socket is
+    /// not open or the send failed or timed out; the socket is then forgotten.
+    /// </summary>
+    private async Task<bool> SendAsync(WebSocket socket, ArraySegment<byte> message)
+    {
+        _sockets.TryGetValue(socket, out var gate);
+        if (gate is not null) await gate.WaitAsync();
+        try
+        {
+            if (socket.State != WebSocketState.Open)
+            {
+                RemoveSocket(socket);
+                return false;
+            }
+
+            using var timeout = new CancellationTokenSource(SendTimeout);
+            await socket.SendAsync(message, WebSocketMessageType.Text, endOfMessage: true, timeout.Token);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Failed to send to WebSocket client ({Error}), removing it", ex.GetType().Name);
+            RemoveSocket(socket);
+            // A cancelled send leaves the socket aborted; make that explicit for any other failure.
+            try { socket.Abort(); } catch { /* already gone */ }
+            return false;
+        }
+        finally
+        {
+            gate?.Release();
         }
     }
 
@@ -230,33 +280,20 @@ public sealed class AgentRegistry
         return BroadcastRawAsync(json);
     }
 
-    private async Task BroadcastRawAsync(string json)
+    internal async Task BroadcastRawAsync(string json)
     {
         var bytes = Encoding.UTF8.GetBytes(json);
         var segment = new ArraySegment<byte>(bytes);
-        var dead = new List<WebSocket>();
+        var removed = 0;
 
-        foreach (var socket in _sockets)
+        foreach (var socket in _sockets.Keys)
         {
-            if (socket.State != WebSocketState.Open)
-            {
-                dead.Add(socket);
-                continue;
-            }
-
-            try
-            {
-                await socket.SendAsync(segment, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to send to WebSocket client, marking for removal");
-                dead.Add(socket);
-            }
+            if (!await SendAsync(socket, segment))
+                removed++;
         }
 
-        if (dead.Count > 0)
-            _logger.LogDebug("Skipped {Count} closed WebSocket connection(s)", dead.Count);
+        if (removed > 0)
+            _logger.LogDebug("Removed {Count} closed WebSocket connection(s)", removed);
     }
 
     private readonly record struct BroadcastKey(

@@ -841,6 +841,8 @@ app.Map("/ws", async (HttpContext context, AgentRegistry registry) =>
     catch (WebSocketException) { }
     finally
     {
+        // Every reconnect of a dashboard would otherwise leave its old socket registered.
+        registry.RemoveSocket(socket);
         await lifetime.CancelAsync();
         await authWatch;
     }

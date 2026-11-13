@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
@@ -26,7 +27,7 @@ public class UpdateAgentConfigContextWindowTests
     }
 
     private static UpdateAgentConfigTool CreateTool(string name) =>
-        new(BuildScopeFactory(name), new NoOpAclChangeNotifier());
+        Writers.UpdateConfigTool(BuildScopeFactory(name), new NoOpAclChangeNotifier());
 
     private static Agent Current(string name) =>
         CreateDb(name).Agents.AsNoTracking().Single(a => a.Name == "agent1");

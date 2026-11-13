@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 using Fleet.Orchestrator.Helpers;
@@ -15,9 +16,9 @@ namespace Fleet.Orchestrator.Endpoints;
 /// The full DB-config REST surface for one agent: <c>GET/PUT /api/agents/{{name}}/config</c>.
 /// </summary>
 /// <remarks>
-/// Lifted verbatim from <c>Program.cs</c> (#357) so the endpoint tests can run the production
-/// handlers over real HTTP instead of a copy — the same pattern as the other endpoint classes.
-/// The PUT handler's unused <c>AgentRegistry</c> parameter was dropped in the move.
+/// Lifted from <c>Program.cs</c> (#357) so the endpoint tests can run the production handlers over
+/// real HTTP instead of a copy. The PUT is an adapter over <see cref="AgentConfigWriter"/>: it
+/// reads the body, calls the writer and renders the outcome.
 /// </remarks>
 public static class AgentConfigEndpoints
 {
@@ -99,14 +100,10 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
     });
 });
 
-// REST: update agent DB config (all scalar fields + replace-all for related tables)
-app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, SetupService setupService, AgentConfigPublisherService publisher, IAclChangeNotifier aclNotifier) =>
+// REST: update agent DB config (all scalar fields + replace-all for related tables).
+// An adapter: the rules live in AgentConfigWriter, which update_agent_config calls too.
+app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request, AgentConfigWriter writer) =>
 {
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
     AgentConfigUpdateRequest? body;
     try { body = await request.ReadFromJsonAsync<AgentConfigUpdateRequest>(); }
 
@@ -114,274 +111,16 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body is null)
         return Results.BadRequest(new { error = "Invalid request body" });
 
-    var agent = await db.Agents
-        .Include(a => a.Tools)
-        .Include(a => a.Projects)
-        .Include(a => a.McpEndpoints)
-        .Include(a => a.Networks)
-        .Include(a => a.EnvRefs)
-        .Include(a => a.TelegramUsers)
-        .Include(a => a.TelegramGroups)
-        .Include(a => a.Instructions)
-        .AsSplitQuery()
-        .FirstOrDefaultAsync(a => a.Name == name);
-
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
-
-    // Only enabling needs a key. A saved true must remain editable and clearable.
-    if (body.JournalEnabled == true && !agent.JournalEnabled &&
-        scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
-        return Results.BadRequest(new { error = "journal_not_configured", detail = journalFault });
-
-    // Chat (#530) is a plain switch, on by default: saving it never fails. Whether it applies is
-    // decided at provisioning (ChatAgents.IsEffective), where a deployment without the chat service
-    // simply gives the agent no chat.
-
-    var oldCrossChat = agent.JournalCrossChatEnabled;
-
-    // Scalar fields
-    if (body.Model is not null) agent.Model = body.Model;
-    if (body.MemoryLimitMb is not null) agent.MemoryLimitMb = body.MemoryLimitMb.Value;
-    if (body.IsEnabled is not null) agent.IsEnabled = body.IsEnabled.Value;
-    if (body.Image is not null) agent.Image = body.Image == "" ? null : body.Image;
-    if (body.PermissionMode is not null)
-    {
-        if (string.Equals(body.PermissionMode, "bypassPermissions", StringComparison.OrdinalIgnoreCase))
-            return Results.BadRequest(new
-            {
-                error = "PermissionMode 'bypassPermissions' is not supported — fleet containers run as root and Claude CLI " +
-                        "rejects --dangerously-skip-permissions for root processes. Use 'acceptEdits' with an explicit tools list."
-            });
-        agent.PermissionMode = body.PermissionMode;
-    }
-    if (body.MaxTurns is not null) agent.MaxTurns = body.MaxTurns.Value;
-    if (body.WorkDir is not null) agent.WorkDir = body.WorkDir;
-    if (body.ProactiveIntervalMinutes is not null) agent.ProactiveIntervalMinutes = body.ProactiveIntervalMinutes.Value;
-    if (body.GroupListenMode is not null) agent.GroupListenMode = body.GroupListenMode;
-    if (body.GroupDebounceSeconds is not null) agent.GroupDebounceSeconds = body.GroupDebounceSeconds.Value;
-    if (body.WarmupTimeoutSeconds is not null)
-    {
-        // Rejected, never clamped (#357 MUST NOT): a hidden correction makes live configuration unauditable.
-        if (WarmupTimeout.DescribeFault(body.WarmupTimeoutSeconds.Value) is { } warmupFault)
-            return Results.BadRequest(new { error = warmupFault });
-        agent.WarmupTimeoutSeconds = body.WarmupTimeoutSeconds.Value;
-    }
-    if (body.ShortName is not null) agent.ShortName = string.IsNullOrWhiteSpace(body.ShortName) ? agent.Name : body.ShortName.Trim();
-    if (body.ShowStats is not null) agent.ShowStats = body.ShowStats.Value;
-    if (body.PrefixMessages is not null) agent.PrefixMessages = body.PrefixMessages.Value;
-    if (body.FormattingMode is not null) agent.FormattingMode = (Fleet.Shared.FormattingMode)body.FormattingMode.Value;
-    if (body.SuppressToolMessages is not null) agent.SuppressToolMessages = body.SuppressToolMessages.Value;
-    if (body.TelegramSendOnly is not null) agent.TelegramSendOnly = body.TelegramSendOnly.Value;
-    if (body.Effort is not null) agent.Effort = body.Effort == "" ? null : body.Effort;
-    if (body.JsonSchema is not null) agent.JsonSchema = body.JsonSchema == "" ? null : body.JsonSchema;
-    if (body.AgentsJson is not null) agent.AgentsJson = body.AgentsJson == "" ? null : body.AgentsJson;
-    if (body.AutoMemoryEnabled is not null) agent.AutoMemoryEnabled = body.AutoMemoryEnabled.Value;
-    if (body.JournalEnabled is not null) agent.JournalEnabled = body.JournalEnabled.Value;
-    if (body.JournalCrossChatEnabled is not null) agent.JournalCrossChatEnabled = body.JournalCrossChatEnabled.Value;
-    if (body.ChatEnabled is not null) agent.ChatEnabled = body.ChatEnabled.Value;
-    if (body.Provider is not null)
-    {
-        // PV1 (#386): an unknown provider is refused, never served as claude. "" stays claude.
-        if (AgentProviders.DescribeFault(body.Provider) is { } providerFault)
-            return Results.BadRequest(new { error = providerFault });
-        agent.Provider = body.Provider;
-    }
-    if (body.CodexSandboxMode is not null)
-    {
-        var (sandboxError, sandboxValue) = AgentPatchHelpers.MapCodexSandboxMode(body.CodexSandboxMode);
-        if (sandboxError is not null)
-            return Results.BadRequest(new { error = sandboxError });
-        agent.CodexSandboxMode = sandboxValue;
-    }
-    if (body.CanReceiveChatRequests is not null) agent.CanReceiveChatRequests = body.CanReceiveChatRequests.Value;
-    if (body.RequestReceivedMessage is not null)
-    {
-        if (body.RequestReceivedMessage.Length > 500)
-            return Results.BadRequest(new { error = $"RequestReceivedMessage exceeds 500-character limit ({body.RequestReceivedMessage.Length} chars)." });
-        agent.RequestReceivedMessage = body.RequestReceivedMessage == "" ? null : body.RequestReceivedMessage;
-    }
-    if (body.MountDockerSock is not null) agent.MountDockerSock = body.MountDockerSock.Value;
-    if (body.OutputStyle is not null)
-    {
-        // Empty string clears, matching effort and codex_sandbox_mode. A name is checked against
-        // output_styles HERE rather than at provision time, so the operator finds out while they
-        // are still looking at the agent instead of at a failed reprovision.
-        var styleName = body.OutputStyle.Trim();
-        if (styleName.Length > 0 && !await db.OutputStyles.AnyAsync(s => s.Name == styleName))
-            return Results.BadRequest(new { error = $"Output style '{styleName}' does not exist." });
-        agent.OutputStyle = styleName.Length == 0 ? null : styleName;
-    }
-    // #382 A1: localBaseUrl and its alias anthropicBaseUrl resolve to one value, or a 400 naming both.
-    var (baseUrlSent, baseUrl, baseUrlError) = AgentPatchHelpers.ResolveLocalBaseUrl(
-        body.LocalBaseUrl, body.AnthropicBaseUrl, "localBaseUrl", "anthropicBaseUrl");
-    if (baseUrlError is not null)
-        return Results.BadRequest(new { error = baseUrlError });
-    if (baseUrlSent) agent.LocalBaseUrl = baseUrl;
-    if (body.ContextWindow is not null)
-    {
-        // #367: 0 clears; anything else must be in range — rejected, never clamped.
-        if (body.ContextWindow != 0 && ContextWindow.DescribeFault(body.ContextWindow.Value) is { } windowFault)
-            return Results.BadRequest(new { error = windowFault });
-        agent.ContextWindow = body.ContextWindow == 0 ? null : body.ContextWindow;
-    }
-
-    // #460: "" clears; any other text is stored verbatim and checked below against the resulting
-    // provider and mode.
-    if (body.HarnessExtra is not null) agent.HarnessExtra = body.HarnessExtra == "" ? null : body.HarnessExtra;
-
-    // Replace-all for related tables (omit field = keep current)
-    if (body.Tools is not null)
-    {
-        var existingEnabled = agent.Tools
-            .ToDictionary(t => t.ToolName, t => t.IsEnabled, StringComparer.OrdinalIgnoreCase);
-        db.AgentTools.RemoveRange(agent.Tools);
-        agent.Tools = body.Tools
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(t => new AgentTool
-            {
-                AgentId = agent.Id,
-                ToolName = t,
-                IsEnabled = existingEnabled.TryGetValue(t, out var was) ? was : true,
-            })
-            .ToList();
-    }
-
-    if (body.Projects is not null)
-    {
-        db.AgentProjects.RemoveRange(agent.Projects);
-        agent.Projects = body.Projects
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(p => new AgentProject { AgentId = agent.Id, ProjectName = p })
-            .ToList();
-    }
-
-    if (body.McpEndpoints is not null)
-    {
-        db.AgentMcpEndpoints.RemoveRange(agent.McpEndpoints);
-        agent.McpEndpoints = body.McpEndpoints
-            .DistinctBy(e => e.McpName, StringComparer.OrdinalIgnoreCase)
-            .Select(e => new AgentMcpEndpoint { AgentId = agent.Id, McpName = e.McpName, Url = e.Url, TransportType = e.TransportType })
-            .ToList();
-    }
-
-    if (body.Networks is not null)
-    {
-        db.AgentNetworks.RemoveRange(agent.Networks);
-        agent.Networks = body.Networks
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(n => new AgentNetwork { AgentId = agent.Id, NetworkName = n })
-            .ToList();
-    }
-
-    if (body.EnvRefs is not null)
-    {
-        // Replaced wholesale, as before. A key that stays keeps its placeholder hash: the running
-        // container still holds that placeholder, and a config save that merely repeats the list
-        // (the dashboard always sends it) must not revoke the agent's bound secrets.
-        var held = agent.EnvRefs
-            .Where(r => r.PlaceholderSha256 is not null)
-            .GroupBy(r => r.EnvKeyName, StringComparer.Ordinal)
-            .ToDictionary(g => g.Key, g => g.First().PlaceholderSha256, StringComparer.Ordinal);
-        db.AgentEnvRefs.RemoveRange(agent.EnvRefs);
-        agent.EnvRefs = body.EnvRefs
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(r => new AgentEnvRef { AgentId = agent.Id, EnvKeyName = r, PlaceholderSha256 = held.GetValueOrDefault(r) })
-            .ToList();
-    }
-
-    // Capture old allowlists before mutation so we can publish the diff.
-    var oldUserIds  = new HashSet<long>(agent.TelegramUsers.Select(u => u.UserId));
-    var oldGroupIds = new HashSet<long>(agent.TelegramGroups.Select(g => g.GroupId));
-
-    if (body.TelegramUsers is not null)
-    {
-        db.AgentTelegramUsers.RemoveRange(agent.TelegramUsers);
-        var tuSet = new HashSet<long>(body.TelegramUsers.Distinct());
-        var ownerId = setupService.GetTelegramUserId();
-        if (ownerId.HasValue) tuSet.Add(ownerId.Value);
-        agent.TelegramUsers = tuSet
-            .Select(u => new AgentTelegramUser { AgentId = agent.Id, UserId = u })
-            .ToList();
-    }
-
-    if (body.TelegramGroups is not null)
-    {
-        db.AgentTelegramGroups.RemoveRange(agent.TelegramGroups);
-        agent.TelegramGroups = body.TelegramGroups
-            .Distinct()
-            .Select(g => new AgentTelegramGroup { AgentId = agent.Id, GroupId = g })
-            .ToList();
-    }
-
-    if (body.Instructions is not null)
-    {
-        // Resolve instruction names to IDs, then upsert the join table
-        var instructionNames = body.Instructions
-            .Select(i => i.InstructionName)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var instructions = await db.Instructions
-            .Where(i => instructionNames.Contains(i.Name))
-            .ToListAsync();
-
-        var missing = instructionNames
-            .Where(n => instructions.All(i => !i.Name.Equals(n, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-
-        if (missing.Count > 0)
-            return Results.BadRequest(new { error = $"Instruction(s) not found: {string.Join(", ", missing)}" });
-
-        db.AgentInstructions.RemoveRange(agent.Instructions);
-        agent.Instructions = body.Instructions
-            .DistinctBy(i => i.InstructionName, StringComparer.OrdinalIgnoreCase)
-            .Select(i =>
-            {
-                var instr = instructions.First(x => x.Name.Equals(i.InstructionName, StringComparison.OrdinalIgnoreCase));
-                return new AgentInstruction { AgentId = agent.Id, InstructionId = instr.Id, LoadOrder = i.LoadOrder };
-            })
-            .ToList();
-    }
-
-    // The agent's resulting state (PV1, then the local-model rules), after
-    // every field in the request is applied. A 400 here returns before SaveChanges, so nothing from
-    // this request is persisted.
-    if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localModelFault)
-        return Results.BadRequest(new { error = localModelFault });
-    // #460 Part 3b: the allowlist, against the final provider and mode; nothing is saved on a fault.
-    if (AgentPatchHelpers.DescribeHarnessExtraFault(agent) is { } harnessExtraFault)
-        return Results.BadRequest(AgentPatchHelpers.HarnessExtraBadRequest(harnessExtraFault));
-
-    await db.SaveChangesAsync();
-    if (oldCrossChat != agent.JournalCrossChatEnabled)
-        app.Logger.LogInformation("Agent config changed: agent={name} field=journal_cross_chat_enabled old={old} new={new} via=rest",
-            agent.Name, oldCrossChat, agent.JournalCrossChatEnabled);
-
-    // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
-    // committed assignment list, and only when the caller actually touched projects.
-    if (body.Projects is not null)
-    {
-        await AgentProjectAccessSync.SyncAndBroadcastAsync(
-            db, aclNotifier, agent.Name, agent.Projects.Select(p => p.ProjectName));
-    }
-
-    // Publish live allowlist diff so running agents update without reprovision.
-    var newUserIds  = new HashSet<long>(agent.TelegramUsers.Select(u => u.UserId));
-    var newGroupIds = new HashSet<long>(agent.TelegramGroups.Select(g => g.GroupId));
-    var addedUsers   = newUserIds.Except(oldUserIds)
-        .Select(id => new Fleet.Orchestrator.Services.AddedUserInfo { UserId = id })
-        .ToList();
-    var removedUsers = oldUserIds.Except(newUserIds).ToList();
-    var addedGroups  = newGroupIds.Except(oldGroupIds).ToList();
-    var removedGroups = oldGroupIds.Except(newGroupIds).ToList();
-    if (addedUsers.Count > 0 || removedUsers.Count > 0 || addedGroups.Count > 0 || removedGroups.Count > 0)
-    {
-        if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                addedUsers: addedUsers, removedUserIds: removedUsers,
-                addedGroupIds: addedGroups, removedGroupIds: removedGroups))
-            return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered("the config, with its Telegram allowlist change,", name));
-    }
+    var outcome = await writer.UpdateAsync(name, body.ToPatch(), WriteCaller.Rest);
+    if (outcome.Fault is { } fault)
+        return fault.Code switch
+        {
+            "journal_not_configured" => Results.BadRequest(new { error = fault.Code, detail = fault.Message }),
+            "harness_extra_invalid" => Results.BadRequest(AgentPatchHelpers.HarnessExtraBadRequest((HarnessExtraFault)fault.Detail!)),
+            _ => WriteHttp.Fault(fault),
+        };
+    if (outcome.NotDelivered is { } sentence)
+        return LiveDelivery.NotDelivered(sentence);
 
     return Results.Ok(new { message = $"Agent '{name}' config updated" });
 });
@@ -436,4 +175,51 @@ internal sealed record AgentConfigUpdateRequest(
     string? LocalBaseUrl = null,
     bool? JournalCrossChatEnabled = null,
     string? HarnessExtra = null,
-    bool? ChatEnabled = null);
+    bool? ChatEnabled = null)
+{
+    internal AgentConfigPatch ToPatch() => new()
+    {
+        Model = Model,
+        MemoryLimitMb = MemoryLimitMb,
+        IsEnabled = IsEnabled,
+        Image = Image,
+        PermissionMode = PermissionMode,
+        MaxTurns = MaxTurns,
+        WorkDir = WorkDir,
+        ProactiveIntervalMinutes = ProactiveIntervalMinutes,
+        GroupListenMode = GroupListenMode,
+        GroupDebounceSeconds = GroupDebounceSeconds,
+        WarmupTimeoutSeconds = WarmupTimeoutSeconds,
+        ShortName = ShortName,
+        ShowStats = ShowStats,
+        PrefixMessages = PrefixMessages,
+        FormattingMode = FormattingMode,
+        SuppressToolMessages = SuppressToolMessages,
+        TelegramSendOnly = TelegramSendOnly,
+        Effort = Effort,
+        JsonSchema = JsonSchema,
+        AgentsJson = AgentsJson,
+        AutoMemoryEnabled = AutoMemoryEnabled,
+        JournalEnabled = JournalEnabled,
+        JournalCrossChatEnabled = JournalCrossChatEnabled,
+        ChatEnabled = ChatEnabled,
+        Provider = Provider,
+        CodexSandboxMode = CodexSandboxMode,
+        CanReceiveChatRequests = CanReceiveChatRequests,
+        RequestReceivedMessage = RequestReceivedMessage,
+        MountDockerSock = MountDockerSock,
+        OutputStyle = OutputStyle,
+        LocalBaseUrl = LocalBaseUrl,
+        LocalBaseUrlAlias = AnthropicBaseUrl,
+        ContextWindow = ContextWindow,
+        HarnessExtra = HarnessExtra,
+        Tools = Tools,
+        Projects = Projects,
+        McpEndpoints = McpEndpoints?.Select(e => new McpEndpointSpec(e.McpName, e.Url, e.TransportType)).ToList(),
+        Networks = Networks,
+        EnvRefs = EnvRefs,
+        TelegramUsers = TelegramUsers,
+        TelegramGroups = TelegramGroups,
+        Instructions = Instructions?.Select(i => new InstructionAssignment(i.InstructionName, i.LoadOrder)).ToList(),
+    };
+}

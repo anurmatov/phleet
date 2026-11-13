@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
@@ -33,7 +34,7 @@ public class UpdateAgentConfigLocalModelTests
         return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
     }
 
-    private UpdateAgentConfigTool Tool() => new(Scopes(), new NoOpAclChangeNotifier());
+    private UpdateAgentConfigTool Tool() => Writers.UpdateConfigTool(Scopes(), new NoOpAclChangeNotifier());
 
     private void Seed(string provider, string model, string? url = null, int? window = null, string? envRef = null,
         string? effort = null, string name = "agent1")

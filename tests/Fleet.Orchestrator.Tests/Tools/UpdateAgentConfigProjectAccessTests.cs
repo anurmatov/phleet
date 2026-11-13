@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
@@ -66,7 +67,7 @@ public class UpdateAgentConfigProjectAccessTests
         var db = CreateDb(name);
         SeedAgent(db, "adev");
         var notifier = new CountingNotifier();
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(name), notifier);
+        var tool = Writers.UpdateConfigTool(BuildScopeFactory(name), notifier);
 
         await tool.UpdateAgentConfigAsync("adev", projects: "fleet,mml");
 
@@ -88,7 +89,7 @@ public class UpdateAgentConfigProjectAccessTests
         db.SaveChanges();
 
         var notifier = new CountingNotifier();
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(name), notifier);
+        var tool = Writers.UpdateConfigTool(BuildScopeFactory(name), notifier);
 
         await tool.UpdateAgentConfigAsync("adev", projects: "fleet");
 
@@ -117,7 +118,7 @@ public class UpdateAgentConfigProjectAccessTests
         db.SaveChanges();
 
         var notifier = new CountingNotifier();
-        var tool = new UpdateAgentConfigTool(BuildScopeFactory(name), notifier);
+        var tool = Writers.UpdateConfigTool(BuildScopeFactory(name), notifier);
 
         await tool.UpdateAgentConfigAsync("adev", model: "claude-opus-5");
 

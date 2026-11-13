@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Application;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -53,6 +54,7 @@ public sealed class AgentConfigEndpointsJournalTests : IAsyncLifetime
             config, null!, null!, sp.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<SetupService>.Instance, null!));
 
+        builder.Services.AddAgentWrites();
         _app = builder.Build();
         _app.MapAgentConfigEndpoints();
 

@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Application;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -213,6 +214,7 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
         builder.Services.AddSingleton(sp => new SetupService(
             _config, null!, null!, sp.GetRequiredService<IServiceScopeFactory>(), NullLogger<SetupService>.Instance,
             new EnvFileCredentialsReader(_config, NullLogger<EnvFileCredentialsReader>.Instance)));
+        builder.Services.AddAgentWrites();
         var app = builder.Build();
         app.MapAgentConfigEndpoints();
         await app.StartAsync();

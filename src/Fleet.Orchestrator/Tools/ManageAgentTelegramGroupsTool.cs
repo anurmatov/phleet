@@ -1,15 +1,12 @@
-using Fleet.Orchestrator.Services;
 using System.ComponentModel;
-using Fleet.Orchestrator.Data;
-using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Application;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
+/// <summary>The MCP adapter over <see cref="AgentAllowlist"/>, which the REST telegram-groups routes call too.</summary>
 [McpServerToolType]
-public sealed class ManageAgentTelegramGroupsTool(
-    IServiceScopeFactory scopeFactory,
-    AgentConfigPublisherService publisher)
+public sealed class ManageAgentTelegramGroupsTool(AgentAllowlist allowlist)
 {
     [McpServerTool(Name = "manage_agent_telegram_groups")]
     [Description("Add or remove an allowed Telegram group ID for an agent. Only listed group IDs will be monitored by the agent.")]
@@ -18,49 +15,25 @@ public sealed class ManageAgentTelegramGroupsTool(
         [Description("Action: 'add' or 'remove'")] string action,
         [Description("Telegram group ID (numeric, typically negative)")] long group_id)
     {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-        var agent = await db.Agents
-            .Include(a => a.TelegramGroups)
-            .FirstOrDefaultAsync(a => a.Name == agent_name);
-
-        if (agent is null)
-            return $"Agent '{agent_name}' not found in DB.";
-
         action = action.Trim().ToLowerInvariant();
+        if (action is not ("add" or "remove"))
+            return $"Unknown action '{action}'. Use 'add' or 'remove'.";
 
-        switch (action)
+        var outcome = action == "add"
+            ? await allowlist.AddGroupAsync(agent_name, group_id)
+            : await allowlist.RemoveGroupAsync(agent_name, group_id);
+
+        if (outcome.Fault is { } fault)
+            return fault.Code == "agent_not_found" ? $"Agent '{agent_name}' not found in DB." : fault.Message;
+        if (outcome.NotDelivered is { } notDelivered)
+            return notDelivered;
+
+        return outcome.Value switch
         {
-            case "add":
-            {
-                if (agent.TelegramGroups.Any(g => g.GroupId == group_id))
-                    return $"Telegram group {group_id} already allowed for agent '{agent_name}'.";
-
-                agent.TelegramGroups.Add(new AgentTelegramGroup { AgentId = agent.Id, GroupId = group_id });
-                await db.SaveChangesAsync();
-                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                    addedUsers: [], removedUserIds: [],
-                    addedGroupIds: [group_id], removedGroupIds: []);
-                return $"Added Telegram group {group_id} to agent '{agent_name}'.";
-            }
-
-            case "remove":
-            {
-                var existing = agent.TelegramGroups.FirstOrDefault(g => g.GroupId == group_id);
-                if (existing is null)
-                    return $"Telegram group {group_id} not found for agent '{agent_name}'.";
-
-                db.AgentTelegramGroups.Remove(existing);
-                await db.SaveChangesAsync();
-                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                    addedUsers: [], removedUserIds: [],
-                    addedGroupIds: [], removedGroupIds: [group_id]);
-                return $"Removed Telegram group {group_id} from agent '{agent_name}'.";
-            }
-
-            default:
-                return $"Unknown action '{action}'. Use 'add' or 'remove'.";
-        }
+            AllowlistChange.Added => $"Added Telegram group {group_id} to agent '{agent_name}'.",
+            AllowlistChange.AlreadyPresent => $"Telegram group {group_id} already allowed for agent '{agent_name}'.",
+            AllowlistChange.Removed => $"Removed Telegram group {group_id} from agent '{agent_name}'.",
+            _ => $"Telegram group {group_id} not found for agent '{agent_name}'.",
+        };
     }
 }

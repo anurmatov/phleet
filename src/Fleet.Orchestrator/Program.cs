@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading.RateLimiting;
+using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Auth;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
@@ -121,6 +122,9 @@ builder.Services.AddHostedService<EpicDriverWatcherService>();
 
 // Push notifications to the first-party iOS app (off by default).
 builder.Services.AddPushNotifications(builder.Configuration);
+
+// The writers REST routes and MCP tools both call (Application/): one implementation per write.
+builder.Services.AddAgentWrites();
 
 // MCP server (HTTP transport — same port as REST, path /mcp)
 builder.Services
@@ -345,30 +349,6 @@ app.MapEpicDriverEndpoints();
 app.MapGet("/api/workflows", (WorkflowStore workflows) =>
     Results.Ok(workflows.GetAll()));
 
-// REST: restart an agent's container via Docker API
-app.MapPost("/api/agents/{name}/restart", async (string name, AgentRegistry registry, DockerService docker, IServiceScopeFactory scopeFactory) =>
-{
-    // Prefer registry (live state), fall back to DB for container name (handles stopped/crashed agents)
-    var containerName = registry.Get(name)?.ContainerName;
-    if (containerName is null)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-        var dbAgent = db is null ? null : await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name);
-        containerName = dbAgent?.ContainerName;
-    }
-
-    if (containerName is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in registry or DB" });
-
-    var ok = await docker.RestartContainerAsync(containerName);
-
-    return ok
-        ? Results.Ok(new { message = $"Container '{containerName}' restart requested" })
-        : Results.Problem($"Failed to restart container '{containerName}' — check orchestrator logs");
-});
-
-
 // REST: cancel all running tasks on an agent by proxying to the agent's HTTP /cancel endpoint.
 // Resolves the agent URL via container name on the Docker network (fleet-orchestrator is containerized).
 // Falls back to host-port routing when container name is unavailable (not yet provisioned agents).
@@ -464,157 +444,11 @@ app.MapPost("/api/agents/{name}/cancel/{**taskId}", async (string name, string t
     }
 });
 
-// REST: restart an agent using a specific instruction version (temporary or pinned)
-app.MapPost("/api/agents/{name}/restart-with-version", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var body = await request.ReadFromJsonAsync<RestartWithVersionRequest>();
-    if (body is null || string.IsNullOrWhiteSpace(body.InstructionName))
-        return Results.BadRequest(new { error = "instructionName is required" });
-
-    var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Name == name);
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
-
-    var instruction = await db.Instructions
-        .Include(i => i.Versions)
-        .FirstOrDefaultAsync(i => i.Name == body.InstructionName);
-
-    if (instruction is null)
-        return Results.NotFound(new { error = $"Instruction '{body.InstructionName}' not found" });
-
-    var version = instruction.Versions.FirstOrDefault(v => v.VersionNumber == body.VersionNumber);
-    if (version is null)
-        return Results.NotFound(new { error = $"Version {body.VersionNumber} not found for instruction '{body.InstructionName}'" });
-
-    if (body.Pin == true)
-    {
-        instruction.CurrentVersion = body.VersionNumber;
-        await db.SaveChangesAsync();
-        var pinnedResult = await provisioning.ReprovisionAsync(name);
-        return pinnedResult.Success
-            ? Results.Ok(new { message = $"Pinned '{body.InstructionName}' to v{body.VersionNumber} and reprovisioned '{name}'" })
-            : Results.Problem(pinnedResult.Message);
-    }
-    else
-    {
-        var overrides = new Dictionary<string, int> { [body.InstructionName] = body.VersionNumber };
-        var result = await provisioning.ReprovisionAsync(name, instructionVersionOverrides: overrides);
-        return result.Success
-            ? Results.Ok(new { message = $"Reprovisioned '{name}' with '{body.InstructionName}' v{body.VersionNumber} (temporary)" })
-            : Results.Problem(result.Message);
-    }
-});
-
-// REST: reprovision an agent's container (deprovision + provision from DB config)
-// Optional ?image= query param overrides the DB-configured image (used by CI for PR-specific tags)
-app.MapPost("/api/agents/{name}/reprovision", async (string name, HttpRequest request, ContainerProvisioningService provisioning) =>
-{
-    var imageOverride = request.Query["image"].FirstOrDefault();
-    var result = await provisioning.ReprovisionAsync(name, imageOverride);
-    return result.Success
-        ? Results.Ok(new { message = result.Message })
-        : Results.Problem(result.Message);
-});
-
-// REST: bulk reprovision all currently running agents
-// Optional ?image= query param overrides the image for all agents (e.g. bulk image upgrade)
-app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, ContainerProvisioningService provisioning) =>
-{
-    var imageOverride = request.Query["image"].FirstOrDefault();
-    var results = await provisioning.ReprovisionRunningAsync(imageOverride);
-
-    var failed = results.Where(r => !r.Success).ToList();
-    return failed.Count == 0
-        ? Results.Ok(new { message = $"Reprovisioned {results.Count} running agent(s)", results })
-        : Results.Json(
-            new { message = $"{failed.Count}/{results.Count} agent(s) failed to reprovision", results },
-            statusCode: 500);
-});
-
 // REST: create a new agent — Endpoints/AgentCreateEndpoints.cs
 app.MapAgentCreateEndpoints();
 
-// REST: delete an agent (deprovision container + remove DB records)
-app.MapDelete("/api/agents/{name}", async (string name, IServiceScopeFactory scopeFactory, ContainerProvisioningService provisioning, AgentRegistry registry, IAclChangeNotifier aclNotifier) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null)
-        return Results.Problem("Database is not configured on this orchestrator");
-
-    var agent = await db.Agents
-        .Include(a => a.Tools)
-        .Include(a => a.Projects)
-        .Include(a => a.McpEndpoints)
-        .Include(a => a.Networks)
-        .Include(a => a.EnvRefs)
-        .Include(a => a.TelegramUsers)
-        .Include(a => a.TelegramGroups)
-        .Include(a => a.Instructions)
-        .AsSplitQuery()
-        .FirstOrDefaultAsync(a => a.Name == name);
-
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
-
-    // Best-effort deprovision — if container doesn't exist that's fine, proceed with DB delete
-    var deprovision = await provisioning.DeprovisionAsync(name);
-
-    db.Agents.Remove(agent);
-    await db.SaveChangesAsync();
-
-    // agent_project_access is keyed by name, not by a foreign key, so deleting the agent leaves its
-    // rows behind. Deleting an agent unassigns every project, so the same hook applies: the rows it
-    // created go, an operator's manual rows and any wildcard stay.
-    await AgentProjectAccessSync.SyncAndBroadcastAsync(db, aclNotifier, agent.Name, []);
-
-    // Remove from in-memory registry so the agent doesn't persist as a ghost in the dashboard.
-    registry.Remove(name);
-
-    return Results.Ok(new
-    {
-        message = deprovision.Success
-            ? $"Agent '{name}' deleted and container removed"
-            : $"Agent '{name}' deleted (container was not running)"
-    });
-});
-
-// REST: stop an agent's container via Docker API
-app.MapPost("/api/agents/{name}/stop", async (string name, AgentRegistry registry, DockerService docker, OperatorStops operatorStops) =>
-{
-    var agent = registry.Get(name);
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in registry" });
-
-    var containerName = agent.ContainerName ?? name;
-    var ok = await docker.StopContainerAsync(containerName);
-    // A stop someone asked for is not an agent going down: the push notifier stays quiet about it.
-    if (ok) operatorStops.MarkStopped(name);
-
-    return ok
-        ? Results.Ok(new { message = $"Container '{containerName}' stop requested" })
-        : Results.Problem($"Failed to stop container '{containerName}' — check orchestrator logs");
-});
-
-// REST: start an agent's container via Docker API
-app.MapPost("/api/agents/{name}/start", async (string name, AgentRegistry registry, DockerService docker) =>
-{
-    var agent = registry.Get(name);
-    if (agent is null)
-        return Results.NotFound(new { error = $"Agent '{name}' not found in registry" });
-
-    var containerName = agent.ContainerName ?? name;
-    var ok = await docker.StartContainerAsync(containerName);
-
-    return ok
-        ? Results.Ok(new { message = $"Container '{containerName}' start requested" })
-        : Results.Problem($"Failed to start container '{containerName}' — check orchestrator logs");
-});
+// REST: restart, stop, start, restart-with-version, reprovision and delete — Endpoints/AgentLifecycleEndpoints.cs
+app.MapAgentLifecycleEndpoints();
 
 // REST: cancel a running Temporal workflow (graceful shutdown)
 app.MapPost("/api/workflows/{ns}/cancel/{**id}", async (string ns, string id, HttpRequest request, TemporalClientRegistry temporal) =>
@@ -841,6 +675,8 @@ app.Map("/ws", async (HttpContext context, AgentRegistry registry) =>
     catch (WebSocketException) { }
     finally
     {
+        // Every reconnect of a dashboard would otherwise leave its old socket registered.
+        registry.RemoveSocket(socket);
         await lifetime.CancelAsync();
         await authWatch;
     }
@@ -902,118 +738,8 @@ app.Map("/ws/logs/{agentName}", async (string agentName, HttpContext context, Ag
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stream ended", CancellationToken.None);
 });
 
-// ─── Workflow Definitions ────────────────────────────────────────────────────
-
-app.MapGet("/api/workflow-definitions", async (bool? includeInactive, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var query = db.WorkflowDefinitions.AsQueryable();
-    if (includeInactive != true) query = query.Where(d => d.IsActive);
-    var defs = await query
-        .OrderBy(d => d.Name)
-        .AsNoTracking()
-        .Select(d => new { d.Name, d.Namespace, d.TaskQueue, d.Description, d.Version, d.IsActive, d.CreatedAt, d.UpdatedAt })
-        .ToListAsync();
-    return Results.Ok(defs);
-});
-
-app.MapGet("/api/workflow-definitions/{name}", async (string name, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var def = await db.WorkflowDefinitions
-        .Include(d => d.Versions)
-        .AsNoTracking()
-        .FirstOrDefaultAsync(d => d.Name == name);
-    if (def is null) return Results.NotFound(new { error = $"Workflow definition '{name}' not found" });
-    return Results.Ok(new {
-        def.Name, def.Namespace, def.TaskQueue, def.Description,
-        def.Version, def.IsActive, def.Definition,
-        def.CreatedAt, def.UpdatedAt, def.CreatedBy,
-        Versions = def.Versions.OrderByDescending(v => v.Version)
-            .Select(v => new { v.Version, v.Definition, v.Reason, v.CreatedAt, v.CreatedBy })
-            .ToList()
-    });
-});
-
-app.MapPost("/api/workflow-definitions", async (WorkflowDefinitionRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    if (string.IsNullOrWhiteSpace(req.Name)) return Results.BadRequest(new { error = "Name is required" });
-    if (string.IsNullOrWhiteSpace(req.Namespace)) return Results.BadRequest(new { error = "Namespace is required" });
-    if (string.IsNullOrWhiteSpace(req.TaskQueue)) return Results.BadRequest(new { error = "TaskQueue is required" });
-    if (string.IsNullOrWhiteSpace(req.Definition)) return Results.BadRequest(new { error = "Definition is required" });
-    var def = new WorkflowDefinition
-    {
-        Name        = req.Name,
-        Namespace   = req.Namespace,
-        TaskQueue   = req.TaskQueue,
-        Description = req.Description,
-        Definition  = req.Definition,
-        Version     = 1,
-        IsActive    = true,
-        CreatedBy   = req.CreatedBy,
-        CreatedAt   = DateTime.UtcNow,
-        UpdatedAt   = DateTime.UtcNow,
-    };
-    db.WorkflowDefinitions.Add(def);
-    await db.SaveChangesAsync();
-    return Results.Created($"/api/workflow-definitions/{def.Name}", def);
-});
-
-app.MapPut("/api/workflow-definitions/{name}", async (string name, WorkflowDefinitionRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var def = await db.WorkflowDefinitions.FirstOrDefaultAsync(d => d.Name == name);
-    if (def is null) return Results.NotFound(new { error = $"Workflow definition '{name}' not found" });
-
-    if (req.Definition is not null)
-    {
-        // Save previous version to history before overwriting
-        db.WorkflowDefinitionVersions.Add(new WorkflowDefinitionVersion
-        {
-            WorkflowDefinitionId = def.Id,
-            Version              = def.Version,
-            Definition           = def.Definition,
-            Reason               = req.Reason,
-            CreatedBy            = req.CreatedBy,
-            CreatedAt            = DateTime.UtcNow,
-        });
-        def.Definition = req.Definition;
-        def.Version   += 1;
-    }
-
-    def.Namespace   = req.Namespace   ?? def.Namespace;
-    def.TaskQueue   = req.TaskQueue   ?? def.TaskQueue;
-    def.Description = req.Description ?? def.Description;
-    def.UpdatedAt   = DateTime.UtcNow;
-
-    await db.SaveChangesAsync();
-    return Results.Ok(new {
-        def.Name, def.Namespace, def.TaskQueue, def.Description,
-        def.Version, def.IsActive, def.UpdatedAt
-    });
-});
-
-app.MapPost("/api/workflow-definitions/{name}/toggle-active", async (string name, ToggleActiveRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var def = await db.WorkflowDefinitions.FirstOrDefaultAsync(d => d.Name == name);
-    if (def is null) return Results.NotFound(new { error = $"Workflow definition '{name}' not found" });
-    def.IsActive  = req.IsActive;
-    def.UpdatedAt = DateTime.UtcNow;
-    await db.SaveChangesAsync();
-    return Results.Ok(new { def.Name, def.Namespace, def.TaskQueue, def.Description, def.Version, def.IsActive, def.UpdatedAt });
-});
+// Workflow definitions: list, detail, create, update, toggle-active — Endpoints/WorkflowDefinitionEndpoints.cs
+app.MapWorkflowDefinitionEndpoints();
 
 // ─── Schedules ───────────────────────────────────────────────────────────────
 
@@ -1600,184 +1326,8 @@ app.MapGet("/api/agent-templates/{name}", (string name) =>
     });
 });
 
-// ── Agent Project Access (memory ACL) ────────────────────────────────────────
-// Manages which memory projects each agent can read.
-// Mutations require bearer auth; GET is open (same pattern as other GET /api/agents/* endpoints).
-
-app.MapGet("/api/agents/{name}/project-access", async (string name, IServiceScopeFactory scopeFactory) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-    var rows = await db.AgentProjectAccess
-        .Where(x => x.AgentName == name.ToLowerInvariant())
-        .Select(x => x.Project)
-        .ToListAsync();
-    return Results.Ok(new { agent = name.ToLowerInvariant(), projects = rows });
-});
-
-app.MapPut("/api/agents/{name}/project-access", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
-{
-    ProjectAccessPutRequest? body;
-    try { body = await request.ReadFromJsonAsync<ProjectAccessPutRequest>(ct); }
-    catch { return Results.BadRequest(new { error = "invalid_json" }); }
-    if (body is null) return Results.BadRequest(new { error = "empty_payload" });
-
-    var projects = body.Projects ?? [];
-    var validationError = ValidateProjectList(projects);
-    if (validationError is not null) return Results.BadRequest(new { error = validationError });
-
-    var agentName = name.ToLowerInvariant();
-    var normalized = projects.Select(p => p.Trim().ToLowerInvariant()).Distinct().ToList();
-
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var existing = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).ToListAsync(ct);
-    db.AgentProjectAccess.RemoveRange(existing);
-    // An explicit full-list PUT is an operator grant, so every row it writes is manual and the
-    // assignment hook will not later revoke it.
-    db.AgentProjectAccess.AddRange(normalized.Select(p => new AgentProjectAccess
-    {
-        AgentName = agentName,
-        Project = p,
-        Source = AgentProjectAccessSource.Manual,
-    }));
-    await db.SaveChangesAsync(ct);
-
-    await configService.PublishAclChangedAsync(ct);
-    return Results.Ok(new { agent = agentName, projects = normalized });
-});
-
-app.MapPost("/api/agents/{name}/project-access", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
-{
-    ProjectAccessPostRequest? body;
-    try { body = await request.ReadFromJsonAsync<ProjectAccessPostRequest>(ct); }
-    catch { return Results.BadRequest(new { error = "invalid_json" }); }
-    if (body is null) return Results.BadRequest(new { error = "empty_payload" });
-
-    var project = body.Project?.Trim().ToLowerInvariant() ?? "";
-    if (string.IsNullOrEmpty(project)) return Results.BadRequest(new { error = "project must not be empty" });
-
-    var agentName = name.ToLowerInvariant();
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var alreadyExists = await db.AgentProjectAccess.AnyAsync(x => x.AgentName == agentName && x.Project == project, ct);
-    if (!alreadyExists)
-    {
-        db.AgentProjectAccess.Add(new AgentProjectAccess
-        {
-            AgentName = agentName,
-            Project = project,
-            Source = AgentProjectAccessSource.Manual,
-        });
-        await db.SaveChangesAsync(ct);
-        await configService.PublishAclChangedAsync(ct);
-    }
-
-    var rows = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).Select(x => x.Project).ToListAsync(ct);
-    return Results.Ok(new { agent = agentName, projects = rows });
-});
-
-app.MapDelete("/api/agents/{name}/project-access/{project}", async (string name, string project, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
-{
-    var agentName = name.ToLowerInvariant();
-    var projectNorm = project.Trim().ToLowerInvariant();
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var row = await db.AgentProjectAccess.FirstOrDefaultAsync(x => x.AgentName == agentName && x.Project == projectNorm, ct);
-    if (row is null) return Results.NotFound(new { error = $"No project-access entry '{projectNorm}' for agent '{agentName}'" });
-
-    db.AgentProjectAccess.Remove(row);
-    await db.SaveChangesAsync(ct);
-    await configService.PublishAclChangedAsync(ct);
-    return Results.NoContent();
-});
-
-// REST: telegram user add/remove — called by dashboard Save to apply diffs with live allowlist update.
-// These mirror manage_agent_telegram_users / manage_agent_telegram_groups MCP tools.
-app.MapPost("/api/agents/{name}/telegram-users", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-    var body = await request.ReadFromJsonAsync<TelegramUserRequest>(ct);
-    if (body is null) return Results.BadRequest(new { error = "Invalid request body" });
-
-    var agent = await db.Agents.Include(a => a.TelegramUsers).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    if (agent.TelegramUsers.Any(u => u.UserId == body.UserId))
-        return Results.Ok(new { message = $"User {body.UserId} already allowed" });
-
-    agent.TelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = body.UserId });
-    await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [new Fleet.Orchestrator.Services.AddedUserInfo { UserId = body.UserId }],
-        removedUserIds: [], addedGroupIds: [], removedGroupIds: [], ct: ct);
-    return Results.Ok(new { message = $"Added user {body.UserId} to agent '{name}'" });
-});
-
-app.MapDelete("/api/agents/{name}/telegram-users/{userId}", async (string name, long userId, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, SetupService setupService, CancellationToken ct) =>
-{
-    // Guard: refuse to remove the installer's own ID — prevents operator self-lockout.
-    var ownerId = setupService.GetTelegramUserId();
-    if (ownerId.HasValue && ownerId.Value == userId)
-        return Results.BadRequest(new { error = $"Cannot remove the owner's Telegram user ID ({userId}) from the allowlist." });
-
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var agent = await db.Agents.Include(a => a.TelegramUsers).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    var existing = agent.TelegramUsers.FirstOrDefault(u => u.UserId == userId);
-    if (existing is null) return Results.Ok(new { message = $"User {userId} not in allowlist — no-op" });
-
-    db.AgentTelegramUsers.Remove(existing);
-    await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [], removedUserIds: [userId], addedGroupIds: [], removedGroupIds: [], ct: ct);
-    return Results.Ok(new { message = $"Removed user {userId} from agent '{name}'" });
-});
-
-app.MapPost("/api/agents/{name}/telegram-groups", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-    var body = await request.ReadFromJsonAsync<TelegramGroupRequest>(ct);
-    if (body is null) return Results.BadRequest(new { error = "Invalid request body" });
-
-    var agent = await db.Agents.Include(a => a.TelegramGroups).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    if (agent.TelegramGroups.Any(g => g.GroupId == body.GroupId))
-        return Results.Ok(new { message = $"Group {body.GroupId} already allowed" });
-
-    agent.TelegramGroups.Add(new AgentTelegramGroup { AgentId = agent.Id, GroupId = body.GroupId });
-    await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [], removedUserIds: [], addedGroupIds: [body.GroupId], removedGroupIds: [], ct: ct);
-    return Results.Ok(new { message = $"Added group {body.GroupId} to agent '{name}'" });
-});
-
-app.MapDelete("/api/agents/{name}/telegram-groups/{groupId}", async (string name, long groupId, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var agent = await db.Agents.Include(a => a.TelegramGroups).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    var existing = agent.TelegramGroups.FirstOrDefault(g => g.GroupId == groupId);
-    if (existing is null) return Results.Ok(new { message = $"Group {groupId} not in allowlist — no-op" });
-
-    db.AgentTelegramGroups.Remove(existing);
-    await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [], removedUserIds: [], addedGroupIds: [], removedGroupIds: [groupId], ct: ct);
-    return Results.Ok(new { message = $"Removed group {groupId} from agent '{name}'" });
-});
+// Telegram allowlist and memory project access of one agent — Endpoints/AgentAccessEndpoints.cs
+app.MapAgentAccessEndpoints();
 
 // GET /internal/agent-project-access — Docker-network-only, no auth (mirrors /internal/* pattern from PR #83).
 // Returns the full ACL map consumed by fleet-memory's AclCacheService.
@@ -1791,16 +1341,6 @@ app.MapGet("/internal/agent-project-access", async (IServiceScopeFactory scopeFa
         .ToDictionary(g => g.Key, g => g.Select(r => r.Project).ToList());
     return Results.Ok(new { acl });
 });
-
-static string? ValidateProjectList(List<string>? projects)
-{
-    if (projects is null) return null;
-    foreach (var p in projects)
-    {
-        if (string.IsNullOrWhiteSpace(p)) return "project entries must not be empty or whitespace";
-    }
-    return null;
-}
 
 // ── Memory API (proxied from fleet-memory /internal/*) ───────────────────────
 // All endpoints require bearer-token auth (checked inline since GETs are normally exempt).
@@ -1876,24 +1416,7 @@ app.MapDelete("/api/memory/{id}", async (string id, MemoryProxyService memProxy,
 app.Run();
 return 0;
 
-record WorkflowDefinitionRequest
-{
-    public string? Name { get; init; }
-    public string? Namespace { get; init; }
-    public string? TaskQueue { get; init; }
-    public string? Definition { get; init; }
-    public string? Description { get; init; }
-    public string? Reason { get; init; }
-    public string? CreatedBy { get; init; }
-}
-
 record ToggleActiveRequest(bool IsActive);
-
-record ProjectAccessPutRequest(List<string>? Projects);
-record ProjectAccessPostRequest(string? Project);
-record TelegramUserRequest(long UserId);
-record TelegramGroupRequest(long GroupId);
-
 
 record McpEndpointEntry(string McpName, string Url, string TransportType);
 record InstructionAssignmentEntry(string InstructionName, int LoadOrder);
@@ -1908,8 +1431,6 @@ record InstructionUpdateRequest(string Content, string? Reason, string? CreatedB
 // Endpoints/ProjectContextEndpoints.cs.
 
 record RepositoryRequest(string? Name, string? FullName);
-
-record RestartWithVersionRequest(string InstructionName, int VersionNumber, bool? Pin);
 
 record RestartServicesRequest(string[] Services);
 record MountCredentialRequest(string AgentName, string MountPath, string? Mode);

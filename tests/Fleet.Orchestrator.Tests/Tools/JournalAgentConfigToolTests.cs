@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
@@ -34,7 +35,7 @@ public sealed class JournalAgentConfigToolTests
         }
 
         var scopes = provider.GetRequiredService<IServiceScopeFactory>();
-        var update = new UpdateAgentConfigTool(scopes, new NoOpAclChangeNotifier());
+        var update = Writers.UpdateConfigTool(scopes, new NoOpAclChangeNotifier());
         var get = new GetAgentConfigTool(scopes);
 
         var changed = await update.UpdateAgentConfigAsync("agent1", journal_enabled: true);
@@ -70,7 +71,7 @@ public sealed class JournalAgentConfigToolTests
             db.Agents.Add(new Agent { Name = "agent1", DisplayName = "agent1", Role = "test", Model = "model-x", Provider = "claude", ContainerName = "agent1", JournalEnabled = before, ShowStats = true });
             await db.SaveChangesAsync();
         }
-        var tool = new UpdateAgentConfigTool(provider.GetRequiredService<IServiceScopeFactory>(), new NoOpAclChangeNotifier());
+        var tool = Writers.UpdateConfigTool(provider.GetRequiredService<IServiceScopeFactory>(), new NoOpAclChangeNotifier());
         var result = await tool.UpdateAgentConfigAsync("agent1", journal_enabled: requested, show_stats: false);
         if (fault is not null)
         {

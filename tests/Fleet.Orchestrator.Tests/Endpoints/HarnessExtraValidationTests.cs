@@ -1,3 +1,5 @@
+using Fleet.Orchestrator.Application;
+using Fleet.Orchestrator.Tests.Support;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -56,6 +58,7 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
             config, null!, null!, sp.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<SetupService>.Instance, null!));
 
+        builder.Services.AddAgentWrites();
         _app = builder.Build();
         _app.MapAgentConfigEndpoints();
 
@@ -338,7 +341,7 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     public async Task UpdateAgentConfig_SetsAndClears()
     {
         await SeedAsync("claude", "claude-opus-5-5");
-        var tool = new UpdateAgentConfigTool(Scopes, new NoopAclChangeNotifier());
+        var tool = Writers.UpdateConfigTool(Scopes, new NoopAclChangeNotifier());
 
         var set = await tool.UpdateAgentConfigAsync("agent1", harness_extra: "--disallowedTools WebSearch\n");
         Assert.Contains("- harness_extra: (none) → (set)", set);
@@ -356,7 +359,7 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     public async Task UpdateAgentConfig_LocalClaude_AcceptsDisableSlashCommands_AndRefusesAValue()
     {
         await SeedAsync("claude", "qwen3.8:27b", Url);
-        var tool = new UpdateAgentConfigTool(Scopes, new NoopAclChangeNotifier());
+        var tool = Writers.UpdateConfigTool(Scopes, new NoopAclChangeNotifier());
 
         var set = await tool.UpdateAgentConfigAsync("agent1", harness_extra: "--tools WebFetch\n--disable-slash-commands");
         Assert.Contains("- harness_extra: (none) → (set)", set);
@@ -371,7 +374,7 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     public async Task UpdateAgentConfig_ARefusedLine_IsAToolError_AndNothingIsWritten()
     {
         await SeedAsync("claude", "claude-opus-5-5");
-        var tool = new UpdateAgentConfigTool(Scopes, new NoopAclChangeNotifier());
+        var tool = Writers.UpdateConfigTool(Scopes, new NoopAclChangeNotifier());
 
         var result = await tool.UpdateAgentConfigAsync("agent1", memory_limit_mb: 4096,
             harness_extra: "MAX_MCP_OUTPUT_TOKENS=2000\n--mcp-config /tmp/other.json");
@@ -385,13 +388,14 @@ public sealed class HarnessExtraValidationTests : IAsyncLifetime
     public async Task CreateAgent_ValidatesLikeTheUpdate_BeforeAnyWrite()
     {
         var config = new ConfigurationBuilder().Build();
-        var tool = new CreateAgentTool(Scopes, config);
+        var tool = Writers.CreateAgentTool(Scopes, config);
 
         var refused = await tool.CreateAgentAsync("agent2", "developer", "gpt-5.5", provider: "codex",
             harness_extra: "features.multi_agent = false");
         Assert.StartsWith("Invalid harness_extra: harnessExtra line 1: 'features.multi_agent' is not an allowed setting", refused);
 
-        var created = await tool.CreateAgentAsync("agent3", "developer", "gpt-5.5", provider: "codex",
+        // A co-cto: the first agent of a fleet must be one, on create_agent as on POST /api/agents.
+        var created = await tool.CreateAgentAsync("agent3", "co-cto", "gpt-5.5", provider: "codex",
             harness_extra: "features.apps = true");
         Assert.Contains("created in DB", created);
 

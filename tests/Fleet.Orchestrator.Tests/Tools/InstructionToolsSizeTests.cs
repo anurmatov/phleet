@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tests.Services;
@@ -23,13 +24,13 @@ public sealed class InstructionToolsSizeTests : IDisposable
     public void Dispose() => _db.Dispose();
 
     private Task<string> CreateAsync(string name, string content) =>
-        new CreateInstructionTool(_db.ScopeFactory, Policy).CreateInstructionAsync(name, content, "agent-a");
+        Writers.CreateInstructionTool(_db.ScopeFactory, Policy).CreateInstructionAsync(name, content, "agent-a");
 
     private Task<string> UpdateAsync(string name, string content) =>
-        new UpdateInstructionTool(_db.ScopeFactory, Policy).UpdateInstructionAsync(name, content, "edit", "agent-a");
+        Writers.UpdateInstructionTool(_db.ScopeFactory, Policy).UpdateInstructionAsync(name, content, "edit", "agent-a");
 
     private Task<string> RollbackAsync(string name, int version) =>
-        new RollbackInstructionTool(_db.ScopeFactory, Policy).RollbackInstructionAsync(name, version);
+        Writers.RollbackInstructionTool(_db.ScopeFactory, Policy).RollbackInstructionAsync(name, version);
 
     [Fact]
     public async Task Create_appends_the_size_line_to_the_unchanged_output()
@@ -85,7 +86,7 @@ public sealed class InstructionToolsSizeTests : IDisposable
     [Fact]
     public async Task Disabled_limit_still_reports_the_size()
     {
-        var result = await new CreateInstructionTool(_db.ScopeFactory, new PromptSizePolicy(0, 10_000, _logs))
+        var result = await Writers.CreateInstructionTool(_db.ScopeFactory, new PromptSizePolicy(0, 10_000, _logs))
             .CreateInstructionAsync("row-a", new string('a', 20_000), "agent-a");
 
         Assert.Equal(

@@ -1,16 +1,14 @@
 using System.ComponentModel;
-using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Services;
-using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
+/// <summary>The MCP adapter over <see cref="InstructionWriter.AddVersionAsync"/>, which the REST versions route calls too.</summary>
 [McpServerToolType]
-public sealed class UpdateInstructionTool(IServiceScopeFactory scopeFactory, PromptSizePolicy sizePolicy)
+public sealed class UpdateInstructionTool(InstructionWriter writer)
 {
-    private const int MaxVersions = 20;
-
     [McpServerTool(Name = "update_instruction")]
     [Description("Create a new version of a named instruction. Auto-increments version number and prunes history beyond 20 versions.")]
     public async Task<string> UpdateInstructionAsync(
@@ -19,48 +17,11 @@ public sealed class UpdateInstructionTool(IServiceScopeFactory scopeFactory, Pro
         [Description("Reason for the update")] string reason,
         [Description("Who is making the update (e.g. agent name)")] string created_by)
     {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var outcome = await writer.AddVersionAsync(instruction_name, content, created_by, reason, WriteCaller.Mcp);
+        if (outcome.Fault is { } fault)
+            return fault.Code == "instruction_not_found" ? $"Instruction '{instruction_name}' not found." : fault.Message;
 
-        var instruction = await db.Instructions
-            .Include(i => i.Versions.OrderBy(v => v.VersionNumber))
-            .FirstOrDefaultAsync(i => i.Name == instruction_name);
-
-        if (instruction is null)
-            return $"Instruction '{instruction_name}' not found.";
-
-        // Captured before Versions.Add so the new row is never mistaken for the previous one.
-        var previousContent = instruction.Versions.FirstOrDefault(v => v.VersionNumber == instruction.CurrentVersion)?.Content;
-
-        var newVersionNumber = instruction.CurrentVersion + 1;
-
-        instruction.Versions.Add(new InstructionVersion
-        {
-            InstructionId = instruction.Id,
-            VersionNumber = newVersionNumber,
-            Content       = content,
-            CreatedAt     = DateTime.UtcNow,
-            CreatedBy     = created_by,
-            Reason        = reason,
-        });
-
-        instruction.CurrentVersion = newVersionNumber;
-
-        // Prune oldest versions beyond the cap
-        var excess = instruction.Versions.Count - MaxVersions;
-        if (excess > 0)
-        {
-            var toDelete = instruction.Versions
-                .OrderBy(v => v.VersionNumber)
-                .Take(excess)
-                .ToList();
-            db.InstructionVersions.RemoveRange(toDelete);
-        }
-
-        await db.SaveChangesAsync();
-
-        var size = sizePolicy.Evaluate(PromptSizeKind.Instruction, instruction_name, previousContent, content);
-        sizePolicy.LogWrite(size, "mcp", instruction_name);
-        return $"Instruction '{instruction_name}' updated to v{newVersionNumber}." + PromptSizePolicy.RenderMcpLines(size);
+        var written = outcome.Value!;
+        return $"Instruction '{instruction_name}' updated to v{written.Version}." + PromptSizePolicy.RenderMcpLines(written.Size);
     }
 }

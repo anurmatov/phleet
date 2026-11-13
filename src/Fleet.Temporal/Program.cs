@@ -20,6 +20,7 @@ builder.Services.Configure<FleetWorkflowOptions>(builder.Configuration.GetSectio
 builder.Services.PostConfigure<FleetWorkflowOptions>(o => o.OrchestratorUrl = builder.Configuration["TemporalBridge:OrchestratorUrl"] ?? "");
 builder.Services.Configure<AuthTokenRefreshOptions>(builder.Configuration.GetSection(AuthTokenRefreshOptions.Section));
 builder.Services.Configure<WorkflowFailureNotifierOptions>(builder.Configuration.GetSection(WorkflowFailureNotifierOptions.Section));
+builder.Services.Configure<DurableDelegationOptions>(builder.Configuration.GetSection(DurableDelegationOptions.Section));
 
 // RabbitMQ connection factory used by DelegateToAgentActivity for outbound publishes
 builder.Services.AddSingleton<IConnectionFactory>(sp =>
@@ -92,11 +93,22 @@ builder.Services.AddSingleton<IWorkflowGateStateReader, WorkflowGateStateReader>
 builder.Services.AddSingleton<IEpicGrantDecisionForwarder, OrchestratorEpicGrantForwarder>();
 builder.Services.AddSingleton<IWorkflowDispatcher, TemporalWorkflowDispatcher>();
 
+// Durable delegation — off unless DurableDelegation:Enabled=true. When on, a delegation is a record
+// in the bridge's state directory and its activity is completed from that record, so a bridge
+// restart no longer fails it. Registered always: switched off it loads nothing and does nothing, and
+// DelegateToAgentActivity and the relay listener take their old paths.
+builder.Services.AddSingleton<IDelegationRelay, DelegationRelay>();
+builder.Services.AddSingleton<IAsyncActivityGateway, TemporalAsyncActivityGateway>();
+builder.Services.AddSingleton<DurableDelegationService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DurableDelegationService>());
+
 // Peer config — fetches FLEET_CTO_AGENT and other keys from orchestrator on startup
 builder.Services.AddHostedService<PeerConfigHostedService>();
 
-// RabbitMQ listener — feeds agent responses into the registry
-builder.Services.AddHostedService<TemporalRelayListener>();
+// RabbitMQ listener — feeds agent responses into the registry. A singleton as well as a hosted
+// service, so /health can report whether it is actually consuming.
+builder.Services.AddSingleton<TemporalRelayListener>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TemporalRelayListener>());
 
 // Namespace initializer — creates configured Temporal namespaces on startup if they don't exist
 builder.Services.AddHostedService<NamespaceInitializer>();
@@ -182,8 +194,17 @@ var fleetWorkflowOptions = app.Services.GetRequiredService<Microsoft.Extensions.
 FleetWorkflowConfig.Initialize(fleetWorkflowOptions);
 
 app.MapMcp();
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "fleet-temporal-bridge" }));
+// The status code and `status` are unchanged on purpose: compose's healthcheck is `curl -f` on this
+// route and setup.sh waits on it, and the MCP server and the workers are up whatever the broker is
+// doing. `relayListener` is the extra field: anything but "consuming" means agent replies are not
+// being received (see TemporalRelayListener.State).
+app.MapGet("/health", (TemporalRelayListener relay) => Results.Ok(
+    new { status = "healthy", service = "fleet-temporal-bridge", relayListener = relay.State }));
 // #488: pending/parked failure notices (identity and attempt counts, no content).
 app.MapGet("/workflow-failures", (WorkflowFailureNotifier notifier) => Results.Ok(notifier.Snapshot()));
+// Delegations waiting for their agent when durable delegation is on (identity, counters and times;
+// no instruction, no answer, no task token).
+app.MapGet("/pending-delegations", async (DurableDelegationService delegations, CancellationToken ct) =>
+    Results.Ok(await delegations.SnapshotAsync(ct)));
 
 app.Run();

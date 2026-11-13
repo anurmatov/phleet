@@ -51,6 +51,10 @@ public sealed class GetUweReferenceTool
         - `forEach`: template expression resolving to an array
         - `itemVar`: variable name bound to the current item inside the step template
         - `step`: single step template (NOT `steps`) executed per item
+        - Two branches must not `wait_for_signal` on the same signal name: the engine keeps one
+          waiter per name, so a signal wakes only one branch. The same literal `signalName` in two
+          static branches, or any literal `signalName` under `forEach`, is a definition-LOAD error.
+          Under `forEach` put the item in the name, e.g. `"ack-{{vars.currentAgent}}"`.
 
         ### 3. loop
         Repeats child steps up to `maxIterations` times. Use `branch` + `{"type":"break"}` inside to exit early.

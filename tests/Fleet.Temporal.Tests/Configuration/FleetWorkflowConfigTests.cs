@@ -6,7 +6,9 @@ namespace Fleet.Temporal.Tests.Configuration;
 /// <summary>
 /// Tests for FleetWorkflowConfig static singleton.
 /// Uses reflection to reset private state between tests to keep them independent.
+/// One collection with the other class that sets that state, so the two never run at once.
 /// </summary>
+[Collection("fleet-workflow-config-static")]
 public sealed class FleetWorkflowConfigTests : IDisposable
 {
     public FleetWorkflowConfigTests()

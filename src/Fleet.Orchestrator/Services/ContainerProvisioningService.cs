@@ -344,7 +344,8 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     /// <remarks>
     /// Claude and codex local faults keep their #340/#382 path: <see cref="GenerateAppsettingsJson"/>
-    /// refuses them during provisioning, which a reprovision reaches after removing the container.
+    /// refuses them when the files are rendered, which a reprovision does before it removes the
+    /// container.
     /// </remarks>
     internal static string? DescribeProviderPreflightFault(Agent agent) =>
         AgentProviders.DescribeFault(agent.Provider);
@@ -395,6 +396,13 @@ public sealed class ContainerProvisioningService(
     // ── live provisioning ──────────────────────────────────────────────────────
 
     /// <summary>
+    /// One provision, deprovision or reprovision per agent at a time; different agents do not wait
+    /// for each other. Two that interleave on one agent can leave the stored placeholder hashes
+    /// describing a container that is not the one running.
+    /// </summary>
+    private readonly KeyedAsyncLock _agentOperations = new();
+
+    /// <summary>
     /// Creates and starts a container from DB config.
     /// Fails if a container with that name already exists.
     /// </summary>
@@ -404,6 +412,33 @@ public sealed class ContainerProvisioningService(
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
     {
+        using var held = await _agentOperations.AcquireAsync(agentName, ct);
+
+        var (prepared, refusal) = await PrepareAsync(
+            agentName, imageOverride, instructionVersionOverrides, containerMustBeAbsent: true, ct);
+        return prepared is null ? refusal! : await CreateAsync(prepared, ct);
+    }
+
+    /// <summary>
+    /// Everything a provision decides, with every generated file rendered in memory: nothing is
+    /// written and nothing is created. Returns the refusal instead when the agent cannot be
+    /// provisioned as configured.
+    /// </summary>
+    /// <remarks>
+    /// A reprovision calls this while the old container is still running, and creates the new one
+    /// from the value returned here, so what was checked is what is created. Whatever can refuse
+    /// for a reason found in the agent's configuration belongs here, not in <see cref="CreateAsync"/>.
+    /// </remarks>
+    private async Task<(PreparedProvision? Prepared, ProvisionResult? Refusal)> PrepareAsync(
+        string agentName,
+        string? imageOverride,
+        IReadOnlyDictionary<string, int>? instructionVersionOverrides,
+        bool containerMustBeAbsent,
+        CancellationToken ct)
+    {
+        (PreparedProvision?, ProvisionResult?) Refuse(string message) =>
+            (null, ProvisionResult.Fail(agentName, message));
+
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
@@ -424,15 +459,15 @@ public sealed class ContainerProvisioningService(
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
 
         if (agent is null)
-            return ProvisionResult.Fail(agentName, "agent not found in DB");
+            return (null, ProvisionResult.Fail(agentName, "agent not found in DB") with { Failure = ProvisionFailure.AgentNotFound });
 
         if (DescribePrimaryHumanFault() is { } priorityFault)
-            return ProvisionResult.Fail(agentName, priorityFault);
+            return Refuse(priorityFault);
         // #386: PV1, before Docker is called or any file is generated.
         if (DescribeProviderPreflightFault(agent) is { } providerFault)
-            return ProvisionResult.Fail(agentName, providerFault);
+            return Refuse(providerFault);
         if (DescribeJournalProvisioningFault(agent) is { } journalFault)
-            return ProvisionResult.Fail(agentName, journalFault);
+            return Refuse(journalFault);
 
         // Bound secrets: decided before Docker is called or any file is generated. A fault here means
         // the agent would otherwise start without a way to use a secret it is meant to hold.
@@ -440,23 +475,27 @@ public sealed class ContainerProvisioningService(
         var (secretPlan, secretFault) = SecretGrantPlanner.Plan(
             agent, secretBindings, _secretSettings, secretState?.CaPresent ?? false, SecretPlaceholders.Create);
         if (secretPlan is null)
-            return ProvisionResult.Fail(agentName, secretFault!);
+            return Refuse(secretFault!);
         if (secretPlan.HasGrants && secretState is null)
-            return ProvisionResult.Fail(agentName, "secret_proxy_state_unavailable: the forwarder state cannot be written from this host");
+            return Refuse("secret_proxy_state_unavailable: the forwarder state cannot be written from this host");
 
         // Guard: bypassPermissions is rejected — fleet containers run as root and Claude CLI
         // refuses --dangerously-skip-permissions for root processes, which crashes the agent immediately.
         // Use acceptEdits + an explicit AllowedTools list instead.
         if (string.Equals(agent.PermissionMode, "bypassPermissions", StringComparison.OrdinalIgnoreCase))
-            return ProvisionResult.Fail(agentName,
+            return Refuse(
                 "PermissionMode 'bypassPermissions' is not supported in fleet containers (processes run as root). " +
                 "Use 'acceptEdits' with an explicit AllowedTools list instead.");
 
-        // Guard: container must not already exist
-        var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
-        if (existing is not null)
-            return ProvisionResult.Fail(agentName,
-                $"container '{agent.ContainerName}' already exists — deprovision first or use reprovision_agent");
+        // Guard: container must not already exist. A reprovision skips it: the container it is
+        // about to replace is still there, and stays there if anything below refuses.
+        if (containerMustBeAbsent)
+        {
+            var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
+            if (existing is not null)
+                return Refuse(
+                    $"container '{agent.ContainerName}' already exists — deprovision first or use reprovision_agent");
+        }
 
         var envFile   = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
         var baseDir   = config["Provisioning:BaseDir"]
@@ -465,13 +504,23 @@ public sealed class ContainerProvisioningService(
         envValues.TryGetValue("FLEET_CTO_AGENT", out var ctoAgentName);
 
         if (DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
-            return ProvisionResult.Fail(agentName, serverUrlFault);
+            return Refuse(serverUrlFault);
 
         var projectContexts = await ResolveProjectContextsAsync(agent);
+        var style = await ResolveOutputStyleAsync(agent);
 
-        await GenerateConfigFilesAsync(agent, baseDir, ctoAgentName ?? "");
-        await GenerateInstructionFilesAsync(agent, baseDir, instructionVersionOverrides);
-        await GenerateProjectContextFilesAsync(agent, baseDir, projectContexts);
+        GeneratedFiles files;
+        try
+        {
+            files = RenderGeneratedFiles(agent, ctoAgentName ?? "", style, projectContexts, instructionVersionOverrides);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // The generators refuse by throwing: a style with no row, a local-model row edited into
+            // an invalid state (#340 D1 point 2). Nothing is written or created yet, so this is a
+            // refusal with the named fault, and a reprovision keeps the old container.
+            return Refuse(ex.Message);
+        }
 
         if (LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
         {
@@ -503,7 +552,26 @@ public sealed class ContainerProvisioningService(
         var expandedBinds = spec.Binds.Select(b => ExpandBindPath(b, baseDir)).ToList();
 
         if (spec.Networks.Count == 0)
-            return ProvisionResult.Fail(agentName, "no networks configured for agent");
+            return Refuse("no networks configured for agent");
+
+        return (new PreparedProvision(agent, spec, expandedBinds, secretPlan, baseDir, files), null);
+    }
+
+    /// <summary>
+    /// Writes the rendered files, tells the forwarder about the new placeholders, then creates and
+    /// starts the container. The container named in <paramref name="prepared"/> must not exist.
+    /// </summary>
+    private async Task<ProvisionResult> CreateAsync(PreparedProvision prepared, CancellationToken ct)
+    {
+        var (agent, spec, expandedBinds, secretPlan, baseDir, files) = prepared;
+        var agentName = agent.Name;
+
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+
+        await WriteConfigFilesAsync(agent, baseDir, files);
+        await WriteInstructionFilesAsync(agent, baseDir, files);
+        await GenerateProjectContextFilesAsync(agent, baseDir, files.ProjectContexts);
 
         var primaryNetwork = spec.Networks[0];
 
@@ -592,6 +660,13 @@ public sealed class ContainerProvisioningService(
     /// </summary>
     public async Task<ProvisionResult> DeprovisionAsync(string agentName, CancellationToken ct = default)
     {
+        using var held = await _agentOperations.AcquireAsync(agentName, ct);
+        return await RemoveAsync(agentName, ct);
+    }
+
+    /// <summary><see cref="DeprovisionAsync"/> for a caller that already holds the agent's lock.</summary>
+    private async Task<ProvisionResult> RemoveAsync(string agentName, CancellationToken ct)
+    {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
@@ -600,12 +675,12 @@ public sealed class ContainerProvisioningService(
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
 
         if (agent is null)
-            return ProvisionResult.Fail(agentName, "agent not found in DB");
+            return ProvisionResult.Fail(agentName, "agent not found in DB") with { Failure = ProvisionFailure.AgentNotFound };
 
         var existing = await docker.InspectContainerAsync(agent.ContainerName, ct);
         if (existing is null)
             return ProvisionResult.Fail(agentName,
-                $"container '{agent.ContainerName}' not found — nothing to deprovision");
+                $"container '{agent.ContainerName}' not found — nothing to deprovision") with { Failure = ProvisionFailure.ContainerNotFound };
 
         logger.LogInformation("Deprovisioning '{Agent}' (container='{Container}')", agentName, agent.ContainerName);
 
@@ -706,12 +781,18 @@ public sealed class ContainerProvisioningService(
     /// Deprovisions then re-provisions the container. Used when config has changed.
     /// An optional imageOverride overrides the DB-configured image (used by CI for PR-specific images).
     /// </summary>
+    /// <remarks>
+    /// The new container is decided and rendered in full before the old one is touched, so a
+    /// refusal for anything in the agent's configuration leaves the old container running.
+    /// </remarks>
     public async Task<ProvisionResult> ReprovisionAsync(
         string agentName,
         string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
         CancellationToken ct = default)
     {
+        using var held = await _agentOperations.AcquireAsync(agentName, ct);
+
         if (DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
 
@@ -719,8 +800,8 @@ public sealed class ContainerProvisioningService(
         if (await DescribeProviderPreflightFaultAsync(agentName, ct) is { } providerFault)
             return ProvisionResult.Fail(agentName, providerFault);
 
-        // Journal faults must be found before DeprovisionAsync. A missing signing key or an
-        // unsupported provider therefore leaves the old, working container untouched.
+        // Journal faults must be found before the old container is removed. A missing signing key or
+        // an unsupported provider therefore leaves the old, working container untouched.
         if (await DescribeJournalProvisioningFaultAsync(agentName, ct) is { } journalFault)
             return ProvisionResult.Fail(agentName, journalFault);
 
@@ -728,18 +809,25 @@ public sealed class ContainerProvisioningService(
         if (await DescribeCodexServerUrlFaultAsync(agentName, ct) is { } serverUrlFault)
             return ProvisionResult.Fail(agentName, serverUrlFault);
 
-        // Bound secrets likewise. Everything ProvisionAsync would refuse for (forwarder off or
+        // Bound secrets likewise. Everything a provision would refuse for (forwarder off or
         // misconfigured, no CA, no address, conflicting names, a state that cannot be written) is
         // found here, while the old container is still running.
         if (await DescribeSecretPlanFaultAsync(agentName, ct) is { } secretFault)
             return ProvisionResult.Fail(agentName, secretFault);
 
-        var deprovision = await DeprovisionAsync(agentName, ct);
+        // And everything else: the permission mode, a style with no row, a local-model fault. The
+        // new container is created from exactly what is rendered here.
+        var (prepared, refusal) = await PrepareAsync(
+            agentName, imageOverride, instructionVersionOverrides, containerMustBeAbsent: false, ct);
+        if (prepared is null)
+            return refusal!;
+
+        var deprovision = await RemoveAsync(agentName, ct);
         if (!deprovision.Success)
         {
             // If the container simply doesn't exist, skip deprovision and go straight to provision.
             // This handles manually-removed containers and first-time provision after config-only updates.
-            if (deprovision.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+            if (deprovision.Failure == ProvisionFailure.ContainerNotFound)
             {
                 logger.LogWarning(
                     "Deprovision skipped for '{Agent}' — container not found, proceeding to provision",
@@ -751,7 +839,7 @@ public sealed class ContainerProvisioningService(
             }
         }
 
-        var provision = await ProvisionAsync(agentName, imageOverride, instructionVersionOverrides, ct);
+        var provision = await CreateAsync(prepared, ct);
         if (!provision.Success)
             return ProvisionResult.Fail(agentName,
                 $"deprovision succeeded but provision failed: {provision.Message}");
@@ -1055,14 +1143,18 @@ public sealed class ContainerProvisioningService(
     // ── config file generation ─────────────────────────────────────────────────
 
     /// <summary>
-    /// Generates appsettings.json, .mcp.json, and settings.json into the agent's
-    /// .generated/ workspace directory before the container is started.
+    /// Renders every file a provision writes under the agent's <c>.generated/</c> directory, in
+    /// memory. Writing them is <see cref="WriteConfigFilesAsync"/> and
+    /// <see cref="WriteInstructionFilesAsync"/>, which decide nothing.
     /// </summary>
-    private async Task GenerateConfigFilesAsync(Agent agent, string baseDir, string ctoAgentName)
+    /// <exception cref="InvalidOperationException">A generator refused; see <see cref="GenerateAppsettingsJson"/>.</exception>
+    private GeneratedFiles RenderGeneratedFiles(
+        Agent agent,
+        string ctoAgentName,
+        OutputStyle? style,
+        ProjectContextPlan projectContexts,
+        IReadOnlyDictionary<string, int>? instructionVersionOverrides)
     {
-        var generatedDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
-        Directory.CreateDirectory(generatedDir);
-
         var enabledTools  = agent.Tools.Where(t => t.IsEnabled).Select(t => t.ToolName).OrderBy(t => t).ToList();
         var mcpEndpoints  = agent.McpEndpoints.Select(e => e.McpName).OrderBy(e => e).ToList();
 
@@ -1082,19 +1174,14 @@ public sealed class ContainerProvisioningService(
                 "Journal enabled for '{Agent}', but it has no Telegram bot token ref; omitting Journal config",
                 agent.Name);
 
-        // The style file is written BEFORE settings.json, so "settings.json names a style that
-        // exists on disk" is a fact about the order rather than a hope. GenerateSettingsJson
-        // refuses the reference outright when the row is missing.
-        var style = await ResolveOutputStyleAsync(agent);
-        await WriteOutputStyleFileAsync(agent, generatedDir, style);
-
         var chat = ChatAgents.BuildProvisioning(agent, journalTokens, config["Chat:SouthUrl"], PrimaryHumanUserIdOrNull());
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), chat));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
+        var appsettings = GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), chat);
+        var mcpJson     = GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled);
+        var settings    = GenerateSettingsJson(agent, ctoAgentName, style);
 
         // #460: the same plan the effective-settings view serves. Written for codex agents only,
         // before the container is created, so the read-only bind always finds a file.
+        string? codexRootToml = null;
         if (HarnessExtra.IsSupportedProvider(agent.Provider))
         {
             var plan = HarnessDefaults.Build(HarnessInputFor(agent));
@@ -1102,9 +1189,34 @@ public sealed class ContainerProvisioningService(
                 logger.LogWarning("harnessExtra ignored for '{Agent}', mode defaults apply: {Reason}", agent.Name, plan.ExtraReason);
             foreach (var note in plan.Notes)
                 logger.LogWarning("harnessExtra for '{Agent}': {Note}", agent.Name, note);
-            if (plan.CodexRootToml is not null)
-                await File.WriteAllTextAsync(Path.Combine(generatedDir, HarnessDefaults.CodexRootTomlFileName), plan.CodexRootToml);
+            codexRootToml = plan.CodexRootToml;
         }
+
+        return new GeneratedFiles(
+            appsettings, mcpJson, settings, codexRootToml, style,
+            RenderInstructionFiles(agent, instructionVersionOverrides), projectContexts);
+    }
+
+    /// <summary>
+    /// Writes appsettings.json, .mcp.json, and settings.json into the agent's
+    /// .generated/ workspace directory before the container is started.
+    /// </summary>
+    private async Task WriteConfigFilesAsync(Agent agent, string baseDir, GeneratedFiles files)
+    {
+        var generatedDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
+        Directory.CreateDirectory(generatedDir);
+
+        // The style file is written BEFORE settings.json, so "settings.json names a style that
+        // exists on disk" is a fact about the order rather than a hope. GenerateSettingsJson
+        // refuses the reference outright when the row is missing.
+        await WriteOutputStyleFileAsync(agent, generatedDir, files.Style);
+
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), files.Appsettings);
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        files.McpJson);
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    files.SettingsJson);
+
+        if (files.CodexRootToml is not null)
+            await File.WriteAllTextAsync(Path.Combine(generatedDir, HarnessDefaults.CodexRootTomlFileName), files.CodexRootToml);
 
         logger.LogInformation(
             "Generated config files for '{Agent}' in {Dir}",
@@ -1201,24 +1313,22 @@ public sealed class ContainerProvisioningService(
         instructionName == "base" ? "_base" : instructionName;
 
     /// <summary>
-    /// Generates roles/_base/system.md and roles/{name}/system.md from DB instruction content
-    /// into the agent's .generated/roles/ workspace directory before the container is started.
+    /// The <c>roles/</c> files for the agent's instructions, from DB instruction content:
+    /// <c>_base/system.md</c> and <c>{name}/system.md</c>. Null when the agent has no instructions.
     /// </summary>
-    private async Task GenerateInstructionFilesAsync(
+    private List<RenderedInstruction>? RenderInstructionFiles(
         Agent agent,
-        string baseDir,
         IReadOnlyDictionary<string, int>? versionOverrides = null)
     {
-        var rolesDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated", "roles");
-
         var instructions = OrderedInstructions(agent);
 
         if (instructions.Count == 0)
         {
             logger.LogWarning("No instructions configured for '{Agent}' — skipping instruction file generation", agent.Name);
-            return;
+            return null;
         }
 
+        var rendered = new List<RenderedInstruction>(instructions.Count);
         foreach (var agentInstruction in instructions)
         {
             var instruction = agentInstruction.Instruction;
@@ -1254,16 +1364,34 @@ public sealed class ContainerProvisioningService(
             }
 
             // "base" → _base/system.md, anything else → {name}/system.md
-            var subDir = InstructionDirectoryName(instruction.Name);
-            var dir    = Path.Combine(rolesDir, subDir);
+            rendered.Add(new RenderedInstruction(InstructionDirectoryName(instruction.Name), version.Content));
+        }
+
+        return rendered;
+    }
+
+    /// <summary>
+    /// Writes the rendered instruction files into the agent's .generated/roles/ workspace directory
+    /// before the container is started.
+    /// </summary>
+    private async Task WriteInstructionFilesAsync(Agent agent, string baseDir, GeneratedFiles files)
+    {
+        if (files.Instructions is null)
+            return;
+
+        var rolesDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated", "roles");
+
+        foreach (var instruction in files.Instructions)
+        {
+            var dir = Path.Combine(rolesDir, instruction.Directory);
             Directory.CreateDirectory(dir);
 
-            await File.WriteAllTextAsync(Path.Combine(dir, "system.md"), version.Content);
+            await File.WriteAllTextAsync(Path.Combine(dir, "system.md"), instruction.Content);
         }
 
         logger.LogInformation(
             "Generated instruction files for '{Agent}' in {Dir} ({Count} instruction(s))",
-            agent.Name, rolesDir, instructions.Count);
+            agent.Name, rolesDir, agent.Instructions.Count);
     }
 
     // ── project contexts ───────────────────────────────────────────────────────
@@ -1452,8 +1580,9 @@ public sealed class ContainerProvisioningService(
                 $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
                 "output_styles — refusing to generate config that drops the style silently.");
 
-        // #340 D1 point 2: a row edited by hand into an invalid state stops here, and reprovision
-        // leaves the agent down with the named fault instead of starting it misconfigured.
+        // #340 D1 point 2: a row edited by hand into an invalid state stops here, and provisioning
+        // refuses with the named fault instead of starting the agent misconfigured. A reprovision
+        // renders before it removes anything, so the old container keeps running.
         if (DescribeLocalModelFault(agent) is { } localFault)
             throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
 
@@ -2014,9 +2143,52 @@ public record NetworkEnsureResult(
 
 public record ProvisionResult(string AgentName, bool Success, string Message)
 {
+    /// <summary>
+    /// Why a failure happened, for a caller that has to act on it. Never serialised: the REST and
+    /// MCP answers are the three fields above, unchanged.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public ProvisionFailure Failure { get; init; }
+
     public static ProvisionResult Ok(string agentName, string message)   => new(agentName, true,  message);
     public static ProvisionResult Fail(string agentName, string message) => new(agentName, false, message);
 }
+
+/// <summary>The failures a caller branches on. Everything else is <see cref="Unspecified"/>.</summary>
+public enum ProvisionFailure
+{
+    Unspecified = 0,
+    AgentNotFound,
+    /// <summary>A deprovision found no container to remove.</summary>
+    ContainerNotFound,
+}
+
+/// <summary>
+/// One provision, decided and rendered: the loaded agent, the container to create and the files to
+/// write. Built once by <c>PrepareAsync</c>; <c>CreateAsync</c> reads nothing else.
+/// </summary>
+internal sealed record PreparedProvision(
+    Agent Agent,
+    ContainerSpec Spec,
+    List<string> ExpandedBinds,
+    SecretPlan SecretPlan,
+    string BaseDir,
+    GeneratedFiles Files);
+
+/// <summary>The contents of the agent's <c>.generated/</c> directory, before any of it is written.</summary>
+/// <param name="Style">The agent's resolved output style row, or null. Whether it becomes a file is <c>HasStyleFile</c>.</param>
+/// <param name="Instructions">The <c>roles/</c> files, or null when the agent has no instructions.</param>
+internal sealed record GeneratedFiles(
+    string Appsettings,
+    string McpJson,
+    string SettingsJson,
+    string? CodexRootToml,
+    OutputStyle? Style,
+    IReadOnlyList<RenderedInstruction>? Instructions,
+    ProjectContextPlan ProjectContexts);
+
+/// <summary>One instruction's <c>roles/{Directory}/system.md</c>.</summary>
+internal sealed record RenderedInstruction(string Directory, string Content);
 
 internal sealed record JournalProvisioning(
     string? IngestToken,

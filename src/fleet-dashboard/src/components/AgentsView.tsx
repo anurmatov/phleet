@@ -1,5 +1,6 @@
 import type { AgentState, WorkflowSummary } from '../types'
 import type { AgentActions } from '../hooks/useAgentActions'
+import { useTick } from '../hooks/useTick'
 import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
 import AgentCard from './AgentCard'
@@ -67,6 +68,8 @@ export default function AgentsView({
     refreshDetail: onRefreshDetail,
     getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass, signalConfirmKey,
   } = workflowActions
+  // Agent uptimes, heartbeat ages and workflow ages are relative to now: redraw as the clock moves.
+  useTick()
   if (sorted.length === 0) {
     return (
       <div className="view-page">

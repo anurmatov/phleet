@@ -248,13 +248,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView])
 
-  const [tick, setTick] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 5000)
-    return () => clearInterval(id)
-  }, [])
-  void tick
-
   // ── What raises an alert ────────────────────────────────────────────────────────────────────
   useEffect(() => {
     const prev = prevAgentsRef.current

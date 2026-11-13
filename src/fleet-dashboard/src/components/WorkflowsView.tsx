@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { WorkflowSummary, SignalDef, SignalButton } from '../types'
 import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import type { WorkflowLists } from '../hooks/useWorkflowLists'
+import { useTick } from '../hooks/useTick'
 import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
 import { PHASE_LABELS } from '../constants'
 
@@ -128,6 +129,8 @@ export default function WorkflowsView({
     runAction: onExecuteWfAction,
     getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass,
   } = actions
+  // The rows show ages ("3m ago"): redraw as the clock moves.
+  useTick()
 
   // ── Highlight / scroll-to ────────────────────────────────────────────────
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())

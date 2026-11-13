@@ -57,6 +57,13 @@ public class UniversalWorkflow
     internal const string BranchTaskIdPatchId = "uwe-branch-task-id-v1";
 
     /// <summary>
+    /// Patch id gating the deterministic id of a <c>cross_namespace_start</c> that names none.
+    /// Consulted only by such a step; see <see cref="NewCrossNamespaceWorkflowId"/> for why a
+    /// value replay never compares still needs one.
+    /// </summary>
+    internal const string CrossNamespaceIdPatchId = "uwe-cross-namespace-id-v1";
+
+    /// <summary>
     /// Separates a step's name from its branch position in a task id. Chosen because it is a URL
     /// unreserved character — the id travels in the cancel route, escaped twice — and because the
     /// position after it is digits and dots only, so the id splits back at the LAST separator
@@ -1265,12 +1272,36 @@ public class UniversalWorkflow
         // Arg order matches StartAsync(targetNamespace, workflowType, workflowId, taskQueue, input). (#685)
         var result = await Workflow.ExecuteActivityAsync<string>(
             "StartCrossNamespaceWorkflow",
-            new object?[] { step.Namespace, workflowType, workflowId ?? Guid.NewGuid().ToString(), step.TaskQueue, args },
+            new object?[] { step.Namespace, workflowType, workflowId ?? NewCrossNamespaceWorkflowId(), step.TaskQueue, args },
             new ActivityOptions { StartToCloseTimeout = TimeSpan.FromSeconds(30) });
 
         if (step.OutputVar != null) SetVar(step.OutputVar, result);
         return result;
     }
+
+    /// <summary>
+    /// The id for a <c>cross_namespace_start</c> that names none.
+    ///
+    /// <para>
+    /// It used to be <c>Guid.NewGuid()</c>, which is not replay-stable: workflow code produced a
+    /// different value every time it ran. Nothing compared it — it is an activity argument, and
+    /// replay checks an activity's id and type only — so it never failed, but it had no business
+    /// in workflow code. It is now <c>Workflow.NewGuid()</c>, from the run's seeded source.
+    /// </para>
+    ///
+    /// <para>
+    /// The patch is there for a different value than this one. The seeded source also names a
+    /// human-input child (<c>"human-input-" + Workflow.NewGuid()</c>), and a child workflow id IS
+    /// compared on replay. A run recorded before this change never drew from the source here, so
+    /// drawing from it on replay would shift the child's id and fail the run. Unpatched histories
+    /// therefore keep the old call exactly; only a run that reaches this for the first time on the
+    /// new engine takes the deterministic id.
+    /// </para>
+    /// </summary>
+    private static string NewCrossNamespaceWorkflowId() =>
+        Workflow.Patched(CrossNamespaceIdPatchId)
+            ? Workflow.NewGuid().ToString()
+            : Guid.NewGuid().ToString();
 
     // -------------------------------------------------------------------------
     // Variable assignment

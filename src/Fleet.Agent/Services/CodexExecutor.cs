@@ -202,7 +202,7 @@ public sealed class CodexExecutor : IAgentExecutor
         await _turnLock.WaitAsync(ct);
 
         string? turnId = null;
-        var abandonReason = "consumer_exit";
+        var relay = new TurnRelay();
         var (forwardedPaths, skippedCount) = CollectImagePaths(images);
 
         Exception? startupError = null;
@@ -273,31 +273,55 @@ public sealed class CodexExecutor : IAgentExecutor
                 };
             }
 
-            await using var stream = StreamTurnAsync(turnId!, ct).GetAsyncEnumerator(ct);
-            while (true)
-            {
-                bool moved;
-                try { moved = await stream.MoveNextAsync(); }
-                catch
-                {
-                    abandonReason = "producer_exception";
-                    throw;
-                }
-                if (!moved)
-                {
-                    abandonReason = "stream_ended";
-                    break;
-                }
-                _lastActivity = DateTimeOffset.UtcNow;
-                yield return stream.Current;
-                if (stream.Current.FinalResult is not null) yield break;
-            }
+            await foreach (var progress in RelayTurnAsync(StreamTurnAsync(turnId!, ct), relay, ct))
+                yield return progress;
         }
         finally
         {
             if (turnId is not null && _activeTurnId == turnId)
-                await AbandonOwnedTurnAsync(turnId, "task", abandonReason, acquireTurnLock: false);
+                await AbandonOwnedTurnAsync(turnId, "task", relay.AbandonReason, acquireTurnLock: false);
             _turnLock.Release();
+        }
+    }
+
+    /// <summary>Why a turn's stream stopped, for the abandon log when the turn is still active.</summary>
+    private sealed class TurnRelay
+    {
+        /// <summary>
+        /// <c>consumer_exit</c> until the stream itself says otherwise: it ended without a terminal
+        /// (<c>stream_ended</c>) or it threw (<c>producer_exception</c>).
+        /// </summary>
+        public string AbandonReason { get; set; } = "consumer_exit";
+    }
+
+    /// <summary>
+    /// The one read loop behind a task turn (<see cref="ExecuteAsync"/>) and a shell command
+    /// (<see cref="SendCommandAsync"/>): relays the turn's progress until its terminal result,
+    /// stamps the activity time on every event and records in <paramref name="relay"/> why the
+    /// stream stopped. The caller's <c>finally</c> reads that after this enumerator is disposed.
+    /// </summary>
+    private async IAsyncEnumerable<AgentProgress> RelayTurnAsync(
+        IAsyncEnumerable<AgentProgress> turn, TurnRelay relay,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        await using var stream = turn.GetAsyncEnumerator(ct);
+        while (true)
+        {
+            bool moved;
+            try { moved = await stream.MoveNextAsync(); }
+            catch
+            {
+                relay.AbandonReason = "producer_exception";
+                throw;
+            }
+            if (!moved)
+            {
+                relay.AbandonReason = "stream_ended";
+                break;
+            }
+            _lastActivity = DateTimeOffset.UtcNow;
+            yield return stream.Current;
+            if (stream.Current.FinalResult is not null) yield break;
         }
     }
 
@@ -414,41 +438,22 @@ public sealed class CodexExecutor : IAgentExecutor
             yield break;
         }
 
-        var abandonReason = "consumer_exit";
+        var relay = new TurnRelay();
         string? commandTurnId = null;
         try
         {
             // Capture this enumeration's id at discovery, not from the shared live marker on
             // dispose: a new command can start after this one's terminal was yielded.
-            await using var stream = StreamTurnAsync(expectedTurnId: null, ct,
-                onTurnResolved: id => commandTurnId = id).GetAsyncEnumerator(ct);
-            while (true)
-            {
-                bool moved;
-                try { moved = await stream.MoveNextAsync(); }
-                catch
-                {
-                    abandonReason = "producer_exception";
-                    throw;
-                }
-                if (!moved)
-                {
-                    abandonReason = "stream_ended";
-                    break;
-                }
-                var progress = stream.Current;
-                _lastActivity = DateTimeOffset.UtcNow;
-
+            var turn = StreamTurnAsync(expectedTurnId: null, ct, onTurnResolved: id => commandTurnId = id);
+            await foreach (var progress in RelayTurnAsync(turn, relay, ct))
                 yield return progress;
-                if (progress.FinalResult is not null) yield break;
-            }
         }
         finally
         {
             try
             {
                 if (commandTurnId is not null)
-                    await AbandonOwnedTurnAsync(commandTurnId, "run", abandonReason, acquireTurnLock: true);
+                    await AbandonOwnedTurnAsync(commandTurnId, "run", relay.AbandonReason, acquireTurnLock: true);
             }
             finally
             {

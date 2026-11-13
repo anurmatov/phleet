@@ -2,8 +2,9 @@ import type { AgentState, WorkflowSummary } from '../types'
 import type { AgentActions } from '../hooks/useAgentActions'
 import { useTick } from '../hooks/useTick'
 import type { WorkflowActions } from '../hooks/useWorkflowActions'
-import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
+import { temporalUiUrl, heartbeatAge } from '../utils'
 import AgentCard from './AgentCard'
+import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import CommsJournalPanel from './CommsJournalPanel'
 
 interface AgentsViewProps {
@@ -54,18 +55,12 @@ export default function AgentsView({
     copyContainer: onCopyContainer,
   } = actions
   const {
-    wfActionMsg, signalStates, signalMsg, signalConfirm, selectedWf, expandedEvents,
+    wfActionMsg, signalStates, signalMsg, signalConfirm,
     menuOpen: wfMenuOpen,
-    history: wfHistory,
-    historyLoading: wfHistoryLoading,
-    historyError: wfHistoryError,
     openDetail: onWfClick,
     confirmAction: onWfAction,
     signalClick: onSignalClick,
     toggleMenu: onToggleMenu,
-    toggleEvent: onToggleEvent,
-    closeDetail: onCloseDetail,
-    refreshDetail: onRefreshDetail,
     getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass, signalConfirmKey,
   } = workflowActions
   // Agent uptimes, heartbeat ages and workflow ages are relative to now: redraw as the clock moves.
@@ -277,81 +272,7 @@ export default function AgentsView({
         </div>
       )}
 
-      {/* ── Workflow detail panel ── */}
-      {selectedWf && (
-        <div className="wf-detail-overlay" onClick={onCloseDetail}>
-          <div className="wf-detail-modal" onClick={e => e.stopPropagation()}>
-            <div className="wf-detail-header">
-              <span className="wf-detail-title">
-                {selectedWf.workflowType} / <span className="wf-detail-id">{selectedWf.workflowId}</span>
-              </span>
-              <div className="wf-detail-header-actions">
-                <button className="wf-detail-refresh" onClick={onRefreshDetail} disabled={wfHistoryLoading} title="Refresh history">↻</button>
-                <button className="wf-detail-close" onClick={onCloseDetail}>✕</button>
-              </div>
-            </div>
-            <div className="wf-detail-body">
-              {wfHistoryLoading && <div className="wf-detail-loading">Loading history…</div>}
-              {wfHistoryError && <div className="wf-detail-error">Error: {wfHistoryError}</div>}
-              {!wfHistoryLoading && !wfHistoryError && wfHistory.length === 0 && (
-                <div className="wf-detail-empty">No history events found.</div>
-              )}
-              {(() => {
-                const agentByActivityType = new Map<string, string>()
-                for (const e of wfHistory) {
-                  if (e.eventType === 'ActivityScheduled' && e.agent && e.activityType) {
-                    agentByActivityType.set(e.activityType, e.agent)
-                  }
-                }
-                return wfHistory.map(ev => {
-                  const agent = ev.agent ?? (ev.activityType ? agentByActivityType.get(ev.activityType) ?? null : null)
-                  const expanded = expandedEvents.has(ev.eventId)
-                  const hasDetail = !!(ev.inputSummary || ev.outputSummary || ev.failureMessage)
-                  return (
-                    <div key={ev.eventId} className={`wf-ev wf-ev-${ev.eventType.toLowerCase()}`}>
-                      <div
-                        className="wf-ev-header"
-                        onClick={hasDetail ? () => onToggleEvent(ev.eventId) : undefined}
-                        style={hasDetail ? { cursor: 'pointer' } : undefined}
-                      >
-                        <span className="wf-ev-type">{ev.eventType}</span>
-                        {ev.activityType && <span className="wf-ev-activity">{ev.activityType}</span>}
-                        {agent && <span className="wf-ev-agent">→ {agent}</span>}
-                        {ev.signalName && <span className="wf-ev-signal">{ev.signalName}</span>}
-                        {ev.failureMessage && !hasDetail && <span className="wf-ev-failure">{ev.failureMessage}</span>}
-                        <span className="wf-ev-time">{new Date(ev.timestamp).toLocaleTimeString()}</span>
-                        {hasDetail && <span className="wf-ev-expand">{expanded ? '▲' : '▼'}</span>}
-                      </div>
-                      {expanded && hasDetail && (
-                        <div className="wf-ev-detail">
-                          {ev.inputSummary && (
-                            <div className="wf-ev-section">
-                              <div className="wf-ev-section-label">Input</div>
-                              <pre className="wf-ev-payload">{decodeUnicode(ev.inputSummary)}</pre>
-                            </div>
-                          )}
-                          {ev.outputSummary && (
-                            <div className="wf-ev-section">
-                              <div className="wf-ev-section-label">Output</div>
-                              <pre className="wf-ev-payload">{decodeUnicode(ev.outputSummary)}</pre>
-                            </div>
-                          )}
-                          {ev.failureMessage && (
-                            <div className="wf-ev-section">
-                              <div className="wf-ev-section-label">Failure</div>
-                              <pre className="wf-ev-payload">{decodeUnicode(ev.failureMessage)}</pre>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })
-              })()}
-            </div>
-          </div>
-        </div>
-      )}
+      <WorkflowHistoryPanel actions={workflowActions} />
     </div>
   )
 }

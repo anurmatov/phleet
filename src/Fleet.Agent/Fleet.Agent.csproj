@@ -7,6 +7,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
+    <ProjectReference Include="..\Fleet.Shared.Telegram\Fleet.Shared.Telegram.csproj" />
+    <ProjectReference Include="..\Fleet.Shared.Messaging\Fleet.Shared.Messaging.csproj" />
     <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
     <!--
       Contracts ONLY, never Fleet.Conversations (#303 D1, MUST NOT 14).

@@ -37,7 +37,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Conversations.Contracts\Fleet.Conversations.Contracts.csproj" />
     <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
-    <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
   </ItemGroup>
 
   <!--

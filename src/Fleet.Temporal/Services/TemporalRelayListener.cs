@@ -41,8 +41,8 @@ internal enum RelaySignalOutcome
 /// </summary>
 public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 {
-    private const string QueueName = "fleet.agent.temporal-bridge";
-    private const string RoutingKey = "temporal-bridge";
+    private const string QueueName = RelayBroker.TemporalBridgeQueue;
+    private const string RoutingKey = RelayBroker.TemporalBridgeKey;
 
     private static readonly Regex StatusPrefixRegex =
         new(@"^\[status:\s*(\w+)\]\s*", RegexOptions.Compiled);
@@ -264,7 +264,7 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
-            var message = JsonSerializer.Deserialize<RelayMessage>(json);
+            var message = RelayWire.Deserialize(json);
 
             if (message is null)
             {

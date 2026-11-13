@@ -35,4 +35,9 @@
     <ProjectReference Include="..\..\src\Fleet.Agent\Fleet.Agent.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The wire contracts are used throughout; see src/Fleet.Contracts. -->
+    <Using Include="Fleet.Contracts" />
+  </ItemGroup>
+
 </Project>

@@ -1,10 +1,10 @@
 using System.Text.Json.Serialization;
 
-namespace Fleet.Agent.Models;
+namespace Fleet.Contracts;
 
 /// <summary>
-/// Per-user info carried in a config.update message so welcome DMs can address the
-/// newly-approved user by name without a separate Telegram lookup.
+/// A newly allowed user in a <see cref="ConfigUpdateMessage"/>, with the name the welcome DM can
+/// address them by without a Telegram lookup.
 /// </summary>
 public sealed class AddedUserInfo
 {
@@ -19,8 +19,9 @@ public sealed class AddedUserInfo
 }
 
 /// <summary>
-/// Payload for a config.update relay message published by the orchestrator
-/// when an agent's AllowedUserIds or AllowedGroupIds are changed at runtime.
+/// The text of a <see cref="RelayMessageType.ConfigUpdate"/> message: what changed in an agent's
+/// AllowedUserIds and AllowedGroupIds, published by the orchestrator so it applies without a
+/// reprovision.
 /// </summary>
 public sealed class ConfigUpdateMessage
 {
@@ -30,10 +31,6 @@ public sealed class ConfigUpdateMessage
     [JsonPropertyName("target_agent")]
     public string TargetAgent { get; init; } = "";
 
-    /// <summary>
-    /// Newly-allowed users, each with optional name info so the welcome DM can
-    /// address them by username or first name.
-    /// </summary>
     [JsonPropertyName("added_users")]
     public IReadOnlyList<AddedUserInfo> AddedUsers { get; init; } = [];
 
@@ -48,8 +45,9 @@ public sealed class ConfigUpdateMessage
 }
 
 /// <summary>
-/// Payload for an access.request relay message published to the CTO agent
-/// when an unknown user DMs a bot with CanReceiveChatRequests=true.
+/// What an agent publishes on <see cref="OrchestratorBroker.Exchange"/> under
+/// <see cref="OrchestratorBroker.AccessRequest"/> when an unknown user DMs a bot that takes chat
+/// requests. The orchestrator forwards it to the CTO agent as a directive.
 /// </summary>
 public sealed class AccessRequestPayload
 {

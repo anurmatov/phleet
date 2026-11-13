@@ -5,28 +5,6 @@ using RabbitMQ.Client;
 namespace Fleet.Conversations;
 
 /// <summary>
-/// The broker topology this service owns, as the design's topology table fixes it.
-/// </summary>
-public static class ConversationBroker
-{
-    /// <summary>Commands to the agent. Direct; the routing key is the agent name.</summary>
-    public const string CommandExchange = "fleet.conversations";
-
-    /// <summary>Committed events. Direct; the routing key is the conversation id.</summary>
-    public const string EventExchange = "fleet.conversations.events";
-
-    /// <summary>
-    /// An agent's durable inbound queue, bound to <see cref="CommandExchange"/> under the agent's
-    /// name. The agent's name is its unique orchestrator name (#530 D9).
-    /// </summary>
-    public static string CommandQueue(string agentName) =>
-        $"fleet.conversations.inbound.{agentName}";
-
-    /// <summary>The command queue's arguments. One definition: a mismatch is a broker error.</summary>
-    public static Dictionary<string, object?> CommandQueueArguments() => new() { ["x-queue-type"] = "quorum" };
-}
-
-/// <summary>
 /// Publishes an outbox batch to RabbitMQ and reports back <b>only what the broker confirmed</b>.
 /// </summary>
 /// <remarks>

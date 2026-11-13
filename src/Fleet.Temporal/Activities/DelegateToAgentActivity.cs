@@ -31,7 +31,7 @@ public sealed class DelegateToAgentActivity
     /// The Sender field used in directive RelayMessages published by this bridge.
     /// Agents reply to "temporal-bridge" routing key which maps to our listener queue.
     /// </summary>
-    private const string BridgeSender = "temporal-bridge";
+    private const string BridgeSender = RelaySender.TemporalBridge;
 
     /// <summary>
     /// <c>owner/name</c>, the same rule the orchestrator applies to <c>repo</c> routes (#347).
@@ -491,7 +491,7 @@ public sealed class DelegateToAgentActivity
             TaskId: taskId,
             Repo: repo);
 
-        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+        var body = RelayWire.Serialize(message, RelayShape.Delegation);
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
         var routingKey = agentName.ToLowerInvariant();
 

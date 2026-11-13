@@ -23,4 +23,11 @@
     <PackageReference Include="Temporalio" />
     <PackageReference Include="Temporalio.Extensions.Hosting" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+    <!-- The wire contracts are used throughout; see src/Fleet.Contracts. -->
+    <Using Include="Fleet.Contracts" />
+  </ItemGroup>
+
 </Project>

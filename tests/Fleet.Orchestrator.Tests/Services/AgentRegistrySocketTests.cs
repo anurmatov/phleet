@@ -87,8 +87,8 @@ public class AgentRegistrySocketTests
     public async Task TheFirstSnapshotToANewSocket_GoesThroughTheSameGate()
     {
         var registry = NewRegistry();
-        registry.UpdateAgent(new Fleet.Orchestrator.Models.AgentHeartbeat("agent1", "idle", DateTimeOffset.UtcNow));
-        registry.UpdateAgent(new Fleet.Orchestrator.Models.AgentHeartbeat("agent2", "idle", DateTimeOffset.UtcNow));
+        registry.UpdateAgent(new AgentHeartbeat("agent1", "idle", DateTimeOffset.UtcNow));
+        registry.UpdateAgent(new AgentHeartbeat("agent2", "idle", DateTimeOffset.UtcNow));
         var socket = new FakeSocket { SendDelay = TimeSpan.FromMilliseconds(5) };
         registry.AddSocket(socket);
 

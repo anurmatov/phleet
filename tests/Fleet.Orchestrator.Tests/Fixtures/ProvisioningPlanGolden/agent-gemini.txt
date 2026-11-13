@@ -1,0 +1,187 @@
+## preview
+container: fleet-agent-gemini (resolved fleet-agent-gemini)
+image: fleet:agent-pinned
+memory: 805306368
+secret network address: (none)
+env:
+  Telegram__BotToken=synthetic-gemini-bot-token
+  RabbitMq__Host=rabbitmq
+  GIT_USER_NAME=Acto
+  GIT_USER_EMAIL=fleet-agent-gemini@users.noreply.github.com
+  GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
+  Whisper__ServiceUrl=http://fleet-whisper:8080
+  Tts__ServiceUrl=http://fleet-kokoro-tts:8880
+binds:
+  ./workspaces/fleet-agent-gemini:/workspace
+  ./workspaces/fleet-agent-gemini/.generated/projects:/app/projects:ro
+  ./workspaces/fleet-agent-gemini/.generated/appsettings.json:/app/appsettings.json:ro
+  ./workspaces/fleet-agent-gemini/claude:/root/.claude
+  ./workspaces/fleet-agent-gemini/.generated/settings.json:/root/.claude/settings.json:ro
+  ./workspaces/fleet-agent-gemini/codex:/root/.codex
+  ./workspaces/fleet-agent-gemini/.generated/.mcp.json:/workspace/.mcp.json:ro
+  ./workspaces/fleet-agent-gemini/.generated/roles:/app/roles:ro
+  ./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw
+networks:
+  fleet-net
+extra hosts:
+diffs:
+  container not found — not running
+
+## result
+ok: container 'fleet-agent-gemini' created and started (id=0123456789ab, networks=[fleet-net])
+
+## docker calls
+GET /v1.41/containers/fleet-agent-gemini/json
+POST /v1.41/containers/create
+POST /v1.41/containers/fleet-agent-gemini/start
+
+## create body
+{
+  "Image": "fleet:agent-pinned",
+  "Env": [
+    "Telegram__BotToken=synthetic-gemini-bot-token",
+    "RabbitMq__Host=rabbitmq",
+    "GIT_USER_NAME=Acto",
+    "GIT_USER_EMAIL=fleet-agent-gemini@users.noreply.github.com",
+    "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
+    "Whisper__ServiceUrl=http://fleet-whisper:8080",
+    "Tts__ServiceUrl=http://fleet-kokoro-tts:8880"
+  ],
+  "ExposedPorts": {
+    "8080/tcp": {}
+  },
+  "HostConfig": {
+    "Memory": 805306368,
+    "Binds": [
+      "<base>/workspaces/fleet-agent-gemini:/workspace",
+      "<base>/workspaces/fleet-agent-gemini/.generated/projects:/app/projects:ro",
+      "<base>/workspaces/fleet-agent-gemini/.generated/appsettings.json:/app/appsettings.json:ro",
+      "<base>/workspaces/fleet-agent-gemini/claude:/root/.claude",
+      "<base>/workspaces/fleet-agent-gemini/.generated/settings.json:/root/.claude/settings.json:ro",
+      "<base>/workspaces/fleet-agent-gemini/codex:/root/.codex",
+      "<base>/workspaces/fleet-agent-gemini/.generated/.mcp.json:/workspace/.mcp.json:ro",
+      "<base>/workspaces/fleet-agent-gemini/.generated/roles:/app/roles:ro",
+      "<base>/.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw"
+    ],
+    "RestartPolicy": {
+      "Name": "unless-stopped"
+    },
+    "NetworkMode": "fleet-net",
+    "PortBindings": {
+      "8080/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "8085"
+        }
+      ]
+    },
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-size": "10m",
+        "max-file": "3"
+      }
+    }
+  },
+  "NetworkingConfig": {
+    "EndpointsConfig": {
+      "fleet-net": {}
+    }
+  }
+}
+
+## network connects
+
+## generated files
+--- .mcp.json
+{
+  "mcpServers": {
+    "fleet-memory": {
+      "type": "http",
+      "url": "http://fleet-memory:3100?agent=agent-gemini"
+    },
+    "fleet-journal-files": {
+      "type": "http",
+      "url": "http://127.0.0.1:8091/journal-files/v1/mcp"
+    }
+  }
+}
+--- appsettings.json
+{
+  "Agent": {
+    "Name": "agent-gemini",
+    "ContainerName": "fleet-agent-gemini",
+    "Role": "co-cto",
+    "Model": "gemini-2.5-pro",
+    "Provider": "gemini",
+    "Projects": [],
+    "AllowedTools": [
+      "mcp__fleet-journal-files__fetch_attachment"
+    ],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ProactiveIntervalMinutes": 0,
+    "GroupListenMode": "mention",
+    "GroupDebounceSeconds": 15,
+    "WarmupTimeoutSeconds": 60,
+    "ShortName": "",
+    "ShowStats": true,
+    "PrefixMessages": false,
+    "FormattingMode": 0,
+    "SuppressToolMessages": false,
+    "Effort": null,
+    "JsonSchema": null,
+    "AgentsJson": null,
+    "CodexSandboxMode": null,
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "InstructionOrder": [
+      "developer"
+    ],
+    "ReplyLookup": "provider_headers_unsupported",
+    "OutputStyleBody": "Answer in one short paragraph."
+  },
+  "Telegram": {
+    "AllowedUserIds": [
+      4242
+    ],
+    "AllowedGroupIds": [],
+    "SendOnly": true,
+    "CanReceiveChatRequests": false,
+    "RequestReceivedMessage": null,
+    "PrimaryHumanUserId": 4242
+  },
+  "Journal": {
+    "IngestToken": "cj1.ingest.agent-gemini.wNUKGt5yfDLkkY8FotvL6TxuvbYZv9TYsIDcBXCj-Nk",
+    "ExcludedChatIds": "-1005,-1003",
+    "ReadToken": "cj1.read.agent-gemini.E5AnYo8nL4E0w_vPr1_a4Zn4oAzBdRmeY5ULpEoW-wk",
+    "FilesEnabled": true,
+    "MediaEnabled": true
+  },
+  "Conversations": {
+    "SouthBaseUrl": "http://fleet-comms:8082",
+    "SouthBearerToken": "cj1.south.agent-gemini.X0x5r8yIDki9s5mE4DbHo1NNQTsmeo0YJWPzSouNihY",
+    "PrimaryHumanPrincipalId": "owner"
+  }
+}
+--- roles/developer/system.md
+Developer instruction.
+
+--- settings.json
+{
+  "permissions": {
+    "allow": [
+      "mcp__fleet-journal-files__fetch_attachment",
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-temporal__notify_cto"
+    ]
+  }
+}
+## log lines
+[Information] Generating config for 'agent-gemini': 1 tools [mcp__fleet-journal-files__fetch_attachment], 0 MCP endpoints [], permissionMode=acceptEdits
+[Information] Generated config files for 'agent-gemini' in <base>/workspaces/fleet-agent-gemini/.generated
+[Information] Generated instruction files for 'agent-gemini' in <base>/workspaces/fleet-agent-gemini/.generated/roles (1 instruction(s))
+[Information] No projects configured for 'agent-gemini' — skipping project context file generation
+[Information] Provisioning 'agent-gemini' container='fleet-agent-gemini' image='fleet:agent-pinned'

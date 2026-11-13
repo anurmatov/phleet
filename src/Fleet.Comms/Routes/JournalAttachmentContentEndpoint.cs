@@ -37,6 +37,11 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
         using var whole = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, deadline.Token);
         var ct = whole.Token;
         string result = "internal";
+        // An abort is requested here and carried out in the last finally, after the subject and
+        // global slots are released. Aborting first let the client see the reset while this request
+        // still held its slots, so an immediate retry could be answered "busy" for a fetch that had
+        // already ended.
+        var abort = false;
         async Task Refuse(int status, string body, string code)
         { result = code; context.Response.StatusCode = status; context.Response.ContentType = "application/json"; await context.Response.WriteAsync(body, ct); }
         async Task Unavailable(string reason) => await Refuse(409, JournalAttachmentRequest.Unavailable(reason), reason);
@@ -107,13 +112,13 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
                 while (true)
                 {
                     var read = await stream.ReadAsync(buffer, ct); if (read == 0) break;
-                    sent += read; if (sent > length) { result = "integrity_failed"; context.Abort(); return; }
+                    sent += read; if (sent > length) { result = "integrity_failed"; abort = true; return; }
                     hash.AppendData(buffer.AsSpan(0, read));
                     if (pending.Length > 0) await context.Response.Body.WriteAsync(pending, ct);
                     pending = buffer.AsSpan(0, read).ToArray();
                 }
                 if (sent != length || !string.Equals(Convert.ToHexStringLower(hash.GetHashAndReset()), row.Sha256, StringComparison.Ordinal))
-                { result = "integrity_failed"; context.Abort(); return; }
+                { result = "integrity_failed"; abort = true; return; }
                 if (pending.Length > 0) await context.Response.Body.WriteAsync(pending, ct);
                 stats.AttachmentFetchBytes(sent); result = "ok";
             }
@@ -125,8 +130,9 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
         }
         catch (Exception e) when (e is JournalObjectStoreUnavailableException or JournalStoreUnavailableException or OperationCanceledException or IOException)
         {
-            if (context.Response.HasStarted || deadline.IsCancellationRequested || context.RequestAborted.IsCancellationRequested)
-            { result = "store_unavailable"; context.Abort(); }
+            // `abort` first: a failure while unwinding an integrity abort must not turn into a 503 body.
+            if (abort || context.Response.HasStarted || deadline.IsCancellationRequested || context.RequestAborted.IsCancellationRequested)
+            { result = "store_unavailable"; abort = true; }
             else
             {
                 context.Response.Clear(); result = "store_unavailable"; context.Response.StatusCode = 503;
@@ -134,6 +140,10 @@ public sealed class JournalAttachmentContentEndpoint(IJournalAttachmentSource? s
                 await context.Response.WriteAsync("{\"error\":\"store_unavailable\",\"retryable\":true}", context.RequestAborted);
             }
         }
-        finally { stats.RecordAttachmentFetch(result); }
+        finally
+        {
+            stats.RecordAttachmentFetch(result);
+            if (abort) context.Abort();
+        }
     }
 }

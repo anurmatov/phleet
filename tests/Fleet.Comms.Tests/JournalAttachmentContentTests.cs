@@ -135,7 +135,23 @@ public sealed class JournalAttachmentContentTests
         await using var host = await Host.Start(); host.Objects.Bytes = Encoding.UTF8.GetBytes("different");
         await Assert.ThrowsAnyAsync<Exception>(async () =>
         { using var reply = await host.Send(); await reply.Content.ReadAsByteArrayAsync(); });
+        // The slots are released before the abort is carried out, so they are free by the time any
+        // client can see it. This read used to race the endpoint's finally block and lose now and then.
         Assert.Equal(0, host.Stats.AttachmentFetchInFlight);
+        // And the same subject can fetch again at once: it is not told "busy" for a fetch that ended.
+        host.Objects.Bytes = Encoding.UTF8.GetBytes("synthetic");
+        using var again = await host.Send(); Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+    }
+
+    [Fact]
+    public async Task StreamLongerThanItsRecordAbortsAndReleasesItsSlots()
+    {
+        await using var host = await Host.Start(); host.Objects.Bytes = Encoding.UTF8.GetBytes("synthetic and then some");
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+        { using var reply = await host.Send(); await reply.Content.ReadAsByteArrayAsync(); });
+        Assert.Equal(0, host.Stats.AttachmentFetchInFlight);
+        host.Objects.Bytes = Encoding.UTF8.GetBytes("synthetic");
+        using var again = await host.Send(); Assert.Equal(HttpStatusCode.OK, again.StatusCode);
     }
 
     [Fact]
@@ -193,6 +209,31 @@ public sealed class JournalAttachmentContentTests
         Assert.Equal(0, host.Stats.AttachmentFetchInFlight);
     }
 
+    [Fact]
+    public async Task AbortIsNotShownToTheClientWhileItsSlotsAreStillHeld()
+    {
+        // The stream holds its own close open, which holds the endpoint between deciding to abort
+        // and releasing its slots. That is the window the client must not be able to see into.
+        await using var host = await Host.Start();
+        var stream = new GatedStream(Encoding.UTF8.GetBytes("different")); host.Objects.Stream = stream;
+        var pending = host.Send();
+        await stream.Closing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using (var busy = await host.Send()) Assert.Equal(HttpStatusCode.TooManyRequests, busy.StatusCode);
+        Assert.False(pending.IsCompleted);
+
+        stream.Release.SetResult();
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+        { using var reply = await pending.WaitAsync(TimeSpan.FromSeconds(5)); await reply.Content.ReadAsByteArrayAsync(); });
+        Assert.Equal(0, host.Stats.AttachmentFetchInFlight);
+    }
+
+    private sealed class GatedStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public TaskCompletionSource Closing = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask DisposeAsync() { Closing.TrySetResult(); await Release.Task; await base.DisposeAsync(); }
+    }
     private sealed class StalledStream : MemoryStream
     {
         public TaskCompletionSource Reading = new(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -49,6 +49,22 @@ public class UniversalWorkflow
     internal const string LoopFinalContinuePatchId = "uwe-loop-final-continue-v1";
 
     /// <summary>
+    /// Patch id gating the branch discriminator on a delegation's task id. It is consulted ONLY by
+    /// a delegation that runs inside a parallel branch, so a run that never delegates from one
+    /// records no marker and keeps the history it always had. A run that already scheduled such a
+    /// delegation before this shipped replays without the marker and keeps its old ids for life.
+    /// </summary>
+    internal const string BranchTaskIdPatchId = "uwe-branch-task-id-v1";
+
+    /// <summary>
+    /// Separates a step's name from its branch position in a task id. Chosen because it is a URL
+    /// unreserved character — the id travels in the cancel route, escaped twice — and because the
+    /// position after it is digits and dots only, so the id splits back at the LAST separator
+    /// whatever the step is called.
+    /// </summary>
+    internal const char BranchSeparator = '~';
+
+    /// <summary>
     /// Error type stamped on the refusal to emit an approver-only gate signal.
     ///
     /// It exists so the refusal can be excluded from the <c>ignoreFailure</c> catch by TYPE rather
@@ -121,6 +137,20 @@ public class UniversalWorkflow
     /// deterministic.
     /// </summary>
     private int _gateVisitCount;
+
+    /// <summary>
+    /// Where the running code sits among parallel branches: the zero-based index of its branch at
+    /// each enclosing <c>parallel</c>, outermost first and dot-separated (<c>"2"</c>,
+    /// <c>"0.3"</c>), or null outside every parallel step.
+    ///
+    /// <para>
+    /// An <see cref="AsyncLocal{T}"/>, like <c>TemplateEngine.IterationOverlay</c>: each branch
+    /// captures its own value at its first await, so interleaved branches never read each other's.
+    /// Setting it is workflow state only — no command — and it is derived from the definition and
+    /// the resolved item list, so it is the same on replay.
+    /// </para>
+    /// </summary>
+    private readonly AsyncLocal<string?> _branchPath = new();
 
     private TemplateEngine _template = null!;
     private bool _skipRemaining;
@@ -346,10 +376,28 @@ public class UniversalWorkflow
 
     private async Task<object?> ExecuteParallelAsync(ParallelStep step)
     {
+        // Read once, before any branch starts: this parallel's own position, which its branches
+        // extend. Null when it is not itself inside a branch.
+        var parentPath = _branchPath.Value;
+
         if (step.Steps is { Length: > 0 })
         {
-            // Static parallel: all branches run concurrently
-            await WhenAllBranchesAsync(step.Steps.Select(s => (Task)ExecuteStepAsync(s)).ToList());
+            // Static parallel: all branches run concurrently.
+            //
+            // Each branch is started exactly as before — a direct call, in order, with nothing
+            // awaited in between — so the commands it emits and when its continuations run are
+            // unchanged. The position is set just before the call: the branch runs on this
+            // execution context until its first await and captures the value there, and the next
+            // assignment here cannot reach what it captured.
+            var branches = new List<Task>(step.Steps.Length);
+            for (var i = 0; i < step.Steps.Length; i++)
+            {
+                _branchPath.Value = BranchPath(parentPath, i);
+                branches.Add(ExecuteStepAsync(step.Steps[i]));
+            }
+            _branchPath.Value = parentPath;
+
+            await WhenAllBranchesAsync(branches);
             return null;
         }
 
@@ -368,6 +416,7 @@ public class UniversalWorkflow
             // overwrites when tasks interleave at activity await boundaries. (#686)
             var tasks = itemList.Select((item, idx) => (Func<Task>)(async () =>
             {
+                _branchPath.Value = BranchPath(parentPath, idx);
                 _template.IterationOverlay.Value = new Dictionary<string, object?> { [step.ItemVar!] = item };
                 var result = await ExecuteStepAsync(step.Step!);
                 results[idx] = result;
@@ -467,7 +516,7 @@ public class UniversalWorkflow
 
         var target = _template.ResolveString(step.Target);
         var instruction = await ResolveInstructionAsync(step);
-        var taskId = $"{Workflow.Info.WorkflowId}/{step.Name ?? "delegate"}";
+        var taskId = DelegationTaskId(step);
         var timeout = TimeSpan.FromMinutes(step.TimeoutMinutes);
         var repo = step.Repo is null ? null : _template.ResolveString(step.Repo);
 
@@ -498,6 +547,41 @@ public class UniversalWorkflow
 
         return result.Text;
     }
+
+    /// <summary>
+    /// The id a delegation is correlated by: the bridge keeps ONE waiter per id, the agent drops a
+    /// directive whose id it is already working on, and the agent's reply is matched back by it.
+    ///
+    /// <para>
+    /// It used to be <c>{workflowId}/{step name}</c> everywhere. That is unique only while one
+    /// delegation of a step is in flight at a time, and a parallel fan-out runs the same step once
+    /// per item: every branch registered under the same id, the last one took the waiter, and the
+    /// first reply completed that branch while the others ran to their timeout.
+    /// </para>
+    ///
+    /// <para>
+    /// A delegation inside a parallel branch now carries its branch position after
+    /// <see cref="BranchSeparator"/> — <c>wf/review~2</c>, or <c>wf/inner~1.0</c> when nested.
+    /// Outside any branch the id is exactly what it was, and the patch is not even consulted, so
+    /// those runs record nothing new. The escalation notification, a wait's reminder and a retried
+    /// attempt all come through here and get the same position as the step they belong to; inside
+    /// one branch they run one after another, as they always did.
+    /// </para>
+    /// </summary>
+    private string DelegationTaskId(DelegateStep step)
+    {
+        var taskId = $"{Workflow.Info.WorkflowId}/{step.Name ?? "delegate"}";
+
+        if (_branchPath.Value is not { } branch) return taskId;
+
+        return Workflow.Patched(BranchTaskIdPatchId)
+            ? $"{taskId}{BranchSeparator}{branch}"
+            : taskId;
+    }
+
+    private static string BranchPath(string? parent, int index) =>
+        parent is null ? index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                       : $"{parent}.{index.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     /// <summary>
     /// The status a definition sees in <c>statusVar</c>: the relay token trimmed and lower-cased,

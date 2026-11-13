@@ -1,11 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type {
-  WorkflowSummary,
-  WorkflowEvent,
-  SignalDef,
-  SignalButton,
-  WfActionState,
-} from '../types'
+import type { WorkflowSummary, SignalDef, SignalButton } from '../types'
+import type { WorkflowActions } from '../hooks/useWorkflowActions'
+import type { WorkflowLists } from '../hooks/useWorkflowLists'
 import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
 import { PHASE_LABELS } from '../constants'
 
@@ -93,91 +89,46 @@ function SignalButtons({
 // ── WorkflowsView ─────────────────────────────────────────────────────────────
 
 interface WorkflowsViewProps {
+  /** The running workflows, kept current by the dashboard socket. */
   workflows: WorkflowSummary[]
-  completedWorkflows: WorkflowSummary[]
-  completedCollapsed: boolean
-  completedLoading: boolean
-  nsFilter: string
-  namespaces: string[]
-  filteredWorkflows: WorkflowSummary[]
-  filteredCompletedWorkflows: WorkflowSummary[]
+  /** Filter, completed runs and manual re-reads (hooks/useWorkflowLists.ts). */
+  lists: WorkflowLists
+  /** Signals, cancel/restart/kill and the history panel (hooks/useWorkflowActions.ts). */
+  actions: WorkflowActions
   agentByWorkflow: Record<string, string>
-  wfActionStates: Record<string, WfActionState>
-  wfActionMsg: Record<string, string>
-  signalStates: Record<string, 'idle' | 'pending' | 'success' | 'error'>
-  signalMsg: Record<string, string>
-  sentSignals: Set<string>
-  signalRegistry: Record<string, SignalDef[]>
-  wfMenuOpen: Record<string, boolean>
-  selectedWf: WorkflowSummary | null
-  wfHistory: WorkflowEvent[]
-  wfHistoryLoading: boolean
-  wfHistoryError: string | null
-  expandedEvents: Set<number>
-  onNsFilter: (ns: string) => void
-  onToggleCompleted: () => void
-  onRefreshCompleted: () => void
-  onWfClick: (wf: WorkflowSummary) => void
-  onSignalClick: (wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) => void
-  onToggleMenu: (k: string) => void
-  onToggleEvent: (eventId: number) => void
-  onCloseDetail: () => void
-  onRefreshDetail: () => void
-  getSignalDefs: (wf: WorkflowSummary) => SignalDef[]
-  wfActionState: (wf: WorkflowSummary) => WfActionState
-  signalKey: (wf: WorkflowSummary) => string
-  wfKey: (wf: WorkflowSummary) => string
-  wfStatusClass: (wf: WorkflowSummary, signalDefs: SignalDef[]) => string
-  onSendSignal: (wf: WorkflowSummary, sigName: string, payload: string) => void
-  onExecuteWfAction: (wf: WorkflowSummary, action: 'cancel' | 'restart' | 'terminate') => void
   highlightedEntityId?: string | null
   onClearHighlight?: () => void
-  onStartWorkflow: () => void
-  onRefreshWorkflows: () => void
-  workflowsLoading: boolean
 }
 
 export default function WorkflowsView({
-  workflows,
-  completedCollapsed,
-  completedLoading,
-  nsFilter,
-  namespaces,
-  filteredWorkflows,
-  filteredCompletedWorkflows,
-  agentByWorkflow,
-  wfActionMsg,
-  signalStates,
-  signalMsg,
-  sentSignals,
-  wfMenuOpen,
-  selectedWf,
-  wfHistory,
-  wfHistoryLoading,
-  wfHistoryError,
-  expandedEvents,
-  onNsFilter,
-  onToggleCompleted,
-  onRefreshCompleted,
-  onWfClick,
-  onSignalClick,
-  onToggleMenu,
-  onToggleEvent,
-  onCloseDetail,
-  onRefreshDetail,
-  getSignalDefs,
-  wfActionState,
-  signalKey,
-  wfKey,
-  wfStatusClass,
-  onSendSignal,
-  onExecuteWfAction,
-  highlightedEntityId,
-  onClearHighlight,
-  onStartWorkflow,
-  onRefreshWorkflows,
-  workflowsLoading,
+  workflows, lists, actions, agentByWorkflow, highlightedEntityId, onClearHighlight,
 }: WorkflowsViewProps) {
+  const {
+    completedCollapsed, completedLoading, nsFilter, namespaces, filteredWorkflows, filteredCompletedWorkflows,
+    workflowsLoading,
+    setNsFilter: onNsFilter,
+    toggleCompleted: onToggleCompleted,
+    refreshCompleted: onRefreshCompleted,
+    refreshWorkflows: onRefreshWorkflows,
+  } = lists
+  const onStartWorkflow = () => lists.setStartOpen(true)
+  const {
+    wfActionMsg, signalStates, signalMsg, sentSignals, selectedWf, expandedEvents,
+    menuOpen: wfMenuOpen,
+    history: wfHistory,
+    historyLoading: wfHistoryLoading,
+    historyError: wfHistoryError,
+    openDetail: onWfClick,
+    signalClick: onSignalClick,
+    toggleMenu: onToggleMenu,
+    toggleEvent: onToggleEvent,
+    closeDetail: onCloseDetail,
+    refreshDetail: onRefreshDetail,
+    sendSignal: onSendSignal,
+    runAction: onExecuteWfAction,
+    getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass,
+  } = actions
+
   // ── Highlight / scroll-to ────────────────────────────────────────────────
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const setRowRef = useCallback((id: string, el: HTMLDivElement | null) => {

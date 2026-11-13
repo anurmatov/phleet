@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react'
 import type { WorkflowDefinitionsState } from '../hooks/useWorkflowDefinitions'
+import { useTick } from '../hooks/useTick'
 import { computeDiff, relativeTime } from '../utils'
 import FieldHint from './FieldHint'
 
@@ -150,6 +151,8 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
     create: onNewFormSubmit,
     load: onRefresh,
   } = state
+  // The rows show ages ("3m ago"): redraw as the clock moves.
+  useTick()
   const [validatedEdits, setValidatedEdits] = useState<Record<string, string>>({})
   const validationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [debouncedNewFormDef, setDebouncedNewFormDef] = useState('')

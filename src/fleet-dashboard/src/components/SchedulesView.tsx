@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import type { ScheduleSummary, ScheduleDetail, WorkflowTypeInfo } from '../types'
 import { apiGet, apiSend, errorMessage } from '../utils'
 import CreateScheduleModal from './CreateScheduleModal'
+import { useTick } from '../hooks/useTick'
 
 function formatRelativeOrFuture(iso: string): string {
   const diff = new Date(iso).getTime() - Date.now()
@@ -226,6 +227,8 @@ interface SchedulesViewProps {
 }
 
 export default function SchedulesView({ schedules, loading, workflowTypes, namespaces, onRefresh }: SchedulesViewProps) {
+  // Next and last runs are shown relative to now ("in 4m"): redraw as the clock moves.
+  useTick()
   const [nsFilter, setNsFilter] = useState('all')
   const [showCreateModal, setShowCreateModal] = useState(false)
 

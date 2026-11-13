@@ -1,6 +1,6 @@
-using Fleet.Comms.Auth;
+using Fleet.Orchestrator.Auth;
 
-namespace Fleet.Comms.Tests;
+namespace Fleet.Orchestrator.Tests.Auth;
 
 /// <summary>
 /// The clock every expiry comparison on this boundary runs against.

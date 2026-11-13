@@ -33,9 +33,10 @@ namespace Fleet.Comms.Routes;
 /// </remarks>
 public static class ConversationEndpoints
 {
-    /// <summary>The six routes this slice adds. The north table is these plus the four auth ones.</summary>
+    /// <summary>The conversation routes. The north table is these plus <see cref="NorthEndpoints.Routes"/>.</summary>
     public static readonly IReadOnlyList<string> Routes =
     [
+        "GET /v1/conversations",
         "POST /v1/conversations",
         "GET /v1/conversations/{id}/events",
         "POST /v1/conversations/{id}/submissions",
@@ -63,9 +64,12 @@ public static class ConversationEndpoints
     public static IEndpointRouteBuilder MapConversationApi(
         this IEndpointRouteBuilder app, bool attachmentsEnabled = false)
     {
-        // The conversation limiter, not the auth one. Authenticated routes partition on the caller's
+        // The conversation limiter. Authenticated routes partition on the caller's
         // credential rather than its address, so two devices behind one forwarded address cannot
         // exhaust each other's budget (§12).
+        app.MapGet("/v1/conversations", ListAsync)
+            .RequireRateLimiting(ConversationRateLimits.PolicyName);
+
         app.MapPost("/v1/conversations", OpenAsync)
             .RequireRateLimiting(ConversationRateLimits.PolicyName);
 
@@ -104,9 +108,9 @@ public static class ConversationEndpoints
     // ── open ─────────────────────────────────────────────────────────────────
 
     private static async Task<IResult> OpenAsync(
-        HttpContext http, AuthService auth, IConversationStore store, CancellationToken ct)
+        HttpContext http, ISignInCheck signIn, IConversationStore store, CancellationToken ct)
     {
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null) return Unauthorized();
 
         var body = await NorthEndpoints.ReadBodyAsync<OpenConversationBody>(http, ct);
@@ -121,6 +125,18 @@ public static class ConversationEndpoints
         if (body.ClientInstanceId is not null && !IsValidIdentifier(body.ClientInstanceId))
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
+        // The shape every part of the path agrees on: a routing key, a queue segment and a token
+        // subject (#530 D9).
+        if (!Fleet.Conversations.Journal.JournalTokens.IsValidSubject(body.Agent))
+            return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
+
+        // A conversation is opened only with an agent that accepts chat NOW. Asked of the
+        // orchestrator, which owns that switch; the answer is never cached past ten seconds.
+        var answer = await NorthEndpoints.CheckAsync(http, signIn, body.Agent, ct);
+        if (answer?.Caller is null) return Unauthorized();
+        if (answer.AgentChatEnabled != true)
+            return Error(ProtocolErrorCode.AgentUnavailable, StatusCodes.Status409Conflict);
+
         return await GuardAsync(async () =>
         {
             var result = await store.OpenConversationAsync(new OpenConversationRequest
@@ -128,27 +144,96 @@ public static class ConversationEndpoints
                 ChannelId = ClientChannelId,
                 ExternalRef = body.ExternalRef!,
 
-                // Derived from the device record. Never read from the request — a caller-supplied
-                // principal on an authenticated route is an authorization bypass wearing a field name.
+                // From the credential, never from the request — a caller-supplied principal on an
+                // authenticated route is an authorization bypass wearing a field name.
                 PrincipalId = caller.PrincipalId,
+                AgentName = body.Agent!,
                 ClientInstanceId = body.ClientInstanceId,
             }, ct);
 
             return Json(new OpenConversationResponse
             {
                 ConversationId = result.ConversationId,
+                Agent = body.Agent!,
                 NextSeq = result.NextSeq,
                 RetainedFloorSeq = result.RetainedFloorSeq,
             }, StatusCodes.Status200OK);
         });
     }
 
+    // ── list ─────────────────────────────────────────────────────────────────
+
+    /// <summary>How many conversations one list returns. A person has one per agent in practice.</summary>
+    public const int ListLimit = 200;
+
+    private static async Task<IResult> ListAsync(
+        HttpContext http, ISignInCheck signIn, IConversationStore store, CancellationToken ct)
+    {
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
+        if (caller is null) return Unauthorized();
+
+        return await GuardAsync(async () =>
+        {
+            // The caller's own, by the principal on the credential. A conversation from before
+            // conversations named their agent is not listed: nothing can route it.
+            var rows = await store.ListConversationsAsync(ClientChannelId, caller.PrincipalId, ListLimit, ct);
+
+            return Json(new ConversationListResponse
+            {
+                Conversations = rows.Select(row => new ConversationListItem
+                {
+                    ConversationId = row.ConversationId,
+                    Agent = row.AgentName,
+                    ExternalRef = row.ExternalRef,
+                    NextSeq = row.NextSeq,
+                    RetainedFloorSeq = row.RetainedFloorSeq,
+                    LastActivityAt = row.LastActivityAt,
+                }).ToList(),
+            }, StatusCodes.Status200OK);
+        });
+    }
+
+    /// <summary>
+    /// Null when the caller may send to conversation <paramref name="id"/>; otherwise the answer to
+    /// give instead.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every route that leads to a command asks this BEFORE it writes (#530 MUST NOT 5). The
+    /// conversation must be the caller's — someone else's is the same not-found as none — and its
+    /// agent must accept chat now, which the orchestrator answers.
+    /// </para>
+    /// <para>
+    /// Called inside <see cref="GuardAsync"/>, so a store failure is the usual 503; a sign-in check
+    /// that could not be answered passes through it to the north edge.
+    /// </para>
+    /// </remarks>
+    private static async Task<IResult?> RefuseUnlessChatAsync(
+        HttpContext http, ISignInCheck signIn, IConversationStore store, string id,
+        AuthenticatedPrincipal caller, CancellationToken ct)
+    {
+        var conversation = await store.FindConversationAsync(id, caller.PrincipalId, ct);
+        if (conversation is null)
+            return Error(ProtocolErrorCode.ConversationNotFound, StatusCodes.Status404NotFound);
+
+        var answer = await NorthEndpoints.CheckAsync(http, signIn, conversation.AgentName, ct);
+
+        // The same credential, asked again with the agent: it may have been revoked in between.
+        if (answer?.Caller is null
+            || !string.Equals(answer.Caller.PrincipalId, caller.PrincipalId, StringComparison.Ordinal))
+            return Unauthorized();
+
+        return answer.AgentChatEnabled == true
+            ? null
+            : Error(ProtocolErrorCode.AgentUnavailable, StatusCodes.Status409Conflict);
+    }
+
     // ── catch-up ─────────────────────────────────────────────────────────────
 
     private static async Task<IResult> CatchUpAsync(
-        HttpContext http, string id, AuthService auth, IConversationStore store, CancellationToken ct)
+        HttpContext http, string id, ISignInCheck signIn, IConversationStore store, CancellationToken ct)
     {
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null) return Unauthorized();
 
         // Parsed from the raw string rather than bound, so a negative or non-integral value is a
@@ -219,10 +304,10 @@ public static class ConversationEndpoints
     // ── submit ───────────────────────────────────────────────────────────────
 
     private static async Task<IResult> SubmitAsync(
-        HttpContext http, string id, AuthService auth, IConversationStore store,
+        HttpContext http, string id, ISignInCheck signIn, IConversationStore store,
         IOptions<CommsOptions> options, CancellationToken ct)
     {
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null) return Unauthorized();
 
         var body = await NorthEndpoints.ReadBodyAsync<SubmitBody>(http, ct);
@@ -283,6 +368,9 @@ public static class ConversationEndpoints
 
         return await GuardAsync(async () =>
         {
+            if (await RefuseUnlessChatAsync(http, signIn, store, id, caller, ct) is { } refusal)
+                return refusal;
+
             var result = await store.AcceptSubmissionAsync(new AcceptSubmissionRequest
             {
                 ConversationId = id,
@@ -346,10 +434,10 @@ public static class ConversationEndpoints
     /// </para>
     /// </remarks>
     private static async Task<IResult> ReserveAttachmentAsync(
-        HttpContext http, string id, AuthService auth, IConversationStore store,
+        HttpContext http, string id, ISignInCheck signIn, IConversationStore store,
         ILoggerFactory loggers, CancellationToken ct)
     {
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null) return Unauthorized();
 
         var body = await NorthEndpoints.ReadBodyAsync<ReserveAttachmentBody>(http, ct);
@@ -376,6 +464,10 @@ public static class ConversationEndpoints
 
         return await GuardAsync(async () =>
         {
+            // An attachment is only ever sent in a submission, so it is refused on the same terms.
+            if (await RefuseUnlessChatAsync(http, signIn, store, id, caller, ct) is { } refusal)
+                return refusal;
+
             var result = await store.ReserveAttachmentAsync(new ReserveAttachmentRequest
             {
                 ConversationId = id,
@@ -447,9 +539,9 @@ public static class ConversationEndpoints
     // ── cancel ───────────────────────────────────────────────────────────────
 
     private static async Task<IResult> CancelAsync(
-        HttpContext http, string id, AuthService auth, IConversationStore store, CancellationToken ct)
+        HttpContext http, string id, ISignInCheck signIn, IConversationStore store, CancellationToken ct)
     {
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null) return Unauthorized();
 
         var body = await NorthEndpoints.ReadBodyAsync<CancelBody>(http, ct);
@@ -471,6 +563,9 @@ public static class ConversationEndpoints
             //
             // It carries NO TranscriptText (#305): a cancel is a control action, not something the
             // user said, and an entry for it would put a button press into the transcript.
+            if (await RefuseUnlessChatAsync(http, signIn, store, id, caller, ct) is { } refusal)
+                return refusal;
+
             var submissionId = Ulid.NewUlid();
 
             await store.AcceptSubmissionAsync(new AcceptSubmissionRequest
@@ -491,9 +586,9 @@ public static class ConversationEndpoints
     // ── cursor ───────────────────────────────────────────────────────────────
 
     private static async Task<IResult> CursorAsync(
-        HttpContext http, string id, AuthService auth, IConversationStore store, CancellationToken ct)
+        HttpContext http, string id, ISignInCheck signIn, IConversationStore store, CancellationToken ct)
     {
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null) return Unauthorized();
 
         var body = await NorthEndpoints.ReadBodyAsync<CursorBody>(http, ct);
@@ -563,6 +658,11 @@ public static class ConversationEndpoints
         catch (InvalidCursorException)
         {
             return Error(ProtocolErrorCode.InvalidCursor, StatusCodes.Status400BadRequest);
+        }
+        catch (Exception e) when (e is SignInUnavailableException or SignInBusyException)
+        {
+            // Not a store failure. The north edge answers these 503 and 429.
+            throw;
         }
         catch (AttachmentNotBindableException)
         {

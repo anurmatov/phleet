@@ -78,8 +78,8 @@ public static class AttachmentEndpoints
     /// bytes, marks the row <c>failed</c>, and returns <c>422</c> — the id is never usable again.
     /// </para>
     /// <para>
-    /// ⚠️ No <see cref="AuthService"/> parameter. That absence is the guarantee; adding one would let
-    /// a session bearer satisfy this route.
+    /// ⚠️ No <see cref="ISignInCheck"/> parameter. That absence is the guarantee; adding one would let
+    /// a signed-in credential satisfy this route.
     /// </para>
     /// </remarks>
     private static async Task<IResult> UploadAsync(
@@ -185,7 +185,7 @@ public static class AttachmentEndpoints
         }, StatusCodes.Status201Created);
     }
 
-    // ── download: the session bearer, and ONLY the session bearer ────────────
+    // ── download: a signed-in credential, and ONLY that ──────────────────────
 
     /// <summary>
     /// Serve the bytes of a <c>sealed</c> or <c>bound</c> attachment to the principal who owns its
@@ -208,10 +208,10 @@ public static class AttachmentEndpoints
     /// </para>
     /// </remarks>
     private static async Task<IResult> DownloadAsync(
-        HttpContext http, string attachmentId, AuthService auth, IConversationStore store,
+        HttpContext http, string attachmentId, ISignInCheck signIn, IConversationStore store,
         AttachmentStore files, CancellationToken ct)
     {
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null) return Error(ProtocolErrorCode.Unauthorized, StatusCodes.Status401Unauthorized);
 
         if (!AttachmentStore.IsSafeId(attachmentId)) return NotFound();

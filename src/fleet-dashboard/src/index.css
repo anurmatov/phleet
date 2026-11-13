@@ -5738,3 +5738,236 @@ body {
 .eg-revoke-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; font-size: 12px; color: var(--amber); border-top: 1px solid var(--border); }
 .eg-revoke-confirm .config-input { width: 260px; }
 .eg-detail { padding: 8px 12px 12px; border-top: 1px solid var(--border); }
+
+/* ── Sign-in ─────────────────────────────────────────────────────────────── */
+.signin-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.signin-card {
+  width: 100%;
+  max-width: 380px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface, transparent);
+}
+.signin-title { font-size: 18px; margin: 0 0 12px; }
+.signin-note { font-size: 13px; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
+.signin-label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+.signin-input { width: 100%; margin-bottom: 12px; box-sizing: border-box; }
+.signin-error { font-size: 13px; color: var(--danger, #c0392b); margin: 0 0 12px; }
+
+/* ── Devices ─────────────────────────────────────────────────────────────── */
+.device-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 12px; max-width: 640px; }
+.device-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.device-row--revoked { opacity: 0.55; }
+.device-row-main { flex: 1; min-width: 0; }
+.device-row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-row-meta { font-size: 11px; color: var(--muted); }
+.device-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  margin-left: 6px;
+  font-weight: 400;
+}
+
+/* ── Chat ────────────────────────────────────────────────────────────────── */
+/* The thread fills the space between header and footer, so the composer stays in view and only the
+   messages scroll. `flex: none`, because .app-main's `flex: 1` would size it by its content in the
+   column layout and ignore this height: the page would then scroll, carrying the composer away. */
+.app-main--chat {
+  flex: none;
+  padding: 0;
+  overflow: hidden;
+  height: calc(100vh - 52px - 36px);
+  height: calc(100dvh - 52px - 36px);
+  display: flex;
+  flex-direction: column;
+}
+.chat-view { flex: 1; min-height: 0; display: flex; }
+.chat-view-message { padding: 24px; color: var(--muted); font-size: 14px; }
+.chat-view-message p { margin-bottom: 8px; }
+
+.chat-agents {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 8px 0;
+}
+.chat-agent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.chat-agent:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.chat-agent.active { color: var(--text); border-left-color: var(--accent); background: rgba(74,222,128,0.06); }
+.chat-agent-name, .chat-agent-id { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-agent-name { font-size: 14px; }
+.chat-agent-id { font-size: 11px; font-family: monospace; color: var(--muted); }
+.chat-agent-select { display: none; }
+
+.chat-thread { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.chat-thread-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.chat-thread-title { font-weight: 600; }
+.chat-status { font-size: 12px; color: var(--muted); }
+.chat-status--live::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.chat-status--warn { color: var(--yellow); }
+.chat-status--error { color: var(--red); }
+
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.chat-empty { color: var(--muted); font-size: 13px; text-align: center; margin: auto 0; }
+.chat-row { display: flex; flex-direction: column; min-width: 0; max-width: min(760px, 85%); }
+.chat-row--you { align-self: flex-end; align-items: flex-end; }
+.chat-row--agent { align-self: flex-start; align-items: flex-start; }
+.chat-bubble {
+  max-width: 100%;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.chat-bubble--you { background: rgba(74,222,128,0.12); border: 1px solid rgba(74,222,128,0.25); white-space: pre-wrap; }
+.chat-bubble--failed { border-color: var(--red); }
+.chat-bubble--agent { background: var(--surface); border: 1px solid var(--border); }
+.chat-meta { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.chat-meta--error { color: var(--red); }
+.chat-system { align-self: center; max-width: 85%; font-size: 12px; color: var(--muted); text-align: center; }
+.chat-system--warn { color: var(--yellow); }
+.chat-system--error { color: var(--red); }
+.chat-working { font-size: 12px; color: var(--muted); font-style: italic; }
+.chat-link-btn {
+  background: none;
+  border: none;
+  padding: 0 0 0 8px;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.chat-notice { padding: 6px 16px; font-size: 12px; color: var(--red); border-top: 1px solid var(--border); }
+
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 16px 4px;
+  border-top: 1px solid var(--border);
+}
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  font-size: 14px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.chat-composer-actions { display: flex; gap: 6px; }
+.chat-composer-actions button { padding: 7px 14px; font-size: 13px; }
+.chat-composer-note { padding: 0 16px; font-size: 11px; color: var(--muted); }
+.chat-composer-note--error { color: var(--red); }
+.chat-composer-hint { padding: 2px 16px 8px; font-size: 11px; color: var(--muted); }
+.chat-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Markdown in an agent's reply. */
+.chat-markdown > :last-child { margin-bottom: 0; }
+.chat-markdown p { margin: 0 0 8px; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3,
+.chat-markdown h4, .chat-markdown h5, .chat-markdown h6 { font-size: 15px; font-weight: 600; margin: 10px 0 6px; }
+.chat-markdown ul, .chat-markdown ol { margin: 0 0 8px; padding-left: 22px; }
+.chat-markdown li { margin-bottom: 2px; }
+.chat-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.chat-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 6px 0 8px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chat-markdown pre code { background: none; padding: 0; overflow-wrap: normal; }
+.chat-markdown blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--border); color: var(--muted); }
+.chat-markdown a { color: var(--accent); }
+.chat-markdown hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.chat-markdown strong { font-weight: 600; }
+.chat-markdown em { font-style: italic; }
+
+@media (max-width: 768px) {
+  .chat-view { flex-direction: column; }
+  .chat-agents { display: none; }
+  .chat-agent-select { display: block; margin: 8px 16px 0; padding: 6px 8px; font-size: 16px; }
+  .chat-row { max-width: 92%; }
+  /* Below 16px, iOS zooms the page in when the text box takes focus. */
+  .chat-input { font-size: 16px; }
+  .chat-composer-hint { display: none; }
+  .chat-composer { padding-bottom: 10px; }
+}

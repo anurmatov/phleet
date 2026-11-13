@@ -1,8 +1,10 @@
 using System.Text;
 using Fleet.Agent.Abstractions;
+using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Fleet.Protocol;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent.Services;
 
@@ -22,14 +24,20 @@ public sealed class ConversationIntake
     private readonly GroupBehavior _groupBehavior;
     private readonly IConversationEventPublisher _events;
     private readonly ILogger<ConversationIntake> _logger;
+    private readonly string _primaryHumanPrincipalId;
 
+    /// <param name="options">
+    /// Names the deployment's primary human (#530 D11). Absent or empty, every chat message is
+    /// routine, as before.
+    /// </param>
     public ConversationIntake(
         ConversationRegistry registry,
         PrincipalBinder binder,
         TaskManager taskManager,
         GroupBehavior groupBehavior,
         IConversationEventPublisher events,
-        ILogger<ConversationIntake> logger)
+        ILogger<ConversationIntake> logger,
+        IOptions<ConversationsOptions>? options = null)
     {
         _registry = registry;
         _binder = binder;
@@ -37,7 +45,16 @@ public sealed class ConversationIntake
         _groupBehavior = groupBehavior;
         _events = events;
         _logger = logger;
+        _primaryHumanPrincipalId = options?.Value.PrimaryHumanPrincipalId ?? string.Empty;
     }
+
+    /// <summary>
+    /// Whether a conversation's principal is the deployment's primary human. Exact, and never true
+    /// when none is named.
+    /// </summary>
+    internal bool IsPrimaryHuman(string? principalId) =>
+        _primaryHumanPrincipalId.Length > 0
+        && string.Equals(principalId, _primaryHumanPrincipalId, StringComparison.Ordinal);
 
     /// <summary>
     /// Open (or re-resolve) a conversation. Any binding failure creates NO registry entry —
@@ -210,9 +227,19 @@ public sealed class ConversationIntake
         // `images` reaches the executor through the parameter the Telegram photo path already uses,
         // so Claude gets native content blocks, Codex gets `local_image` blocks from the persisted
         // path, and Gemini gets an `@<path>` reference — with no executor change at all (#308 D7).
+        //
+        // The primary human's chat message is first-class (#530 D11): the priority lane, and
+        // eligibility to steer a running workflow turn — exactly what their Telegram message gets.
+        // The principal is the conversation's, bound from the server-derived envelope, never a
+        // field the client chose. Steering stays scoped to (this runtime key, userId 0), so a chat
+        // turn can steer only a turn this conversation owns or an unowned one.
+        var primary = IsPrimaryHuman(reference.PrincipalId);
+
         return await _taskManager.StartTask(
             runtimeKey, prompt, Display(text), isSessionTask: true,
-            source: TaskSource.UserMessage, images: images, userId: 0, identity: identity);
+            source: TaskSource.UserMessage, images: images, userId: 0, identity: identity,
+            priority: primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine,
+            steeringEligible: primary);
     }
 
     /// <summary>

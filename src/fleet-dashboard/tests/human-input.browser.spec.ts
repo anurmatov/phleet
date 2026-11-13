@@ -19,7 +19,7 @@ const workflow = {
 const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
 const dirty = !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()
 
-async function fixture(page: Page, mode: Mode, historyState: 'held' | 'error' | 'ready' = 'ready', readOnly = false) {
+async function fixture(page: Page, mode: Mode, historyState: 'held' | 'error' | 'ready' = 'ready', signedIn = true) {
   let channel: WebSocketRoute | undefined
   let releaseHistory!: () => void
   const held = new Promise<void>(resolve => { releaseHistory = resolve })
@@ -48,6 +48,13 @@ async function fixture(page: Page, mode: Mode, historyState: 'held' | 'error' | 
         { json: [{ eventType: 'WorkflowStarted', inputSummary: JSON.stringify(request) }] })
       return
     }
+    // The page loads only signed in (#530); a signed-out browser gets the sign-in page instead.
+    if (url.pathname === '/api/auth/session') {
+      await route.fulfill(signedIn
+        ? { json: { authRequired: true, signedIn: true, kind: 'browser', userId: 'owner', displayName: 'Owner', deviceId: 'd_test' } }
+        : { status: 401, json: { error: 'Unauthorized', authRequired: true } })
+      return
+    }
     const data: Record<string, unknown> = {
       '/api/agents': [{ agentName: 'agent1', displayName: 'Test agent', shortName: null, model: null, role: null,
         currentTask: null, currentTaskId: null, reportedStatus: 'idle', effectiveStatus: 'idle', lastSeen: new Date().toISOString(),
@@ -61,7 +68,8 @@ async function fixture(page: Page, mode: Mode, historyState: 'held' | 'error' | 
     }
     await route.fulfill({ json: data[url.pathname] ?? [] })
   })
-  await page.goto(readOnly ? 'http://127.0.0.1:5179/#agents' : '/#agents')
+  await page.goto('/#agents')
+  if (!signedIn) return { posts, releaseHistory, stale: () => {} }
   await expect(page.locator('.agent-list')).toBeVisible()
   // This is specifically AgentsView's button, not WorkflowsView or a test callback.
   await page.locator('.wf-btn-signal').getByText('Answer', { exact: true }).click()
@@ -89,6 +97,16 @@ async function capture(page: Page, info: TestInfo, mode: Mode, state: string) {
   await writeFile(path.join(directory, name + '.json'), JSON.stringify({ head, dirty, capturedAt: new Date().toISOString(), browser: page.context().browser()?.version(), viewport: page.viewportSize(), mode, state,
     path: 'App → AgentsView → App.handleSignalClick → SignalModal → App.sendSignal', transport: 'synthetic HTTP/WebSocket only' }, null, 2))
 }
+
+// What "read-only" became with sign-in (#530): a browser that is not signed in never reaches the
+// decision at all. It gets the sign-in page, and nothing is sent.
+test('signed out: the sign-in page shows and no decision can be sent', async ({ page }) => {
+  const f = await fixture(page, 'approve-reject', 'ready', false)
+  await expect(page.getByLabel('Orchestrator token')).toBeVisible()
+  await expect(page.locator('.agent-list')).toHaveCount(0)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect(f.posts).toHaveLength(0)
+})
 
 for (const mode of modes) {
   test(`${mode}: production AgentsView/App path, loading, no selection and explicit answer`, async ({ page }, info) => {
@@ -118,14 +136,6 @@ for (const mode of modes) {
     await expect(page.getByText('Cannot load the exact request. Refresh before deciding.')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
     await capture(page, info, mode, 'history-error')
-    expect(f.posts).toHaveLength(0)
-  })
-  test(`${mode}: read-only refuses a selected answer`, async ({ page }, info) => {
-    const f = await fixture(page, mode, 'ready', true)
-    await expect(page.getByText(question, { exact: true })).toBeVisible()
-    await select(page, mode)
-    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
-    await capture(page, info, mode, 'read-only')
     expect(f.posts).toHaveLength(0)
   })
   test(`${mode}: changed run refuses a previously selected answer`, async ({ page }, info) => {

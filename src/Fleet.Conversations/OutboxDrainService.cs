@@ -24,7 +24,6 @@ public sealed class OutboxDrainService(
     RabbitMqOutboxTransport commandTransport,
     RabbitMqOutboxTransport eventTransport,
     string connectionString,
-    string agentName,
     ConversationStoreOptions options,
     ILogger<OutboxDrainService> logger) : BackgroundService
 {
@@ -39,10 +38,11 @@ public sealed class OutboxDrainService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Declared before the first drain, and by THIS service. A command published to an exchange
-        // with no bound queue is discarded silently by the broker, so a submission accepted before
-        // the agent has ever started would be lost with the submission row still saying it was
-        // dispatched.
+        // The exchanges are declared before the first drain, and by THIS service. Each agent's queue
+        // is declared by the transport before the first publish to it (#530 D9): a command published
+        // to an exchange with no bound queue is discarded silently by the broker, so a submission
+        // accepted before the agent has ever started would be lost with the submission row still
+        // saying it was dispatched.
         await DeclareAsync(stoppingToken);
 
         var commands = new OutboxPublisher(
@@ -59,11 +59,11 @@ public sealed class OutboxDrainService(
             {
                 // The command outbox first. A client is waiting on it; nothing is waiting on the
                 // event outbox in this slice, which has no production consumer yet.
-                published += await commands.DrainOnceAsync(agentName, stoppingToken);
+                // Each command routes to its conversation's agent, read from the row.
+                published += await commands.DrainOnceAsync(stoppingToken);
 
-                // Events route per conversation, so the routing key comes from the row rather than
-                // from here. The argument is the default for rows that carry none.
-                published += await events.DrainOnceAsync(routingKey: string.Empty, stoppingToken);
+                // Events route per conversation, also from the row.
+                published += await events.DrainOnceAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -89,7 +89,7 @@ public sealed class OutboxDrainService(
         {
             try
             {
-                await commandTransport.DeclareTopologyAsync(agentName, ct);
+                await commandTransport.DeclareExchangesAsync(ct);
                 return;
             }
             catch (Exception e)

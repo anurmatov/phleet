@@ -353,6 +353,33 @@ has no factory loggers, which would log the URI and so the token); delete a devi
 any failure other than Apple saying the token is gone (`ApnsOutcome.Unregistered`). See
 `docs/push-notifications.md`.
 
+## Sign-in and chat (#530)
+
+The orchestrator owns sign-in (`src/Fleet.Orchestrator/Auth/`, `docs/sign-in.md`): one user `owner`;
+devices are a browser (`fleet_session` cookie) or an app (15-minute access tokens minted from a device
+secret it got with a one-time enrollment code); `ORCHESTRATOR_AUTH_TOKEN` is the service bearer and is
+never shipped to a client. A request the dashboard's nginx marks with `X-Fleet-Edge` needs a
+credential for reads too; an unmarked internal call keeps the old rule. A browser write needs
+`X-Fleet-Request: 1`. Names shared with Comms live only in `Fleet.Shared.SignIn`.
+
+Fleet.Comms keeps no credential store: every north request is checked with the orchestrator's
+`POST /internal/auth/check` (a `cj1.auth-check.fleet-comms` token under `FLEET_COMMS_JOURNAL_KEY`,
+required whenever conversations are on), cached at most 10 s and rechecked fresh on every stream ping.
+Clients reach Comms through the dashboard's `/v1/`. Chat is on by default per agent
+(`agents.chat_enabled`); `ChatAgents.IsEffective` decides whether provisioning writes the agent's
+`Conversations` section and never refuses provisioning. A conversation is (channel, principal,
+`agent_name`, external ref) and both clients use `externalRef: "main"`. Commands route by the
+conversation's agent to `fleet.conversations.inbound.<Agent.Name>`; each agent's south token
+`cj1.south.<Agent.Name>` acts only on its own conversations. The owner's chat gets primary-human
+priority, cancel is executed, and an answer that commits with no stream attached becomes a push
+(`POST /internal/push/chat-reply`, identifiers only).
+
+MUST NOT: return, log or store in clear a device secret, access token, session token, enrollment code
+or bootstrap token (hashes only); accept a principal, device or agent identity from a request field;
+treat an auth lookup that could not complete as a pass; let a device token reach `/api/config/*` or
+manage other devices; publish a command for an agent that is not chat-enabled, or let one agent's
+south token act on another agent's conversation; put a credential in a URL.
+
 ## Workflow failure notifier
 
 Off by default (`FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false` → bridge

@@ -175,7 +175,7 @@ public sealed class MaintenanceLoopTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = "p_owner",
+            PrincipalId = "p_owner", AgentName = SouthTestHost.Agent,
         });
 
         var accept = await _store.AcceptSubmissionAsync(new AcceptSubmissionRequest

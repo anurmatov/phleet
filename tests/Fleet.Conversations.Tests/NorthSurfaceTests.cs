@@ -60,7 +60,7 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = OwnerPrincipal,
+            PrincipalId = OwnerPrincipal, AgentName = SouthTestHost.Agent,
         });
 
         var epoch = Ulid.NewUlid();
@@ -154,7 +154,7 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = OwnerPrincipal,
+            PrincipalId = OwnerPrincipal, AgentName = SouthTestHost.Agent,
         });
 
         // Exactly the bound `GET /v1/session` publishes, and deliberately distinct after the 32nd
@@ -228,7 +228,7 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = OwnerPrincipal,
+            PrincipalId = OwnerPrincipal, AgentName = SouthTestHost.Agent,
         });
 
         await using var host = await NorthHost.StartAsync(store);
@@ -297,7 +297,7 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
     /// </summary>
     /// <remarks>
     /// Built through <see cref="CommsApp.BuildNorthApp"/>, the composition <c>Program</c> runs. The
-    /// auth store is an in-memory one — these tests are not about device enrollment, only about
+    /// sign-in check is a fixed one — these tests are not about sign-in, only about
     /// getting a valid credential in hand.
     /// </remarks>
     private sealed class NorthHost : IAsyncDisposable
@@ -319,22 +319,17 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
             builder.WebHost.UseTestServer();
             builder.Logging.ClearProviders();
 
-            var authPath = Path.Combine(
-                Directory.CreateTempSubdirectory("fleet-comms-north-").FullName, "auth.db");
-
             builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 // Enabling is a CONFIGURATION fact; the substitute below is what is actually used.
                 ["Comms:ConversationConnectionString"] = "Server=unused-by-this-test;",
-                ["Comms:AuthStorePath"] = authPath,
             });
 
             builder.Services.AddSingleton(store);
 
-            // `allowCreate`, because nothing creates the auth database implicitly — a deleted volume
-            // has to be an error rather than a silently empty store, so `store init` is the one
-            // thing that may create it. A test is its own operator.
-            builder.Services.AddSingleton<IAuthStore>(new SqliteAuthStore(authPath, allowCreate: true));
+            // Sign-in is the orchestrator's (#530). These tests are about the conversation store
+            // behind the routes, so the question "who is this caller?" gets a fixed answer.
+            builder.Services.AddSingleton<ISignInCheck>(new OneDeviceSignIn());
 
             var app = CommsApp.BuildNorthApp(builder);
             await app.StartAsync();
@@ -342,30 +337,7 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
             return new NorthHost(app, app.GetTestClient());
         }
 
-        public async Task<string> EnrolledTokenAsync()
-        {
-            var auth = _app.Services.GetRequiredService<AuthService>();
-            var code = await auth.IssueEnrollmentCodeAsync(OwnerPrincipal);
-
-            var registration = await Client.PostAsJsonAsync("/v1/auth/devices", new
-            {
-                protocol = ProtocolVersion.Current,
-                enrollmentCode = code,
-            });
-
-            var device = await registration.Content.ReadFromJsonAsync<RegisteredDevice>(
-                FleetProtocolJson.Options);
-
-            var minted = await Client.PostAsJsonAsync("/v1/auth/token", new
-            {
-                protocol = ProtocolVersion.Current,
-                deviceId = device!.DeviceId,
-                deviceSecret = device.DeviceSecret,
-            });
-
-            return (await minted.Content.ReadFromJsonAsync<MintedToken>(FleetProtocolJson.Options))!
-                .AccessToken;
-        }
+        public Task<string> EnrolledTokenAsync() => Task.FromResult(OneDeviceSignIn.Token);
 
         public Task<HttpResponseMessage> PostAsync(string path, string token, object body)
         {
@@ -404,8 +376,20 @@ public sealed class NorthSurfaceTests(MySqlFixture fixture)
             await _app.DisposeAsync();
         }
 
-        private sealed record RegisteredDevice(string DeviceId, string DeviceSecret);
+    }
 
-        private sealed record MintedToken(string AccessToken);
+    /// <summary>One signed-in app for <see cref="OwnerPrincipal"/>; every agent accepts chat.</summary>
+    private sealed class OneDeviceSignIn : ISignInCheck
+    {
+        public const string Token = "north-suite-access-token";
+
+        public Task<SignInAnswer> CheckAsync(
+            PresentedCredential credential, string? agent, bool fresh, CancellationToken ct) =>
+            Task.FromResult(credential.Authorization == $"Bearer {Token}"
+                ? new SignInAnswer(
+                    SignInOutcome.Signed,
+                    new AuthenticatedPrincipal(OwnerPrincipal, "d_1", "t_1", IsBrowser: false),
+                    agent is null ? null : true)
+                : SignInAnswer.Refused);
     }
 }

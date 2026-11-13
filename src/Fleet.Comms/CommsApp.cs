@@ -36,24 +36,16 @@ public static class CommsApp
     public const string ConversationStoreSection = "Conversations";
 
     /// <summary>Register everything the north boundary needs. No south service is registered here.</summary>
+    /// <remarks>
+    /// There is no credential store here (#530 D1, D7). The orchestrator owns sign-in, and every
+    /// north request is answered by asking it through <see cref="ISignInCheck"/>.
+    /// </remarks>
     public static IServiceCollection AddNorthBoundary(this IServiceCollection services)
     {
         // TryAdd, not Add. These are defaults: a host that registered a substitute before calling
         // this keeps it. With Add, the last registration wins and the substitute is silently
         // discarded — which would have made every TTL assertion run against the system clock and
         // pass vacuously.
-        services.TryAddSingleton<IAuthStore>(provider =>
-        {
-            // The deployable's default is the durable store. An in-process one is a test fixture
-            // and is registered by the test host ahead of this call; it must never be what a
-            // deployment gets by omission.
-            var path = provider.GetRequiredService<IOptions<CommsOptions>>().Value.AuthStorePath;
-            if (string.IsNullOrWhiteSpace(path))
-                throw new InvalidOperationException(
-                    $"{CommsOptions.SectionName}:{nameof(CommsOptions.AuthStorePath)} is required " +
-                    "and has no default. Point it at a path on storage that survives a restart.");
-            return new SqliteAuthStore(path);
-        });
         // The conversation store, registered LAZILY.
         //
         // A factory rather than an instance, so an install that has not enabled the feature never
@@ -97,17 +89,23 @@ public static class CommsApp
                 provider.GetRequiredService<ILogger<AttachmentStore>>());
         });
 
-        services.TryAddSingleton<ISecretHasher, Argon2idSecretHasher>();
         services.TryAddSingleton(TimeProvider.System);
-        services.TryAddSingleton<MonotonicClock>();
-        services.TryAddSingleton<AuthService>();
 
-        // Registered so the stream slice can take it as a dependency without re-deciding the
-        // 30-second bound. Nothing resolves it in a request pipeline yet — this slice ships the
-        // component, not the socket.
-        services.TryAddSingleton<CredentialRevalidator>();
+        // Who a caller is, asked of the orchestrator (#530 D7). Also LAZY: an install without the
+        // conversation feature maps no north route, so nothing ever resolves it and the shared key it
+        // is built from is never required.
+        services.TryAddSingleton<ISignInCheck>(provider =>
+        {
+            var options = provider.GetRequiredService<IOptions<CommsOptions>>().Value;
+            return new OrchestratorSignInCheck(
+                new HttpClient { Timeout = Timeout.InfiniteTimeSpan },
+                options.OrchestratorUrl,
+                options.Journal.Keys()[0],
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetRequiredService<ILogger<OrchestratorSignInCheck>>());
+        });
 
-        services.AddRateLimiter(ConfigureAuthRateLimiter);
+        services.AddRateLimiter(ConfigureRateLimiter);
         return services;
     }
 
@@ -158,7 +156,6 @@ public static class CommsApp
         var conversationConnection =
             conversationSection[nameof(CommsOptions.ConversationConnectionString)];
         var brokerConnection = conversationSection[nameof(CommsOptions.BrokerConnectionString)];
-        var agentName = conversationSection[nameof(CommsOptions.AgentName)];
         var attachmentRoot = conversationSection[nameof(CommsOptions.AttachmentRootPath)];
 
         // Media, read straight from configuration like the four above (options are not resolvable
@@ -243,7 +240,10 @@ public static class CommsApp
             // The drain needs a broker. Without one the outboxes still accumulate correctly and the
             // client is unaffected — its submission is already durable — so a missing broker is a
             // logged degradation rather than a refusal to start.
-            if (!string.IsNullOrWhiteSpace(brokerConnection) && !string.IsNullOrWhiteSpace(agentName))
+            //
+            // One drain for every agent (#530 D9): a command's routing key is its conversation's agent,
+            // read from the row, and that agent's queue is declared before the first publish to it.
+            if (!string.IsNullOrWhiteSpace(brokerConnection))
             {
                 builder.Services.AddHostedService(provider => new OutboxDrainService(
                     new RabbitMqOutboxTransport(
@@ -253,7 +253,6 @@ public static class CommsApp
                         brokerConnection, ConversationBroker.EventExchange,
                         provider.GetRequiredService<ILogger<OutboxDrainService>>()),
                     conversationConnection,
-                    agentName,
                     provider.GetRequiredService<IOptions<ConversationStoreOptions>>().Value,
                     provider.GetRequiredService<ILogger<OutboxDrainService>>()));
             }
@@ -261,23 +260,11 @@ public static class CommsApp
 
         var app = builder.Build();
 
-        // Resolve the store NOW, during construction.
-        //
-        // Configuration that is missing is not the same failure as a store that is unreachable, and
-        // they must not arrive the same way. A missing or blank path is an operator mistake that
-        // cannot resolve itself, so it is a process that refuses to start; `503` is reserved for a
-        // store that was configured and is temporarily not answering, which is what a client is
-        // told to retry (§5.2, §16). Deferring this to the first request would present the first
-        // one as the second, and the deployment would look healthy until someone tried to enroll.
-        //
-        // A host that registered its own IAuthStore keeps it — this resolves whatever is wired.
-        _ = app.Services.GetRequiredService<IAuthStore>();
-
-        // Fail closed, at the edge. An auth-store outage is a 503 with the fixed Internal body and
-        // is NEVER a pass (§16, MUST NOT 18); anything else unhandled is a 500 with the same body,
-        // so no exception message can reach a client (§13). Both statuses carry identical bytes —
-        // the distinction is the status line, and a client must not parse the body to tell them
-        // apart (§5.2).
+        // Fail closed, at the edge. A sign-in check that could not be answered is a 503 with the fixed
+        // Internal body and is NEVER a pass (§16, #530 MUST NOT 3); anything else unhandled is a 500
+        // with the same body, so no exception message can reach a client (§13). Both statuses carry
+        // identical bytes — the distinction is the status line, and a client must not parse the body
+        // to tell them apart (§5.2).
         //
         // Outermost, so it also covers a fault inside the limiter below.
         app.Use(async (context, next) =>
@@ -286,9 +273,22 @@ public static class CommsApp
             {
                 await next(context);
             }
-            catch (AuthStoreUnavailableException)
+            catch (SignInUnavailableException)
             {
                 await WriteFixedError(context, StatusCodes.Status503ServiceUnavailable);
+            }
+            catch (SignInBusyException)
+            {
+                // The orchestrator is throttling sign-in. Said as this service's own 429, with the
+                // same Retry-After floor the limiter uses.
+                if (!context.Response.HasStarted)
+                {
+                    context.Response.Clear();
+                    context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                    context.Response.Headers.RetryAfter = "1";
+                    await context.Response.WriteAsJsonAsync(
+                        ErrorResponse.For(ProtocolErrorCode.RateLimited), FleetProtocolJson.Options);
+                }
             }
             catch (Exception)
             {
@@ -327,24 +327,22 @@ public static class CommsApp
         }
 
         // Before the endpoints, and that placement is the whole point: a throttled request must be
-        // refused without spending an Argon2id evaluation or taking a store transaction.
+        // refused without asking the orchestrator or taking a store transaction.
         app.UseRateLimiter();
 
-        app.MapNorthApi();
-
-        // The conversation surface, only when it is configured.
+        // The north surface, only when conversations are configured.
         //
-        // An install that has not configured it is byte-identical to the one the auth slice ships:
-        // no conversation route is mapped, every conversation path is a 404 from the router rather
-        // than a handler that decided to refuse, no WebSocket middleware is in the pipeline, and no
-        // database connection is attempted. That is what makes this an opt-in feature rather than
-        // one that merely defaults to off.
+        // An install that has not configured them maps no north route at all: every path is a 404
+        // from the router rather than a handler that decided to refuse, no WebSocket middleware is
+        // in the pipeline, nothing asks the orchestrator, and no database connection is attempted.
+        // That is what makes this an opt-in feature rather than one that merely defaults to off.
         var commsOptions = app.Services.GetRequiredService<IOptions<CommsOptions>>().Value;
 
         if (commsOptions.ConversationsEnabled)
         {
             // Only reached on the enabled path, so a disabled install adds no middleware at all.
             app.UseWebSockets();
+            app.MapNorthApi();
             app.MapConversationApi(commsOptions.AttachmentsEnabled);
         }
 
@@ -366,10 +364,9 @@ public static class CommsApp
     /// come from <see cref="CommsOptions.OpsUrl"/>. Neither inherits the other's.</para>
     /// </summary>
     public static WebApplication BuildOpsApp(
-        WebApplicationBuilder builder, IAuthStore store,
+        WebApplicationBuilder builder,
         IConversationStore? conversations = null, string? migrationStatusConnectionString = null)
     {
-        builder.Services.AddSingleton(store);
         var app = builder.Build();
 
         // Liveness: the process is running and can answer. Deliberately says nothing about the
@@ -377,25 +374,17 @@ public static class CommsApp
         // recoverable dependency failure.
         app.MapGet("/health", () => Results.Json(new { status = "ok" }, FleetProtocolJson.Options));
 
-        // Readiness: one trivial transaction against the real store.
+        // Readiness: one trivial read against the real conversation store, when there is one.
         //
-        // This is the probe that separates "started and permanently broken" from "healthy". The
-        // store initialises lazily and a bad path — unwritable, wrong owner, read-only mount, no
-        // volume mounted — is not detected at construction by design, so a probe that did not
-        // touch the store would report a service that 503s every request as ready.
-        //
-        // The transaction is a read, but SqliteAuthStore opens every transaction BEGIN IMMEDIATE,
-        // so this acquires the write lock and surfaces a read-only mount too, not only a missing
-        // file.
-        app.MapGet("/ready", async (IAuthStore authStore, CancellationToken ct) =>
+        // This is the probe that separates "started and permanently broken" from "healthy". It does
+        // NOT ask the orchestrator: sign-in being briefly unreachable is answered 503 per request, and
+        // a readiness failure here would restart this container over a dependency it does not own.
+        app.MapGet("/ready", async (CancellationToken ct) =>
         {
             try
             {
-                await authStore.InTransactionAsync(
-                    (tx, token) => tx.CountActiveDevicesAsync("", token), ct);
-
-                // The conversation store too, when the feature is enabled — and the SCHEMA VERSION
-                // as well as reachability.
+                // The conversation store, when the feature is enabled — and the SCHEMA VERSION as well
+                // as reachability.
                 //
                 // A wrong credential or a database that is up but carrying the wrong schema would
                 // otherwise be reported ready, and every conversation route would then 503 while the
@@ -438,14 +427,6 @@ public static class CommsApp
                 }
 
                 return Results.Json(new { status = "ready" }, FleetProtocolJson.Options);
-            }
-            catch (AuthStoreUnavailableException)
-            {
-                // The same fixed body every other store failure produces. A readiness endpoint is
-                // not a debugging surface, and on a misconfigured deployment it is the one thing
-                // reachable before anything else works.
-                return Results.Json(ErrorResponse.For(ProtocolErrorCode.Internal),
-                    FleetProtocolJson.Options, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
             catch (Exception)
             {
@@ -492,8 +473,8 @@ public static class CommsApp
     /// </para>
     /// </remarks>
     /// <summary>
-    /// The conversation limiter's partition key: the hashed bearer when one is presented, and the
-    /// caller's address otherwise.
+    /// The conversation limiter's partition key: the hashed credential — a bearer or a browser's
+    /// session cookie — when one is presented, and the caller's address otherwise.
     /// </summary>
     /// <remarks>
     /// The address fallback matters: an upgrade or a route call arriving with no credential at all
@@ -502,15 +483,11 @@ public static class CommsApp
     /// </remarks>
     private static string ConversationPartitionKey(HttpContext context)
     {
-        var header = context.Request.Headers.Authorization.ToString();
-
-        if (!header.StartsWith("Bearer ", StringComparison.Ordinal))
-            return $"addr:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
-
-        var hash = System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(header["Bearer ".Length..]));
-
-        return $"cred:{Convert.ToHexStringLower(hash)}";
+        // Behind the dashboard's proxy every caller shares one address, so the credential is what
+        // separates them.
+        return PresentedCredential.Of(context.Request) is { } credential
+            ? $"cred:{credential.Digest()}"
+            : $"addr:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
     }
 
     /// <param name="attachments">
@@ -518,7 +495,7 @@ public static class CommsApp
     /// </param>
     public static WebApplication BuildSouthApp(
         WebApplicationBuilder builder, IConversationStore store, CommsOptions options,
-        AttachmentStore? attachments = null)
+        AttachmentStore? attachments = null, IChatReplyNotifier? replies = null)
     {
         // Request BINDING, not just response writing. The framework's web defaults carry no enum
         // converter, so a body carrying the protocol's own `"disposition":"ran"` failed to bind and
@@ -528,7 +505,7 @@ public static class CommsApp
             jsonOptions => FleetProtocolJson.ApplyTo(jsonOptions.SerializerOptions));
 
         var app = builder.Build();
-        SouthEndpoints.Map(app, store, options, attachments);
+        SouthEndpoints.Map(app, store, options, attachments, replies);
         return app;
     }
 
@@ -739,7 +716,7 @@ public static class CommsApp
         return services;
     }
 
-    private static void ConfigureAuthRateLimiter(RateLimiterOptions options)
+    private static void ConfigureRateLimiter(RateLimiterOptions options)
     {
         options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
@@ -749,7 +726,7 @@ public static class CommsApp
         // household NAT, a corporate egress, a reverse proxy that does not forward — would otherwise
         // share a budget, so one client's catch-up storm would throttle the other's.
         //
-        // The key is a hash of the presented bearer, never the bearer: a rate-limiter partition key
+        // The key is a hash of the presented credential, never the credential: a rate-limiter partition key
         // reaches metrics and diagnostics, and a token there is a token in a log. It is also not
         // validated at this point, because admission runs before the endpoint — which is the whole
         // reason it is cheap. A caller inventing tokens therefore mints partitions, each still
@@ -762,21 +739,6 @@ public static class CommsApp
                     PermitLimit = ConversationRateLimits.PermitsPerWindow,
                     Window = TimeSpan.FromSeconds(ConversationRateLimits.WindowSeconds),
                     QueueLimit = ConversationRateLimits.QueueLimit,
-                    AutoReplenishment = true,
-                }));
-
-        options.AddPolicy(AuthRateLimits.PolicyName, context =>
-            RateLimitPartition.GetFixedWindowLimiter(
-                // Per caller address. A deployment terminating TLS in front of this process is
-                // responsible for presenting the real client address; if every request arrives
-                // from one hop the partition collapses to a global bound, which is degraded but
-                // still bounded — the failure mode is a stricter limit, never an unbounded one.
-                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-                _ => new FixedWindowRateLimiterOptions
-                {
-                    PermitLimit = AuthRateLimits.PermitsPerWindow,
-                    Window = TimeSpan.FromSeconds(AuthRateLimits.WindowSeconds),
-                    QueueLimit = AuthRateLimits.QueueLimit,
                     AutoReplenishment = true,
                 }));
 
@@ -793,7 +755,7 @@ public static class CommsApp
             // will be rejected again, which is the storm the contract warns about.
             var seconds = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter)
                 ? (int)Math.Ceiling(retryAfter.TotalSeconds)
-                : AuthRateLimits.WindowSeconds;
+                : ConversationRateLimits.WindowSeconds;
             response.Headers.RetryAfter =
                 Math.Max(1, seconds).ToString(CultureInfo.InvariantCulture);
 

@@ -93,9 +93,15 @@ public partial class DashboardNginxConfigTests
     [Fact]
     public void Upstream_IsDeclaredAsASchemeOnlyVariable()
     {
-        var set = Assert.Single(Named("set"));
-        Assert.Equal("$orchestrator_upstream http://fleet-orchestrator:3600", set.Value);
-        Assert.False(set.Value.EndsWith('/'), "a URI part in the variable would replace every request URI.");
+        var sets = Named("set");
+        Assert.Equal(
+            ["$comms_upstream http://fleet-comms:8080", "$orchestrator_upstream http://fleet-orchestrator:3600"],
+            sets.Select(s => s.Value).Order().ToArray());
+        Assert.All(sets, set =>
+        {
+            Assert.Equal("server", set.Context);
+            Assert.False(set.Value.EndsWith('/'), "a URI part in the variable would replace every request URI.");
+        });
     }
 
     [Fact]
@@ -104,15 +110,16 @@ public partial class DashboardNginxConfigTests
         var passes = Named("proxy_pass");
         Assert.NotEmpty(passes);
 
-        var expectedContexts = new[] { "location /api/", "location /ws", "location /health" };
-        Assert.Equal(
-            expectedContexts.OrderBy(c => c),
-            passes.Select(p => p.Context).OrderBy(c => c));
-
-        foreach (var pass in passes)
+        var expected = new Dictionary<string, string>
         {
-            Assert.Equal("$orchestrator_upstream", pass.Value);
-        }
+            ["location /api/"] = "$orchestrator_upstream",
+            ["location /ws"] = "$orchestrator_upstream",
+            ["location /health"] = "$orchestrator_upstream",
+            ["location /v1/"] = "$comms_upstream",
+        };
+        Assert.Equal(
+            expected.OrderBy(e => e.Key).Select(e => (e.Key, e.Value)),
+            passes.OrderBy(p => p.Context).Select(p => (p.Context, p.Value)));
     }
 
     [Fact]
@@ -121,6 +128,8 @@ public partial class DashboardNginxConfigTests
         Assert.Empty(Named("upstream"));
         Assert.DoesNotContain(Directives.Value,
             d => d.Name == "proxy_pass" && d.Value.Contains("fleet-orchestrator", StringComparison.Ordinal));
+        Assert.DoesNotContain(Directives.Value,
+            d => d.Name == "proxy_pass" && d.Value.Contains("fleet-comms", StringComparison.Ordinal));
         Assert.DoesNotContain(Directives.Value,
             d => d.Name == "proxy_pass" && d.Value.Contains("http://", StringComparison.Ordinal));
     }
@@ -143,6 +152,41 @@ public partial class DashboardNginxConfigTests
 
         Assert.Contains(api, d => d is { Name: "proxy_set_header", Value: "Host $host" });
         Assert.Contains(api, d => d is { Name: "proxy_set_header", Value: "X-Real-IP $remote_addr" });
+    }
+
+    /// <summary>
+    /// The mark that makes the orchestrator ask for sign-in on reads (docs/sign-in.md). It must be
+    /// set on every route that reaches the orchestrator's API, and set by <c>proxy_set_header</c>,
+    /// which replaces a value the client sent — a client must not be able to remove it.
+    /// </summary>
+    [Theory]
+    [InlineData("location /api/")]
+    [InlineData("location /ws")]
+    public void EveryOrchestratorApiRoute_IsMarkedAsComingFromOutside(string context) =>
+        Assert.Contains(In(context), d => d is { Name: "proxy_set_header", Value: "X-Fleet-Edge 1" });
+
+    [Fact]
+    public void TheMarkIsNeverCopiedFromTheClient() =>
+        Assert.DoesNotContain(Directives.Value,
+            d => d.Name == "proxy_set_header" && d.Value.Contains("$http_x_fleet_edge", StringComparison.OrdinalIgnoreCase));
+
+    [Fact]
+    public void ApiLocation_ReportsTheSchemeTheOuterProxySaw() =>
+        // What marks the session cookie Secure when TLS ends at a proxy in front of this one.
+        Assert.Contains(In("location /api/"),
+            d => d is { Name: "proxy_set_header", Value: "X-Forwarded-Proto $http_x_forwarded_proto" });
+
+    [Fact]
+    public void ChatLocation_ServesPlainRequestsAndTheStreamUpgrade()
+    {
+        var chat = In("location /v1/");
+
+        Assert.Contains(chat, d => d is { Name: "proxy_http_version", Value: "1.1" });
+        Assert.Contains(chat, d => d is { Name: "proxy_set_header", Value: "Upgrade $http_upgrade" });
+        // Passed through, not forced: this location also serves ordinary requests.
+        Assert.Contains(chat, d => d is { Name: "proxy_set_header", Value: "Connection $http_connection" });
+        Assert.Contains(chat, d => d is { Name: "proxy_set_header", Value: "Host $host" });
+        Assert.Contains(chat, d => d is { Name: "proxy_read_timeout", Value: "3600s" });
     }
 
     [GeneratedRegex(@"\bvalid=(\d+)s\b")]

@@ -37,79 +37,69 @@ public sealed class ConversationConfigurationTests
     }
 
     /// <summary>
-    /// Enabled without a south credential fails at construction, naming the key.
+    /// Enabled without the shared key fails at construction, naming the key and never a value.
     /// </summary>
     /// <remarks>
-    /// The south listener carries an administrative surface. A default credential would be a
-    /// credential every deployment shares, which is the same as none.
+    /// The key signs every sign-in question this service asks the orchestrator and verifies every
+    /// agent's south token (#530 D7, D8). There is no other credential on either surface.
     /// </remarks>
     [Fact]
-    public void An_enabled_feature_without_a_south_credential_fails_and_names_the_key()
+    public void An_enabled_feature_without_the_shared_key_fails_and_names_the_key()
     {
-        var options = new CommsOptions
-        {
-            ConversationConnectionString = "Server=db;Database=conversations;",
-            AgentName = "example-agent",
-        };
+        var options = new CommsOptions { ConversationConnectionString = "Server=db;Database=conversations;" };
 
         var error = Assert.Throws<InvalidOperationException>(options.ValidateConversations);
-        Assert.Contains("SouthBearerToken", error.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void An_enabled_feature_without_an_agent_name_fails_and_names_the_key()
-    {
-        var options = new CommsOptions
-        {
-            ConversationConnectionString = "Server=db;Database=conversations;",
-            SouthBearerToken = "a-credential",
-        };
-
-        var error = Assert.Throws<InvalidOperationException>(options.ValidateConversations);
-        Assert.Contains("AgentName", error.Message, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The agent name becomes a routing key AND a queue-name segment, so it is validated rather
-    /// than trusted.
-    /// </summary>
-    /// <remarks>
-    /// A dot or a slash produces a queue name the consumer cannot address — and the failure would
-    /// surface as "the agent never receives anything", which is a long way from its cause.
-    /// </remarks>
-    [Theory]
-    [InlineData("has.a.dot")]
-    [InlineData("has/a/slash")]
-    [InlineData("has a space")]
-    [InlineData("has#a#hash")]
-    public void An_agent_name_that_cannot_be_a_queue_segment_is_refused(string agentName)
-    {
-        var options = new CommsOptions
-        {
-            ConversationConnectionString = "Server=db;Database=conversations;",
-            SouthBearerToken = "a-credential",
-            AgentName = agentName,
-        };
-
-        var error = Assert.Throws<InvalidOperationException>(options.ValidateConversations);
-        Assert.Contains("routing key", error.Message, StringComparison.Ordinal);
+        Assert.StartsWith("chat_key_missing", error.Message, StringComparison.Ordinal);
+        Assert.Contains("TokenKeys", error.Message, StringComparison.Ordinal);
     }
 
     [Theory]
-    [InlineData("example-agent")]
-    [InlineData("example_agent")]
-    [InlineData("Agent1")]
-    public void A_usable_agent_name_is_accepted(string agentName)
+    [InlineData("not base64url!")]
+    [InlineData("c2hvcnQ")]
+    public void An_unusable_shared_key_fails_and_never_echoes_it(string key)
     {
         var options = new CommsOptions
         {
             ConversationConnectionString = "Server=db;Database=conversations;",
-            SouthBearerToken = "a-credential",
-            AgentName = agentName,
+            Journal = new() { TokenKeys = key },
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(options.ValidateConversations);
+        Assert.StartsWith("chat_key_invalid", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(key, error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("fleet-orchestrator:3600")]
+    [InlineData("ftp://fleet-orchestrator")]
+    public void An_unusable_orchestrator_address_fails_and_names_the_key(string url)
+    {
+        var options = new CommsOptions
+        {
+            ConversationConnectionString = "Server=db;Database=conversations;",
+            Journal = new() { TokenKeys = JournalTestHost.KeyA },
+            OrchestratorUrl = url,
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(options.ValidateConversations);
+        Assert.Contains("OrchestratorUrl", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_enabled_feature_with_the_shared_key_is_accepted_and_needs_no_agent_name()
+    {
+        // No agent is named in this service's configuration any more: each conversation names its
+        // own, and every chat-enabled agent is reachable (#530 D8, D9).
+        var options = new CommsOptions
+        {
+            ConversationConnectionString = "Server=db;Database=conversations;",
+            Journal = new() { TokenKeys = JournalTestHost.KeyA },
         };
 
         options.ValidateConversations();
         Assert.True(options.ConversationsEnabled);
+        Assert.Equal("http://fleet-orchestrator:3600", options.OrchestratorUrl);
     }
 
     /// <summary>

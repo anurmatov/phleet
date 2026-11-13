@@ -1,4 +1,4 @@
-namespace Fleet.Comms.Auth;
+namespace Fleet.Orchestrator.Auth;
 
 /// <summary>
 /// The clock every expiry decision on this boundary is made against.

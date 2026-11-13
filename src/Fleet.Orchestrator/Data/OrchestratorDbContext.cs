@@ -16,6 +16,12 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
     public DbSet<AgentEnvRef> AgentEnvRefs => Set<AgentEnvRef>();
     public DbSet<SecretBinding> SecretBindings => Set<SecretBinding>();
     public DbSet<PushDevice> PushDevices => Set<PushDevice>();
+
+    // Sign-in (Auth/): users, their devices, one-time enrollment codes and issued tokens.
+    public DbSet<AuthUser> AuthUsers => Set<AuthUser>();
+    public DbSet<AuthDevice> AuthDevices => Set<AuthDevice>();
+    public DbSet<AuthEnrollment> AuthEnrollments => Set<AuthEnrollment>();
+    public DbSet<AuthToken> AuthTokens => Set<AuthToken>();
     public DbSet<AgentTelegramUser> AgentTelegramUsers => Set<AgentTelegramUser>();
     public DbSet<AgentTelegramGroup> AgentTelegramGroups => Set<AgentTelegramGroup>();
     public DbSet<AgentNetwork> AgentNetworks => Set<AgentNetwork>();
@@ -78,6 +84,9 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.AutoMemoryEnabled).HasDefaultValue(true);
             e.Property(x => x.JournalEnabled).HasColumnName("journal_enabled").HasDefaultValue(false);
             e.Property(x => x.JournalCrossChatEnabled).HasColumnName("journal_cross_chat_enabled").HasDefaultValue(false);
+            // Default ON (#530). An agent saved with chat off stays off: AddAgentChatEnabledMigrationTests
+            // saves one through EF against MySQL and reads back false.
+            e.Property(x => x.ChatEnabled).HasColumnName("chat_enabled").HasDefaultValue(true);
             e.Property(x => x.HarnessExtra).HasColumnName("harness_extra").HasColumnType("text");
             e.Property(x => x.CanReceiveChatRequests).HasDefaultValue(false);
             e.Property(x => x.RequestReceivedMessage).HasMaxLength(500);
@@ -214,8 +223,59 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.ToTable("push_devices");
             e.HasKey(x => x.Id);
             e.Property(x => x.DeviceId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.AuthDeviceId).HasMaxLength(32);
+            e.HasIndex(x => x.AuthDeviceId);
             e.Property(x => x.Token).HasMaxLength(200).IsRequired();
             e.HasIndex(x => x.DeviceId).IsUnique();
+        });
+
+        modelBuilder.Entity<AuthUser>(e =>
+        {
+            e.ToTable("auth_users");
+            e.HasKey(x => x.UserId);
+            e.Property(x => x.UserId).HasMaxLength(64);
+            e.Property(x => x.DisplayName).HasMaxLength(128).IsRequired();
+        });
+
+        modelBuilder.Entity<AuthDevice>(e =>
+        {
+            e.ToTable("auth_devices");
+            e.HasKey(x => x.DeviceId);
+            e.Property(x => x.DeviceId).HasMaxLength(32);
+            e.Property(x => x.UserId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.Kind).HasMaxLength(16).IsRequired();
+            e.Property(x => x.Name).HasMaxLength(64).IsRequired();
+            e.Property(x => x.SecretHash).HasMaxLength(200).IsRequired();
+            e.Property(x => x.EnrollmentId).HasMaxLength(32);
+            e.HasIndex(x => x.UserId);
+            // A user with devices cannot be deleted out from under them.
+            e.HasOne(x => x.User)
+             .WithMany()
+             .HasForeignKey(x => x.UserId)
+             .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<AuthEnrollment>(e =>
+        {
+            e.ToTable("auth_enrollments");
+            e.HasKey(x => x.EnrollmentId);
+            e.Property(x => x.EnrollmentId).HasMaxLength(32);
+            e.Property(x => x.CodeHash).HasMaxLength(200).IsRequired();
+            e.Property(x => x.UserId).HasMaxLength(64).IsRequired();
+            e.Property(x => x.DeviceName).HasMaxLength(64).IsRequired();
+            e.Property(x => x.DeviceId).HasMaxLength(32);
+        });
+
+        modelBuilder.Entity<AuthToken>(e =>
+        {
+            e.ToTable("auth_tokens");
+            e.HasKey(x => x.TokenId);
+            e.Property(x => x.TokenId).HasMaxLength(32);
+            e.Property(x => x.TokenHash).HasMaxLength(200).IsRequired();
+            e.Property(x => x.DeviceId).HasMaxLength(32).IsRequired();
+            e.Property(x => x.Kind).HasMaxLength(16).IsRequired();
+            e.HasIndex(x => x.DeviceId);
+            e.HasIndex(x => x.ExpiresAt);
         });
 
         modelBuilder.Entity<SecretBinding>(e =>

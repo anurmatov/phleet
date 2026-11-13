@@ -117,6 +117,63 @@ public sealed class AgentConfigEndpointsJournalTests : IAsyncLifetime
         Assert.Equal(fault is not null, stored.ShowStats);
     }
 
+    /// <summary>
+    /// Chat (#530) is a plain switch, on by default: saving it never fails, with or without the
+    /// shared key. Whether it applies is decided at provisioning.
+    /// </summary>
+    [Theory]
+    [InlineData(false, true, "missing")]
+    [InlineData(false, true, "invalid")]
+    [InlineData(false, true, "valid")]
+    [InlineData(true, false, "missing")]
+    [InlineData(true, false, "valid")]
+    public async Task Put_chat_always_saves_whatever_the_key(bool before, bool requested, string key)
+    {
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            var agent = await db.Agents.SingleAsync();
+            agent.ChatEnabled = before;
+            agent.ShowStats = true;
+            await db.SaveChangesAsync();
+        }
+        var config = (IConfigurationRoot)_app.Services.GetRequiredService<JournalTokenServiceConfig>().Config;
+        config["Journal:TokenKey"] = key switch
+        {
+            "valid" => Convert.ToBase64String(new byte[32]).TrimEnd('='),
+            "invalid" => "invalid",
+            _ => null,
+        };
+
+        var response = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { chatEnabled = requested, showStats = false });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await using var readScope = _app.Services.CreateAsyncScope();
+        var stored = await readScope.ServiceProvider.GetRequiredService<OrchestratorDbContext>().Agents.AsNoTracking().SingleAsync();
+        Assert.Equal(requested, stored.ChatEnabled);
+        Assert.False(stored.ShowStats);
+
+        var read = await _client.GetFromJsonAsync<JsonElement>("/api/agents/agent1/config");
+        Assert.Equal(requested, read.GetProperty("chatEnabled").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Put_without_chatEnabled_leaves_it_alone()
+    {
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+            (await db.Agents.SingleAsync()).ChatEnabled = true;
+            await db.SaveChangesAsync();
+        }
+
+        var response = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { showStats = false });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var read = await _client.GetFromJsonAsync<JsonElement>("/api/agents/agent1/config");
+        Assert.True(read.GetProperty("chatEnabled").GetBoolean());
+    }
+
     [Fact]
     public async Task CrossChatSave_IsIndependentOfEffectiveGrant_AndAlwaysClearable()
     {

@@ -118,8 +118,9 @@ identity-only through the existing notifier, without question or answer text.
 The browser suite loads the real App, clicks the AgentsView answer button and
 uses App's production modal/send callbacks. Only HTTP and WebSocket IO is
 synthetic. Both 390px and 1280px projects cover every answer mode, loading,
-no selection, long labels, history error, read-only, selected-answer staleness and
-late history after a run changes. A live identity change invalidates the modal
+no selection, long labels, history error, selected-answer staleness and
+late history after a run changes, plus a signed-out browser, which gets the
+sign-in page and never the decision (#530). A live identity change invalidates the modal
 without rebinding it to a newer run.
 
 Playwright is a pinned, development-only dependency needed for actual browser
@@ -131,8 +132,8 @@ npx playwright install chromium
 npm run test:human-input-browser
 ```
 
-The suite starts its own loopback Vite servers with synthetic operator/read-only
-settings and blocks non-loopback browser requests. CI installs Chromium's system
+The suite starts its own loopback Vite server, answers the session route as
+signed in or signed out, and blocks non-loopback browser requests. CI installs Chromium's system
 dependencies and runs the same suite. No application callbacks are replaced.
 
 Set `HUMAN_INPUT_EVIDENCE_DIR` to a directory outside the checkout to retain the

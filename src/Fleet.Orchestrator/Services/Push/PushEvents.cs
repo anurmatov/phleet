@@ -185,6 +185,18 @@ public static class PushMessages
         // Includes when it went quiet, so a second outage of the same agent is its own notification.
         Key: string.Join('\u001f', "agent", agent.AgentName, since.ToUnixTimeSeconds().ToString()));
 
+    /// <summary>
+    /// An agent replied in chat while no client was attached (#530). Who replied, and where; never
+    /// what was said.
+    /// </summary>
+    /// <param name="seq">The reply's position in the conversation, so each reply is its own notification.</param>
+    public static PushMessage ChatReply(string agentName, string displayName, string conversationId, ulong seq) => new(
+        Kind: "chat",
+        Title: displayName,
+        Body: "New reply",
+        Target: new Dictionary<string, string> { ["agentName"] = agentName, ["conversationId"] = conversationId },
+        Key: string.Join('\u001f', "chat", conversationId, seq.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
     /// <summary>The repository and the pull request or issue, else the workflow identifier.</summary>
     public static string Subject(WorkflowSummary run)
     {

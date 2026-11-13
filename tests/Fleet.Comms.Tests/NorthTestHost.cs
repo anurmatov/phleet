@@ -1,7 +1,6 @@
-using System.Net.Http.Json;
 using Fleet.Comms;
+using System.Collections.Concurrent;
 using Fleet.Comms.Auth;
-using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -18,27 +17,28 @@ namespace Fleet.Comms.Tests;
 ///
 /// <para>It is built through <see cref="CommsApp.BuildNorthApp"/> — the same composition
 /// <c>Program</c> runs — so these tests exercise the production registration graph rather than a
-/// hand-wired approximation. Only the clock and the store instance are substituted, and the store
-/// is the real <see cref="InMemoryAuthStore"/> rather than a mock, so the fail-closed paths run the
-/// same code the request path does.</para>
+/// hand-wired approximation. Only the clock, the conversation store and the sign-in check are
+/// substituted. The sign-in check is <see cref="FakeSignIn"/>: the orchestrator owns sign-in
+/// (#530), and what these tests ask is what this service does with each answer it can get.
+/// <see cref="OrchestratorSignInCheckTests"/> covers the real client.</para>
 /// </summary>
 internal sealed class NorthTestHost : IAsyncDisposable
 {
+    /// <summary>The chat-enabled agent every test conversation is with unless it says otherwise.</summary>
+    public const string ChatAgent = "example-agent";
+
     private readonly WebApplication _app;
 
-    private NorthTestHost(WebApplication app, InMemoryAuthStore store, TestTimeProvider time,
-        AuthService auth, HttpClient client)
+    private NorthTestHost(WebApplication app, FakeSignIn signIn, TestTimeProvider time, HttpClient client)
     {
         _app = app;
-        Store = store;
+        SignIn = signIn;
         Time = time;
-        Auth = auth;
         Client = client;
     }
 
-    public InMemoryAuthStore Store { get; }
+    public FakeSignIn SignIn { get; }
     public TestTimeProvider Time { get; }
-    public AuthService Auth { get; }
     public HttpClient Client { get; }
 
     /// <summary>The running app's services, so a test can inspect the real registration graph.</summary>
@@ -54,7 +54,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
     public WebSocketClient WebSocketClient() => _app.GetTestServer().CreateWebSocketClient();
 
     public static async Task<NorthTestHost> StartAsync(
-        ISecretHasher? hasher = null, IAuthStore? store = null, bool? trustForwardedHeaders = null,
+        bool? trustForwardedHeaders = null,
         Fleet.Conversations.Contracts.IConversationStore? conversations = null,
         string? attachmentRoot = null)
     {
@@ -97,50 +97,27 @@ internal sealed class NorthTestHost : IAsyncDisposable
             });
         }
 
-        // `store` lets a test drive the real routes against a durable store — the operator-command
-        // tests need the CLI and the routes to be looking at the same file. Left null, the
-        // in-process fixture is used and `Store` below is the one the test can poke at.
-        var inMemory = new InMemoryAuthStore();
+        var signIn = new FakeSignIn();
         var time = new TestTimeProvider();
 
-        builder.Services.AddSingleton(store ?? inMemory);
+        builder.Services.AddSingleton<ISignInCheck>(signIn);
         builder.Services.AddSingleton<TimeProvider>(time);
-        if (hasher is not null)
-            builder.Services.AddSingleton(hasher);
 
         var app = CommsApp.BuildNorthApp(builder);
 
         // The production composition registers concrete defaults; TryAdd semantics mean the
         // substitutions above win only because they were registered first. Assert that rather than
-        // assume it — a silent fallback to the system clock would make every TTL test meaningless.
+        // assume it — a silent fallback would make every test here ask a real orchestrator.
         await app.StartAsync();
-        var resolvedTime = app.Services.GetRequiredService<TimeProvider>();
-        if (!ReferenceEquals(resolvedTime, time))
+        if (!ReferenceEquals(app.Services.GetRequiredService<TimeProvider>(), time))
             throw new InvalidOperationException("The test clock was not the resolved TimeProvider.");
 
-        var client = app.GetTestClient();
-        return new NorthTestHost(app, inMemory, time,
-            app.Services.GetRequiredService<AuthService>(), client);
+        if (conversations is not null
+            && !ReferenceEquals(app.Services.GetRequiredService<ISignInCheck>(), signIn))
+            throw new InvalidOperationException("The fake sign-in check was not the resolved ISignInCheck.");
+
+        return new NorthTestHost(app, signIn, time, app.GetTestClient());
     }
-
-    /// <summary>Issue a code through the library path. There is no north route for this by design.</summary>
-    public Task<string> IssueEnrollmentCodeAsync(string principalId = "p_owner") =>
-        Auth.IssueEnrollmentCodeAsync(principalId);
-
-    public Task<HttpResponseMessage> RegisterAsync(string enrollmentCode) =>
-        Client.PostAsJsonAsync("/v1/auth/devices", new
-        {
-            protocol = ProtocolVersion.Current,
-            enrollmentCode,
-        });
-
-    public Task<HttpResponseMessage> TokenAsync(string deviceId, string deviceSecret) =>
-        Client.PostAsJsonAsync("/v1/auth/token", new
-        {
-            protocol = ProtocolVersion.Current,
-            deviceId,
-            deviceSecret,
-        });
 
     public Task<HttpResponseMessage> SessionAsync(string? bearer, string? forwardedFor = null)
     {
@@ -152,26 +129,15 @@ internal sealed class NorthTestHost : IAsyncDisposable
         return Client.SendAsync(request);
     }
 
-    public Task<HttpResponseMessage> RevokeAsync(string deviceId, string? bearer)
+    /// <summary>
+    /// A signed-in app — the ordinary starting state. The secret is not this service's business any
+    /// more; it is returned empty so the tuple shape older tests use still reads.
+    /// </summary>
+    public Task<(string DeviceId, string DeviceSecret, string Token)> EnrolledDeviceAsync(
+        string principalId = FakeSignIn.Owner)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, $"/v1/auth/devices/{deviceId}:revoke");
-        if (bearer is not null)
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {bearer}");
-        return Client.SendAsync(request);
-    }
-
-    /// <summary>Register a device and mint its first token — the ordinary starting state.</summary>
-    public async Task<(string DeviceId, string DeviceSecret, string Token)> EnrolledDeviceAsync()
-    {
-        var code = await IssueEnrollmentCodeAsync();
-        var registration = await RegisterAsync(code);
-        var device = await registration.Content.ReadFromJsonAsync<RegisterDeviceBody>(
-            FleetProtocolJson.Options);
-
-        var token = await TokenAsync(device!.DeviceId, device.DeviceSecret);
-        var minted = await token.Content.ReadFromJsonAsync<TokenBody>(FleetProtocolJson.Options);
-
-        return (device.DeviceId, device.DeviceSecret, minted!.AccessToken);
+        var (deviceId, token) = SignIn.AddApp(principalId);
+        return Task.FromResult((deviceId, string.Empty, token));
     }
 
     public async ValueTask DisposeAsync()
@@ -180,10 +146,83 @@ internal sealed class NorthTestHost : IAsyncDisposable
         await _app.StopAsync();
         await _app.DisposeAsync();
     }
+}
 
-    internal sealed record RegisterDeviceBody(string Protocol, string DeviceId, string DeviceSecret);
+/// <summary>
+/// The orchestrator's answers, held in memory: which bearer and which session cookie name whom, and
+/// which agents accept chat. Records every question it is asked.
+/// </summary>
+internal sealed class FakeSignIn : ISignInCheck
+{
+    public const string Owner = "p_owner";
 
-    internal sealed record TokenBody(string Protocol, string AccessToken, int ExpiresInSeconds);
+    private readonly ConcurrentDictionary<string, AuthenticatedPrincipal> _bearers = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, AuthenticatedPrincipal> _cookies = new(StringComparer.Ordinal);
+    private int _next;
+
+    /// <summary>The agents that accept chat.</summary>
+    public ConcurrentDictionary<string, bool> ChatAgents { get; } =
+        new(StringComparer.Ordinal) { [NorthTestHost.ChatAgent] = true };
+
+    /// <summary>When set, every question gets this answer instead: an outage, or a throttle.</summary>
+    public SignInAnswer? Override { get; set; }
+
+    /// <summary>Every question, in order.</summary>
+    public ConcurrentQueue<(PresentedCredential Credential, string? Agent, bool Fresh)> Asked { get; } = new();
+
+    /// <summary>An enrolled app: a device id and the bearer it presents.</summary>
+    public (string DeviceId, string Token) AddApp(string principalId = Owner)
+    {
+        var n = Interlocked.Increment(ref _next);
+        var device = $"d_app_{n:D4}";
+        var token = $"access-token-{n:D4}-{Guid.NewGuid():N}";
+        _bearers[token] = new AuthenticatedPrincipal(principalId, device, $"t_{n:D4}", IsBrowser: false);
+        return (device, token);
+    }
+
+    /// <summary>A signed-in browser: the value of its session cookie.</summary>
+    public string AddBrowser(string principalId = Owner)
+    {
+        var n = Interlocked.Increment(ref _next);
+        var cookie = $"session-{n:D4}-{Guid.NewGuid():N}";
+        _cookies[cookie] = new AuthenticatedPrincipal(principalId, $"d_browser_{n:D4}", $"s_{n:D4}", IsBrowser: true);
+        return cookie;
+    }
+
+    /// <summary>Revoke a bearer or a session cookie.</summary>
+    public void Revoke(string tokenOrCookie)
+    {
+        _bearers.TryRemove(tokenOrCookie, out _);
+        _cookies.TryRemove(tokenOrCookie, out _);
+    }
+
+    public Task<SignInAnswer> CheckAsync(
+        PresentedCredential credential, string? agent, bool fresh, CancellationToken ct)
+    {
+        Asked.Enqueue((credential, agent, fresh));
+
+        if (Override is { } forced) return Task.FromResult(forced);
+
+        AuthenticatedPrincipal? caller = null;
+        var authorization = credential.Authorization;
+
+        if (authorization is not null)
+        {
+            // As the orchestrator does: an Authorization header that is not a known bearer refuses,
+            // whatever cookie came with it.
+            if (authorization.StartsWith("Bearer ", StringComparison.Ordinal))
+                _bearers.TryGetValue(authorization["Bearer ".Length..], out caller);
+        }
+        else if (credential.SessionCookie is { } cookie)
+        {
+            _cookies.TryGetValue(cookie, out caller);
+        }
+
+        if (caller is null) return Task.FromResult(SignInAnswer.Refused);
+
+        bool? chat = agent is null ? null : ChatAgents.TryGetValue(agent, out var on) && on;
+        return Task.FromResult(new SignInAnswer(SignInOutcome.Signed, caller, chat));
+    }
 }
 
 /// <summary>
@@ -231,30 +270,4 @@ internal sealed class TestTimeProvider(DateTimeOffset? start = null) : TimeProvi
     /// time, and a test written with <c>Advance</c> cannot express it.</para>
     /// </summary>
     public void SetForward(TimeSpan delta) => _now += delta;
-}
-
-/// <summary>
-/// Wraps a real hasher and counts verifications, so the "every rejection costs the same" property
-/// can be asserted as an exact call count rather than as a wall-clock measurement. A timing
-/// assertion on a shared CI runner is a flake waiting to be muted; a count is not.
-/// </summary>
-internal sealed class CountingSecretHasher(ISecretHasher inner) : ISecretHasher
-{
-    private int _verifications;
-
-    public int Verifications => Volatile.Read(ref _verifications);
-
-    public string Hash(string secret) => inner.Hash(secret);
-
-    public bool Verify(string secret, string encodedHash)
-    {
-        Interlocked.Increment(ref _verifications);
-        return inner.Verify(secret, encodedHash);
-    }
-
-    public bool VerifyOrDummy(string secret, string? encodedHash)
-    {
-        Interlocked.Increment(ref _verifications);
-        return inner.VerifyOrDummy(secret, encodedHash);
-    }
 }

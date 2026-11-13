@@ -657,7 +657,7 @@ public sealed class SubmissionTranscriptTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = Owner,
+            PrincipalId = Owner, AgentName = SouthTestHost.Agent,
         });
 
     /// <param name="commandKind">

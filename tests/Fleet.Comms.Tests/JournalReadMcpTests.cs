@@ -88,7 +88,7 @@ public sealed partial class JournalReadMcpTests
         var opsBuilder = WebApplication.CreateBuilder();
         opsBuilder.WebHost.UseTestServer();
         opsBuilder.Logging.ClearProviders();
-        await using var ops = CommsApp.BuildOpsApp(opsBuilder, new InMemoryAuthStore());
+        await using var ops = CommsApp.BuildOpsApp(opsBuilder);
         Assert.DoesNotContain(RoutePatterns(ops.Services), p => p.Contains("mcp", StringComparison.OrdinalIgnoreCase));
 
         var southBuilder = WebApplication.CreateBuilder();
@@ -97,15 +97,14 @@ public sealed partial class JournalReadMcpTests
         southBuilder.Logging.ClearProviders();
         await using var south = CommsApp.BuildSouthApp(southBuilder, new FakeConversationStore(), new CommsOptions
         {
-            SouthBearerToken = "south-token",
-            AgentName = "example-agent",
             ConversationConnectionString = "configured",
+            Journal = new() { TokenKeys = JournalTestHost.KeyA },
         });
         await south.StartAsync();
         Assert.DoesNotContain(RoutePatterns(south.Services), p => p.Contains("mcp", StringComparison.OrdinalIgnoreCase));
 
         var request = new HttpRequestMessage(HttpMethod.Post, JournalMcp.Path) { Content = new StringContent("{}") };
-        request.Headers.TryAddWithoutValidation("Authorization", "Bearer south-token");
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {JournalTestHost.SouthToken("example-agent")}");
         Assert.Equal(HttpStatusCode.NotFound, (await south.GetTestClient().SendAsync(request)).StatusCode);
 
         // The SDK maps its POST on a route group, so the pattern carries a trailing slash.
@@ -555,10 +554,7 @@ public sealed partial class JournalReadMcpTests
 
             info.Environment["DOTNET_CONTENTROOT"] = directory;
             info.Environment["ASPNETCORE_URLS"] = "http://127.0.0.1:0";
-            info.Environment["Comms__AuthStorePath"] = Path.Combine(directory, "auth.db");
             info.Environment["Comms__ConversationConnectionString"] = "Server=127.0.0.1;Port=1;Database=unused;User ID=unused;Password=unused;";
-            info.Environment["Comms__SouthBearerToken"] = "a-south-credential";
-            info.Environment["Comms__AgentName"] = "example-agent";
             info.Environment["Comms__Journal__Enabled"] = "true";
             info.Environment["Comms__Journal__TokenKeys"] = JournalTestHost.KeyA;
             info.Environment["Comms__Journal__ReadAllSubjects"] = "example-agent,not a subject";

@@ -48,6 +48,17 @@ public class Agent
     /// </summary>
     public bool JournalEnabled { get; set; } = false;
     public bool JournalCrossChatEnabled { get; set; } = false;
+    /// <summary>
+    /// Lets a signed-in person chat with this agent from the dashboard and the app (#530). On by
+    /// default, for new and existing agents; the owner turns it off per agent.
+    /// </summary>
+    /// <remarks>
+    /// It takes effect only where the deployment can carry chat (<see cref="Services.ChatAgents.IsEffective"/>):
+    /// provisioning writes the agent's <c>Conversations</c> section then and only then, and never
+    /// refuses an agent over chat. The chat service refuses a conversation with an agent for which
+    /// it is false.
+    /// </remarks>
+    public bool ChatEnabled { get; set; } = true;
     [MaxLength(30)]
     public string? CodexSandboxMode { get; set; }
 
@@ -655,7 +666,68 @@ public class PushDevice
 {
     public int Id { get; set; }
     public required string DeviceId { get; set; }
+    /// <summary>Server-derived sign-in device. Null only for legacy service registrations.</summary>
+    public string? AuthDeviceId { get; set; }
     public required string Token { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>A person who can sign in. See <see cref="Fleet.Orchestrator.Auth.UserRecord"/>.</summary>
+public class AuthUser
+{
+    public required string UserId { get; set; }
+    public string DisplayName { get; set; } = "";
+    public long? TelegramUserId { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// A signed-in browser or an enrolled app. See <see cref="Fleet.Orchestrator.Auth.DeviceRecord"/>.
+/// </summary>
+/// <remarks>
+/// <see cref="SecretHash"/> is a salted Argon2id hash, never a secret. No endpoint returns it and
+/// nothing logs it.
+/// </remarks>
+public class AuthDevice
+{
+    public required string DeviceId { get; set; }
+    public required string UserId { get; set; }
+    public AuthUser? User { get; set; }
+
+    /// <summary><c>app</c> or <c>browser</c>.</summary>
+    public required string Kind { get; set; }
+    public string Name { get; set; } = "";
+    public string SecretHash { get; set; } = "";
+    public string? EnrollmentId { get; set; }
+    public DateTime RegisteredAt { get; set; }
+    public DateTime? FirstTokenMintedAt { get; set; }
+    public DateTime? LastSeenAt { get; set; }
+    public DateTime? RevokedAt { get; set; }
+}
+
+/// <summary>A one-time enrollment code, stored as a hash. See <see cref="Fleet.Orchestrator.Auth.EnrollmentRecord"/>.</summary>
+public class AuthEnrollment
+{
+    public required string EnrollmentId { get; set; }
+    public required string CodeHash { get; set; }
+    public required string UserId { get; set; }
+    public string DeviceName { get; set; } = "";
+    public DateTime ExpiresAt { get; set; }
+    public DateTime? ConsumedAt { get; set; }
+    public string? DeviceId { get; set; }
+    public DateTime? RevokedAt { get; set; }
+}
+
+/// <summary>An access or session token, stored as a hash. See <see cref="Fleet.Orchestrator.Auth.TokenRecord"/>.</summary>
+public class AuthToken
+{
+    public required string TokenId { get; set; }
+    public required string TokenHash { get; set; }
+    public required string DeviceId { get; set; }
+
+    /// <summary><c>access</c> or <c>session</c>.</summary>
+    public required string Kind { get; set; }
+    public DateTime ExpiresAt { get; set; }
+    public DateTime? RevokedAt { get; set; }
 }

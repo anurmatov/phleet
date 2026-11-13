@@ -1,5 +1,4 @@
 using System.Net;
-using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Fleet.Comms.Routes;
 using Fleet.Protocol;
@@ -46,7 +45,8 @@ public class NorthBoundaryTests
     [MemberData(nameof(SouthRoutes))]
     public async Task NoSouthRouteIsReachableOnTheNorthListener(string method, string path)
     {
-        await using var host = await NorthTestHost.StartAsync();
+        // With conversations ON, which is when the north listener has routes at all.
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
 
         var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
 
@@ -59,7 +59,8 @@ public class NorthBoundaryTests
     [InlineData("GET", "/journal/v1/status")]
     public async Task NoJournalRouteIsReachableOnTheNorthListener(string method, string path)
     {
-        await using var host = await NorthTestHost.StartAsync();
+        // With conversations ON, which is when the north listener has routes at all.
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
 
         var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
 
@@ -67,122 +68,61 @@ public class NorthBoundaryTests
     }
 
     /// <summary>
-    /// The structural half, and the one that actually holds the line. Probing for 404s proves those
-    /// nine paths are absent today; this proves the north app's route table is EXACTLY the four
-    /// routes of this slice, so mapping a south endpoint onto it later fails here rather than
-    /// shipping.
+    /// With conversations off, the north listener maps nothing (#530): no sign-in route, because
+    /// sign-in is the orchestrator's, and no conversation route.
     /// </summary>
     [Fact]
-    public async Task TheNorthRouteTableIsExactlyTheSliceOneRoutes()
+    public async Task WithConversationsOff_TheNorthRouteTableIsEmpty()
     {
         await using var host = await NorthTestHost.StartAsync();
 
         var registered = host.Services.GetServices<EndpointDataSource>()
             .SelectMany(s => s.Endpoints)
             .OfType<RouteEndpoint>()
-            .Select(e =>
-            {
-                var methods = e.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods ?? [];
-                return $"{string.Join(",", methods)} /{e.RoutePattern.RawText?.TrimStart('/')}";
-            })
-            .OrderBy(x => x, StringComparer.Ordinal)
             .ToList();
 
-        Assert.Equal(NorthEndpoints.Routes.OrderBy(x => x, StringComparer.Ordinal).ToList(), registered);
+        Assert.Empty(registered);
+        Assert.Equal(HttpStatusCode.NotFound, (await host.Client.GetAsync("/v1/session")).StatusCode);
     }
 
     // ── indistinguishable failures ───────────────────────────────────────────
 
     /// <summary>
-    /// §3.6: enrollment failure, unknown device, bad secret, expired token and revoked token are
-    /// indistinguishable to the caller. Asserted on the raw bytes, not on the status alone — a
-    /// differing `message` or field order would be an oracle just as surely as a differing code.
+    /// Absent, unknown, revoked, a cookie nobody issued, and a bearer in the wrong scheme: one
+    /// status and one body, byte for byte, so a caller learns nothing from which it got.
     /// </summary>
     [Fact]
-    public async Task TheFiveAuthFailures_ProduceByteIdenticalResponses()
+    public async Task EveryRefusedCredential_ProducesByteIdenticalResponses()
     {
-        await using var host = await NorthTestHost.StartAsync();
-        var (deviceId, secret, token) = await host.EnrolledDeviceAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
+        var (_, _, revoked) = await host.EnrolledDeviceAsync();
+        host.SignIn.Revoke(revoked);
 
-        var bodies = new List<(string Case, string Body, HttpStatusCode Status)>();
-
-        var unknownCode = await host.RegisterAsync(
-            Credentials.Compose("nosuchid", Credentials.NewSecret()));
-        bodies.Add(("unknown enrollment code", await unknownCode.Content.ReadAsStringAsync(), unknownCode.StatusCode));
-
-        var unknownDevice = await host.TokenAsync("nosuchdevice", secret);
-        bodies.Add(("unknown device", await unknownDevice.Content.ReadAsStringAsync(), unknownDevice.StatusCode));
-
-        var badSecret = await host.TokenAsync(deviceId, Credentials.NewSecret());
-        bodies.Add(("bad secret", await badSecret.Content.ReadAsStringAsync(), badSecret.StatusCode));
-
-        await host.RevokeAsync(deviceId, token);
-        var revokedToken = await host.SessionAsync(token);
-        bodies.Add(("revoked token", await revokedToken.Content.ReadAsStringAsync(), revokedToken.StatusCode));
-
-        // The expired case needs a token that is still valid when the clock moves, so it uses a
-        // fresh device — the first one is revoked by now, which is also what makes a second
-        // registration legal here. Rolling the clock BACKWARDS to reuse the first device, as this
-        // test once did, is no longer possible and never should have been: expiry is irreversible,
-        // and a test that depended on reversing it was asserting the bug.
-        var replacement = await AuthLifecycleTests.Body<NorthTestHost.RegisterDeviceBody>(
-            await host.RegisterAsync(await host.IssueEnrollmentCodeAsync()));
-        var replacementToken = await AuthLifecycleTests.Body<NorthTestHost.TokenBody>(
-            await host.TokenAsync(replacement.DeviceId, replacement.DeviceSecret));
-
-        host.Time.Advance(AuthService.AccessTokenTtl);
-        var expiredToken = await host.SessionAsync(replacementToken.AccessToken);
-        bodies.Add(("expired token", await expiredToken.Content.ReadAsStringAsync(), expiredToken.StatusCode));
-
-        Assert.All(bodies, b => Assert.Equal(HttpStatusCode.Unauthorized, b.Status));
-        Assert.Single(bodies.Select(b => b.Body).Distinct(StringComparer.Ordinal));
-    }
-
-    // ── fail closed ──────────────────────────────────────────────────────────
-
-    [Fact]
-    public async Task AnAuthStoreOutage_Returns503AndNever2xx()
-    {
-        await using var host = await NorthTestHost.StartAsync();
-        var (deviceId, secret, token) = await host.EnrolledDeviceAsync();
-
-        host.Store.FailEveryOperation = true;
-
-        foreach (var response in new[]
-                 {
-                     await host.RegisterAsync(Credentials.Compose("id", Credentials.NewSecret())),
-                     await host.TokenAsync(deviceId, secret),
-                     await host.SessionAsync(token),
-                     await host.RevokeAsync(deviceId, token),
-                 })
+        var requests = new List<HttpRequestMessage>
         {
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-            var body = await AuthLifecycleTests.Body<AuthLifecycleTests.ErrorBody>(response);
-            Assert.Equal("internal", body.Code);
-            Assert.Equal(ProtocolErrors.Internal, body.Message);
+            new(HttpMethod.Get, "/v1/session"),
+            WithHeader("Authorization", "Bearer not-a-token"),
+            WithHeader("Authorization", $"Bearer {revoked}"),
+            WithHeader("Authorization", $"Basic {revoked}"),
+            WithHeader("Cookie", "fleet_session=never-issued"),
+        };
+
+        var bodies = new List<string>();
+        foreach (var request in requests)
+        {
+            var response = await host.Client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+            bodies.Add(await response.Content.ReadAsStringAsync());
         }
-    }
 
-    /// <summary>
-    /// §16: a code is consumed atomically or not at all. A partial consume leaving a code both
-    /// spent and unusable locks the owner out with no recovery.
-    /// </summary>
-    [Fact]
-    public async Task AFailedCommitLeavesNoHalfSpentEnrollmentState()
-    {
-        await using var host = await NorthTestHost.StartAsync();
-        var code = await host.IssueEnrollmentCodeAsync();
+        Assert.Single(bodies.Distinct(StringComparer.Ordinal));
 
-        host.Store.FailOnCommit = true;
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await host.RegisterAsync(code)).StatusCode);
-        host.Store.FailOnCommit = false;
-
-        // Nothing was written: no device, and the code is still unconsumed.
-        Assert.Empty(host.Store.Devices);
-        Assert.All(host.Store.Enrollments, e => Assert.Null(e.ConsumedAt));
-
-        // And the owner is not locked out — the same code still registers.
-        Assert.Equal(HttpStatusCode.OK, (await host.RegisterAsync(code)).StatusCode);
+        static HttpRequestMessage WithHeader(string name, string value)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, "/v1/session");
+            request.Headers.TryAddWithoutValidation(name, value);
+            return request;
+        }
     }
 
     // ── session ──────────────────────────────────────────────────────────────
@@ -190,14 +130,13 @@ public class NorthBoundaryTests
     [Fact]
     public async Task SessionReturnsOnlyDerivedOwnerFieldsAndTheContractLimits()
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
         var (_, _, token) = await host.EnrolledDeviceAsync();
 
-        var body = await AuthLifecycleTests.Body<SessionBody>(await host.SessionAsync(token));
+        var body = await Body<SessionBody>(await host.SessionAsync(token));
 
         Assert.Equal(ProtocolVersion.Current, body.Protocol);
         Assert.Equal("p_owner", body.PrincipalId);
-        Assert.Equal("assistant", body.AgentLabel);
         Assert.Equal(ProtocolLimits.MaxInboundTextBytes, body.Limits.InboundTextBytes);
         Assert.Equal(CommsLimits.CatchUpLimitDefault, body.Limits.CatchUpLimitDefault);
         Assert.Equal(CommsLimits.CatchUpLimitMax, body.Limits.CatchUpLimitMax);
@@ -206,20 +145,20 @@ public class NorthBoundaryTests
     }
 
     /// <summary>
-    /// §1, §4: `principalId` is derived from the device record and never accepted from input. A
-    /// request that supplies one must not be able to change the answer.
+    /// §1, §4: `principalId` comes from the credential and is never accepted from input. A request
+    /// that supplies one must not be able to change the answer.
     /// </summary>
     [Fact]
     public async Task ASuppliedPrincipalIdCannotInfluenceTheSession()
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
         var (_, _, token) = await host.EnrolledDeviceAsync();
 
         var request = new HttpRequestMessage(HttpMethod.Get, "/v1/session?principalId=p_attacker");
         request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
         request.Headers.TryAddWithoutValidation("X-Principal-Id", "p_attacker");
 
-        var body = await AuthLifecycleTests.Body<SessionBody>(await host.Client.SendAsync(request));
+        var body = await Body<SessionBody>(await host.Client.SendAsync(request));
 
         Assert.Equal("p_owner", body.PrincipalId);
     }
@@ -232,7 +171,7 @@ public class NorthBoundaryTests
     [Fact]
     public async Task ATokenInTheQueryStringDoesNotAuthenticate()
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
         var (_, _, token) = await host.EnrolledDeviceAsync();
 
         var response = await host.Client.GetAsync($"/v1/session?access_token={token}");
@@ -240,8 +179,14 @@ public class NorthBoundaryTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
-    internal sealed record SessionBody(
-        string Protocol, string PrincipalId, string AgentLabel, SessionLimitsBody Limits);
+    private static async Task<T> Body<T>(HttpResponseMessage response)
+    {
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return System.Text.Json.JsonSerializer.Deserialize<T>(
+            await response.Content.ReadAsStringAsync(), FleetProtocolJson.Options)!;
+    }
+
+    internal sealed record SessionBody(string Protocol, string PrincipalId, SessionLimitsBody Limits);
 
     internal sealed record SessionLimitsBody(
         int InboundTextBytes, int CatchUpLimitDefault, int CatchUpLimitMax,

@@ -16,7 +16,7 @@ public sealed class ConversationStoreTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = principal ?? "p_owner",
+            PrincipalId = principal ?? "p_owner", AgentName = SouthTestHost.Agent,
         });
 
     private static string Fingerprint(string text, string conversationId) =>
@@ -51,11 +51,128 @@ public sealed class ConversationStoreTests(MySqlFixture fixture)
             ExternalRef = await fixture.ScalarRowAsync(
                 $"SELECT external_ref FROM conversations WHERE id = '{first.ConversationId}'"),
             PrincipalId = "p_owner",
+            AgentName = SouthTestHost.Agent,
         });
 
         Assert.Equal(first.ConversationId, second.ConversationId);
         Assert.Equal(1UL, first.NextSeq);
         Assert.Equal(1UL, first.RetainedFloorSeq);
+    }
+
+    // ───────────────────────────────────────────────────────── a conversation's agent (#530 D9)
+
+    [Fact]
+    public async Task The_same_reference_with_two_agents_is_two_conversations()
+    {
+        var reference = "conv-" + Ulid.NewUlid();
+
+        var one = await _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = reference, PrincipalId = "p_owner", AgentName = "agent-one",
+        });
+        var two = await _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = reference, PrincipalId = "p_owner", AgentName = "agent-two",
+        });
+        var again = await _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = reference, PrincipalId = "p_owner", AgentName = "agent-one",
+        });
+
+        Assert.NotEqual(one.ConversationId, two.ConversationId);
+        Assert.Equal(one.ConversationId, again.ConversationId);
+    }
+
+    [Fact]
+    public async Task The_same_reference_for_two_people_is_two_conversations()
+    {
+        var reference = "conv-" + Ulid.NewUlid();
+
+        var mine = await _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = reference, PrincipalId = "p_owner", AgentName = "agent-one",
+        });
+        var theirs = await _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = reference, PrincipalId = "p_other", AgentName = "agent-one",
+        });
+
+        Assert.NotEqual(mine.ConversationId, theirs.ConversationId);
+    }
+
+    [Fact]
+    public async Task Agent_names_are_compared_byte_for_byte()
+    {
+        var reference = "conv-" + Ulid.NewUlid();
+
+        var lower = await _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = reference, PrincipalId = "p_owner", AgentName = "builder",
+        });
+        var upper = await _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = reference, PrincipalId = "p_owner", AgentName = "Builder",
+        });
+
+        Assert.NotEqual(lower.ConversationId, upper.ConversationId);
+    }
+
+    [Fact]
+    public async Task A_new_conversation_must_name_its_agent()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(() => _store.OpenConversationAsync(new OpenConversationRequest
+        {
+            ChannelId = "client", ExternalRef = "conv-" + Ulid.NewUlid(), PrincipalId = "p_owner", AgentName = "",
+        }));
+    }
+
+    [Fact]
+    public async Task Find_answers_its_owner_and_nobody_else()
+    {
+        var conversation = await OpenAsync();
+
+        var own = await _store.FindConversationAsync(conversation.ConversationId, "p_owner");
+        Assert.NotNull(own);
+        Assert.Equal(SouthTestHost.Agent, own!.AgentName);
+
+        Assert.Null(await _store.FindConversationAsync(conversation.ConversationId, "p_other"));
+        Assert.Null(await _store.FindConversationAsync(conversation.ConversationId, "P_OWNER"));
+        Assert.Null(await _store.FindConversationAsync(Ulid.NewUlid(), "p_owner"));
+    }
+
+    [Fact]
+    public async Task The_list_is_the_persons_own_conversations_and_leaves_out_ones_with_no_agent()
+    {
+        var principal = "p_list_" + Ulid.NewUlid()[..8];
+        var first = await OpenAsync(principal);
+        var second = await OpenAsync(principal);
+        var legacy = await OpenAsync(principal);
+        await OpenAsync();
+
+        await fixture.ExecuteAsync($"UPDATE conversations SET agent_name = '' WHERE id = '{legacy.ConversationId}'");
+
+        var listed = await _store.ListConversationsAsync("client", principal, 50);
+
+        Assert.Equal(
+            new[] { first.ConversationId, second.ConversationId }.Order(StringComparer.Ordinal),
+            listed.Select(c => c.ConversationId).Order(StringComparer.Ordinal));
+        Assert.All(listed, c => Assert.Equal(SouthTestHost.Agent, c.AgentName));
+    }
+
+    [Fact]
+    public async Task FindAgent_answers_for_a_conversation_a_command_and_a_submission()
+    {
+        var conversation = await OpenAsync();
+        var accept = await AcceptAsync(conversation.ConversationId);
+        var messageId = await MessageIdForAsync(accept.SubmissionId!);
+
+        Assert.Equal(SouthTestHost.Agent, await _store.FindAgentAsync(AgentTargetKind.Conversation, conversation.ConversationId));
+        Assert.Equal(SouthTestHost.Agent, await _store.FindAgentAsync(AgentTargetKind.Message, messageId));
+        Assert.Equal(SouthTestHost.Agent, await _store.FindAgentAsync(AgentTargetKind.Submission, accept.SubmissionId!));
+
+        Assert.Null(await _store.FindAgentAsync(AgentTargetKind.Conversation, Ulid.NewUlid()));
+        Assert.Null(await _store.FindAgentAsync(AgentTargetKind.Attempt, Ulid.NewUlid()));
+        Assert.Null(await _store.FindAgentAsync(AgentTargetKind.Attachment, Ulid.NewUlid()));
     }
 
     /// <summary>

@@ -7,47 +7,6 @@ namespace Fleet.Comms.Contracts;
 // nulls omitted, enums as snake_case strings — so the wire form is the protocol's, not this
 // project's. NorthSerializationTests pins each body byte-for-byte.
 
-/// <summary>`POST /v1/auth/devices` request.</summary>
-public sealed record RegisterDeviceRequest
-{
-    public string? Protocol { get; init; }
-    public string? EnrollmentCode { get; init; }
-}
-
-/// <summary>
-/// `POST /v1/auth/devices` response. The only time a device secret is ever transmitted; the server
-/// keeps a salted Argon2id hash and cannot reproduce this value.
-/// </summary>
-public sealed record RegisterDeviceResponse
-{
-    public string Protocol { get; init; } = ProtocolVersion.Current;
-    public required string DeviceId { get; init; }
-    public required string DeviceSecret { get; init; }
-}
-
-/// <summary>`POST /v1/auth/token` request. There is no refresh token; this is the refresh path.</summary>
-public sealed record TokenRequest
-{
-    public string? Protocol { get; init; }
-    public string? DeviceId { get; init; }
-    public string? DeviceSecret { get; init; }
-}
-
-/// <summary>`POST /v1/auth/token` response.</summary>
-public sealed record TokenResponse
-{
-    public string Protocol { get; init; } = ProtocolVersion.Current;
-    public required string AccessToken { get; init; }
-    public required int ExpiresInSeconds { get; init; }
-}
-
-/// <summary>`POST /v1/auth/devices/{deviceId}:revoke` response.</summary>
-public sealed record RevokeDeviceResponse
-{
-    public string Protocol { get; init; } = ProtocolVersion.Current;
-    public required bool Revoked { get; init; }
-}
-
 /// <summary>The server limits a client needs before it can size anything (§5.1).</summary>
 public sealed record SessionLimits
 {
@@ -59,14 +18,13 @@ public sealed record SessionLimits
 }
 
 /// <summary>
-/// `GET /v1/session` response. `principalId` is derived from the authenticated device record and is
-/// never accepted from input (§1, §4).
+/// `GET /v1/session` response. `principalId` is the signed-in user's id, from the orchestrator's
+/// answer for the credential, and is never accepted from input (§1, §4).
 /// </summary>
 public sealed record SessionResponse
 {
     public string Protocol { get; init; } = ProtocolVersion.Current;
     public required string PrincipalId { get; init; }
-    public required string AgentLabel { get; init; }
     public required SessionLimits Limits { get; init; }
 }
 

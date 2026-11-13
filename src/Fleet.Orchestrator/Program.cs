@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading.RateLimiting;
+using Fleet.Orchestrator.Auth;
 using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
@@ -64,6 +65,10 @@ builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSe
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<AgentConfigPublisherService>();
 
+// Sign-in (docs/sign-in.md): users, their devices, and the credentials each device holds. Durable
+// when a database is configured; in memory otherwise, where a restart signs everyone out.
+builder.Services.AddFleetSignIn(durable: !string.IsNullOrEmpty(connectionString));
+
 // HeartbeatConsumerService registered as singleton so tools can inject IRabbitMqStatus
 builder.Services.AddSingleton<HeartbeatConsumerService>();
 builder.Services.AddSingleton<IRabbitMqStatus>(sp => sp.GetRequiredService<HeartbeatConsumerService>());
@@ -87,6 +92,7 @@ builder.Services.AddRateLimiter(rl =>
             QueueLimit = 0,
         });
     });
+    rl.AddSignInPolicy();
     rl.RejectionStatusCode = 429;
 });
 
@@ -168,6 +174,20 @@ if (!string.IsNullOrEmpty(connectionString))
     app.Logger.LogInformation("Epic grants are {State}", epicGrants.IsEnabled ? "enabled" : "disabled");
 }
 
+// Sign-in needs its one user before the first request. The owner's Telegram id follows the
+// deployment's primary human, so a chat message and a Telegram message from the same person are
+// known to be the same person. A failure here exits like any other startup failure above.
+try
+{
+    await app.Services.GetRequiredService<AuthService>().EnsureOwnerAsync(
+        app.Services.GetRequiredService<ContainerProvisioningService>().PrimaryHumanUserIdOrNull());
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"Fleet.Orchestrator startup aborted, exiting 1: sign-in store: {ex.Message}");
+    Environment.Exit(1);
+}
+
 // WebSocket support
 app.UseWebSockets();
 
@@ -177,79 +197,11 @@ app.UseSecretStateFaults();
 // Rate limiting middleware
 app.UseRateLimiter();
 
-// Bearer token auth on mutating endpoints (non-GET).
-// If Orchestrator:AuthToken is empty, auth is disabled (dev/backward-compat mode).
-var orchestratorAuthToken = app.Configuration["Orchestrator:AuthToken"] ?? "";
-if (!string.IsNullOrWhiteSpace(orchestratorAuthToken))
-{
-    app.Use(async (context, next) =>
-    {
-        var method = context.Request.Method;
-        var path   = context.Request.Path.Value ?? "";
-
-        // Only protect mutating HTTP methods; skip GETs, WebSocket upgrades, /health, /mcp.
-        // The rule lives in OrchestratorAuth so the endpoint tests can gate a host on the same
-        // predicate rather than a copy of it.
-        if (!OrchestratorAuth.RequiresBearerToken(method, path))
-        {
-            await next(context);
-            return;
-        }
-
-        var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
-        var token      = authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true
-            ? authHeader["Bearer ".Length..].Trim()
-            : null;
-
-        if (token != orchestratorAuthToken)
-        {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(new { error = "Unauthorized" });
-            return;
-        }
-
-        await next(context);
-    });
-}
-
-// Config API auth — ORCHESTRATOR_CONFIG_TOKEN gates /api/config/* (all methods).
-// Separate from ORCHESTRATOR_AUTH_TOKEN so peers can read config without full admin access.
-// Fails CLOSED: if ORCHESTRATOR_CONFIG_TOKEN is not configured all /api/config/* requests
-// return 503 so the endpoint is never accidentally open on a misconfigured deployment.
-var orchestratorConfigToken = app.Configuration["Orchestrator:ConfigToken"] ?? "";
-app.Use(async (context, next) =>
-{
-    var path = context.Request.Path.Value ?? "";
-    if (!path.StartsWith("/api/config", StringComparison.OrdinalIgnoreCase))
-    {
-        await next(context);
-        return;
-    }
-
-    if (string.IsNullOrWhiteSpace(orchestratorConfigToken))
-    {
-        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-        await context.Response.WriteAsJsonAsync(new
-        {
-            error = "Config API unavailable: ORCHESTRATOR_CONFIG_TOKEN is not configured on this orchestrator"
-        });
-        return;
-    }
-
-    var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
-    var token = authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true
-        ? authHeader["Bearer ".Length..].Trim()
-        : null;
-
-    if (token != orchestratorConfigToken)
-    {
-        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-        await context.Response.WriteAsJsonAsync(new { error = "Unauthorized" });
-        return;
-    }
-
-    await next(context);
-});
+// Who is calling, and whether this request may proceed (docs/sign-in.md): the caller is resolved
+// from its credential, OrchestratorAuth.Decide gates the request, and /api/config keeps its own
+// token. With no Orchestrator:AuthToken nothing is gated, as before sign-in existed.
+app.UseFleetAccess();
+var callerAuthenticator = app.Services.GetRequiredService<CallerAuthenticator>();
 
 // MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
 app.MapMcp("/mcp");
@@ -375,6 +327,9 @@ app.MapPromptSizePolicyEndpoints();
 // REST: GET /api/operator-token — whether the presented bearer is the operator token. The one
 // read that checks it, so a client can verify a stored token without making a write.
 app.MapOperatorTokenEndpoints();
+
+// Sign-in: browsers, enrolled apps, devices, and the chat service's identity check.
+app.MapAuthEndpoints();
 
 // REST: the /api/project-contexts surface — list, detail, create, new version, rollback and
 // toggle-active. Mapped from Endpoints/ so the endpoint tests exercise the same handlers a live
@@ -868,16 +823,26 @@ app.Map("/ws", async (HttpContext context, AgentRegistry registry) =>
     }
 
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
-    registry.AddSocket(socket);
-    await registry.BroadcastAllToSocket(socket);
-
-    // Keep socket alive until client disconnects
-    var buffer = new byte[256];
-    while (socket.State == WebSocketState.Open)
+    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+    var authWatch = ControlSocketAccess.WatchAsync(context, socket, lifetime);
+    try
     {
-        var result = await socket.ReceiveAsync(buffer, context.RequestAborted);
-        if (result.MessageType == WebSocketMessageType.Close)
-            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by client", CancellationToken.None);
+        registry.AddSocket(socket);
+        await registry.BroadcastAllToSocket(socket);
+        var buffer = new byte[256];
+        while (socket.State == WebSocketState.Open)
+        {
+            var result = await socket.ReceiveAsync(buffer, lifetime.Token);
+            if (result.MessageType == WebSocketMessageType.Close)
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by client", lifetime.Token);
+        }
+    }
+    catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+    catch (WebSocketException) { }
+    finally
+    {
+        await lifetime.CancelAsync();
+        await authWatch;
     }
 });
 
@@ -897,8 +862,9 @@ app.Map("/ws/logs/{agentName}", async (string agentName, HttpContext context, Ag
 
     using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
 
+    var authWatch = ControlSocketAccess.WatchAsync(context, socket, cts);
     // Receive loop — detect client-initiated close
-    _ = Task.Run(async () =>
+    var receiver = Task.Run(async () =>
     {
         var buf = new byte[64];
         try
@@ -930,6 +896,8 @@ app.Map("/ws/logs/{agentName}", async (string agentName, HttpContext context, Ag
         logger.LogDebug(ex, "Log stream for {Agent} ended", agentName);
     }
 
+    await cts.CancelAsync();
+    await Task.WhenAll(receiver, authWatch);
     if (socket.State == WebSocketState.Open)
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stream ended", CancellationToken.None);
 });
@@ -1524,12 +1492,12 @@ app.MapDelete("/api/credential-files/{id:int}", async (int id, IServiceScopeFact
 // GET /api/credential-files/{id}/download (auth-gated)
 app.MapGet("/api/credential-files/{id:int}/download", async (int id, IServiceScopeFactory scopeFactory, HttpContext ctx) =>
 {
-    var token = app.Configuration["Orchestrator:AuthToken"];
-    if (!string.IsNullOrEmpty(token))
+    // A credential file is a secret. The service bearer or a signed-in browser may download one;
+    // an enrolled app may not, for the same reason it cannot reach /api/config.
+    if (callerAuthenticator.IsRequired
+        && CallerIdentity.Of(ctx).Kind is not (CallerKind.Service or CallerKind.Browser))
     {
-        var auth = ctx.Request.Headers.Authorization.FirstOrDefault() ?? "";
-        if (!auth.Equals($"Bearer {token}", StringComparison.Ordinal))
-            return Results.Unauthorized();
+        return Results.Unauthorized();
     }
 
     using var scope = scopeFactory.CreateScope();
@@ -1837,13 +1805,11 @@ static string? ValidateProjectList(List<string>? projects)
 // ── Memory API (proxied from fleet-memory /internal/*) ───────────────────────
 // All endpoints require bearer-token auth (checked inline since GETs are normally exempt).
 
-bool CheckMemoryAuth(HttpRequest req)
-{
-    var token = req.Headers.Authorization.FirstOrDefault();
-    if (token?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true)
-        token = token["Bearer ".Length..].Trim();
-    return !string.IsNullOrWhiteSpace(orchestratorAuthToken) && token == orchestratorAuthToken;
-}
+// Any verified caller: the service bearer, a signed-in browser or an enrolled app. With no
+// Orchestrator:AuthToken these routes stay closed, as they always were — memory content is not
+// served by a deployment that gates nothing.
+bool CheckMemoryAuth(HttpRequest req) =>
+    callerAuthenticator.IsRequired && CallerIdentity.Of(req.HttpContext).Kind != CallerKind.None;
 
 app.MapGet("/api/memory", async (HttpRequest req, MemoryProxyService memProxy, CancellationToken ct) =>
 {

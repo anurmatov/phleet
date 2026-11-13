@@ -15,8 +15,7 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 # would silently override the choice saved in .env — and the operator would see
 # a service on an address they did not configure, with .env saying otherwise.
 # Unset them here: .env is the record of the decision.
-unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
-      FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
+unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
@@ -25,9 +24,9 @@ unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED
 unset FLEET_PUSH_ENABLED FLEET_PUSH_APNS_KEY_BASE64 FLEET_PUSH_APNS_KEY_ID FLEET_PUSH_APNS_TEAM_ID FLEET_PUSH_APNS_TOPIC
 # Secret placeholders (fleet-secrets): likewise, .env decides.
 unset FLEET_SECRETS_ENABLED FLEET_SECRETS_SUBNET FLEET_SECRETS_ADDRESS
-# The journal decision in .env is preserved as it is: upgrade never asks, never flips it, and never
-# generates a key for a host that did not opt in. `conversations migrate` below applies 0004 either
-# way; it is additive.
+# The journal decision in .env is preserved as it is: upgrade never asks and never flips it. The key
+# is generated only for a host with conversations on, which needs it for chat whether or not the
+# journal is on (#530). `conversations migrate` below applies 0004 either way; it is additive.
 unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
       FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION \
       FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS
@@ -181,9 +180,6 @@ fi
 # ── Build images ─────────────────────────────────────────────────────────────
 section "[3/4] Building Docker images..."
 
-VITE_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
-CONFIG_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_CONFIG_TOKEN")
-
 build_image() {
   local tag="$1" dockerfile="$2" context="$3" extra_args="${4:-}"
   echo -n "  Building $tag ... "
@@ -206,8 +202,8 @@ build_image "fleet:bridge"          "$SCRIPT_DIR/src/Fleet.Bridge/Dockerfile"   
 build_image "fleet:memory"          "$SCRIPT_DIR/src/Fleet.Memory/Dockerfile"       "$SCRIPT_DIR"
 build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
 build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"     "$SCRIPT_DIR"
-build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR" \
-  "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN --build-arg VITE_CONFIG_TOKEN=$CONFIG_TOKEN"
+# No build arguments: the dashboard holds no token. A browser signs in at runtime.
+build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR"
 
 # Only when the user opted in. Someone who never enabled Fleet.Comms should not pay its build
 # time on every upgrade, and an image built for a service that never starts is pure cost.
@@ -226,19 +222,8 @@ section "[4/4] Starting services..."
 if $SKIP_RESTART; then
   warn "Skipping restart (--skip-restart)"
 else
-  # `docker compose down` above removes containers, NOT named volumes — `fleet_comms_auth`
-  # survives an upgrade, which is what keeps enrolled devices enrolled across one. Never add -v.
-  # Before `up`, every time. The documented enable-on-an-existing-install path is an .env edit
-  # followed by ./upgrade.sh, which never ran `store init` — so the service came up against a
-  # database that did not exist and 503'd permanently. `store init` is idempotent, so running it on
-  # every enabled upgrade costs one short-lived container and closes that hole.
+  # `docker compose down` above removes containers, NOT named volumes. Never add -v.
   if [[ "$COMMS_ENABLED" == "true" ]]; then
-    (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
-      run --rm fleet-comms-ops store init) \
-      || { fail "Could not initialise the Fleet.Comms auth store — see docs/comms-deployment.md"; exit 1; }
-
-    # Outside the volume, so a later volume loss is recognisable as loss. See setup.sh.
-    #
     # Newline-safe and idempotent. A bare `>>` appends to whatever the last line is, and .env files
     # written by hand routinely lack a trailing newline — so the key would have been glued onto the
     # end of the previous value, corrupting that setting and never taking effect itself.
@@ -252,12 +237,30 @@ else
         printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
       fi
     }
-    write_comms_env_var "FLEET_COMMS_STORE_PROVISIONED" "true"
 
-    # The conversation schema, on every enabled upgrade, for the same reason `store init` runs on
-    # every one: the documented enable-on-an-existing-install path is an .env edit followed by
-    # ./upgrade.sh, and a service started against an unmigrated schema refuses every conversation
-    # route and reports unhealthy until somebody runs this by hand.
+    # Sign-in moved to the orchestrator and chat reaches any chat-enabled agent (#530). The names
+    # that configured Comms's own credential store and its one agent are gone; leaving them would
+    # only suggest they still do something.
+    for _removed in FLEET_COMMS_AGENT_NAME FLEET_COMMS_AGENT_LABEL FLEET_COMMS_SOUTH_TOKEN \
+                    FLEET_COMMS_STORE_PROVISIONED; do
+      if grep -qE "^${_removed}=" "$ENV_FILE"; then
+        sed -i.bak -E "/^${_removed}=/d" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        warn "Removed ${_removed} from .env: it no longer configures anything (#530)."
+      fi
+    done
+
+    # The shared key, required whenever conversations are on (#530): it signs Comms's sign-in
+    # questions to the orchestrator and each chat-enabled agent's token. Generated once and never
+    # replaced — every token minted with it would stop verifying.
+    if [[ -n "$(read_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATION_DB")" \
+          && -z "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY")" ]]; then
+      write_comms_env_var "FLEET_COMMS_JOURNAL_KEY" "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
+      ok "Generated FLEET_COMMS_JOURNAL_KEY: chat needs it (#530)"
+    fi
+
+    # The conversation schema, on every enabled upgrade: the documented enable-on-an-existing-install
+    # path is an .env edit followed by ./upgrade.sh, and a service started against an unmigrated
+    # schema refuses every conversation route and reports unhealthy until somebody runs this by hand.
     #
     # Idempotent — a second run applies nothing and reports the version — so running it always costs
     # one short-lived container. It uses the DDL credential; the runtime account has no DDL grants
@@ -272,6 +275,14 @@ else
         run --rm fleet-comms-ops conversations migrate) \
         || { fail "Could not apply the conversation migrations — see docs/comms-deployment.md"; exit 1; }
     fi
+  fi
+
+  # Chat is a per-agent switch now (#530), applied by provisioning, and Comms keeps no devices.
+  if [[ "$COMMS_ENABLED" == "true" && -n "$(read_env_var "$ENV_FILE" "FLEET_COMMS_CONVERSATION_DB")" ]]; then
+    warn "Chat is on for every agent by default: reprovision the agents to give them chat, and turn"
+    warn "  it off per agent in the dashboard where you do not want it. Remove any hand-attached"
+    warn "  Conversations__* Env Refs."
+    warn "  Connect the phone again from Credentials → Devices: old Comms registrations do not carry over."
   fi
 
   # The agent-side flag is DERIVED at provisioning time, so a reprovision is what turns an agent's

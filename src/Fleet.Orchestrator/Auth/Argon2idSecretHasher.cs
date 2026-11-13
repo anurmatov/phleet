@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Konscious.Security.Cryptography;
 
-namespace Fleet.Comms.Auth;
+namespace Fleet.Orchestrator.Auth;
 
 /// <summary>Hashes and verifies a credential secret. One implementation; the seam exists for tests.</summary>
 public interface ISecretHasher
@@ -25,8 +25,7 @@ public interface ISecretHasher
 }
 
 /// <summary>
-/// Argon2id with a per-record salt, as the contract requires for all three credential kinds
-/// (docs/first-party-api.md §3, issue #292 scope 4).
+/// Argon2id with a per-record salt, for every credential kind (docs/sign-in.md).
 ///
 /// <para><b>Parameters are OWASP's minimum recommendation</b> — 19 MiB, 2 iterations, 1 lane —
 /// and are stored inside the encoded hash rather than assumed at verify time, so raising them
@@ -34,9 +33,10 @@ public interface ISecretHasher
 ///
 /// <para><b>Why Argon2id for a 256-bit random token at all.</b> A memory-hard KDF earns its cost
 /// against low-entropy secrets, and these are not: brute-forcing 256 bits is infeasible regardless
-/// of the hash. The contract mandates it anyway, and the cost is real — roughly tens of
-/// milliseconds on every authenticated request. That is a deliberate spec-fidelity choice, not an
-/// oversight, and it is the reason the verify path takes a record handle rather than scanning.</para>
+/// of the hash. It is kept so one hasher covers every credential kind, and the cost is real —
+/// roughly tens of milliseconds per verification. That is why a verified credential is remembered
+/// for a short time (<see cref="AuthSessionCache"/>) and why the verify path takes a record handle
+/// rather than scanning.</para>
 /// </summary>
 public sealed class Argon2idSecretHasher : ISecretHasher
 {

@@ -84,12 +84,11 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 # a service on an address they did not configure, with .env saying otherwise.
 # Unset them here: .env is the record of the decision.
 unset FLEET_COMMS_CONVERSATIONS_ENABLED FLEET_COMMS_CONVERSATION_DB \
-      FLEET_COMMS_CONVERSATION_MIGRATION_DB FLEET_COMMS_SOUTH_TOKEN \
-      FLEET_COMMS_SOUTH_BIND FLEET_COMMS_AGENT_NAME FLEET_COMMS_BROKER \
+      FLEET_COMMS_CONVERSATION_MIGRATION_DB \
+      FLEET_COMMS_SOUTH_BIND FLEET_COMMS_BROKER \
       FLEET_COMMS_MYSQL_ROOT_PASSWORD FLEET_COMMS_CLAIM_RETENTION \
       FLEET_COMMS_MYSQL_DDL_PASSWORD FLEET_COMMS_MYSQL_RUNTIME_PASSWORD
-unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY \
-      FLEET_COMMS_AGENT_LABEL FLEET_COMMS_STORE_PROVISIONED
+unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY
 unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
       FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION \
       FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS
@@ -297,10 +296,10 @@ _configure_comms() {
 
   if [[ "$_comms_enabled" == "true" ]]; then
 
-    # Loopback by default: a host reverse proxy reaches it, nothing else does.
-    # Change this only once TLS terminates in front of it.
+    # Loopback by default: clients reach Comms through the dashboard's address (`/v1/`, #530),
+    # so this host port is optional. Change it only once TLS terminates in front of it.
     prompt_field "$ENV_FILE" "FLEET_COMMS_BIND" "Fleet.Comms bind address" \
-      "host:port for the client API. Keep the loopback default unless a TLS reverse proxy is in front." \
+      "host:port for the client API. Clients use the dashboard's address; keep the loopback default unless a TLS reverse proxy is in front." \
       n n "127.0.0.1:3500"
 
     # Off by default. Turning it on while the port is reachable without a proxy
@@ -351,13 +350,8 @@ _configure_comms() {
       prompt_field "$ENV_FILE" "FLEET_COMMS_CONVERSATION_MIGRATION_DB" "Conversation migration connection string" \
         "The DDL account, used only by 'conversations migrate'. Never give this one to the running container." y y
 
-      # No default, deliberately: the south listener carries an administrative
-      # surface and a shipped default credential is a credential everyone has.
-      prompt_field "$ENV_FILE" "FLEET_COMMS_SOUTH_TOKEN" "South listener bearer credential" \
-        "Generate one per deployment: openssl rand -base64 32. Startup fails without it." y y
-
-      prompt_field "$ENV_FILE" "FLEET_COMMS_AGENT_NAME" "Agent name for command routing" \
-        "Becomes a routing key and a queue-name segment: [A-Za-z0-9_-], 1-128 characters. A dot or a slash produces a queue name the consumer cannot address." y n
+      # No south credential and no agent name to ask for (#530): each agent with Chat turned on in the
+      # dashboard gets its own token at provisioning, signed with the shared key below.
 
       prompt_field "$ENV_FILE" "FLEET_COMMS_BROKER" "Broker connection for the outboxes" \
         "AMQP URI. Without it the outboxes still accumulate correctly and nothing is lost, but nothing is dispatched." n n "amqp://guest:guest@rabbitmq:5672/"
@@ -379,9 +373,10 @@ _configure_comms() {
         $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_ENABLED" "$_journal_enabled"
       fi
 
-      # The signing key is generated only for a host that opted in, and never replaced: every token
-      # minted with it would stop verifying.
-      if [[ "$_journal_enabled" == "true" && -z "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY")" ]]; then
+      # The shared signing key, generated for any host with conversations on — chat sign-in checks
+      # and agents' chat tokens need it whether or not the journal is on (#530) — and never
+      # replaced: every token minted with it would stop verifying.
+      if [[ -z "$(read_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY")" ]]; then
         $DRY_RUN || write_env_var "$ENV_FILE" "FLEET_COMMS_JOURNAL_KEY" \
           "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
       fi
@@ -815,9 +810,8 @@ if $PROMPT_GITHUB; then
   fi
 fi
 
-# Note: no separate prompt for VITE_AUTH_TOKEN. The dashboard build arg is
-# sourced directly from ${ORCHESTRATOR_AUTH_TOKEN} in docker-compose.example.yml
-# and in the `docker build` call below, so the two values can't diverge.
+# Note: the dashboard is built without any token. A browser signs in at runtime with
+# ORCHESTRATOR_AUTH_TOKEN (docs/sign-in.md).
 
 # ── Local-only credentials ────────────────────────────────────────────────────
 # These five values are internal-only — no external service needs to match them.
@@ -1013,11 +1007,6 @@ section "[5/7] Building Docker images..."
 if $SKIP_BUILD; then
   warn "Skipping image builds (--skip-build)"
 else
-  # Both tokens are baked into the dashboard bundle at build time so it can
-  # call the general API (VITE_AUTH_TOKEN) and the config API (VITE_CONFIG_TOKEN).
-  VITE_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_AUTH_TOKEN")
-  CONFIG_TOKEN=$(read_env_var "$ENV_FILE" "ORCHESTRATOR_CONFIG_TOKEN")
-
   # Download ONNX model + vocab into models/fleet-memory/ before building fleet:memory.
   # Fleet.Memory's Dockerfile bakes them in via `COPY models/fleet-memory/ /app/models/`.
   onnx_model="$SCRIPT_DIR/models/fleet-memory/all-MiniLM-L6-v2.onnx"
@@ -1061,11 +1050,7 @@ else
   build_image "fleet:temporal-bridge" "$SCRIPT_DIR/Dockerfile.temporal"               "$SCRIPT_DIR"
   build_image "fleet:telegram"        "$SCRIPT_DIR/src/Fleet.Telegram/Dockerfile"      "$SCRIPT_DIR"
   build_image "fleet:whisper"         "$SCRIPT_DIR/whisper/Dockerfile"                "$SCRIPT_DIR/whisper"
-  # No quotes around $VITE_TOKEN / $CONFIG_TOKEN — the `docker build $extra_args`
-  # call in build_image() relies on word-splitting, and escaped quotes here would
-  # become literal characters inside the baked-in tokens → 401s.
-  build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR" \
-    "--build-arg VITE_AUTH_TOKEN=$VITE_TOKEN --build-arg VITE_CONFIG_TOKEN=$CONFIG_TOKEN"
+  build_image "fleet:dashboard"       "$SCRIPT_DIR/src/fleet-dashboard/Dockerfile"    "$SCRIPT_DIR"
 
   if [[ "$_comms_enabled" == true ]]; then
     build_image "fleet:comms" "$SCRIPT_DIR/src/Fleet.Comms/Dockerfile" "$SCRIPT_DIR"
@@ -1095,18 +1080,7 @@ else
         fi
         ;;
     esac
-    # The auth store is created BEFORE the service starts. It opens the database read-write and
-    # will not create it, so starting first means a container that 503s until someone notices.
     if [[ "$_comms_enabled" == "true" ]]; then
-      (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env \
-        run --rm fleet-comms-ops store init) \
-        || { fail "Could not initialise the Fleet.Comms auth store"; exit 1; }
-
-      # Recorded on the HOST, outside the volume. If the volume is later deleted the marker inside
-      # it goes too, and a wiped volume would otherwise look exactly like a first install; this is
-      # what makes `store init` demand --recover instead of silently starting over empty.
-      write_env_var "$ENV_FILE" "FLEET_COMMS_STORE_PROVISIONED" "true"
-
       # The conversation schema, applied BEFORE the service starts, and only ever from here.
       #
       # The service refuses conversation routes until the applied version matches the one it

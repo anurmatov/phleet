@@ -59,6 +59,13 @@ export default function Sidenav({
           }
         </button>
 
+        <button
+          className={`sidenav-item${activeView === 'chat' ? ' active' : ''}`}
+          onClick={() => { onNavigate('chat'); onNavClose() }}
+        >
+          <span className="sidenav-item-label">Chat</span>
+        </button>
+
         <div className="sidenav-section-label" style={{ marginTop: 16 }}>Agent Config</div>
 
         <button

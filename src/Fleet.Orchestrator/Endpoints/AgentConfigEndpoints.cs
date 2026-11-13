@@ -75,6 +75,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.AutoMemoryEnabled,
         agent.JournalEnabled,
         agent.JournalCrossChatEnabled,
+        agent.ChatEnabled,
         agent.Provider,
         agent.CodexSandboxMode,
         agent.OutputStyle,
@@ -133,6 +134,10 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
         scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
         return Results.BadRequest(new { error = "journal_not_configured", detail = journalFault });
 
+    // Chat (#530) is a plain switch, on by default: saving it never fails. Whether it applies is
+    // decided at provisioning (ChatAgents.IsEffective), where a deployment without the chat service
+    // simply gives the agent no chat.
+
     var oldCrossChat = agent.JournalCrossChatEnabled;
 
     // Scalar fields
@@ -174,6 +179,7 @@ app.MapPut("/api/agents/{name}/config", async (string name, HttpRequest request,
     if (body.AutoMemoryEnabled is not null) agent.AutoMemoryEnabled = body.AutoMemoryEnabled.Value;
     if (body.JournalEnabled is not null) agent.JournalEnabled = body.JournalEnabled.Value;
     if (body.JournalCrossChatEnabled is not null) agent.JournalCrossChatEnabled = body.JournalCrossChatEnabled.Value;
+    if (body.ChatEnabled is not null) agent.ChatEnabled = body.ChatEnabled.Value;
     if (body.Provider is not null)
     {
         // PV1 (#386): an unknown provider is refused, never served as claude. "" stays claude.
@@ -426,4 +432,5 @@ internal sealed record AgentConfigUpdateRequest(
     int? ContextWindow,
     string? LocalBaseUrl = null,
     bool? JournalCrossChatEnabled = null,
-    string? HarnessExtra = null);
+    string? HarnessExtra = null,
+    bool? ChatEnabled = null);

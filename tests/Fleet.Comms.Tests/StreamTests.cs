@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using Fleet.Comms.Contracts;
+using Fleet.Comms.Auth;
 using Fleet.Comms.Routes;
 using Fleet.Protocol;
 
@@ -17,14 +18,38 @@ namespace Fleet.Comms.Tests;
 /// to a client that says something unexpected — is observable only from the socket.
 /// </para>
 /// <para>
-/// The pong deadline and the revocation bound are deliberately NOT tested here. Both are driven by
-/// the 20-second ping tick, so asserting them would mean either a twenty-second test or a test-only
-/// seam that changes the timing the assertion is about. They belong to acceptance, and the PR body
-/// says so rather than leaving a reader to infer it from an absence.
+/// Busy-stream revocation below deliberately runs across the real 20-second interval instead
+/// of shortening it with a test-only timing seam; the pong-timeout case remains separate.
 /// </para>
 /// </remarks>
 public class StreamTests
 {
+    /// <summary>
+    /// Whether a client is attached is what decides a reply notification (#530 step 9): true while a
+    /// stream is open on the conversation, false once it closed, and never true for another one.
+    /// </summary>
+    [Fact]
+    public async Task A_conversation_has_a_live_stream_exactly_while_one_is_open()
+    {
+        var store = new FakeConversationStore { ConversationId = Ulid.NewUlid() };
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+
+        Assert.False(StreamEndpoint.HasLiveStream(store.ConversationId));
+
+        var socket = await ConnectAsync(host, store.ConversationId, token);
+        await ReceiveAsync(socket);
+        Assert.True(StreamEndpoint.HasLiveStream(store.ConversationId));
+        Assert.False(StreamEndpoint.HasLiveStream(Ulid.NewUlid()));
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        socket.Dispose();
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (StreamEndpoint.HasLiveStream(store.ConversationId))
+            await Task.Delay(20, deadline.Token);
+    }
+
     /// <summary>
     /// The first frame is `hello`, and it carries what a client needs before any event.
     /// </summary>
@@ -215,6 +240,32 @@ public class StreamTests
         await Assert.ThrowsAnyAsync<Exception>(() => client.ConnectAsync(
             new Uri($"http://localhost/v1/conversations/{store.ConversationId}/stream?clientInstanceId=inst_a1"),
             CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BusyStream_RechecksAuthWithoutAnIdlePingInterval(bool unavailable)
+    {
+        var store = new FakeConversationStore { ContinuousTraffic = true };
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+        using var socket = await ConnectAsync(host, store.ConversationId, token);
+        await ReceiveAsync(socket);
+        if (unavailable) host.SignIn.Override = SignInAnswer.Unavailable;
+        else host.SignIn.Revoke(token);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(28));
+        var buffer = new byte[65536];
+        var frames = 0;
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await socket.ReceiveAsync(buffer, deadline.Token);
+            frames++;
+        } while (result.MessageType != WebSocketMessageType.Close);
+        Assert.True(frames > 1, "exercise continuous outgoing traffic, not an idle socket");
+        Assert.Equal(StreamEndpoint.Close.Unauthorized, (int)result.CloseStatus!);
+        await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "ack", deadline.Token);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

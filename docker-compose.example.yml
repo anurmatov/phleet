@@ -529,23 +529,18 @@ services:
     ports:
       - "${FLEET_COMMS_BIND:-127.0.0.1:3500}:8080"
     environment:
-      # North listener. The ops listener is loopback-only inside the container and is NOT published:
-      # /ready reports whether the auth store answers, which on a reachable address is an
-      # availability oracle.
+      # North listener. Clients reach it through the dashboard's proxy (`/v1/`, #530), on the same
+      # address as the dashboard; the host port above is optional. The ops listener is loopback-only
+      # inside the container and is NOT published: /ready reports whether the conversation store
+      # answers, which on a reachable address is an availability oracle.
       - ASPNETCORE_URLS=http://0.0.0.0:8080
       - Comms__OpsUrl=http://127.0.0.1:8081
-      # Named volume, not a bind mount: SqliteAuthStore runs PRAGMA journal_mode=WAL, and a bind
-      # mount onto a macOS or Windows host goes through a virtualised filesystem where SQLite file
-      # locking is not dependable. A named volume behaves the same on every platform, and
-      # `docker compose down` without -v preserves it — which is what makes upgrade.sh safe.
-      - Comms__AuthStorePath=/var/lib/fleet-comms/auth.db
-      - Comms__AgentLabel=${FLEET_COMMS_AGENT_LABEL:-assistant}
+      # Sign-in is the orchestrator's (#530). Every north request is checked there, over the Docker
+      # network, with a token under FLEET_COMMS_JOURNAL_KEY — required whenever conversations are on.
+      - Comms__OrchestratorUrl=http://fleet-orchestrator:3600
       # Off unless a reverse proxy is actually in front AND replaces X-Forwarded-For. On a port
       # reachable without one, this hands every caller the rate limiter's partition key.
       - Comms__TrustForwardedHeaders=${FLEET_COMMS_TRUST_PROXY:-false}
-      # Set by setup.sh/upgrade.sh after the first successful `store init`. Lives here, not in the
-      # volume, so a deleted volume is still recognisable as loss rather than a fresh install.
-      - Comms__StoreProvisioned=${FLEET_COMMS_STORE_PROVISIONED:-false}
       # ── Durable conversations (opt-in) ──────────────────────────────────────
       # The presence of the RUNTIME connection string is what enables the feature. Leave it empty
       # and this service is byte-identical to the auth-only deployment: no conversation route, no
@@ -559,9 +554,12 @@ services:
       # block below — a caller who reached /turns:commit could write a terminal for someone else's
       # turn. Its binding rule is the opposite of the ops listener's for a reason: the south caller
       # is a DIFFERENT container, so a loopback bind would make it unreachable by construction.
+      #
+      # Each chat-enabled agent presents its own token here (`cj1.south.<agent>`, minted by the
+      # orchestrator at provisioning under FLEET_COMMS_JOURNAL_KEY) and acts only on its own
+      # conversations. There is no shared south credential and no agent named here: a conversation
+      # names its agent, and that agent's queue is declared on the first command to it.
       - Comms__SouthUrl=${FLEET_COMMS_SOUTH_BIND:-http://0.0.0.0:8082}
-      - Comms__SouthBearerToken=${FLEET_COMMS_SOUTH_TOKEN:-}
-      - Comms__AgentName=${FLEET_COMMS_AGENT_NAME:-}
       - Comms__BrokerConnectionString=${FLEET_COMMS_BROKER:-}
       # ⚠️ Claim retention must exceed the broker's redelivery horizon AND the longest a submission
       # can wait behind a running turn. See .env.example for why shortening it removes a guard.
@@ -573,6 +571,9 @@ services:
       # Off unless FLEET_COMMS_JOURNAL_ENABLED=true. Its listener is on the Docker network only and
       # is NEVER in the `ports:` block above: publishers are containers on fleet-net. The workflow
       # activity group is always excluded; the extra list is appended to it.
+      #
+      # The key below is read whether or not the journal is on: chat sign-in checks and agent
+      # tokens use it too (#530).
       - Comms__Journal__OrchestratorUrl=http://fleet-orchestrator:3600
       - Comms__Journal__Enabled=${FLEET_COMMS_JOURNAL_ENABLED:-false}
       - Comms__Journal__Url=${FLEET_COMMS_JOURNAL_BIND:-http://0.0.0.0:8083}
@@ -593,13 +594,11 @@ services:
       - Comms__Media__Bucket=${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
       - Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
       - Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY:-}
-    volumes:
-      - fleet_comms_auth:/var/lib/fleet-comms
     mem_limit: 512m
     restart: unless-stopped
     healthcheck:
-      # /ready, not /health: the store initialises lazily, so a liveness probe would report a
-      # service that 503s every request as healthy.
+      # /ready, not /health: an unreachable conversation database leaves a process that starts and
+      # then 503s every request, which a liveness probe would report as healthy.
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/ready"]
       interval: 15s
       timeout: 5s
@@ -658,9 +657,9 @@ services:
 
   # The operator path, as a one-shot container with logging DISABLED.
   #
-  # `enroll issue` prints a bearer credential to stdout, and `docker compose run` creates the
+  # `journal token` prints a bearer credential to stdout, and `docker compose run` creates the
   # one-shot container from its service definition — INCLUDING its logging driver. Running it on
-  # fleet-comms would write the code into the engine's json-file log on the host before `--rm`
+  # fleet-comms would write the token into the engine's json-file log on the host before `--rm`
   # removed the container: `docker logs` would show it, and removal does not un-write the file.
   #
   # Same image, same entrypoint, `logging: none`, no ports, no restart. The API service keeps its
@@ -680,8 +679,6 @@ services:
     image: fleet:comms
     pull_policy: never
     environment:
-      - Comms__AuthStorePath=/var/lib/fleet-comms/auth.db
-      - Comms__StoreProvisioned=${FLEET_COMMS_STORE_PROVISIONED:-false}
       # The DDL credential lives HERE and on no long-running service.
       #
       # `conversations migrate` is the only thing that applies a migration, and this one-shot
@@ -704,7 +701,6 @@ services:
       - Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
       - Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY:-}
     volumes:
-      - fleet_comms_auth:/var/lib/fleet-comms
       # `media backup --out` writes here. A bind mount rather than a volume on purpose: the whole
       # point is a file the operator can carry off this host, and a named volume is not portable
       # without a second copy step.
@@ -850,9 +846,8 @@ services:
     build:
       context: .
       dockerfile: src/fleet-dashboard/Dockerfile
-      args:
-        VITE_AUTH_TOKEN: ${ORCHESTRATOR_AUTH_TOKEN:-changeme}
-        VITE_CONFIG_TOKEN: ${ORCHESTRATOR_CONFIG_TOKEN:-}
+      # No build arguments: no token is built into the page. A browser signs in at runtime with
+      # ORCHESTRATOR_AUTH_TOKEN and holds a session cookie (docs/sign-in.md).
     image: fleet:dashboard
     container_name: fleet-dashboard
     ports:
@@ -867,10 +862,7 @@ services:
 
 volumes:
   qdrant_data:
-  # Device registrations, enrollment state and tokens. Losing this volume locks the owner out of
-  # their own client with no self-service recovery — restore from a `store backup` file.
   comms_mysql_data:
-  fleet_comms_auth:
   # Journal objects. Losing this volume is losing archived media: the journal MESSAGE survives (it
   # is in comms-mysql) but every attachment's bytes are gone and no restore can recreate them.
   # `media backup` exists so this is recoverable — run it before any operation that can drop it.

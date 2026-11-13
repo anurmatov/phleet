@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Fleet.Shared;
+using Fleet.Orchestrator.Auth;
 using Fleet.Orchestrator.Services;
 
 namespace Fleet.Orchestrator.Endpoints;
@@ -38,10 +39,12 @@ public static class WorkflowSignalEndpoints
         if (humanInputRequest)
         {
             // This new human-only path fails closed even when legacy development auth is off.
-            var configured = request.HttpContext.RequestServices.GetRequiredService<IConfiguration>()["Orchestrator:AuthToken"];
-            var authorization = request.Headers.Authorization.FirstOrDefault();
-            var token = authorization?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true ? authorization[7..].Trim() : null;
-            if (string.IsNullOrWhiteSpace(configured) || token != configured) return Results.Unauthorized();
+            var auth = request.HttpContext.RequestServices.GetRequiredService<CallerAuthenticator>();
+            var caller = CallerIdentity.Of(request.HttpContext);
+            if (!auth.IsRequired || caller.Kind == CallerKind.None) return Results.Unauthorized();
+            if (OrchestratorAuth.IsBrowserWriteWithoutHeader(request.Method, caller.Kind,
+                    request.Headers.ContainsKey(OrchestratorAuth.RequestHeader)))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
             signalName = "request-input";
         }
         var known = string.IsNullOrWhiteSpace(body.WorkflowType) ? null : SignalRegistry.Get(body.WorkflowType);

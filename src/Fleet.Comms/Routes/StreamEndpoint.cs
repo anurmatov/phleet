@@ -61,8 +61,16 @@ public static class StreamEndpoint
     /// </summary>
     private static readonly ConcurrentDictionary<string, CancellationTokenSource> Live = new();
 
+    /// <summary>
+    /// Whether any client has a stream open on this conversation right now. A key is the
+    /// conversation id — always 26 characters — followed by the client instance, so a prefix match
+    /// is exact.
+    /// </summary>
+    public static bool HasLiveStream(string conversationId) =>
+        Live.Keys.Any(key => key.StartsWith(conversationId, StringComparison.Ordinal));
+
     public static async Task HandleAsync(
-        HttpContext http, string id, AuthService auth, IConversationStore store,
+        HttpContext http, string id, ISignInCheck signIn, IConversationStore store,
         ILoggerFactory loggerFactory, CancellationToken ct)
     {
         var logger = loggerFactory.CreateLogger(typeof(StreamEndpoint).FullName!);
@@ -76,7 +84,7 @@ public static class StreamEndpoint
         // The ordering matters for a second reason: checking `IsWebSocketRequest` first would answer
         // an unauthenticated caller `400` for a malformed upgrade and `401` for a well-formed one,
         // which tells them the difference without a credential.
-        var caller = await NorthEndpoints.AuthenticateAsync(http, auth, ct);
+        var caller = await NorthEndpoints.AuthenticateAsync(http, signIn, ct);
         if (caller is null)
         {
             http.Response.StatusCode = StatusCodes.Status401Unauthorized;
@@ -91,7 +99,8 @@ public static class StreamEndpoint
 
         // Kept for the per-tick re-validation below. It is held in a local for the lifetime of one
         // socket and is never logged, never written to a frame and never put in a metric label.
-        var bearer = http.Request.Headers.Authorization.ToString()["Bearer ".Length..];
+        // A browser's socket carries its session cookie, which is why this is not only a bearer.
+        var credential = PresentedCredential.Of(http.Request)!;
 
         var clientInstanceId = http.Request.Query["clientInstanceId"].ToString();
         if (!ConversationEndpoints.IsValidIdentifier(clientInstanceId))
@@ -145,7 +154,7 @@ public static class StreamEndpoint
 
         try
         {
-            await PumpAsync(socket, store, auth, caller, bearer, id, afterSeq, head, lifetime, logger);
+            await PumpAsync(socket, store, signIn, caller, credential, id, afterSeq, head, lifetime, logger);
         }
         finally
         {
@@ -154,8 +163,8 @@ public static class StreamEndpoint
     }
 
     private static async Task PumpAsync(
-        WebSocket socket, IConversationStore store, AuthService auth, AuthenticatedPrincipal caller,
-        string bearer, string conversationId, ulong afterSeq, ReadConversationResult head,
+        WebSocket socket, IConversationStore store, ISignInCheck signIn, AuthenticatedPrincipal caller,
+        PresentedCredential credential, string conversationId, ulong afterSeq, ReadConversationResult head,
         CancellationTokenSource lifetime, ILogger logger)
     {
         // Bounded, and DropWrite is deliberately NOT used: §9 says the server closes 4413 and drops
@@ -170,6 +179,33 @@ public static class StreamEndpoint
 
         var pongs = Channel.CreateUnbounded<bool>();
         var overflow = 0;
+        var unauthorized = 0;
+
+        // Authentication runs independently of outbound traffic and blocked sends. A busy
+        // conversation must not be able to postpone revocation by resetting the ping timer.
+        var auth = Task.Run(async () =>
+        {
+            try
+            {
+                while (!lifetime.IsCancellationRequested)
+                {
+                    await Task.Delay(PingInterval, lifetime.Token);
+                    var answer = await signIn.CheckAsync(credential, agent: null, fresh: true, lifetime.Token)
+                        .WaitAsync(TimeSpan.FromSeconds(5), lifetime.Token);
+                    if (answer.Outcome == SignInOutcome.Signed
+                        && answer.Caller == caller) continue;
+                    Interlocked.Exchange(ref unauthorized, 1);
+                    await lifetime.CancelAsync();
+                    return;
+                }
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                Interlocked.Exchange(ref unauthorized, 1);
+                await lifetime.CancelAsync();
+            }
+        });
 
         var reader = Task.Run(() => ReadFramesAsync(socket, pongs, lifetime, logger));
 
@@ -205,19 +241,18 @@ public static class StreamEndpoint
         // the probe page happened to reach the tail, and the second reports a floor of 0 — a
         // position that does not exist — whenever no gap was produced, which is almost always. A
         // client sizing its catch-up from either would ask for the wrong range.
-        await SendAsync(socket, FleetProtocolJson.Serialize(new StreamHello
-        {
-            ConversationId = conversationId,
-            NextSeq = head.NextSeq,
-            RetainedFloorSeq = head.RetainedFloorSeq,
-            Limits = SessionLimitsSnapshot,
-        }), lifetime.Token);
-
         var closeCode = Close.Internal;
         var closeReason = "internal";
 
         try
         {
+            await SendAsync(socket, FleetProtocolJson.Serialize(new StreamHello
+            {
+                ConversationId = conversationId,
+                NextSeq = head.NextSeq,
+                RetainedFloorSeq = head.RetainedFloorSeq,
+                Limits = SessionLimitsSnapshot,
+            }), lifetime.Token);
             while (!lifetime.IsCancellationRequested)
             {
                 var send = outbound.Reader.WaitToReadAsync(lifetime.Token).AsTask();
@@ -231,15 +266,6 @@ public static class StreamEndpoint
                         await SendAsync(socket, frame, lifetime.Token);
 
                     continue;
-                }
-
-                // Ping tick. Re-validate the credential FIRST: this is the mechanism behind the
-                // 30-second revocation bound, and without it that bound is a hope.
-                if (!(await auth.AuthenticateAsync(bearer, CancellationToken.None)).Succeeded)
-                {
-                    closeCode = Close.Unauthorized;
-                    closeReason = "unauthorized";
-                    break;
                 }
 
                 await SendAsync(socket, """{"kind":"ping"}""", lifetime.Token);
@@ -294,8 +320,13 @@ public static class StreamEndpoint
                 // Already torn down; nothing left to cancel.
             }
 
+            if (Volatile.Read(ref unauthorized) == 1)
+            {
+                closeCode = Close.Unauthorized;
+                closeReason = "unauthorized";
+            }
             await CloseAsync(socket, closeCode, closeReason);
-            await Task.WhenAll(reader, tail);
+            await Task.WhenAll(reader, tail, auth);
         }
     }
 
@@ -357,12 +388,13 @@ public static class StreamEndpoint
 
         try
         {
-            await socket.CloseAsync(
-                (WebSocketCloseStatus)code, reason, CancellationToken.None);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await socket.CloseAsync((WebSocketCloseStatus)code, reason, deadline.Token);
         }
-        catch (WebSocketException)
+        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException)
         {
-            // The peer is already gone; there is nothing to tell it.
+            // A peer that never acknowledges cannot hold a revoked stream open indefinitely.
+            socket.Abort();
         }
     }
 

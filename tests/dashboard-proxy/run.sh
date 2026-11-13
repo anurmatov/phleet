@@ -32,7 +32,7 @@ contains() { printf '%s' "$1" | grep -qF -- "$2"; }
 cleanup() {
   local rc=$?
   local name
-  for name in "$RUN-dash" "$RUN-dash2" "$RUN-client" "$RUN-orch-a" "$RUN-orch-b" "$RUN-orch-c"; do
+  for name in "$RUN-dash" "$RUN-dash2" "$RUN-client" "$RUN-orch-a" "$RUN-orch-b" "$RUN-orch-c" "$RUN-orch-d" "$RUN-comms"; do
     docker rm -f "$name" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $name"
   done
   # docker rm -f can return before the last endpoint detaches; give the
@@ -105,9 +105,14 @@ start_dash() { # start_dash <container-name> — mounted conf, or DASHBOARD_IMAG
 }
 
 # One request through the client container. Sets PROBE_STATUS, PROBE_TIME, PROBE_BODY.
+# PROBE_HEADER, when set, is sent as one extra request header.
+PROBE_HEADER=""
 probe() { # probe <path> [max-time]
   local path="$1" maxtime="${2:-3}" out
+  local -a extra=()
+  if [ -n "$PROBE_HEADER" ]; then extra=(-H "$PROBE_HEADER"); fi
   out=$(docker exec "$RUN-client" curl -s --max-time "$maxtime" -o "$BODY_FILE" \
+    "${extra[@]}" \
     -w '%{http_code} %{time_total}' "http://$DASH_HOST$path") || out="000 0.000"
   PROBE_STATUS="${out%% *}"
   PROBE_TIME="${out##* }"
@@ -312,5 +317,74 @@ probe "/"
 probe "/api/setup/status"
 [ "$PROBE_STATUS" = "502" ] || fail_assert "proxied route expected 502 on cold start, got $PROBE_STATUS"
 pass "dashboard starts with no orchestrator; static 200, proxied 502"
+
+# ── P5 sign-in edge mark and the chat route (#530) ────────────────────────────
+#
+# After P4 on purpose: the pre-#341 negative control fails at P2 and must keep
+# failing there, so nothing it would also fail is asserted before that point.
+
+PHASE="P5 edge mark"
+start_stub D
+if ! rec=$(await_http "http://$DASH_HOST/api/setup/status" '"instance":"D"'); then
+  fail_assert "edge: no proxied request reached instance D (last: $rec)"
+fi
+
+probe "/api/agents"
+contains "$PROBE_BODY" '"xFleetEdge":"1"' || fail_assert "/api/ not marked as coming from outside: $PROBE_BODY"
+contains "$PROBE_BODY" '"xForwardedProto":null' || fail_assert "X-Forwarded-Proto invented: $PROBE_BODY"
+
+# The mark is what makes the orchestrator ask for sign-in on reads. A client
+# that could clear or change it would be read as an internal service.
+PROBE_HEADER="X-Fleet-Edge: 0"
+probe "/api/agents"
+contains "$PROBE_BODY" '"xFleetEdge":"1"' || fail_assert "a client changed the edge mark: $PROBE_BODY"
+PROBE_HEADER="X-Fleet-Edge;"
+probe "/api/agents"
+contains "$PROBE_BODY" '"xFleetEdge":"1"' || fail_assert "a client emptied the edge mark: $PROBE_BODY"
+
+PROBE_HEADER="X-Forwarded-Proto: https"
+probe "/api/agents"
+contains "$PROBE_BODY" '"xForwardedProto":"https"' || fail_assert "outer proxy's scheme not passed on: $PROBE_BODY"
+PROBE_HEADER=""
+
+ws_probe "/ws"
+contains "$WS_STATUS" " 101 " || fail_assert "/ws expected 101, got '$WS_STATUS'"
+contains "$WS_OUTPUT" "X-Stub-Edge: 1" || fail_assert "/ws not marked as coming from outside: $WS_OUTPUT"
+pass "/api/ and /ws carry the edge mark, and a client cannot change it"
+
+PHASE="P5 chat route"
+# The chat service is optional. Without it only its own route fails.
+probe "/v1/session"
+[ "$PROBE_STATUS" = "502" ] || fail_assert "/v1/ expected 502 with no chat service, got $PROBE_STATUS"
+probe "/api/agents"
+[ "$PROBE_STATUS" = "200" ] || fail_assert "/api/ expected 200 with no chat service, got $PROBE_STATUS"
+RUNNING="$(docker inspect -f '{{.State.Running}}' "$DASH_HOST")" || fail_infra "inspect $DASH_HOST"
+[ "$RUNNING" = "true" ] || fail_assert "dashboard did not stay up without a chat service"
+
+infra "start stub chat service" docker run -d \
+  --name "$RUN-comms" \
+  --network "$RUN-net" \
+  --network-alias fleet-comms \
+  -e "STUB_NAME=COMMS" \
+  -e "STUB_PORT=8080" \
+  -v "$STUB_SCRIPT":/stub/stub_orchestrator.py:ro \
+  python:3.12-alpine \
+  python /stub/stub_orchestrator.py
+if ! rec=$(await_http "http://$DASH_HOST/v1/session" '"instance":"COMMS"'); then
+  fail_assert "chat: no proxied request reached the chat service (last: $rec)"
+fi
+
+probe "/v1/conversations?agent=example"
+[ "$PROBE_STATUS" = "200" ] || fail_assert "/v1/ expected 200, got $PROBE_STATUS"
+contains "$PROBE_BODY" '"path":"/v1/conversations?agent=example"' || fail_assert "chat request URI rewritten: $PROBE_BODY"
+contains "$PROBE_BODY" "\"host\":\"$DASH_HOST\"" || fail_assert "chat Host header not preserved: $PROBE_BODY"
+probe "/api/agents"
+contains "$PROBE_BODY" '"instance":"D"' || fail_assert "/api/ reached the chat service: $PROBE_BODY"
+
+ws_probe "/v1/conversations/c1/stream?afterSeq=0"
+contains "$WS_STATUS" " 101 " || fail_assert "chat stream expected 101, got '$WS_STATUS'"
+contains "$WS_OUTPUT" "X-Stub: COMMS" || fail_assert "chat stream reached the wrong upstream: $WS_OUTPUT"
+contains "$WS_OUTPUT" "X-Stub-Path: /v1/conversations/c1/stream?afterSeq=0" || fail_assert "chat stream path rewritten: $WS_OUTPUT"
+pass "/v1/ reaches the chat service for plain requests and the stream upgrade"
 
 echo "PASS all phases ($RUN_ID)"

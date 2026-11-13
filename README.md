@@ -68,12 +68,15 @@ Once setup finishes, the dashboard is live at:
 
 **👉 http://localhost:3700**
 
-Auth is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `./fleet/.env` — `setup.sh` generates it for you.
-Every request that changes something needs it as a bearer; reads do not. To check a token without
-changing anything, `GET /api/operator-token` with the bearer answers `{"status":"accepted"}` or
-`401` (`"not_required"` when no token is configured).
+Sign-in is controlled by `ORCHESTRATOR_AUTH_TOKEN` in `./fleet/.env` — `setup.sh` generates it for
+you. The dashboard asks for it once per browser and then keeps a session; the token is never built
+into the page. Internal services calling the orchestrator directly need it as a bearer for writes, as
+before. To check a token without changing anything, `GET /api/operator-token` with the bearer answers
+`{"status":"accepted"}` or `401` (`"not_required"` when no token is configured). See
+[`docs/sign-in.md`](docs/sign-in.md).
 To connect the [iOS app](https://github.com/anurmatov/phleet-ios) to this dashboard, open
-**Credentials → Phone** and scan the setup code; see [`docs/phone-setup-code.md`](docs/phone-setup-code.md).
+**Credentials → Devices → Connect a phone** and scan the setup code; see
+[`docs/phone-setup-code.md`](docs/phone-setup-code.md).
 
 ### 4. Create your co-CTO agent
 
@@ -216,9 +219,7 @@ docker build -t fleet:memory -f src/Fleet.Memory/Dockerfile .
 docker build -t fleet:temporal-bridge -f Dockerfile.temporal .
 docker build -t fleet:bridge -f src/Fleet.Bridge/Dockerfile .
 docker build -t fleet:secrets -f src/Fleet.SecretProxy/Dockerfile .
-docker build -t fleet:dashboard \
-  --build-arg VITE_AUTH_TOKEN=your-token \
-  -f src/fleet-dashboard/Dockerfile .
+docker build -t fleet:dashboard -f src/fleet-dashboard/Dockerfile .
 
 # Dashboard dev server
 cd src/fleet-dashboard && npm install && npm run dev
@@ -384,7 +385,7 @@ Telegram allows only one long-poller per bot token. If two or more agents share 
 
 `temporal_list_workflow_types` populates lazily on first call after `fleet-temporal-bridge` starts. Immediately after a restart it may return only the hardcoded built-ins and none of the seeded UWE workflow definitions. Wait a few seconds and call it again, or start any workflow once to warm the cache.
 
-## Fleet.Comms — first-party client API (optional)
+## Fleet.Comms — chat with your agents (optional)
 
 Comms is optional: every setup question defaults to no, and declining builds no Comms image
 and starts no Comms container. Telegram agents do not need Comms or a journal key.
@@ -396,14 +397,14 @@ See [Comms deployment](docs/comms-deployment.md).
 Full cold-host setup still depends on [#399](https://github.com/anurmatov/phleet/issues/399)
 replacing the withdrawn core share-store images. The Comms change does not replace that store.
 
-An HTTPS boundary a native client can enroll a device against and authenticate to. **Auth and
-session only** — device enrollment, token mint, self-revocation and session discovery. No chat, no
-WebSocket, no conversation history, no push notifications; an enrolled device holds a valid token
-and has nothing to talk to yet.
+Chat with any agent from the dashboard's Chat view and the iOS app: one thread per agent, with
+history, a live stream, cancel, and a phone notification for a reply you were not watching. Chat is
+on for every agent by default and can be turned off per agent. Sign-in is the orchestrator's, so the
+same signed-in browser or phone is used for chat, and clients reach Comms through the dashboard's
+address.
 
-Off by default, behind a Compose profile, published on loopback so it sits behind your own TLS
-reverse proxy. See **[docs/comms-deployment.md](docs/comms-deployment.md)** to run it, and
-[docs/first-party-api.md](docs/first-party-api.md) for the wire contract.
+Off by default, behind a Compose profile. See **[docs/comms-deployment.md](docs/comms-deployment.md)**
+to run it, and [docs/first-party-api.md](docs/first-party-api.md) for the wire contract.
 
 ## License
 

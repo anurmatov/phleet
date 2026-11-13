@@ -31,9 +31,9 @@ public sealed class ConversationSouthRegistrationTests
 {
     private const string ValidUrl = "http://south.invalid:8082";
 
-    /// <summary>The agent's own short name — the seam's identity, borrowed rather than restated.</summary>
-    private static readonly string ShortNameKey =
-        $"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)}";
+    /// <summary>The agent's own unique name — the seam's identity, borrowed rather than restated (#530).</summary>
+    private static readonly string NameKey =
+        $"{AgentOptions.Section}:{nameof(AgentOptions.Name)}";
 
     /// <summary>The broker the agent already talks to. No second connection string exists.</summary>
     private static readonly string BrokerHostKey =
@@ -47,7 +47,7 @@ public sealed class ConversationSouthRegistrationTests
 
     /// <summary>
     /// Bare names belong to the <c>Conversations</c> section; anything already carrying a section
-    /// prefix is passed through, so a test can drive <c>Agent:ShortName</c> and <c>RabbitMq:Host</c>
+    /// prefix is passed through, so a test can drive <c>Agent:Name</c> and <c>RabbitMq:Host</c>
     /// through the same helper.
     /// </summary>
     private static string Qualify(string key) =>
@@ -59,7 +59,7 @@ public sealed class ConversationSouthRegistrationTests
         {
             [nameof(ConversationsOptions.SouthBaseUrl)] = ValidUrl,
             [nameof(ConversationsOptions.SouthBearerToken)] = "a-token",
-            [ShortNameKey] = "example-agent",
+            [NameKey] = "example-agent",
             [BrokerHostKey] = "broker.invalid",
         };
 
@@ -188,7 +188,7 @@ public sealed class ConversationSouthRegistrationTests
     /// </remarks>
     [Theory]
     [InlineData(nameof(ConversationsOptions.SouthBearerToken))]
-    [InlineData("Agent:ShortName")]
+    [InlineData("Agent:Name")]
     [InlineData("RabbitMq:Host")]
     public void AMissingRequiredKeyFailsStartupAndNamesTheKey(string key)
     {
@@ -200,7 +200,7 @@ public sealed class ConversationSouthRegistrationTests
 
     [Theory]
     [InlineData(nameof(ConversationsOptions.SouthBearerToken))]
-    [InlineData("Agent:ShortName")]
+    [InlineData("Agent:Name")]
     [InlineData("RabbitMq:Host")]
     public void ABlankRequiredKeyFailsStartupToo(string key)
     {
@@ -226,7 +226,7 @@ public sealed class ConversationSouthRegistrationTests
     }
 
     /// <summary>
-    /// Validation 3 — the agent's own <c>ShortName</c> must match the pattern the SERVICE enforces.
+    /// Validation 3 — the agent's own <c>Name</c> must match the pattern the SERVICE enforces.
     /// </summary>
     /// <remarks>
     /// It is both the routing key and a queue-name segment. A value the two sides read differently
@@ -240,21 +240,29 @@ public sealed class ConversationSouthRegistrationTests
     [InlineData("has.dot")]
     [InlineData("has/slash")]
     [InlineData("ünïcode")]
-    public void AShortNameOutsideThePatternFailsStartup(string value)
+    public void ANameOutsideThePatternFailsStartup(string value)
     {
         var error = Assert.Throws<InvalidOperationException>(
-            () => Register(FullyConfigured((ShortNameKey, value))));
+            () => Register(FullyConfigured((NameKey, value))));
 
-        Assert.Contains(nameof(AgentOptions.ShortName), error.Message, StringComparison.Ordinal);
+        Assert.Contains($"{AgentOptions.Section}:{nameof(AgentOptions.Name)}", error.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The short name plays no part any more (#530 D9): it is not unique, and the chat service
+    /// publishes under the agent's unique name.
+    /// </summary>
+    [Fact]
+    public void AShortNameOutsideThePatternDoesNotMatter() =>
+        Register(FullyConfigured(($"{AgentOptions.Section}:{nameof(AgentOptions.ShortName)}", "has space")));
 
     [Theory]
     [InlineData("agent")]
     [InlineData("agent-1")]
     [InlineData("agent_1")]
     [InlineData("A0")]
-    public void AShortNameInsideThePatternStarts(string value) =>
-        Register(FullyConfigured((ShortNameKey, value)));
+    public void ANameInsideThePatternStarts(string value) =>
+        Register(FullyConfigured((NameKey, value)));
 
     /// <summary>Validation 4 — a non-positive heartbeat interval fails startup.</summary>
     [Theory]

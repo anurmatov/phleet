@@ -111,9 +111,8 @@ public sealed class JournalEndpointTests
 
         await using var south = CommsApp.BuildSouthApp(builder, new FakeConversationStore(), new Configuration.CommsOptions
         {
-            SouthBearerToken = "south-token",
-            AgentName = "example-agent",
             ConversationConnectionString = "configured",
+            Journal = new() { TokenKeys = JournalTestHost.KeyA },
         });
         await south.StartAsync();
         var client = south.GetTestClient();
@@ -121,7 +120,7 @@ public sealed class JournalEndpointTests
         foreach (var (method, path) in new[] { (HttpMethod.Get, JournalEndpoints.StatusPath), (HttpMethod.Post, JournalEndpoints.MessagesPath) })
         {
             var request = new HttpRequestMessage(method, path);
-            request.Headers.TryAddWithoutValidation("Authorization", "Bearer south-token");
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {JournalTestHost.SouthToken("example-agent")}");
             Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(request)).StatusCode);
         }
     }

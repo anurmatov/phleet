@@ -19,6 +19,13 @@ public sealed record OpenConversationBody
     public string? ExternalRef { get; init; }
 
     /// <summary>
+    /// The agent this conversation is with: its unique name, as <c>GET /api/chat/agents</c> lists it
+    /// (#530 D9). Required. It must accept chat when the conversation is opened, and it is the
+    /// conversation's for life: the same reference with another agent is another conversation.
+    /// </summary>
+    public string? Agent { get; init; }
+
+    /// <summary>
     /// Opaque bookkeeping label for cursors (§4). <b>Not a credential and not device identity</b>,
     /// so it is never used for authorisation — the principal comes from the validated token.
     /// </summary>
@@ -30,8 +37,27 @@ public sealed record OpenConversationResponse
 {
     public string Protocol { get; init; } = ProtocolVersion.Current;
     public required string ConversationId { get; init; }
+    public required string Agent { get; init; }
     public required ulong NextSeq { get; init; }
     public required ulong RetainedFloorSeq { get; init; }
+}
+
+/// <summary>`GET /v1/conversations` response: the caller's conversations, most recently active first.</summary>
+public sealed record ConversationListResponse
+{
+    public string Protocol { get; init; } = ProtocolVersion.Current;
+    public required IReadOnlyList<ConversationListItem> Conversations { get; init; }
+}
+
+/// <summary>One conversation in <see cref="ConversationListResponse"/>.</summary>
+public sealed record ConversationListItem
+{
+    public required string ConversationId { get; init; }
+    public required string Agent { get; init; }
+    public required string ExternalRef { get; init; }
+    public required ulong NextSeq { get; init; }
+    public required ulong RetainedFloorSeq { get; init; }
+    public required DateTimeOffset LastActivityAt { get; init; }
 }
 
 /// <summary>`GET /v1/conversations/{id}/events` response.</summary>

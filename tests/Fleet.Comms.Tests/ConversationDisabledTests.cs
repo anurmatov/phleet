@@ -7,19 +7,20 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Fleet.Comms.Tests;
 
 /// <summary>
-/// An install that has not enabled conversations is byte-identical to the one the auth slice ships
-/// (AC9, D-C, MUST NOT 13).
+/// An install that has not enabled conversations serves no north route (AC9, D-C, MUST NOT 13).
 /// </summary>
 /// <remarks>
-/// This is what makes the feature opt-in rather than merely defaulted to off. A deployment that
-/// wants an auth boundary and nothing else keeps exactly the surface it had, attempts no database
-/// connection, and gets no background loop.
+/// This is what makes the feature opt-in rather than merely defaulted to off. Such a deployment
+/// attempts no database connection, gets no background loop and never asks the orchestrator
+/// anything; sign-in is the orchestrator's (#530).
 /// </remarks>
 public class ConversationDisabledTests
 {
     /// <summary>The six routes, which must be absent rather than present-and-refusing.</summary>
     public static TheoryData<string, string> ConversationRoutes() => new()
     {
+        { "GET", "/v1/session" },
+        { "GET", "/v1/conversations" },
         { "POST", "/v1/conversations" },
         { "GET", "/v1/conversations/c_1/events" },
         { "POST", "/v1/conversations/c_1/submissions" },
@@ -96,24 +97,18 @@ public class ConversationDisabledTests
     }
 
     /// <summary>
-    /// The four auth routes are untouched: same statuses, same bodies.
+    /// Nothing asks the orchestrator, and nothing needs the shared key: the sign-in check is never
+    /// built when no route could use it.
     /// </summary>
-    /// <remarks>
-    /// MUST NOT 12. The equalised-work property on credential checks is part of the contract and is
-    /// easy to break by adding a fast path — so the disabled install is checked end to end rather
-    /// than assumed to be unaffected by a feature it does not have.
-    /// </remarks>
     [Fact]
-    public async Task The_auth_routes_still_work_end_to_end_when_conversations_are_disabled()
+    public async Task The_sign_in_check_is_never_asked_when_the_feature_is_disabled()
     {
         await using var host = await NorthTestHost.StartAsync();
-
-        var (deviceId, secret, token) = await host.EnrolledDeviceAsync();
-
-        Assert.NotEmpty(deviceId);
-        Assert.NotEmpty(secret);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
 
         var session = await host.SessionAsync(token);
-        Assert.Equal(HttpStatusCode.OK, session.StatusCode);
+
+        Assert.Equal(HttpStatusCode.NotFound, session.StatusCode);
+        Assert.Empty(host.SignIn.Asked);
     }
 }

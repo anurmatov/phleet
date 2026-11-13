@@ -1,48 +1,48 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  emptyPhoneSetupForm, normalizeOrigin, phoneSetupCode, phoneSetupProblemMessage,
+  emptyPhoneSetupForm, normalizeOrigin, phoneSetupCode, phoneSetupFormProblem, phoneSetupProblemMessage,
   type PhoneSetupForm, type PhoneSetupProblem,
 } from './phoneSetup.ts'
 import qrcode from 'qrcode-generator'
 import { QR_MAX_BYTES, qrMatrix } from './qrMatrix.ts'
 
 const form = (over: Partial<PhoneSetupForm> = {}): PhoneSetupForm => ({
-  origin: 'https://fleet.example.test', includeOperatorToken: true,
+  origin: 'https://fleet.example.test', deviceName: '',
   accessClientId: '', accessClientSecret: '', ...over,
 })
 
-const codeOf = (f: PhoneSetupForm, token = 'synthetic-operator-token') => {
+const codeOf = (f: PhoneSetupForm, token = 'synthetic-enrollment-code') => {
   const result = phoneSetupCode(f, token)
   assert.ok('code' in result, `expected a code, got ${JSON.stringify(result)}`)
   return result.code
 }
 
-const problemOf = (f: PhoneSetupForm, token = 'synthetic-operator-token') => {
+const problemOf = (f: PhoneSetupForm, token = 'synthetic-enrollment-code') => {
   const result = phoneSetupCode(f, token)
   assert.ok('problem' in result, 'expected a problem')
   return result.problem
 }
 
-test('the form starts from the address this page was opened at, with the operator token included', () => {
+test('the form starts from the address this page was opened at', () => {
   assert.deepEqual(emptyPhoneSetupForm('https://fleet.example.test'), form())
 })
 
 test('a full code carries the kind, the version and every part, in a fixed order', () => {
-  const code = codeOf(form({ accessClientId: ' client-id ', accessClientSecret: ' client-secret ' }), ' synthetic-operator-token ')
+  const code = codeOf(form({ accessClientId: ' client-id ', accessClientSecret: ' client-secret ' }), ' synthetic-enrollment-code ')
   assert.equal(code,
-    '{"phleet":"control-setup","v":1,"origin":"https://fleet.example.test",' +
-    '"accessClientId":"client-id","accessClientSecret":"client-secret","operatorToken":"synthetic-operator-token"}')
+    '{"phleet":"setup","v":2,"origin":"https://fleet.example.test",' +
+    '"accessClientId":"client-id","accessClientSecret":"client-secret","enrollmentCode":"synthetic-enrollment-code"}')
 })
 
 test('a part that is not given is left out, never sent empty', () => {
-  const code = JSON.parse(codeOf(form({ includeOperatorToken: false })))
-  assert.deepEqual(Object.keys(code), ['phleet', 'v', 'origin'])
+  const code = JSON.parse(codeOf(form()))
+  assert.deepEqual(Object.keys(code), ['phleet', 'v', 'origin', 'enrollmentCode'])
 })
 
-test('a read-only code never contains the operator token, even though the page holds one', () => {
-  const code = codeOf(form({ includeOperatorToken: false }), 'synthetic-operator-token')
-  assert.ok(!code.includes('synthetic-operator-token'))
+test('the device name is for the orchestrator, and is not drawn into the code', () => {
+  const code = codeOf(form({ deviceName: 'Pocket phone' }))
+  assert.ok(!code.includes('Pocket phone'))
 })
 
 test('half a service token is refused', () => {
@@ -50,9 +50,15 @@ test('half a service token is refused', () => {
   assert.equal(problemOf(form({ accessClientSecret: 'client-secret' })), 'service_token_incomplete')
 })
 
-test('including an operator token the page does not have is refused rather than sent empty', () => {
-  assert.equal(problemOf(form(), '   '), 'operator_token_missing')
-  assert.ok('code' in phoneSetupCode(form({ includeOperatorToken: false }), ''))
+test('a code is never drawn without an enrollment code in it', () => {
+  assert.equal(problemOf(form(), '   '), 'enrollment_code_missing')
+  assert.equal(problemOf(form(), ''), 'enrollment_code_missing')
+})
+
+test('a form that cannot make a code is found out before an enrollment code is asked for', () => {
+  assert.equal(phoneSetupFormProblem(form()), null)
+  assert.equal(phoneSetupFormProblem(form({ origin: 'http://fleet.example.test' })), 'origin_insecure')
+  assert.equal(phoneSetupFormProblem(form({ accessClientId: 'client-id' })), 'service_token_incomplete')
 })
 
 test('an address is normalised to what the app stores', () => {
@@ -75,7 +81,7 @@ test('other address problems are named', () => {
 test('every problem has its own words', () => {
   const problems: PhoneSetupProblem[] = [
     'origin_empty', 'origin_invalid', 'origin_insecure', 'origin_userinfo',
-    'service_token_incomplete', 'operator_token_missing', 'code_too_long',
+    'service_token_incomplete', 'enrollment_code_missing', 'code_too_long',
   ]
   const messages = problems.map(phoneSetupProblemMessage)
   assert.equal(new Set(messages).size, problems.length)
@@ -107,7 +113,7 @@ test('a QR matrix is square, has the three finder patterns, and is the same for 
 })
 
 test('a longer code makes a larger matrix rather than failing', () => {
-  const short = qrMatrix(codeOf(form({ includeOperatorToken: false })))
+  const short = qrMatrix(codeOf(form()))
   const long = qrMatrix(codeOf(form({ accessClientId: 'c'.repeat(64), accessClientSecret: 's'.repeat(96) }), 't'.repeat(96)))
   assert.ok(long.length > short.length)
 })
@@ -119,7 +125,7 @@ test('a credential outside ASCII reaches the phone exactly, in a code that is pl
   // Plain ASCII is the same bytes whichever character set a scanner assumes.
   assert.ok([...code].every(c => c.charCodeAt(0) < 0x80), 'every character of the code is ASCII')
   const parsed = JSON.parse(code)
-  assert.equal(parsed.operatorToken, 'тест')
+  assert.equal(parsed.enrollmentCode, 'тест')
   assert.equal(parsed.accessClientId, 'клиент')
   assert.equal(parsed.accessClientSecret, secret)
 })

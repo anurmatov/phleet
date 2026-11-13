@@ -35,26 +35,33 @@ public class ConversationRouteTests
         var token = await AuthorizeAsync(host);
 
         var response = await host.Client.SendAsync(
-            Post("/v1/conversations", token, new { protocol = ProtocolVersion.Current, externalRef = "main-thread" }));
+            Post("/v1/conversations", token, new
+            {
+                protocol = ProtocolVersion.Current,
+                externalRef = "main-thread",
+                agent = NorthTestHost.ChatAgent,
+            }));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
         var body = await ReadAsync<OpenConversationResponse>(response);
         Assert.Equal(store.ConversationId, body.ConversationId);
+        Assert.Equal(NorthTestHost.ChatAgent, body.Agent);
+        Assert.Equal(NorthTestHost.ChatAgent, Assert.Single(store.Opened).AgentName);
         Assert.Equal(store.NextSeq, body.NextSeq);
         Assert.Equal(store.RetainedFloorSeq, body.RetainedFloorSeq);
     }
 
     /// <summary>
-    /// The route table is EXACTLY the ten routes §5 publishes when the feature is on.
+    /// The route table is EXACTLY the published routes when the feature is on.
     /// </summary>
     /// <remarks>
-    /// Probing for 200s proves these ten answer; this proves nothing else was mapped. The auth
-    /// slice's four-route assertion was a slice-1 statement, and D-D says the surface grows to ten
-    /// deliberately and visibly — this is where "visibly" is enforced.
+    /// Probing for 200s proves these answer; this proves nothing else was mapped. The surface grows
+    /// deliberately and visibly — this is where "visibly" is enforced. Since #530 there is no
+    /// <c>/v1/auth/…</c> route at all: sign-in is the orchestrator's.
     /// </remarks>
     [Fact]
-    public async Task The_enabled_north_route_table_is_exactly_the_ten_published_routes()
+    public async Task The_enabled_north_route_table_is_exactly_the_published_routes()
     {
         await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
 
@@ -397,6 +404,8 @@ public class ConversationRouteTests
     /// <summary>Every conversation route refuses an absent credential.</summary>
     public static TheoryData<string, string> AuthenticatedRoutes() => new()
     {
+        { "GET", "/v1/session" },
+        { "GET", "/v1/conversations" },
         { "POST", "/v1/conversations" },
         { "GET", "/v1/conversations/c_1/events" },
         { "POST", "/v1/conversations/c_1/submissions" },
@@ -470,16 +479,9 @@ public class ConversationRouteTests
 
         var first = await AuthorizeAsync(host);
 
-        // A second device for a second principal. One principal may hold one device, so a second
-        // device means a second principal — which is also the only shape this deployment can
-        // produce.
-        var secondCode = await host.IssueEnrollmentCodeAsync("p_second");
-        var registration = await host.RegisterAsync(secondCode);
-        var device = await registration.Content.ReadFromJsonAsync<NorthTestHost.RegisterDeviceBody>(
-            FleetProtocolJson.Options);
-        var minted = await host.TokenAsync(device!.DeviceId, device.DeviceSecret);
-        var second = (await minted.Content.ReadFromJsonAsync<NorthTestHost.TokenBody>(
-            FleetProtocolJson.Options))!.AccessToken;
+        // A second device, for a second person so the request below reaches a 404 rather than the
+        // first person's conversation.
+        var (_, _, second) = await host.EnrolledDeviceAsync("p_second");
 
         // Spend the first device's whole window.
         HttpStatusCode last = HttpStatusCode.OK;
@@ -495,9 +497,8 @@ public class ConversationRouteTests
 
         // The second device, from the same address, is unaffected.
         //
-        // Asserted as "not throttled" rather than as `200`: one principal may hold one device, so a
-        // second device is necessarily a second principal — and a second principal reading the
-        // first's conversation is a `404` by design. What matters here is that the request reached
+        // Asserted as "not throttled" rather than as `200`: the second device belongs to a second
+        // person, and a second person reading the first's conversation is a `404` by design. What matters here is that the request reached
         // the handler at all, which is the thing a shared budget would have prevented.
         var other = await host.Client.SendAsync(
             Get($"/v1/conversations/{store.ConversationId}/events?afterSeq=0", second));

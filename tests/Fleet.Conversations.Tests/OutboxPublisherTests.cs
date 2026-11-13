@@ -40,7 +40,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
 
         var conversation = await store.OpenConversationAsync(new OpenConversationRequest
         {
-            ChannelId = "client", ExternalRef = "conv-" + Ulid.NewUlid(), PrincipalId = "p_owner",
+            ChannelId = "client", ExternalRef = "conv-" + Ulid.NewUlid(), PrincipalId = "p_owner", AgentName = SouthTestHost.Agent,
         });
 
         var accept = await store.AcceptSubmissionAsync(new AcceptSubmissionRequest
@@ -63,17 +63,77 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
         new(fixture.ConnectionString, OutboxPublisher.EventTable, transport,
             fixture.Options, NullLogger.Instance);
 
+    /// <summary>
+    /// Each command goes to its own conversation's agent: one drain serves every chat-enabled agent
+    /// (#530 D9).
+    /// </summary>
+    [Fact]
+    public async Task Commands_for_two_agents_are_routed_to_each_agent()
+    {
+        var store = fixture.CreateStore();
+        var agents = new[] { "agent-one-" + Ulid.NewUlid()[..6], "agent-two-" + Ulid.NewUlid()[..6] };
+        var submissions = new Dictionary<string, string>();
+
+        foreach (var agent in agents)
+        {
+            var conversation = await store.OpenConversationAsync(new OpenConversationRequest
+            {
+                ChannelId = "client", ExternalRef = "conv-" + Ulid.NewUlid(), PrincipalId = "p_owner", AgentName = agent,
+            });
+
+            var accept = await store.AcceptSubmissionAsync(new AcceptSubmissionRequest
+            {
+                ConversationId = conversation.ConversationId,
+                ExternalSubmissionId = Guid.NewGuid().ToString("n"),
+                PayloadFingerprint = PayloadFingerprint.Compute(agent, null, conversation.ConversationId),
+                CommandKind = ConversationEventKind.SubmissionCreate,
+                CommandPayloadJson = """{"text":"hello"}""",
+            });
+
+            submissions[agent] = await fixture.ScalarRowAsync(
+                $"SELECT message_id FROM command_outbox WHERE submission_id = '{accept.SubmissionId}'");
+        }
+
+        var transport = new FakeTransport();
+        while (await CommandPublisher(transport).DrainOnceAsync() > 0) { }
+
+        foreach (var agent in agents)
+        {
+            var published = Assert.Single(transport.Published, m => m.DedupeId == submissions[agent]);
+            Assert.Equal(agent, published.RoutingKey);
+        }
+    }
+
+    /// <summary>
+    /// A conversation from before conversations named their agent has nowhere to go. Its command is
+    /// never claimed, so it is never published to a routing key nothing consumes.
+    /// </summary>
+    [Fact]
+    public async Task A_command_for_a_conversation_without_an_agent_is_never_claimed()
+    {
+        var (conversation, submissionId) = await AcceptOneAsync();
+        await fixture.ExecuteAsync($"UPDATE conversations SET agent_name = '' WHERE id = '{conversation}'");
+
+        var transport = new FakeTransport();
+        while (await CommandPublisher(transport).DrainOnceAsync() > 0) { }
+
+        Assert.DoesNotContain(transport.Published, m => m.ConversationId == conversation);
+        Assert.Equal("pending", await fixture.ScalarRowAsync(
+            $"SELECT state FROM command_outbox WHERE submission_id = '{submissionId}'"));
+    }
+
     [Fact]
     public async Task A_confirmed_row_is_marked_published_with_a_timestamp()
     {
         var (_, submissionId) = await AcceptOneAsync();
         var transport = new FakeTransport();
 
-        var confirmed = await CommandPublisher(transport).DrainOnceAsync("example-agent");
+        var confirmed = await CommandPublisher(transport).DrainOnceAsync();
 
         Assert.Equal(1, confirmed);
         Assert.Single(transport.Published);
-        Assert.Equal("example-agent", transport.Published[0].RoutingKey);
+        // The conversation's agent, read in the claim (#530 D9).
+        Assert.Equal(SouthTestHost.Agent, transport.Published[0].RoutingKey);
 
         Assert.Equal("published|1", await fixture.ScalarRowAsync($"""
             SELECT state, published_at IS NOT NULL
@@ -96,7 +156,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
             ConfirmSelector = _ => new HashSet<ulong>(),
         };
 
-        var confirmed = await CommandPublisher(transport).DrainOnceAsync("example-agent");
+        var confirmed = await CommandPublisher(transport).DrainOnceAsync();
 
         Assert.Equal(0, confirmed);
         Assert.Single(transport.Published);
@@ -113,7 +173,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
             """);
 
         var retry = new FakeTransport();
-        Assert.Equal(1, await CommandPublisher(retry).DrainOnceAsync("example-agent"));
+        Assert.Equal(1, await CommandPublisher(retry).DrainOnceAsync());
         Assert.Equal(transport.Published[0].DedupeId, retry.Published[0].DedupeId);
     }
 
@@ -124,7 +184,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
         var (_, submissionId) = await AcceptOneAsync();
 
         var transport = new FakeTransport { Throw = new IOException("broker unreachable") };
-        var confirmed = await CommandPublisher(transport).DrainOnceAsync("example-agent");
+        var confirmed = await CommandPublisher(transport).DrainOnceAsync();
 
         Assert.Equal(0, confirmed);
         Assert.Equal("pending|NULL", await fixture.ScalarRowAsync($"""
@@ -152,7 +212,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
             ConfirmSelector = batch => batch.Take(2).Select(m => m.Id).ToHashSet(),
         };
 
-        var confirmed = await CommandPublisher(transport).DrainOnceAsync("example-agent");
+        var confirmed = await CommandPublisher(transport).DrainOnceAsync();
 
         Assert.Equal(2, confirmed);
         Assert.Equal("2|2", await fixture.ScalarRowAsync($"""
@@ -174,7 +234,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
 
         var conversation = await store.OpenConversationAsync(new OpenConversationRequest
         {
-            ChannelId = "client", ExternalRef = "conv-" + Ulid.NewUlid(), PrincipalId = "p_owner",
+            ChannelId = "client", ExternalRef = "conv-" + Ulid.NewUlid(), PrincipalId = "p_owner", AgentName = SouthTestHost.Agent,
         });
 
         var epoch = Ulid.NewUlid();
@@ -190,7 +250,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
         });
 
         var transport = new FakeTransport();
-        var confirmed = await EventPublisher(transport).DrainOnceAsync(routingKey: "unused");
+        var confirmed = await EventPublisher(transport).DrainOnceAsync();
 
         // Scoped to THIS conversation. The drain takes whatever is pending in the database, and the
         // class shares one with every other class in this collection — so a global count is a
@@ -238,8 +298,8 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
         var b = new FakeTransport();
 
         await Task.WhenAll(
-            CommandPublisher(a).DrainOnceAsync("example-agent"),
-            CommandPublisher(b).DrainOnceAsync("example-agent"));
+            CommandPublisher(a).DrainOnceAsync(),
+            CommandPublisher(b).DrainOnceAsync());
 
         var claimed = a.Published.Select(m => m.Id).Concat(b.Published.Select(m => m.Id)).ToList();
 
@@ -257,7 +317,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
     public async Task The_backlog_measure_reports_depth()
     {
         // Drain anything a previous test left pending, so the delta below is this test's own.
-        await CommandPublisher(new FakeTransport()).DrainOnceAsync("example-agent");
+        await CommandPublisher(new FakeTransport()).DrainOnceAsync();
 
         var (before, _) = await CommandPublisher(new FakeTransport()).MeasureBacklogAsync();
 
@@ -266,7 +326,7 @@ public sealed class OutboxPublisherTests(MySqlFixture fixture)
         var (queued, _) = await CommandPublisher(new FakeTransport()).MeasureBacklogAsync();
         Assert.Equal(before + 3, queued);
 
-        await CommandPublisher(new FakeTransport()).DrainOnceAsync("example-agent");
+        await CommandPublisher(new FakeTransport()).DrainOnceAsync();
 
         var (drained, _) = await CommandPublisher(new FakeTransport()).MeasureBacklogAsync();
         Assert.Equal(0, drained);

@@ -68,7 +68,6 @@ const history = [{ eventType: 'WorkflowStarted', inputSummary: JSON.stringify(re
 
 test('both workflows request actions must load the exact request before sending', async t => {
   const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), configFile: false,
-    define: { 'import.meta.env.VITE_AUTH_TOKEN': JSON.stringify('synthetic-operator') },
     server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' })
   const originalFetch = globalThis.fetch
   try {
@@ -135,7 +134,6 @@ test('both workflows request actions must load the exact request before sending'
 
 test('late history from a previous run cannot unlock the current request', async () => {
   const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), configFile: false,
-    define: { 'import.meta.env.VITE_AUTH_TOKEN': JSON.stringify('synthetic-operator') },
     server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' })
   const originalFetch = globalThis.fetch
   try {
@@ -158,28 +156,5 @@ test('late history from a previous run cannot unlock the current request', async
     responses[1](new Response('{}', { status: 503 })); await tick()
     current = hooks.render(Modal, next)
     assert.equal(send(current).props.disabled, true)
-  } finally { globalThis.fetch = originalFetch; await server.close() }
-})
-
-test('read-only confirmation cannot send even after history and explicit selection', async () => {
-  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), configFile: false,
-    define: { 'import.meta.env.VITE_AUTH_TOKEN': JSON.stringify('') },
-    server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' })
-  const originalFetch = globalThis.fetch
-  try {
-    const { default: Modal } = await server.ssrLoadModule('/src/components/SignalModal.tsx')
-    globalThis.fetch = (async () => new Response(JSON.stringify(history), { status: 200 })) as typeof fetch
-    const hooks = new Hooks()
-    let sends = 0
-    const props = { modal: { wf, signalName: 'request-input', button: { label: 'Answer', payload: '{}', requiresComment: false }, comment: '' },
-      onClose: () => {}, onCommentChange: () => {}, onSend: () => { sends++ } }
-    hooks.render(Modal, props); hooks.flush(); await tick()
-    let tree = hooks.render(Modal, props)
-    const radio = elements(tree).find(e => e.type === 'input')!
-    ;(radio.props as unknown as { onChange: () => void }).onChange()
-    tree = hooks.render(Modal, props)
-    assert.ok(text(tree).includes('Read-only'))
-    assert.equal(send(tree).props.disabled, true)
-    send(tree).props.onClick!(); assert.equal(sends, 0)
   } finally { globalThis.fetch = originalFetch; await server.close() }
 })

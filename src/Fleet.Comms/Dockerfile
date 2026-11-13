@@ -8,12 +8,8 @@
 #
 # Released 10.0 tags, matching the images the agent and orchestrator already build from.
 #
-# The auth store is a file, and `Comms:AuthStorePath` defaults to a path inside the container. A
-# deployment MUST point `Comms__AuthStorePath` at a persistent volume: the records it holds are
-# device registrations the owner cannot re-create without a fresh out-of-band enrollment code, so
-# losing the file on container recreation locks the owner out of their own client. No default is
-# baked in here, because where that volume lives is a deployment decision and this is a public
-# repository (issue #292 scope 7).
+# There is no credential store in this image (#530): the orchestrator owns sign-in, and this service
+# asks it who each caller is. Nothing here needs a volume.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
@@ -37,13 +33,5 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app .
-
-# NOTE: the auth store directory is deliberately NOT created here.
-#
-# `Comms__AuthStorePath` points inside a named volume. If that volume is not mounted, the open
-# fails, /ready reports 503 and the container never becomes healthy — which is the behaviour we
-# want, because the alternative is a service that quietly writes credentials to the container's
-# own filesystem and forgets every device on the next recreation. A `mkdir -p` here would convert
-# a loud, correct failure into that silent one.
 
 ENTRYPOINT ["dotnet", "Fleet.Comms.dll"]

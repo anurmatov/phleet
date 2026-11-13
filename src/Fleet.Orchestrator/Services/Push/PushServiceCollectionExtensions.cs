@@ -16,6 +16,7 @@ public static class PushServiceCollectionExtensions
         services.Configure<PushOptions>(configuration.GetSection(PushOptions.Section));
         services.AddSingleton<PushReadiness>();
         services.AddSingleton<OperatorStops>();
+        services.AddSingleton<ChatReplyPushes>();
         services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton(sp =>
         {

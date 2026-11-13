@@ -185,6 +185,8 @@ export interface AgentConfig {
   autoMemoryEnabled: boolean
   journalEnabled: boolean
   journalCrossChatEnabled: boolean
+  /** Absent from an orchestrator older than #530. */
+  chatEnabled?: boolean
   hostPort: number | null
   telegramSendOnly: boolean
   provider: string
@@ -235,6 +237,7 @@ export interface ConfigEdits {
   autoMemoryEnabled: boolean
   journalEnabled: boolean
   journalCrossChatEnabled: boolean
+  chatEnabled: boolean
   hostPort: string
   telegramSendOnly: boolean
   provider?: string
@@ -346,7 +349,7 @@ export type StopStartState = 'idle' | 'confirming' | 'pending' | 'success' | 'er
 export type WfActionState = 'idle' | 'confirming-cancel' | 'confirming-restart' | 'confirming-terminate' | 'pending' | 'success' | 'error'
 export type CancelState = 'idle' | 'confirming' | 'cancelling' | 'success' | 'error'
 export type ConfigSaveState = 'idle' | 'saving' | 'success' | 'error'
-export type ActiveView = 'agents' | 'workflows' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
+export type ActiveView = 'agents' | 'workflows' | 'chat' | 'instructions' | 'project-contexts' | 'output-styles' | 'wf-definitions' | 'alerts' | 'schedules' | 'namespaces' | 'repositories' | 'credentials' | 'memory' | 'epic-grants'
 
 // ── Memory types ──────────────────────────────────────────────────────────────
 

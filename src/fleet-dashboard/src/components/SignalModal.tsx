@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SignalModalState, WorkflowEvent } from '../types'
-import { apiFetch, AUTH_TOKEN } from '../utils'
+import { apiFetch } from '../utils'
 import { humanInputChoices, validHumanAnswer, humanInputHistoryUrl, humanInputIdentity, humanInputRequestFromHistory, type HumanInputRequest } from '../humanInputRequest'
 
 interface SignalModalProps {
@@ -43,7 +43,9 @@ export default function SignalModal({ modal, currentGate = true, onClose, onComm
   }, [approval, identity, modal.wf, currentGate])
   const request = loaded?.identity === identity ? loaded.request : undefined
   const error = loaded?.identity === identity ? loaded.error : undefined
-  const blocked = approval && (!currentGate || !request || !AUTH_TOKEN || modal.comment.length > 2000 || !validHumanAnswer(request, value))
+  // No token check here (#530): the page only loads signed in, and the orchestrator decides what a
+  // signed-in browser may do.
+  const blocked = approval && (!currentGate || !request || modal.comment.length > 2000 || !validHumanAnswer(request, value))
   return (
     <div className="signal-modal-backdrop" onClick={onClose}>
       <div className="signal-modal" role="dialog" aria-modal="true" aria-label="Confirm workflow decision" onClick={e => e.stopPropagation()}
@@ -52,7 +54,6 @@ export default function SignalModal({ modal, currentGate = true, onClose, onComm
           Send signal: <strong>{modal.button.label}</strong>
           <span className="signal-modal-wf">→ {modal.wf.workflowType}</span>
         </div>
-        {approval && !AUTH_TOKEN && <p role="status">Read-only: an operator token is required to decide.</p>}
         {approval && <section aria-label="Exact human input request" aria-busy={!loaded}>
           <p>Request: {modal.wf.workflowId}</p>
           <p>Run: {modal.wf.runId}</p>

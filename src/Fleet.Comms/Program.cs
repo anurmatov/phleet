@@ -1,5 +1,4 @@
 using Fleet.Comms;
-using Fleet.Comms.Auth;
 using Fleet.Comms.Configuration;
 using Fleet.Conversations;
 using Fleet.Conversations.Contracts;
@@ -12,10 +11,9 @@ using Microsoft.Extensions.DependencyInjection;
 
 // Subcommands are dispatched FIRST, before anything builds a web application.
 //
-// That ordering is the contract, not an implementation detail: an operator issuing an enrollment
-// code or revoking a lost phone must not cause a listener to appear, not on the public address and
-// not on loopback. `docker compose run --rm fleet-comms enroll issue ...` is a one-shot process
-// against the store, and the only thing it opens is the database file.
+// That ordering is the contract, not an implementation detail: an operator migrating the schema or
+// minting a journal token must not cause a listener to appear, not on the public address and not on
+// loopback. `docker compose run --rm fleet-comms-ops conversations migrate` is a one-shot process.
 if (args.Length > 0)
     return await OperatorCommands.RunAsync(args);
 
@@ -27,8 +25,8 @@ catch (Exception e)
 {
     // NOTHING is allowed to escape to the runtime's unhandled-exception path.
     //
-    // This is not tidiness. Container acceptance found that a missing `Comms__AuthStorePath` —
-    // which throws here by design — did not terminate the process at all: the message was written,
+    // This is not tidiness. Container acceptance found that a configuration rejection — which
+    // throws here by design — did not terminate the process at all: the message was written,
     // no listener was bound, and the process then sat at ~99% CPU indefinitely. Docker sees that as
     // `running`, so `restart: unless-stopped` never fires, an orchestrator never learns anything is
     // wrong, and a deployment that can serve nothing looks alive. A configuration mistake has to be
@@ -56,8 +54,7 @@ static async Task<int> RunServiceAsync(string[] args)
     var northApp = CommsApp.BuildNorthApp(WebApplication.CreateBuilder(args));
 
     // The operations listener is a SEPARATE application on its own address (see CommsApp.BuildOpsApp).
-    // It shares the auth store instance so `/ready` probes the same store the routes use — a readiness
-    // check against a second connection to the same file would still miss an exhausted pool.
+    // It shares the conversation store instance so `/ready` probes the same store the routes use.
     var opsUrl = northApp.Services
         .GetRequiredService<Microsoft.Extensions.Options.IOptions<CommsOptions>>().Value.OpsUrl;
 
@@ -80,7 +77,6 @@ static async Task<int> RunServiceAsync(string[] args)
 
     var opsApp = CommsApp.BuildOpsApp(
         opsBuilder,
-        northApp.Services.GetRequiredService<IAuthStore>(),
         conversationOptions.ConversationsEnabled
             ? northApp.Services.GetRequiredService<IConversationStore>()
             : null,
@@ -94,8 +90,8 @@ static async Task<int> RunServiceAsync(string[] args)
 
     // ── The south listener, only when the conversation feature is configured ─────────
     //
-    // An install that has not configured it is byte-identical to the auth slice: no third host is
-    // built, no south route exists, and no database connection is attempted. That is asserted
+    // An install that has not configured it builds no third host: no south route exists, and no
+    // database connection is attempted. That is asserted
     // rather than assumed — it is the difference between an opt-in feature and one that merely
     // defaults to off.
     //
@@ -107,11 +103,12 @@ static async Task<int> RunServiceAsync(string[] args)
     var options = northApp.Services
         .GetRequiredService<Microsoft.Extensions.Options.IOptions<CommsOptions>>().Value;
 
-    options.ValidateConversations();
-
-    // The journal is validated here too, before any host starts: every failure is a process that
-    // exits 1 with a fixed `journal_…` code and never the key.
+    // The journal first, before any host starts: every failure is a process that exits 1 with a
+    // fixed `journal_…` code and never the key. It shares its key with chat (#530), so with the
+    // journal on a bad key is named as the journal's, the more specific of the two.
     options.ValidateJournal();
+
+    options.ValidateConversations();
 
     // Media is validated the same way, and the bucket is PROBED before any host serves a request.
     //
@@ -207,7 +204,12 @@ static async Task<int> RunServiceAsync(string[] args)
             : null;
 
         // Composed by CommsApp, not here, so the south suite drives the same graph this line does.
-        southApp = CommsApp.BuildSouthApp(southBuilder, store, options, attachments);
+        // Replies nobody is watching become a phone notification, through the orchestrator (#530).
+        var replies = new OrchestratorChatReplyNotifier(
+            new HttpClient { Timeout = Timeout.InfiniteTimeSpan }, options.OrchestratorUrl, options.Journal.Keys()[0],
+            northApp.Services.GetRequiredService<ILoggerFactory>().CreateLogger<OrchestratorChatReplyNotifier>());
+
+        southApp = CommsApp.BuildSouthApp(southBuilder, store, options, attachments, replies);
     }
 
     // ── The journal listener, only when the journal is enabled (#375) ─────────────────

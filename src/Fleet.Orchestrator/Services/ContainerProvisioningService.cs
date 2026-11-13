@@ -1088,7 +1088,8 @@ public sealed class ContainerProvisioningService(
         var style = await ResolveOutputStyleAsync(agent);
         await WriteOutputStyleFileAsync(agent, generatedDir, style);
 
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue()));
+        var chat = ChatAgents.BuildProvisioning(agent, journalTokens, config["Chat:SouthUrl"], PrimaryHumanUserIdOrNull());
+        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), chat));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled));
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    GenerateSettingsJson(agent, ctoAgentName, style));
 
@@ -1442,7 +1443,8 @@ public sealed class ContainerProvisioningService(
         Agent agent,
         string ctoAgentName,
         OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null)
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null,
+        ChatProvisioning? chat = null)
     {
         var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
@@ -1533,7 +1535,8 @@ public sealed class ContainerProvisioningService(
             && journal?.ReadToken is null
             && !codexLocal
             && !HasTelegramBot(agent)
-            && agent.HarnessExtra is null)
+            && agent.HarnessExtra is null
+            && chat is null)
             return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
@@ -1586,6 +1589,22 @@ public sealed class ContainerProvisioningService(
             }
             if (journal.MediaEnabled)
                 node["Journal"]!.AsObject()["MediaEnabled"] = true;
+        }
+
+        // #530. Written only for an agent chat applies to (ChatAgents.IsEffective), so every other
+        // agent — chat off, or no chat service on this deployment — keeps its bytes. The
+        // section's presence is what turns the agent's chat path on; it names no agent and no
+        // broker, because the agent already holds both.
+        if (chat is not null)
+        {
+            var conversations = new System.Text.Json.Nodes.JsonObject
+            {
+                ["SouthBaseUrl"] = chat.SouthBaseUrl,
+                ["SouthBearerToken"] = chat.SouthToken,
+            };
+            if (chat.PrimaryHumanPrincipalId is not null)
+                conversations["PrimaryHumanPrincipalId"] = chat.PrimaryHumanPrincipalId;
+            node["Conversations"] = conversations;
         }
         return node.ToJsonString(IndentedJson);
     }
@@ -1697,6 +1716,16 @@ public sealed class ContainerProvisioningService(
 
     private string? PrimaryHumanRawValue() =>
         LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env").GetValueOrDefault("FLEET_PRIMARY_HUMAN_USER_ID");
+
+    /// <summary>
+    /// The deployment's primary human on Telegram, or null when it is blank or not a valid id.
+    /// For startup, which must not fail on a value provisioning already refuses by name.
+    /// </summary>
+    public long? PrimaryHumanUserIdOrNull()
+    {
+        try { return ParsePrimaryHumanUserId(PrimaryHumanRawValue()); }
+        catch (InvalidOperationException) { return null; }
+    }
 
     private string? DescribePrimaryHumanFault()
     {

@@ -173,6 +173,17 @@ public enum ProtocolErrorCode
     /// empty 200.
     /// </remarks>
     AttachmentGone,
+
+    /// <summary>
+    /// The agent a conversation is with does not accept chat: it is unknown, or chat is turned off
+    /// for it (#530).
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="ConversationNotFound"/>, because the client says a different thing:
+    /// "this agent no longer accepts chat" is a state someone can change in the agent's settings,
+    /// while a missing conversation is one the client opens again. Appended, never inserted.
+    /// </remarks>
+    AgentUnavailable,
 }
 
 /// <summary>Coarse attachment classification (D14). Metadata only — no bytes, no URL.</summary>

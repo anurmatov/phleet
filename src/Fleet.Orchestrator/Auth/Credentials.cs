@@ -1,11 +1,12 @@
 using System.Security.Cryptography;
 
-namespace Fleet.Comms.Auth;
+namespace Fleet.Orchestrator.Auth;
 
 /// <summary>
-/// The three credentials this boundary issues, and the one shape they share.
+/// The credentials sign-in issues (enrollment code, access token, session token), and the one
+/// shape they share.
 ///
-/// <para>Every credential is <b>256 bits from a CSPRNG</b> (docs/first-party-api.md §3) presented
+/// <para>Every credential is <b>256 bits from a CSPRNG</b> (docs/sign-in.md) presented
 /// as <c>&lt;recordId&gt;.&lt;secret&gt;</c>.</para>
 ///
 /// <para><b>Why the id prefix.</b> The secret is stored only as a salted Argon2id hash, and a
@@ -19,7 +20,7 @@ namespace Fleet.Comms.Auth;
 /// </summary>
 public static class Credentials
 {
-    /// <summary>Secret length. 256 bits, per §3, for all three credential kinds.</summary>
+    /// <summary>Secret length. 256 bits for every credential kind.</summary>
     public const int SecretBytes = 32;
 
     /// <summary>Record-handle length. Not a secret; sized only to avoid collisions.</summary>
@@ -41,7 +42,7 @@ public static class Credentials
     ///
     /// <para>A malformed value returns false and the caller answers exactly as it would for an
     /// unknown record — a caller must never be able to tell "you sent nonsense" from "that is not
-    /// a credential I know" (§3.6).</para>
+    /// a credential I know".</para>
     /// </summary>
     public static bool TryParse(string? presented, out string recordId, out string secret)
     {

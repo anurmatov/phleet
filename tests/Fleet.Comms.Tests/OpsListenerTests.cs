@@ -1,6 +1,5 @@
 using System.Net;
 using Fleet.Comms;
-using Fleet.Comms.Auth;
 using Fleet.Comms.Routes;
 using Fleet.Protocol;
 using Microsoft.AspNetCore.Builder;
@@ -34,7 +33,7 @@ public class OpsListenerTests
     [InlineData("/")]
     public async Task OpsAndUnknownPathsAreNotFoundOnTheNorthListener(string path)
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
 
         var response = await host.Client.GetAsync(path);
 
@@ -51,7 +50,7 @@ public class OpsListenerTests
     [InlineData("/ready")]
     public async Task AForgedOpsHostHeaderDoesNotReachOpsRoutesThroughTheNorthListener(string path)
     {
-        await using var host = await NorthTestHost.StartAsync();
+        await using var host = await NorthTestHost.StartAsync(conversations: new FakeConversationStore());
 
         foreach (var forged in new[] { "127.0.0.1:8081", "localhost:8081", "127.0.0.1" })
         {
@@ -64,26 +63,12 @@ public class OpsListenerTests
         }
     }
 
-    [Fact]
-    public async Task TheNorthRouteTableIsStillExactlyFourRoutes()
-    {
-        await using var host = await NorthTestHost.StartAsync();
-
-        var registered = host.Services.GetServices<EndpointDataSource>()
-            .SelectMany(s => s.Endpoints)
-            .OfType<RouteEndpoint>()
-            .Count();
-
-        Assert.Equal(4, registered);
-        Assert.Equal(4, NorthEndpoints.Routes.Count);
-    }
-
     // ── the ops surface ──────────────────────────────────────────────────────
 
     [Fact]
     public async Task HealthAndReadyAnswerOnTheOpsListenerWhenTheStoreIsHealthy()
     {
-        var store = new InMemoryAuthStore();
+        var store = new FakeConversationStore();
         await using var ops = BuildOps(store);
         var client = ops.GetTestClient();
 
@@ -92,14 +77,14 @@ public class OpsListenerTests
     }
 
     /// <summary>
-    /// F4, and the reason the healthcheck targets `/ready` rather than `/health`: the store
-    /// initialises lazily, so a broken path produces a process that starts cleanly and then `503`s
-    /// every request. Liveness calls that healthy. Readiness must not.
+    /// F4, and the reason the healthcheck targets `/ready` rather than `/health`: a database that is
+    /// unreachable produces a process that starts cleanly and then `503`s every request. Liveness
+    /// calls that healthy. Readiness must not.
     /// </summary>
     [Fact]
     public async Task ReadyReports503WhenTheStoreIsUnavailable_WhileHealthStillReports200()
     {
-        var store = new InMemoryAuthStore { FailEveryOperation = true };
+        var store = new FakeConversationStore { Unavailable = true };
         await using var ops = BuildOps(store);
         var client = ops.GetTestClient();
 
@@ -111,9 +96,9 @@ public class OpsListenerTests
 
         // The same fixed body every other store failure produces. A readiness endpoint is not a
         // debugging surface.
-        var body = await AuthLifecycleTests.Body<AuthLifecycleTests.ErrorBody>(ready);
-        Assert.Equal("internal", body.Code);
-        Assert.Equal(ProtocolErrors.Internal, body.Message);
+        using var body = System.Text.Json.JsonDocument.Parse(await ready.Content.ReadAsStringAsync());
+        Assert.Equal("internal", body.RootElement.GetProperty("code").GetString());
+        Assert.Equal(ProtocolErrors.Internal, body.RootElement.GetProperty("message").GetString());
     }
 
     /// <summary>
@@ -123,13 +108,13 @@ public class OpsListenerTests
     [Fact]
     public async Task ReadyRecoversWithoutRestartingWhenTheStoreComesBack()
     {
-        var store = new InMemoryAuthStore { FailEveryOperation = true };
+        var store = new FakeConversationStore { Unavailable = true };
         await using var ops = BuildOps(store);
         var client = ops.GetTestClient();
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, (await client.GetAsync("/ready")).StatusCode);
 
-        store.FailEveryOperation = false;
+        store.Unavailable = false;
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/ready")).StatusCode);
     }
@@ -137,14 +122,13 @@ public class OpsListenerTests
     [Fact]
     public async Task NoNorthOrSouthRouteIsReachableOnTheOpsListener()
     {
-        await using var ops = BuildOps(new InMemoryAuthStore());
+        await using var ops = BuildOps(new FakeConversationStore());
         var client = ops.GetTestClient();
 
         foreach (var (method, path) in new[]
                  {
-                     (HttpMethod.Post, "/v1/auth/devices"),
-                     (HttpMethod.Post, "/v1/auth/token"),
                      (HttpMethod.Get, "/v1/session"),
+                     (HttpMethod.Get, "/v1/conversations"),
                      (HttpMethod.Post, "/events:append"),
                      (HttpMethod.Post, "/conversations"),
                  })
@@ -159,7 +143,7 @@ public class OpsListenerTests
     [Fact]
     public async Task NoJournalRouteIsReachableOnTheOpsListener()
     {
-        await using var ops = BuildOps(new InMemoryAuthStore());
+        await using var ops = BuildOps(new FakeConversationStore());
         var client = ops.GetTestClient();
 
         Assert.Equal(HttpStatusCode.NotFound,
@@ -167,7 +151,7 @@ public class OpsListenerTests
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/journal/v1/status")).StatusCode);
     }
 
-    private static WebApplication BuildOps(IAuthStore store)
+    private static WebApplication BuildOps(Fleet.Conversations.Contracts.IConversationStore store)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();

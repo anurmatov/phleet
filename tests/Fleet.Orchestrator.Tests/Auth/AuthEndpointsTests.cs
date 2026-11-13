@@ -1,0 +1,603 @@
+using System.Net;
+using System.Text.Json;
+using Fleet.Orchestrator.Auth;
+using Fleet.Orchestrator.Endpoints;
+
+namespace Fleet.Orchestrator.Tests.Auth;
+
+/// <summary>
+/// Sign-in as a caller sees it: over HTTP, through the production pipeline and routes.
+/// </summary>
+public class AuthEndpointsTests
+{
+    private static readonly HttpMethod Get = HttpMethod.Get;
+    private static readonly HttpMethod Post = HttpMethod.Post;
+
+    // ── a browser ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ABrowserSignsInWithTheBootstrapToken_AndGetsAnHttpOnlyStrictCookie()
+    {
+        await using var host = await SignInHost.StartAsync();
+
+        var response = await host.SendAsync(Post, "/api/auth/browser-session",
+            body: new { token = SignInHost.ServiceToken, deviceName = "Kitchen laptop" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var header = SignInHost.SetCookieHeaderOf(response)!;
+        Assert.Contains("httponly", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("samesite=strict", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("path=/", header, StringComparison.OrdinalIgnoreCase);
+        // Plain HTTP in the test, so not marked Secure; the next test covers HTTPS.
+        Assert.DoesNotContain("secure", header, StringComparison.OrdinalIgnoreCase);
+
+        var session = await SignInHost.JsonAsync(
+            await host.SendAsync(Get, "/api/auth/session", cookie: SignInHost.SessionCookieOf(response)));
+        Assert.True(session.GetProperty("signedIn").GetBoolean());
+        Assert.Equal("browser", session.GetProperty("kind").GetString());
+        Assert.Equal("owner", session.GetProperty("userId").GetString());
+    }
+
+    [Fact]
+    public async Task TheCookieIsMarkedSecure_WhenTheProxyReportsHttps()
+    {
+        await using var host = await SignInHost.StartAsync();
+
+        var request = SignInHost.Request(Post, "/api/auth/browser-session", body: new { token = SignInHost.ServiceToken });
+        request.Headers.Add("X-Forwarded-Proto", "https");
+        var response = await host.Client().SendAsync(request);
+
+        Assert.Contains("secure", SignInHost.SetCookieHeaderOf(response)!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("wrong-token")]
+    [InlineData("")]
+    [InlineData(null)]
+    public async Task AWrongOrMissingBootstrapToken_IsRefused_AndSetsNoCookie(string? token)
+    {
+        await using var host = await SignInHost.StartAsync();
+
+        var response = await host.SendAsync(Post, "/api/auth/browser-session", body: new { token });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Null(SignInHost.SetCookieHeaderOf(response));
+        Assert.Empty(host.MemoryStore!.Devices);
+    }
+
+    [Fact]
+    public async Task SigningOut_RevokesThatBrowser_AndClearsTheCookie()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var cookie = await host.SignInBrowserAsync();
+
+        var signOut = await host.SendAsync(HttpMethod.Delete, "/api/auth/browser-session", cookie: cookie, requestHeader: true);
+
+        Assert.Equal(HttpStatusCode.NoContent, signOut.StatusCode);
+        Assert.NotNull(SignInHost.SetCookieHeaderOf(signOut));
+        Assert.Null(SignInHost.SessionCookieOf(signOut));
+        // At once, not after the remembered check lapses.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", cookie: cookie)).StatusCode);
+    }
+
+    // ── the gate ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task FromOutside_AReadNeedsACredential()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var cookie = await host.SignInBrowserAsync();
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/ws")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: cookie)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/ws", cookie: cookie)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: SignInHost.ServiceToken)).StatusCode);
+        // Health is how a proxy and an orchestration layer ask "are you up"; it names nothing.
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/health")).StatusCode);
+    }
+
+    [Fact]
+    public async Task FromTheInternalNetwork_AReadNeedsNone_AndAWriteStillDoes()
+    {
+        await using var host = await SignInHost.StartAsync();
+
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", edge: false)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await host.SendAsync(Post, "/api/agents/example/restart", edge: false)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.SendAsync(Post, "/api/agents/example/restart", bearer: SignInHost.ServiceToken, edge: false)).StatusCode);
+    }
+
+    [Fact]
+    public async Task ABrowsersWriteNeedsTheRequestHeader_AndABearersDoesNot()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, _, _, accessToken) = await host.EnrolledAppAsync();
+
+        var without = await host.SendAsync(Post, "/api/agents/example/restart", cookie: cookie);
+        Assert.Equal(HttpStatusCode.Forbidden, without.StatusCode);
+        Assert.Equal("request_header_required", (await SignInHost.JsonAsync(without)).GetProperty("error").GetString());
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.SendAsync(Post, "/api/agents/example/restart", cookie: cookie, requestHeader: true)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.SendAsync(Post, "/api/agents/example/restart", bearer: accessToken)).StatusCode);
+        // A read is never asked for it.
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: cookie)).StatusCode);
+    }
+
+    [Fact]
+    public async Task EachCredentialOnlyWorksWhereItBelongs()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, _, _, accessToken) = await host.EnrolledAppAsync();
+
+        // A session token lifted out of the cookie jar is not a bearer, and an access token planted
+        // in a cookie is not a session.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: cookie)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", cookie: accessToken)).StatusCode);
+    }
+
+    [Fact]
+    public async Task ABearerIsJudgedAlone_AndNeverFallsBackToTheCookie()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var cookie = await host.SignInBrowserAsync();
+
+        var response = await host.SendAsync(Get, "/api/agents", bearer: "not-a-token", cookie: cookie);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SessionSaysSignedOut_WithA401_WhenSignInIsRequired()
+    {
+        await using var host = await SignInHost.StartAsync();
+
+        var response = await host.SendAsync(Get, "/api/auth/session");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.True((await SignInHost.JsonAsync(response)).GetProperty("authRequired").GetBoolean());
+    }
+
+    // ── an enrolled app ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task AnAppEnrollsWithAOneTimeCode_MintsAToken_AndUsesTheApi()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var cookie = await host.SignInBrowserAsync();
+        var code = await host.IssueEnrollmentCodeAsync(cookie, "Pocket phone");
+
+        var registered = await host.RegisterAsync(code, "what the phone calls itself");
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        var device = await SignInHost.JsonAsync(registered);
+        var deviceId = device.GetProperty("deviceId").GetString()!;
+
+        var minted = await host.TokenAsync(deviceId, device.GetProperty("deviceSecret").GetString());
+        Assert.Equal(HttpStatusCode.OK, minted.StatusCode);
+        var token = await SignInHost.JsonAsync(minted);
+        Assert.Equal((int)AuthService.AccessTokenTtl.TotalSeconds, token.GetProperty("expiresInSeconds").GetInt32());
+
+        var accessToken = token.GetProperty("accessToken").GetString()!;
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: accessToken)).StatusCode);
+
+        var session = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/auth/session", bearer: accessToken));
+        Assert.Equal("app", session.GetProperty("kind").GetString());
+        Assert.Equal(deviceId, session.GetProperty("deviceId").GetString());
+
+        // The name is the one the person adding the device chose, not the one the device sent.
+        var listed = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/auth/devices", cookie: cookie));
+        var names = listed.GetProperty("devices").EnumerateArray().Select(d => d.GetProperty("name").GetString()).ToList();
+        Assert.Contains("Pocket phone", names);
+        Assert.DoesNotContain("what the phone calls itself", names);
+    }
+
+    [Fact]
+    public async Task AnEnrollmentCode_RegistersOneDevice_AndIsRefusedOnceThatDeviceHasProvedItself()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var cookie = await host.SignInBrowserAsync();
+        var code = await host.IssueEnrollmentCodeAsync(cookie);
+
+        var device = await SignInHost.JsonAsync(await host.RegisterAsync(code));
+        await host.TokenAsync(device.GetProperty("deviceId").GetString(), device.GetProperty("deviceSecret").GetString());
+
+        var reuse = await host.RegisterAsync(code);
+        var unknown = await host.RegisterAsync(Credentials.Compose("nosuchid", Credentials.NewSecret()));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, reuse.StatusCode);
+        Assert.Equal(await unknown.Content.ReadAsStringAsync(), await reuse.Content.ReadAsStringAsync());
+        Assert.Single(host.MemoryStore!.Devices, d => d.Kind == DeviceKind.App);
+    }
+
+    [Fact]
+    public async Task AnAppCannotManageDevices_ButCanSignItselfOut()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, deviceId, deviceSecret, accessToken) = await host.EnrolledAppAsync();
+        var browserId = (await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/auth/session", cookie: cookie)))
+            .GetProperty("deviceId").GetString();
+
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await host.SendAsync(Post, "/api/auth/enrollments", bearer: accessToken, body: new { })).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(Get, "/api/auth/devices", bearer: accessToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await host.SendAsync(Post, $"/api/auth/devices/{browserId}/revoke", bearer: accessToken)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.NoContent,
+            (await host.SendAsync(Post, $"/api/auth/devices/{deviceId}/revoke", bearer: accessToken)).StatusCode);
+
+        // Its token stops at once, and its secret mints no more.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: accessToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.TokenAsync(deviceId, deviceSecret)).StatusCode);
+        // The browser it was enrolled from is untouched.
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: cookie)).StatusCode);
+    }
+
+    [Fact]
+    public async Task ABrowserRevokesAPhone_AndThePhoneStopsAtOnce()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, deviceId, _, accessToken) = await host.EnrolledAppAsync();
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: accessToken)).StatusCode);
+
+        var revoke = await host.SendAsync(Post, $"/api/auth/devices/{deviceId}/revoke", cookie: cookie, requestHeader: true);
+
+        Assert.Equal(HttpStatusCode.NoContent, revoke.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: accessToken)).StatusCode);
+
+        var listed = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/auth/devices", cookie: cookie));
+        var phone = listed.GetProperty("devices").EnumerateArray().Single(d => d.GetProperty("deviceId").GetString() == deviceId);
+        Assert.NotEqual(JsonValueKind.Null, phone.GetProperty("revokedAt").ValueKind);
+    }
+
+    [Fact]
+    public async Task RevokingADeviceThatDoesNotExist_IsNotFound()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var cookie = await host.SignInBrowserAsync();
+
+        var response = await host.SendAsync(Post, "/api/auth/devices/nosuchdevice/revoke", cookie: cookie, requestHeader: true);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task NoDeviceRouteEverReturnsASecretOrAHash()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, _, deviceSecret, accessToken) = await host.EnrolledAppAsync();
+
+        var listed = await (await host.SendAsync(Get, "/api/auth/devices", cookie: cookie)).Content.ReadAsStringAsync();
+        var session = await (await host.SendAsync(Get, "/api/auth/session", bearer: accessToken)).Content.ReadAsStringAsync();
+
+        foreach (var body in new[] { listed, session })
+        {
+            Assert.DoesNotContain(deviceSecret, body);
+            Assert.DoesNotContain(accessToken, body);
+            Assert.DoesNotContain(cookie, body);
+            Assert.DoesNotContain("argon2", body, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    // ── the config API ───────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task TheConfigApi_TakesItsTokenOrABrowser_AndNeverAnApp()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, _, _, accessToken) = await host.EnrolledAppAsync();
+
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/config/values", bearer: SignInHost.ConfigToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/config/values", cookie: cookie)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.SendAsync(HttpMethod.Put, "/api/config/values", cookie: cookie, requestHeader: true)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(HttpMethod.Put, "/api/config/values", cookie: cookie)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/config/values", bearer: accessToken)).StatusCode);
+        // The service bearer is the admin token, not the config token; the two stay separate.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/config/values", bearer: SignInHost.ServiceToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/config/values")).StatusCode);
+    }
+
+    [Fact]
+    public async Task TheConfigApi_StaysClosedWithoutItsToken_EvenForABrowser()
+    {
+        await using var host = await SignInHost.StartAsync(configToken: null);
+        var cookie = await host.SignInBrowserAsync();
+
+        var response = await host.SendAsync(Get, "/api/config/values", cookie: cookie);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    // ── nothing gated ────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task WithNoServiceToken_NothingIsGated_AndASessionIsIssuedWithoutOne()
+    {
+        await using var host = await SignInHost.StartAsync(serviceToken: null);
+
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Post, "/api/agents/example/restart")).StatusCode);
+
+        var session = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/auth/session"));
+        Assert.False(session.GetProperty("authRequired").GetBoolean());
+        Assert.False(session.GetProperty("signedIn").GetBoolean());
+
+        // A page still needs something to present to the chat service.
+        var cookie = await host.SignInBrowserAsync(token: null);
+        var signedIn = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/auth/session", cookie: cookie));
+        Assert.True(signedIn.GetProperty("signedIn").GetBoolean());
+
+        // And a phone can be enrolled by whoever can reach the API, exactly as they can do
+        // everything else on such a deployment.
+        var enrollment = await host.SendAsync(Post, "/api/auth/enrollments", body: new { });
+        Assert.Equal(HttpStatusCode.OK, enrollment.StatusCode);
+    }
+
+    // ── the chat service's question ──────────────────────────────────────────
+
+    private static string CheckToken(SignInHost host) =>
+        host.Tokens.Mint(AuthEndpoints.CheckTokenPurpose, AuthEndpoints.CheckTokenSubject);
+
+    private static Task<HttpResponseMessage> CheckAsync(SignInHost host, string? serviceBearer, object body) =>
+        host.SendAsync(Post, AuthEndpoints.CheckPath, bearer: serviceBearer, edge: false, body: body);
+
+    [Fact]
+    public async Task TheCheck_AnswersForACookieAndForAnAppToken()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, deviceId, _, accessToken) = await host.EnrolledAppAsync();
+
+        var app = await CheckAsync(host, CheckToken(host), new { authorization = $"Bearer {accessToken}" });
+        Assert.Equal(HttpStatusCode.OK, app.StatusCode);
+        var appBody = await SignInHost.JsonAsync(app);
+        Assert.Equal("owner", appBody.GetProperty("principalId").GetString());
+        Assert.Equal(deviceId, appBody.GetProperty("deviceId").GetString());
+        Assert.Equal("app", appBody.GetProperty("kind").GetString());
+
+        var browser = await CheckAsync(host, CheckToken(host),
+            new { cookie = $"other=1; {CallerAuthenticator.SessionCookie}={cookie}" });
+        Assert.Equal(HttpStatusCode.OK, browser.StatusCode);
+        Assert.Equal("browser", (await SignInHost.JsonAsync(browser)).GetProperty("kind").GetString());
+    }
+
+    [Fact]
+    public async Task TheCheck_SaysWhichKindOfCallerItIs_SoTheChatServiceCanApplyTheBrowserWriteRule()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, _, _, accessToken) = await host.EnrolledAppAsync();
+
+        // Identity only. Whether THIS request is a write without its header is for the service
+        // that received the request to decide, with the rule both services share.
+        var browser = await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
+            new { cookie = $"{CallerAuthenticator.SessionCookie}={cookie}" }));
+        var app = await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
+            new { authorization = $"Bearer {accessToken}" }));
+
+        Assert.Equal("browser", browser.GetProperty("kind").GetString());
+        Assert.Equal("app", app.GetProperty("kind").GetString());
+        Assert.Equal(JsonValueKind.Null, app.GetProperty("agentChatEnabled").ValueKind);
+    }
+
+    [Fact]
+    public async Task TheCheck_SaysWhetherAnAgentAcceptsChat_ByItsExactName()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true);
+        await host.SeedAgentAsync("builder", chatEnabled: true);
+        await host.SeedAgentAsync("reviewer", chatEnabled: false);
+        var (_, _, _, accessToken) = await host.EnrolledAppAsync();
+
+        async Task<bool> Asks(string agent) => (await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
+            new { authorization = $"Bearer {accessToken}", agent }))).GetProperty("agentChatEnabled").GetBoolean();
+
+        Assert.True(await Asks("builder"));
+        Assert.False(await Asks("reviewer"));
+        Assert.False(await Asks("nobody"));
+        // An agent's chat identity is its exact name: it is a routing key and a queue segment.
+        Assert.False(await Asks("Builder"));
+        Assert.False(await Asks("not a name"));
+    }
+
+    [Fact]
+    public async Task TheCheck_NeverSaysAnythingAboutAgentsToAnUnverifiedCaller()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true);
+        await host.SeedAgentAsync("builder", chatEnabled: true);
+
+        var response = await CheckAsync(host, CheckToken(host), new { authorization = "Bearer not-a-token", agent = "builder" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.DoesNotContain("agentChatEnabled", await response.Content.ReadAsStringAsync());
+    }
+
+    // ── which agents a person can chat with ──────────────────────────────────
+
+    [Fact]
+    public async Task ChatAgents_ListsOnlyTheAgentsWithChatOn_ByName()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true);
+        await host.SeedAgentAsync("reviewer", chatEnabled: true, displayName: "Reviewer");
+        await host.SeedAgentAsync("builder", chatEnabled: true, displayName: " ");
+        await host.SeedAgentAsync("planner", chatEnabled: false);
+        var cookie = await host.SignInBrowserAsync();
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/chat/agents")).StatusCode);
+
+        var body = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/chat/agents", cookie: cookie));
+        Assert.True(body.GetProperty("available").GetBoolean());
+        Assert.Equal(
+            [("builder", "builder"), ("reviewer", "Reviewer")],
+            body.GetProperty("agents").EnumerateArray()
+                .Select(a => (a.GetProperty("agentName").GetString(), a.GetProperty("displayName").GetString()))
+                .ToArray());
+    }
+
+    [Fact]
+    public async Task ChatAgents_SaysChatIsNotAvailable_WhenTheSharedKeyIsMissing()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true, tokenKey: null);
+        await host.SeedAgentAsync("builder", chatEnabled: true);
+        var cookie = await host.SignInBrowserAsync();
+
+        var body = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/chat/agents", cookie: cookie));
+
+        Assert.False(body.GetProperty("available").GetBoolean());
+        Assert.Empty(body.GetProperty("agents").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task TheCheck_RefusesTheServiceBearerAndAnythingUnverified()
+    {
+        await using var host = await SignInHost.StartAsync();
+
+        foreach (var body in new object[]
+                 {
+                     new { authorization = $"Bearer {SignInHost.ServiceToken}" },
+                     new { authorization = "Bearer not-a-token" },
+                     new { cookie = "unrelated=1" },
+                 })
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, (await CheckAsync(host, CheckToken(host), body)).StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task TheCheck_IsOnlyForTheChatService()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (_, _, _, accessToken) = await host.EnrolledAppAsync();
+        var question = new { authorization = $"Bearer {accessToken}" };
+
+        // No bearer, the admin bearer, a token minted for another purpose, and one for another subject.
+        //
+        // 403, never the 401 that means "the caller in the question is not signed in": the chat
+        // service reads a 403 as its own token being refused — the two services holding different
+        // keys — and says so, instead of refusing every person as though they had signed in wrong.
+        foreach (var bearer in new[]
+                 {
+                     null,
+                     SignInHost.ServiceToken,
+                     host.Tokens.Mint("ingest", AuthEndpoints.CheckTokenSubject),
+                     host.Tokens.Mint(AuthEndpoints.CheckTokenPurpose, "someone-else"),
+                 })
+        {
+            var response = await CheckAsync(host, bearer, question);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Equal("check_token_invalid", (await SignInHost.JsonAsync(response)).GetProperty("error").GetString());
+        }
+    }
+
+    // ── failure is never a pass ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task AStoreThatCannotAnswer_IsA503_NeverAPass()
+    {
+        await using var host = await SignInHost.StartAsync();
+        // Not signed in through the host first: a remembered check would answer without the store.
+        host.MemoryStore!.FailEveryOperation = true;
+
+        var response = await host.SendAsync(Get, "/api/agents",
+            bearer: Credentials.Compose("sometoken", Credentials.NewSecret()));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TheDurableStore_RunsTheSameFlow()
+    {
+        await using var host = await SignInHost.StartAsync(durable: true);
+        var (cookie, deviceId, _, accessToken) = await host.EnrolledAppAsync();
+
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: accessToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: cookie)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.NoContent,
+            (await host.SendAsync(Post, $"/api/auth/devices/{deviceId}/revoke", cookie: cookie, requestHeader: true)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: accessToken)).StatusCode);
+    }
+    [Fact]
+    public async Task OpenModeBrowser_CannotReadConfigSecrets()
+    {
+        await using var host = await SignInHost.StartAsync(serviceToken: null);
+        var cookie = await host.SignInBrowserAsync(token: null);
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await host.SendAsync(Get, "/api/config/values", cookie: cookie)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await host.SendAsync(Get, "/api/config/values", bearer: SignInHost.ConfigToken)).StatusCode);
+    }
+
+    [Fact]
+    public async Task JunkFlood_DoesNotSpendTheVerificationBudget_OrEvictKnownCallers()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (cookie, _, _, token) = await host.EnrolledAppAsync();
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+        host.Time.Advance(TimeSpan.FromSeconds(31));
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow * 2; i++)
+            Assert.Equal(HttpStatusCode.Unauthorized,
+                (await host.SendAsync(Get, "/api/agents", bearer: "junk" + i)).StatusCode);
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow; i++)
+            _ = await host.SendAsync(Get, "/api/agents", bearer: Credentials.Compose(Credentials.NewRecordId(), Credentials.NewSecret()));
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: cookie)).StatusCode);
+    }
+
+    [Fact]
+    public async Task CachedAccessToken_ExpiresAcrossBackwardWallClockJump()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var (_, _, _, token) = await host.EnrolledAppAsync();
+        host.Time.Advance(AuthService.AccessTokenTtl - TimeSpan.FromSeconds(5));
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+        host.Time.SetBackwards(TimeSpan.FromHours(1));
+        host.Time.Advance(TimeSpan.FromSeconds(6));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: token)).StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CanonicalUnknownFlood_DoesNotRejectAnUncachedBrowserOrApp(bool throughComms)
+    {
+        await using var host = await SignInHost.StartAsync();
+        // Issue directly so neither credential has ever passed CallerAuthenticator or its cache.
+        var browser = (await host.Auth.SignInBrowserAsync(UserRecord.OwnerId, "Fresh browser")).Value!;
+        var code = (await host.Auth.IssueEnrollmentCodeAsync(UserRecord.OwnerId, "Fresh app")).Value!;
+        var app = (await host.Auth.RegisterDeviceAsync(code.EnrollmentCode, null)).Value!;
+        var access = (await host.Auth.MintTokenAsync(app.DeviceId, app.DeviceSecret)).Value!;
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow * 2; i++)
+        {
+            var unknown = Credentials.Compose(Credentials.NewRecordId(), Credentials.NewSecret());
+            if (throughComms)
+                _ = await CheckAsync(host, CheckToken(host), new { authorization = "Bearer " + unknown });
+            else _ = await host.SendAsync(Get, "/api/agents", bearer: unknown);
+        }
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: browser.SessionToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", bearer: access.AccessToken)).StatusCode);
+        // The verified path still refuses wrong secrets and observes revocation, rather than
+        // treating a real record handle as authentication.
+        var wrong = access.AccessToken[..access.AccessToken.IndexOf('.')] + "." + Credentials.NewSecret();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: wrong)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await host.SendAsync(Post, $"/api/auth/devices/{app.DeviceId}/revoke", cookie: browser.SessionToken, requestHeader: true)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/agents", bearer: access.AccessToken)).StatusCode);
+    }
+
+    [Fact]
+    public async Task GuessesAgainstOneRealHandle_AreBoundedWithoutSpendingAnotherHandlesCapacity()
+    {
+        await using var host = await SignInHost.StartAsync();
+        var target = (await host.Auth.SignInBrowserAsync(UserRecord.OwnerId, "Target")).Value!;
+        var fresh = (await host.Auth.SignInBrowserAsync(UserRecord.OwnerId, "Fresh")).Value!;
+        var wrong = target.SessionToken[..target.SessionToken.IndexOf('.')] + "." + Credentials.NewSecret();
+        var before = host.Hasher.Verifications;
+        for (var i = 0; i < CallerAuthenticator.MissesPerWindow * 2; i++)
+            _ = await host.SendAsync(Get, "/api/agents", cookie: wrong);
+        Assert.Equal(CallerAuthenticator.MissesPerWindow, host.Hasher.Verifications - before);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(Get, "/api/agents", cookie: fresh.SessionToken)).StatusCode);
+    }
+
+}

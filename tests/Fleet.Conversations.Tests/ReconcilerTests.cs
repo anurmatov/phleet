@@ -256,7 +256,7 @@ public sealed class ReconcilerTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = "p_owner",
+            PrincipalId = "p_owner", AgentName = SouthTestHost.Agent,
         });
 
     private async Task<AcceptSubmissionResult> AcceptAsync(string conversationId, string text) =>

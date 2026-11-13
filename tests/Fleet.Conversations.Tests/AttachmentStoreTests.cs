@@ -549,7 +549,7 @@ public sealed class AttachmentStoreTests(MySqlFixture fixture)
         {
             ChannelId = "client",
             ExternalRef = "conv-" + Ulid.NewUlid(),
-            PrincipalId = Owner,
+            PrincipalId = Owner, AgentName = SouthTestHost.Agent,
         });
 
     private Task<ReserveAttachmentResult> ReserveAsync(string conversationId, long byteSize) =>

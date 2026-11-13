@@ -125,6 +125,11 @@ jobs:
       - name: Human-input production App click path
         run: npm run test:human-input-browser
 
+      # Every view through the production App against a substituted orchestrator: what each
+      # click sends and what the page then shows. This is the net under the App.tsx refactors.
+      - name: View behaviour through the production App
+        run: npm run test:views-browser
+
       - name: Human-input browser evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -42,8 +42,8 @@ internal sealed class SouthTestHost : IAsyncDisposable
 
     /// <summary>Another agent's token under the same key.</summary>
     public static string TokenFor(string agent) =>
-        Fleet.Conversations.Journal.JournalTokens.Mint(
-            Fleet.Conversations.Journal.JournalTokens.ParseKeys(Key)[0], Fleet.Shared.SignIn.AgentTokenPurpose, agent);
+        JournalTokens.Mint(
+            JournalTokens.ParseKeys(Key)[0], Fleet.Shared.SignIn.AgentTokenPurpose, agent);
 
     private readonly WebApplication _app;
 

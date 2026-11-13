@@ -19,21 +19,6 @@ public interface IEpicGrantDecisionForwarder
 }
 
 /// <summary>
-/// The forwarded body. Serialized camelCase, in this order:
-/// <c>namespace, workflowId, gate, decision, visitId, artifactRef, evidence, caller</c>.
-/// <see cref="Gate"/> is the canonical lowercase gate name.
-/// </summary>
-public sealed record EpicGrantDecisionRequest(
-    string Namespace,
-    string WorkflowId,
-    string Gate,
-    string Decision,
-    string VisitId,
-    string ArtifactRef,
-    string Evidence,
-    string Caller);
-
-/// <summary>
 /// What the orchestrator answered, or why there is no answer.
 ///
 /// <para>When <see cref="Error"/> is null the orchestrator returned a JSON object carrying a string

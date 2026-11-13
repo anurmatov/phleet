@@ -63,7 +63,7 @@ const wf: WorkflowSummary = {
   taskQueue: 'fleet', status: 'Running', startTime: '2026-11-12T12:00:00Z', closeTime: null,
   issueNumber: null, prNumber: null, repo: null, docPrs: null,
 }
-const request = { Question: ' \"read\"\nКыргыз \\ {{config.Secret}} ', Context: 'only this report', AnswerMode: 'approve-reject' as const, Origin: { Kind: 'agent' as const, RequesterAgent: 'agent1' } }
+const request = { Question: ' "read"\nКыргыз \\ {{config.Secret}} ', Context: 'only this report', AnswerMode: 'approve-reject' as const, Origin: { Kind: 'agent' as const, RequesterAgent: 'agent1' } }
 const history = [{ eventType: 'WorkflowStarted', inputSummary: JSON.stringify(request) }]
 
 test('both workflows request actions must load the exact request before sending', async t => {

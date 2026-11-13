@@ -117,6 +117,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The two hook rules (rules-of-hooks, exhaustive-deps) plus the recommended sets; zero
+      # warnings allowed, so a new one fails here instead of accumulating.
+      - name: Lint
+        run: npm run lint
+
       - name: Test
         run: npm test
 

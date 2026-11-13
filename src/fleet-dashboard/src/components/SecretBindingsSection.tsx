@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { apiFetch } from '../utils'
+import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
 import {
   GITHUB_APP_KIND, SSH_KEY_KIND, STATIC_KIND, agentSummary, bindingBody, emptyForm, formFor, statusProblem, withKind,
   type SecretBinding, type SecretBindingForm, type SecretBindingsStatus,
@@ -22,11 +22,9 @@ export default function SecretBindingsSection({ onToast }: { onToast: (message: 
 
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch('/api/secret-bindings')
-      if (!res.ok) { setLoadError(`Error ${res.status}`); return }
-      setStatus(await res.json() as SecretBindingsStatus)
+      setStatus(await apiGet<SecretBindingsStatus>('/api/secret-bindings'))
       setLoadError('')
-    } catch (e) { setLoadError(String(e)) }
+    } catch (e) { setLoadError(errorMessage(e)) }
   }, [])
 
   useEffect(() => { void load() }, [load])
@@ -44,18 +42,12 @@ export default function SecretBindingsSection({ onToast }: { onToast: (message: 
     setSaving(true)
     setError('')
     try {
-      const res = await apiFetch(`/api/secret-bindings/${encodeURIComponent(key)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bindingBody(form)),
-      })
-      const data = await res.json().catch(() => ({})) as { error?: string; reprovision?: string[] }
-      if (!res.ok) { setError(data.error ?? `Error ${res.status}`); return }
-      const agents = data.reprovision ?? []
+      const data = await apiSend<{ reprovision?: string[] } | null>(`/api/secret-bindings/${encodeURIComponent(key)}`, 'PUT', bindingBody(form))
+      const agents = data?.reprovision ?? []
       onToast(agents.length > 0 ? `Saved ${key}. Reprovision: ${agents.join(', ')}` : `Saved ${key}`)
       setForm(null)
       await load()
-    } catch (e) { setError(String(e)) }
+    } catch (e) { setError(errorMessage(e)) }
     finally { setSaving(false) }
   }
 

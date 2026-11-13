@@ -33,14 +33,18 @@ import type {
   PromptSizeLimits,
   PromptSizeReport,
 } from './types'
-import { apiFetch, heartbeatAge } from './utils'
+import { apiFetch, apiGet, apiSend, errorMessage, firstFailure } from './utils'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
 import { humanInputIdentity } from './humanInputRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
-import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
+import { warmupTimeoutEditValue } from './warmupTimeout'
 import { contextWindowEditValue } from './contextWindow'
 import { localModelEditValues } from './localModel'
 import { configSaveBody } from './agentConfigSave'
+import { DEFAULT_CREATE_FORM, createAgentBody, createFormFromConfig } from './agentCreate'
+import { parseViewHash } from './activeViews'
+import { reconcileAgents } from './agentList'
+import { KeyedTimers, afterClose } from './reconnect'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -73,17 +77,40 @@ type WsMessage =
 
 const STUCK_TASK_MS = 30 * 60 * 1000
 
-const DEFAULT_CREATE_FORM: CreateForm = {
-  name: '', displayName: '', role: '', model: PROVIDER_DEFAULT_MODEL['claude'],
-  containerName: '', memoryLimitMb: '4096', isEnabled: true, image: '',
-  permissionMode: 'acceptEdits', maxTurns: '50', workDir: '/workspace',
-  proactiveIntervalMinutes: '0',
-  groupListenMode: 'mention', groupDebounceSeconds: '15', warmupTimeoutSeconds: '60', shortName: '',
-  effort: '', jsonSchema: '', agentsJson: '', autoMemoryEnabled: true,
-  showStats: true, prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
-  codexSandboxMode: '',
-  tools: '', projects: '', networks: '', envRefs: '',
-  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [],
+interface SetupStatus {
+  telegram: { configured: boolean; groupChatEnabled: boolean }
+  gitHub: { configured: boolean }
+}
+
+/** A write that may answer with the #346 size report. Null when the answer has no body. */
+type SizedWrite = { size?: PromptSizeReport } | null
+
+/** `GET /api/agent-templates/{name}`: the template's create-form defaults. */
+interface AgentTemplateDetail {
+  displayName?: string
+  role?: string
+  model?: string
+  provider?: string
+  memoryLimitMb?: number
+  permissionMode?: string
+  maxTurns?: number
+  workDir?: string
+  proactiveIntervalMinutes?: number
+  groupListenMode?: string
+  groupDebounceSeconds?: number
+  warmupTimeoutSeconds?: number
+  showStats?: boolean
+  prefixMessages?: boolean
+  formattingMode?: number
+  suppressToolMessages?: boolean
+  telegramSendOnly?: boolean
+  autoMemoryEnabled?: boolean
+  tools?: { toolName: string }[]
+  projects?: string[]
+  networks?: string[]
+  envRefs?: string[]
+  mcpEndpoints?: McpEndpointEntry[]
+  instructions?: { name: string; loadOrder: number }[]
 }
 
 export default function App() {
@@ -98,7 +125,14 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reconnectFailures = useRef(0)
   const unmounted = useRef(false)
+
+  // Confirmations ("confirm?") and result messages ("Stopped") go back to idle on timers. Each
+  // action on each target owns one timer, so a timer left by an earlier click or an earlier
+  // result cannot expire a confirmation armed after it (reconnect.ts, KeyedTimers).
+  const [timers] = useState(() => new KeyedTimers())
+  useEffect(() => () => timers.cancelAll(), [timers])
 
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskRecord[]>>({})
@@ -201,10 +235,11 @@ export default function App() {
   const [deployState, setDeployState] = useState<Record<string, 'idle' | 'deploying' | 'success' | 'error'>>({})
   const [deployMsg, setDeployMsg] = useState<Record<string, string>>({})
 
-  const [setupStatus, setSetupStatus] = useState<{
-    telegram: { configured: boolean; groupChatEnabled: boolean }
-    gitHub: { configured: boolean }
-  } | null>(null)
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
+  // On failure the banner keeps what it last knew (nothing, on a first load).
+  function loadSetupStatus() {
+    apiGet<SetupStatus>('/api/setup/status').then(setSetupStatus).catch(() => {})
+  }
 
   const [logViewer, setLogViewer] = useState<string | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])
@@ -242,19 +277,9 @@ export default function App() {
   const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
 
   // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
-  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
-  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
-  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
-  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
-  // Null for anything unrecognised, which leaves the current view alone exactly as before.
-  function parseHash(): { view: ActiveView; param: string } | null {
-    const raw = window.location.hash.slice(1)
-    const slash = raw.indexOf('/')
-    const head = (slash === -1 ? raw : raw.slice(0, slash)) as ActiveView
-    if (!VALID_VIEWS.includes(head)) return null
-    return { view: head, param: slash === -1 ? '' : decodeURIComponent(raw.slice(slash + 1)) }
-  }
+  // The hash is `#view` or `#view/param` (activeViews.ts). Null for anything unrecognised, which
+  // leaves the current view alone.
+  const parseHash = () => parseViewHash(window.location.hash)
   const [activeView, setActiveViewState] = useState<ActiveView>(() => parseHash()?.view ?? 'agents')
   const [viewParam, setViewParam] = useState<string>(() => parseHash()?.param ?? '')
   const setActiveView = useCallback((view: ActiveView) => {
@@ -275,6 +300,9 @@ export default function App() {
   useEffect(() => {
     if (activeView === 'wf-definitions' && !wfDefsLoaded) loadWfDefs()
     if ((activeView === 'schedules' || activeView === 'namespaces') && !schedulesLoaded) loadSchedules()
+    // Runs when the view changes. The two flags only guard the calls, and are declared further
+    // down this component, where a dependency list here cannot reach them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView])
   const [navOpen, setNavOpen] = useState(false)
 
@@ -312,8 +340,7 @@ export default function App() {
 
   function loadSchedules() {
     setSchedulesLoading(true)
-    apiFetch('/api/schedules')
-      .then(r => r.json())
+    apiGet<ScheduleSummary[]>('/api/schedules')
       .then((list: ScheduleSummary[]) => { setSchedules(list); setSchedulesLoaded(true) })
       .catch(() => {})
       .finally(() => setSchedulesLoading(false))
@@ -357,7 +384,18 @@ export default function App() {
       setActiveView('agents')
       setTimeout(() => setHighlightedEntityId(alert.agentName!), 50)
     }
-  }, [workflows, addAlert])
+  }, [workflows, addAlert, setActiveView])
+
+  // Replaces the list with what the server lists now (see reconcileAgents). On failure the rows
+  // held so far stay.
+  const refreshAgents = useCallback(() => {
+    apiGet<AgentState[]>('/api/agents')
+      .then(list => {
+        setAgents(prev => reconcileAgents(prev, list))
+        setLastUpdated(new Date().toLocaleTimeString())
+      })
+      .catch(() => {})
+  }, [])
 
   const connect = useCallback(() => {
     if (unmounted.current) return
@@ -365,7 +403,14 @@ export default function App() {
     const ws = new WebSocket(`${proto}://${location.host}/ws`)
     wsRef.current = ws
     setWsStatus('connecting')
-    ws.onopen = () => { setWsStatus('connected') }
+    let openedAt: number | null = null
+    ws.onopen = () => {
+      openedAt = Date.now()
+      setWsStatus('connected')
+      // The socket only adds and updates rows. Re-reading the list on every (re)connect is what
+      // drops an agent that was deleted while this page was not listening.
+      refreshAgents()
+    }
     ws.onmessage = (event) => {
       try {
         const msg: WsMessage = JSON.parse(event.data)
@@ -393,15 +438,21 @@ export default function App() {
     }
     ws.onclose = () => {
       setWsStatus('disconnected')
-      if (!unmounted.current) reconnectTimer.current = setTimeout(connect, 3000)
+      if (unmounted.current) return
+      // A handshake the orchestrator refuses (a session that lapsed) looks, from here, like any
+      // other close: the browser hides the status. The list request is an ordinary HTTP read, so
+      // a 401 on it reaches the sign-in gate; it also keeps the list honest while the socket is down.
+      if (openedAt === null) refreshAgents()
+      const next = afterClose(reconnectFailures.current, openedAt, Date.now(), Math.random())
+      reconnectFailures.current = next.failures
+      reconnectTimer.current = setTimeout(connect, next.delayMs)
     }
     ws.onerror = () => ws.close()
-  }, [])
+  }, [refreshAgents])
 
   function fetchWorkflows() {
     setWorkflowsLoading(true)
-    apiFetch('/api/workflows')
-      .then(r => r.json())
+    apiGet<WorkflowSummary[]>('/api/workflows')
       .then((list: WorkflowSummary[]) => setWorkflows(list))
       .catch(() => {})
       .finally(() => setWorkflowsLoading(false))
@@ -409,8 +460,7 @@ export default function App() {
 
   function fetchCompleted() {
     setCompletedLoading(true)
-    apiFetch('/api/workflows/completed?hours=24')
-      .then(r => r.json())
+    apiGet<WorkflowSummary[]>('/api/workflows/completed?hours=24')
       .then((list: WorkflowSummary[]) => setCompletedWorkflows(list))
       .catch(() => {})
       .finally(() => setCompletedLoading(false))
@@ -418,8 +468,7 @@ export default function App() {
 
   function loadInstructions() {
     setInstructionsLoading(true)
-    apiFetch('/api/instructions')
-      .then(r => r.json())
+    apiGet<InstructionSummary[]>('/api/instructions')
       .then((list: InstructionSummary[]) => setInstructions(list))
       .catch(() => {})
       .finally(() => setInstructionsLoading(false))
@@ -428,16 +477,14 @@ export default function App() {
   // Populates the output-style select and the sidenav count. On failure the list stays empty and
   // the select still offers "none", so a styled agent can always be switched back off.
   function loadOutputStyles() {
-    apiFetch('/api/output-styles')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    apiGet<OutputStyleSummary[]>('/api/output-styles')
       .then((list: OutputStyleSummary[]) => setOutputStyles(list))
       .catch(() => setOutputStyles([]))
   }
 
   // #346: fetched once. On failure or 404 (an older orchestrator) the meters show bytes only.
   function loadPromptSizeLimits() {
-    apiFetch('/api/prompt-size-policy')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    apiGet<PromptSizeLimits>('/api/prompt-size-policy')
       .then((policy: PromptSizeLimits) => setPromptSizeLimits(policy))
       .catch(() => setPromptSizeLimits(null))
   }
@@ -462,38 +509,26 @@ export default function App() {
 
   function loadProjectContexts() {
     setProjectContextsLoading(true)
-    apiFetch('/api/project-contexts')
-      .then(r => r.json())
+    apiGet<ProjectContextSummary[]>('/api/project-contexts')
       .then((list: ProjectContextSummary[]) => setProjectContexts(list))
       .catch(() => {})
       .finally(() => setProjectContextsLoading(false))
   }
 
   useEffect(() => {
-    apiFetch('/api/agents')
-      .then(r => r.json())
-      .then((list: AgentState[]) => {
-        const map: Record<string, AgentState> = {}
-        for (const a of list) map[a.agentName] = a
-        setAgents(map)
-        setLastUpdated(new Date().toLocaleTimeString())
-      })
-      .catch(() => {})
+    refreshAgents()
 
     fetchWorkflows()
 
-    apiFetch('/api/signals')
-      .then(r => r.json())
+    apiGet<Record<string, SignalDef[]>>('/api/signals')
       .then((reg: Record<string, SignalDef[]>) => setSignalRegistry(reg))
       .catch(() => {})
 
-    apiFetch('/api/workflow-types')
-      .then(r => r.json())
+    apiGet<WorkflowTypeInfo[]>('/api/workflow-types')
       .then((list: WorkflowTypeInfo[]) => setWorkflowTypes(list))
       .catch(() => {})
 
-    apiFetch('/api/namespaces')
-      .then(r => r.json())
+    apiGet<string[]>('/api/namespaces')
       .then((list: string[]) => setApiNamespaces(list))
       .catch(() => {})
 
@@ -503,11 +538,8 @@ export default function App() {
     loadOutputStyles()
     fetchCompleted()
 
-    apiFetch('/api/setup/status')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data) setSetupStatus(data) })
-      .catch(() => {})
-  }, [])
+    loadSetupStatus()
+  }, [refreshAgents])
 
   useEffect(() => {
     unmounted.current = false
@@ -547,7 +579,15 @@ export default function App() {
       })
     }
     ws.onerror = () => ws.close()
-    return () => { ws.close(); logWsRef.current = null }
+    // A stream that ends (the container stopped, the orchestrator restarted, the session lapsed)
+    // used to leave the last lines on screen looking live. It is not reopened by itself: the
+    // orchestrator replays the last 200 lines on every connect, which would repeat them here.
+    let closedHere = false
+    ws.onclose = () => {
+      if (closedHere) return
+      setLogLines(prev => [...prev, '── log stream ended; close and reopen the viewer to follow again ──'])
+    }
+    return () => { closedHere = true; ws.close(); logWsRef.current = null }
   }, [logViewer])
 
   useEffect(() => {
@@ -591,8 +631,7 @@ export default function App() {
 
   useEffect(() => {
     function checkFailures() {
-      apiFetch('/api/workflows/failures')
-        .then(r => r.json())
+      apiGet<WorkflowSummary[]>('/api/workflows/failures')
         .then((list: WorkflowSummary[]) => {
           for (const wf of list) {
             const key = `${wf.namespace}/${wf.workflowId}/${wf.runId}`
@@ -636,14 +675,14 @@ export default function App() {
     if (expandedAgent === agentName) { setExpandedAgent(null); return }
     setExpandedAgent(agentName)
     setHistoryLoading(prev => ({ ...prev, [agentName]: true }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/history`)
-      .then(r => r.json())
+    apiGet<TaskRecord[]>(`/api/agents/${encodeURIComponent(agentName)}/history`)
       .then((records: TaskRecord[]) => setTaskHistory(prev => ({ ...prev, [agentName]: records })))
       .catch(() => setTaskHistory(prev => ({ ...prev, [agentName]: [] })))
       .finally(() => setHistoryLoading(prev => ({ ...prev, [agentName]: false })))
   }
 
   function setAgentRestartState(agentName: string, state: RestartState, msg = '') {
+    if (state === 'confirming') timers.cancel(`restart:${agentName}`)
     setRestartStates(prev => ({ ...prev, [agentName]: state }))
     setRestartMsg(prev => ({ ...prev, [agentName]: msg }))
   }
@@ -657,16 +696,14 @@ export default function App() {
 
   function handleRestartConfirm(agentName: string) {
     setAgentRestartState(agentName, 'restarting')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/restart`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) setAgentRestartState(agentName, 'success', 'Restart triggered')
-        else { const b = await r.json().catch(() => ({})); setAgentRestartState(agentName, 'error', b?.error ?? `Error ${r.status}`) }
-      })
-      .catch(() => setAgentRestartState(agentName, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setAgentRestartState(agentName, 'idle'), 4000))
+    apiSend(`/api/agents/${encodeURIComponent(agentName)}/restart`, 'POST')
+      .then(() => setAgentRestartState(agentName, 'success', 'Restart triggered'))
+      .catch((e: unknown) => { setAgentRestartState(agentName, 'error', errorMessage(e)) })
+      .finally(() => timers.after(`restart:${agentName}`, 4000, () => setAgentRestartState(agentName, 'idle')))
   }
 
   function setAgentCancelState(agentName: string, state: CancelState, msg = '') {
+    if (state === 'confirming') timers.cancel(`cancel:${agentName}`)
     setCancelStates(prev => ({ ...prev, [agentName]: state }))
     setCancelMsg(prev => ({ ...prev, [agentName]: msg }))
   }
@@ -680,26 +717,24 @@ export default function App() {
 
   function handleCancelConfirm(agentName: string) {
     setAgentCancelState(agentName, 'cancelling')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/cancel`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) setAgentCancelState(agentName, 'success', 'Cancelled')
-        else { const b = await r.json().catch(() => ({})); setAgentCancelState(agentName, 'error', b?.error ?? `Error ${r.status}`) }
-      })
-      .catch(() => setAgentCancelState(agentName, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setAgentCancelState(agentName, 'idle'), 4000))
+    apiSend(`/api/agents/${encodeURIComponent(agentName)}/cancel`, 'POST')
+      .then(() => setAgentCancelState(agentName, 'success', 'Cancelled'))
+      .catch((e: unknown) => { setAgentCancelState(agentName, 'error', errorMessage(e)) })
+      .finally(() => timers.after(`cancel:${agentName}`, 4000, () => setAgentCancelState(agentName, 'idle')))
   }
 
   function handleBgCancel(agentName: string, taskId: string) {
     const key = `${agentName}/${taskId}`
     if (bgCancelStates[key] === 'cancelling') return
     setBgCancelStates(prev => ({ ...prev, [key]: 'cancelling' }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/cancel_bg/${encodeURIComponent(taskId)}`, { method: 'POST' })
-      .then(r => setBgCancelStates(prev => ({ ...prev, [key]: r.ok ? 'done' : 'error' })))
+    apiSend(`/api/agents/${encodeURIComponent(agentName)}/cancel_bg/${encodeURIComponent(taskId)}`, 'POST')
+      .then(() => setBgCancelStates(prev => ({ ...prev, [key]: 'done' })))
       .catch(() => setBgCancelStates(prev => ({ ...prev, [key]: 'error' })))
       .finally(() => setTimeout(() => setBgCancelStates(prev => ({ ...prev, [key]: 'idle' })), 4000))
   }
 
   function setAgentReprovisionState(agentName: string, state: ReprovisionState, msg = '') {
+    if (state === 'confirming') timers.cancel(`reprovision:${agentName}`)
     setReprovisionStates(prev => ({ ...prev, [agentName]: state }))
     setReprovisionMsg(prev => ({ ...prev, [agentName]: msg }))
   }
@@ -713,39 +748,31 @@ export default function App() {
 
   function handleReprovisionConfirm(agentName: string) {
     setAgentReprovisionState(agentName, 'provisioning')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) setAgentReprovisionState(agentName, 'success', 'Reprovisioning...')
-        else { const b = await r.json().catch(() => ({})); setAgentReprovisionState(agentName, 'error', b?.error ?? `Error ${r.status}`) }
-      })
-      .catch(() => setAgentReprovisionState(agentName, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setAgentReprovisionState(agentName, 'idle'), 5000))
+    apiSend(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, 'POST')
+      .then(() => setAgentReprovisionState(agentName, 'success', 'Reprovisioning...'))
+      .catch((e: unknown) => { setAgentReprovisionState(agentName, 'error', errorMessage(e)) })
+      .finally(() => timers.after(`reprovision:${agentName}`, 5000, () => setAgentReprovisionState(agentName, 'idle')))
   }
 
   function handleReprovisionAll() {
     setReprovisionAllState('confirming')
-    setTimeout(() => setReprovisionAllState(s => s === 'confirming' ? 'idle' : s), 5000)
+    timers.after('reprovision-all', 5000, () => setReprovisionAllState(s => s === 'confirming' ? 'idle' : s))
   }
 
   function handleReprovisionAllConfirm() {
     setReprovisionAllState('running')
-    apiFetch('/api/agents/reprovision-running', { method: 'POST' })
-      .then(async r => {
-        if (r.ok) {
-          setReprovisionAllState('success')
-          setReprovisionAllMsg('All agents reprovisioning…')
-          addAlert('agent-stale', 'Reprovision all triggered — agents restarting')
-        } else {
-          const b = await r.json().catch(() => ({}))
-          setReprovisionAllState('error')
-          setReprovisionAllMsg(b?.error ?? `Error ${r.status}`)
-        }
+    apiSend('/api/agents/reprovision-running', 'POST')
+      .then(() => {
+        setReprovisionAllState('success')
+        setReprovisionAllMsg('All agents reprovisioning…')
+        addAlert('agent-stale', 'Reprovision all triggered — agents restarting')
       })
-      .catch(() => { setReprovisionAllState('error'); setReprovisionAllMsg('Request failed') })
-      .finally(() => setTimeout(() => { setReprovisionAllState('idle'); setReprovisionAllMsg('') }, 5000))
+      .catch((e: unknown) => { setReprovisionAllState('error'); setReprovisionAllMsg(errorMessage(e)) })
+      .finally(() => timers.after('reprovision-all', 5000, () => { setReprovisionAllState('idle'); setReprovisionAllMsg('') }))
   }
 
   function handleReprovisionAllCancel() {
+    timers.cancel('reprovision-all')
     setReprovisionAllState('idle')
   }
 
@@ -754,49 +781,47 @@ export default function App() {
     if (ss === 'pending') return
     if (ss === 'confirming') {
       setStopStates(prev => ({ ...prev, [agentName]: 'pending' }))
-      apiFetch(`/api/agents/${encodeURIComponent(agentName)}/stop`, { method: 'POST' })
-        .then(async r => {
-          if (r.ok) { setStopStates(prev => ({ ...prev, [agentName]: 'success' })); setStopMsg(prev => ({ ...prev, [agentName]: 'Stopped' })) }
-          else { const b = await r.json().catch(() => ({})); setStopStates(prev => ({ ...prev, [agentName]: 'error' })); setStopMsg(prev => ({ ...prev, [agentName]: b?.error ?? `Error ${r.status}` })) }
-        })
-        .catch(() => { setStopStates(prev => ({ ...prev, [agentName]: 'error' })); setStopMsg(prev => ({ ...prev, [agentName]: 'Request failed' })) })
-        .finally(() => setTimeout(() => setStopStates(prev => ({ ...prev, [agentName]: 'idle' })), 4000))
+      apiSend(`/api/agents/${encodeURIComponent(agentName)}/stop`, 'POST')
+        .then(() => { setStopStates(prev => ({ ...prev, [agentName]: 'success' })); setStopMsg(prev => ({ ...prev, [agentName]: 'Stopped' })) })
+        .catch((e: unknown) => { setStopStates(prev => ({ ...prev, [agentName]: 'error' })); setStopMsg(prev => ({ ...prev, [agentName]: errorMessage(e) })) })
+        .finally(() => timers.after(`stop:${agentName}`, 4000, () => setStopStates(prev => ({ ...prev, [agentName]: 'idle' }))))
       return
     }
     setStopStates(prev => ({ ...prev, [agentName]: 'confirming' }))
-    setTimeout(() => setStopStates(prev => prev[agentName] === 'confirming' ? { ...prev, [agentName]: 'idle' } : prev), 5000)
+    timers.after(`stop:${agentName}`, 5000, () => setStopStates(prev => prev[agentName] === 'confirming' ? { ...prev, [agentName]: 'idle' } : prev))
   }
 
   function handleStart(agentName: string) {
     const ss = startStates[agentName] ?? 'idle'
     if (ss === 'pending') return
     setStartStates(prev => ({ ...prev, [agentName]: 'pending' }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/start`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) { setStartStates(prev => ({ ...prev, [agentName]: 'success' })); setStartMsg(prev => ({ ...prev, [agentName]: 'Started' })) }
-        else { const b = await r.json().catch(() => ({})); setStartStates(prev => ({ ...prev, [agentName]: 'error' })); setStartMsg(prev => ({ ...prev, [agentName]: b?.error ?? `Error ${r.status}` })) }
-      })
-      .catch(() => { setStartStates(prev => ({ ...prev, [agentName]: 'error' })); setStartMsg(prev => ({ ...prev, [agentName]: 'Request failed' })) })
+    apiSend(`/api/agents/${encodeURIComponent(agentName)}/start`, 'POST')
+      .then(() => { setStartStates(prev => ({ ...prev, [agentName]: 'success' })); setStartMsg(prev => ({ ...prev, [agentName]: 'Started' })) })
+      .catch((e: unknown) => { setStartStates(prev => ({ ...prev, [agentName]: 'error' })); setStartMsg(prev => ({ ...prev, [agentName]: errorMessage(e) })) })
       .finally(() => setTimeout(() => setStartStates(prev => ({ ...prev, [agentName]: 'idle' })), 4000))
   }
 
   function handleDeleteClick(agentName: string) {
     const state = deleteStates[agentName] ?? 'idle'
     if (state === 'deleting') return
-    if (state === 'confirming') { setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })); return }
+    if (state === 'confirming') { timers.cancel(`delete:${agentName}`); setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })); return }
+    armDeleteConfirm(agentName, 5000)
+  }
+
+  // "confirm delete?" goes back to idle by itself, like every other confirmation here. It used to
+  // stay armed until clicked, and a `?delete=<agent>` link armed it on load with no limit at all.
+  function armDeleteConfirm(agentName: string, ms: number) {
     setDeleteStates(prev => ({ ...prev, [agentName]: 'confirming' }))
+    timers.after(`delete:${agentName}`, ms, () =>
+      setDeleteStates(prev => prev[agentName] === 'confirming' ? { ...prev, [agentName]: 'idle' } : prev))
   }
 
   function handleDeleteConfirm(agentName: string) {
     setDeleteStates(prev => ({ ...prev, [agentName]: 'deleting' }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}`, { method: 'DELETE' })
-      .then(async r => {
-        const d = await r.json().catch(() => ({}))
-        if (r.ok) { setDeleteStates(prev => ({ ...prev, [agentName]: 'success' })); setDeleteMsg(prev => ({ ...prev, [agentName]: d.message ?? 'Deleted' })) }
-        else { setDeleteStates(prev => ({ ...prev, [agentName]: 'error' })); setDeleteMsg(prev => ({ ...prev, [agentName]: d.error ?? `Error ${r.status}` })) }
-      })
-      .catch(() => { setDeleteStates(prev => ({ ...prev, [agentName]: 'error' })); setDeleteMsg(prev => ({ ...prev, [agentName]: 'Request failed' })) })
-      .finally(() => setTimeout(() => setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })), 5000))
+    apiSend<{ message?: string } | null>(`/api/agents/${encodeURIComponent(agentName)}`, 'DELETE')
+      .then(d => { setDeleteStates(prev => ({ ...prev, [agentName]: 'success' })); setDeleteMsg(prev => ({ ...prev, [agentName]: d?.message ?? 'Deleted' })); refreshAgents() })
+      .catch((e: unknown) => { setDeleteStates(prev => ({ ...prev, [agentName]: 'error' })); setDeleteMsg(prev => ({ ...prev, [agentName]: errorMessage(e) })) })
+      .finally(() => timers.after(`delete:${agentName}`, 5000, () => setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' }))))
   }
 
   function openConfig(agentName: string) {
@@ -810,8 +835,7 @@ export default function App() {
     setProjectAccess(null)
     setConfigLoading(true)
     setProjectAccessLoading(true)
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    apiGet<{ projects: string[] }>(`/api/agents/${encodeURIComponent(agentName)}/project-access`)
       .then((data: { projects: string[] }) => setProjectAccess(data.projects))
       .catch(() => setProjectAccess([]))
       .finally(() => setProjectAccessLoading(false))
@@ -820,8 +844,7 @@ export default function App() {
     // Same for the project and instruction tables, whose Size columns show the current bytes.
     loadProjectContexts()
     loadInstructions()
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    apiGet<AgentConfig>(`/api/agents/${encodeURIComponent(agentName)}/config`)
       .then((cfg: AgentConfig) => {
         setConfigData(cfg)
         setConfigEdits({
@@ -837,7 +860,6 @@ export default function App() {
           groupDebounceSeconds: String(cfg.groupDebounceSeconds),
           warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
           shortName: cfg.shortName,
-          displayName: cfg.displayName,
           showStats: cfg.showStats,
           prefixMessages: cfg.prefixMessages,
           formattingMode: cfg.formattingMode,
@@ -880,34 +902,32 @@ export default function App() {
     setProjectAccess(null)
   }
 
-  async function addProjectAccess(agentName: string, project: string) {
-    await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project }),
-    })
-    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
-    setProjectAccess(data.projects)
-  }
-
-  async function removeProjectAccess(agentName: string, project: string) {
-    await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access/${encodeURIComponent(project)}`, { method: 'DELETE' })
-    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
-    setProjectAccess(data.projects)
-  }
-
-  async function toggleProjectAccessWildcard(agentName: string, enable: boolean) {
-    if (enable) {
-      await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project: '*' }),
-      })
-    } else {
-      await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access/${encodeURIComponent('*')}`, { method: 'DELETE' })
+  // A project-access change is its own write, outside Save. A refusal is shown on the dialog's
+  // status line, and the list is re-read either way so it shows what the server holds.
+  async function changeProjectAccess(agentName: string, write: (url: string) => Promise<unknown>) {
+    const url = `/api/agents/${encodeURIComponent(agentName)}/project-access`
+    try {
+      await write(url)
+    } catch (e) {
+      setConfigSaveState('error'); setConfigSaveMsg(`Project access not changed: ${errorMessage(e)}`)
+      setTimeout(() => setConfigSaveState('idle'), 5000)
     }
-    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
-    setProjectAccess(data.projects)
+    try {
+      const data = await apiGet<{ projects: string[] }>(url)
+      setProjectAccess(data.projects)
+    } catch { /* the list shown stays as it was */ }
+  }
+
+  function addProjectAccess(agentName: string, project: string) {
+    return changeProjectAccess(agentName, url => apiSend(url, 'POST', { project }))
+  }
+
+  function removeProjectAccess(agentName: string, project: string) {
+    return changeProjectAccess(agentName, url => apiSend(`${url}/${encodeURIComponent(project)}`, 'DELETE'))
+  }
+
+  function toggleProjectAccessWildcard(agentName: string, enable: boolean) {
+    return enable ? addProjectAccess(agentName, '*') : removeProjectAccess(agentName, '*')
   }
 
   function saveConfig(agentName: string, andReprovision: boolean) {
@@ -925,39 +945,43 @@ export default function App() {
     const addedGroups = newTelegramGroups.filter(id => !prevGroups.includes(id))
     const removedGroups = prevGroups.filter(id => !newTelegramGroups.includes(id))
     setConfigSaveState('saving')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(save.body),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        // Apply telegram user/group diffs via dedicated endpoints (live, no reprovision needed)
-        const userOps = [
-          ...addedUsers.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-users`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: id }) })),
-          ...removedUsers.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-users/${id}`, { method: 'DELETE' })),
-          ...addedGroups.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-groups`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groupId: id }) })),
-          ...removedGroups.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-groups/${id}`, { method: 'DELETE' })),
-        ]
-        if (userOps.length > 0) await Promise.all(userOps)
-        if (andReprovision) return apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' }).then(r2 => { if (!r2.ok) throw new Error('Reprovision failed') })
-      })
-      .then(() => {
-        setConfigData(prev => prev ? { ...prev, projects, harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra, chatEnabled: configEdits.chatEnabled } : prev)
-        setConfigSaveState('success')
-        setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
-        setTimeout(() => setConfigSaveState('idle'), 4000)
-      })
-      .catch((err: Error) => {
-        setConfigSaveState('error'); setConfigSaveMsg(err.message)
-        setTimeout(() => setConfigSaveState('idle'), 5000)
-      })
+    const agentUrl = `/api/agents/${encodeURIComponent(agentName)}`
+    const failed = (message: string) => {
+      setConfigSaveState('error'); setConfigSaveMsg(message)
+      setTimeout(() => setConfigSaveState('idle'), 5000)
+    }
+    void (async () => {
+      try {
+        await apiSend(`${agentUrl}/config`, 'PUT', save.body)
+      } catch (e) { failed(errorMessage(e)); return }
+      // The config is stored from here on. A later step that is refused says so, and is never
+      // reported as "Saved" nor as a save that did not happen.
+      setConfigData(prev => prev ? { ...prev, projects, harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra, chatEnabled: configEdits.chatEnabled } : prev)
+      // Apply telegram user/group diffs via dedicated endpoints (live, no reprovision needed)
+      const allowlist = firstFailure(await Promise.allSettled([
+        ...addedUsers.map(id => apiSend(`${agentUrl}/telegram-users`, 'POST', { userId: id })),
+        ...removedUsers.map(id => apiSend(`${agentUrl}/telegram-users/${id}`, 'DELETE')),
+        ...addedGroups.map(id => apiSend(`${agentUrl}/telegram-groups`, 'POST', { groupId: id })),
+        ...removedGroups.map(id => apiSend(`${agentUrl}/telegram-groups/${id}`, 'DELETE')),
+      ]))
+      if (allowlist) {
+        failed(`Saved, but ${allowlist.failed} Telegram allowlist change${allowlist.failed === 1 ? '' : 's'} failed: ${allowlist.message}`)
+        return
+      }
+      if (andReprovision) {
+        try {
+          await apiSend(`${agentUrl}/reprovision`, 'POST')
+        } catch (e) { failed(`Saved, but reprovision failed: ${errorMessage(e)}`); return }
+      }
+      setConfigSaveState('success')
+      setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
+      setTimeout(() => setConfigSaveState('idle'), 4000)
+    })()
   }
 
   function loadInstructionDetail(name: string) {
     setInstructionDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    apiGet<InstructionDetail>(`/api/instructions/${encodeURIComponent(name)}`)
       .then((detail: InstructionDetail) => {
         setInstructionDetail(prev => ({ ...prev, [name]: detail }))
         const current = detail.versions.find(v => v.versionNumber === detail.currentVersion)
@@ -978,42 +1002,36 @@ export default function App() {
     if (!content?.trim()) return
     const reason = instructionReason[name]?.trim() || undefined
     setInstructionSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}/versions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, reason }),
-    })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
+    apiSend<SizedWrite>(`/api/instructions/${encodeURIComponent(name)}/versions`, 'POST', { content, reason })
+      .then(res => {
         applySizeWarning(setInstrSizeWarnings, name, res?.size)
         setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
         setInstructionSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
         setInstructionReason(prev => ({ ...prev, [name]: '' }))
         loadInstructionDetail(name)
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
+        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
         setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: err.message }))
+      .catch((err: unknown) => {
+        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
 
   function rollbackInstruction(name: string, targetVersion: number) {
     setInstructionSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}/rollback/${targetVersion}`, { method: 'POST' })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
+    apiSend<SizedWrite>(`/api/instructions/${encodeURIComponent(name)}/rollback/${targetVersion}`, 'POST')
+      .then(res => {
         applySizeWarning(setInstrSizeWarnings, name, res?.size)
         setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
         setInstructionSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
         setSelectedVersion(prev => ({ ...prev, [name]: null }))
         loadInstructionDetail(name)
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
+        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
         setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: err.message }))
+      .catch((err: unknown) => {
+        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
@@ -1027,7 +1045,7 @@ export default function App() {
       rollbackInstruction(instrName, versionNumber)
     } else {
       setRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      setTimeout(() => setRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev), 5000)
+      timers.after(`instr-rollback:${key}`, 5000, () => setRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev))
     }
   }
 
@@ -1038,49 +1056,34 @@ export default function App() {
     if (deployConfirm[deployKey]) {
       setDeployConfirm(prev => ({ ...prev, [deployKey]: false }))
       setDeployState(prev => ({ ...prev, [deployKey]: 'deploying' }))
-      apiFetch(`/api/agents/${encodeURIComponent(agentName)}/restart-with-version`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instructionName: instrName, versionNumber }),
-      })
-        .then(async r => {
-          if (r.ok) { setDeployState(prev => ({ ...prev, [deployKey]: 'success' })); setDeployMsg(prev => ({ ...prev, [deployKey]: `Deployed to ${agentName}` })) }
-          else { const b = await r.json().catch(() => ({})); setDeployState(prev => ({ ...prev, [deployKey]: 'error' })); setDeployMsg(prev => ({ ...prev, [deployKey]: b?.error ?? `Error ${r.status}` })) }
-        })
-        .catch(() => { setDeployState(prev => ({ ...prev, [deployKey]: 'error' })); setDeployMsg(prev => ({ ...prev, [deployKey]: 'Request failed' })) })
+      apiSend(`/api/agents/${encodeURIComponent(agentName)}/restart-with-version`, 'POST', { instructionName: instrName, versionNumber })
+        .then(() => { setDeployState(prev => ({ ...prev, [deployKey]: 'success' })); setDeployMsg(prev => ({ ...prev, [deployKey]: `Deployed to ${agentName}` })) })
+        .catch((e: unknown) => { setDeployState(prev => ({ ...prev, [deployKey]: 'error' })); setDeployMsg(prev => ({ ...prev, [deployKey]: errorMessage(e) })) })
         .finally(() => setTimeout(() => setDeployState(prev => ({ ...prev, [deployKey]: 'idle' })), 4000))
     } else {
       setDeployConfirm(prev => ({ ...prev, [deployKey]: true }))
-      setTimeout(() => setDeployConfirm(prev => prev[deployKey] ? { ...prev, [deployKey]: false } : prev), 5000)
+      timers.after(`deploy:${deployKey}`, 5000, () => setDeployConfirm(prev => prev[deployKey] ? { ...prev, [deployKey]: false } : prev))
     }
   }
 
   function handleInstrToggleConfirmClick(name: string) {
     setInstrToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setInstrToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
+    timers.after(`instr-toggle:${name}`, 5000, () => setInstrToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
   }
 
   function toggleInstrActive(name: string, isActive: boolean) {
     setInstrToggleConfirm(prev => ({ ...prev, [name]: false }))
     setInstrToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}/toggle-active`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isActive }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
+    apiSend(`/api/instructions/${encodeURIComponent(name)}/toggle-active`, 'POST', { isActive })
       .then(() => {
         setInstrToggleState(prev => ({ ...prev, [name]: 'success' }))
         setInstrToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
+        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
         setTimeout(() => setInstrToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         setInstrToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setInstrToggleMsg(prev => ({ ...prev, [name]: err.message }))
+        setInstrToggleMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setInstrToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
@@ -1088,31 +1091,23 @@ export default function App() {
   function createInstruction() {
     const name = instrNewForm.name
     setInstrNewState('saving')
-    apiFetch('/api/instructions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    apiSend<SizedWrite>('/api/instructions', 'POST', {
         name: instrNewForm.name,
         content: instrNewForm.content,
         reason: instrNewForm.reason || undefined,
-      }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
       })
-      .then((res: { size?: PromptSizeReport }) => {
+      .then(res => {
         applySizeWarning(setInstrSizeWarnings, name, res?.size)
         setInstrNewState('success')
         setInstrNewMsg('Created')
         setInstrShowNew(false)
         setInstrNewForm({ name: '', content: '', reason: '' })
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
+        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
         setTimeout(() => setInstrNewState('idle'), 3000)
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         setInstrNewState('error')
-        setInstrNewMsg(err.message)
+        setInstrNewMsg(errorMessage(err))
         setTimeout(() => setInstrNewState('idle'), 5000)
       })
   }
@@ -1121,8 +1116,7 @@ export default function App() {
 
   function loadContextDetail(name: string) {
     setContextDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    apiGet<ProjectContextDetail>(`/api/project-contexts/${encodeURIComponent(name)}`)
       .then((detail: ProjectContextDetail) => {
         setContextDetail(prev => ({ ...prev, [name]: detail }))
         const current = detail.versions.find(v => v.versionNumber === detail.currentVersion)
@@ -1143,42 +1137,36 @@ export default function App() {
     if (!content?.trim()) return
     const reason = contextReason[name]?.trim() || undefined
     setContextSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}/versions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, reason }),
-    })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
+    apiSend<SizedWrite>(`/api/project-contexts/${encodeURIComponent(name)}/versions`, 'POST', { content, reason })
+      .then(res => {
         applySizeWarning(setCtxSizeWarnings, name, res?.size)
         setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
         setContextSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
         setContextReason(prev => ({ ...prev, [name]: '' }))
         loadContextDetail(name)
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
+        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
         setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
-        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: err.message }))
+      .catch((err: unknown) => {
+        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
 
   function rollbackContext(name: string, targetVersion: number) {
     setContextSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}/rollback/${targetVersion}`, { method: 'POST' })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
+    apiSend<SizedWrite>(`/api/project-contexts/${encodeURIComponent(name)}/rollback/${targetVersion}`, 'POST')
+      .then(res => {
         applySizeWarning(setCtxSizeWarnings, name, res?.size)
         setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
         setContextSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
         setContextSelectedVersion(prev => ({ ...prev, [name]: null }))
         loadContextDetail(name)
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
+        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
         setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
-        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: err.message }))
+      .catch((err: unknown) => {
+        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
@@ -1192,36 +1180,28 @@ export default function App() {
       rollbackContext(ctxName, versionNumber)
     } else {
       setContextRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      setTimeout(() => setContextRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev), 5000)
+      timers.after(`ctx-rollback:${key}`, 5000, () => setContextRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev))
     }
   }
 
   function handleCtxToggleConfirmClick(name: string) {
     setCtxToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setCtxToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
+    timers.after(`ctx-toggle:${name}`, 5000, () => setCtxToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
   }
 
   function toggleCtxActive(name: string, isActive: boolean) {
     setCtxToggleConfirm(prev => ({ ...prev, [name]: false }))
     setCtxToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}/toggle-active`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isActive }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
+    apiSend(`/api/project-contexts/${encodeURIComponent(name)}/toggle-active`, 'POST', { isActive })
       .then(() => {
         setCtxToggleState(prev => ({ ...prev, [name]: 'success' }))
         setCtxToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
+        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
         setTimeout(() => setCtxToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         setCtxToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setCtxToggleMsg(prev => ({ ...prev, [name]: err.message }))
+        setCtxToggleMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setCtxToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
@@ -1229,30 +1209,22 @@ export default function App() {
   function createContext() {
     const name = ctxNewForm.name
     setCtxNewState('saving')
-    apiFetch('/api/project-contexts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    apiSend<SizedWrite>('/api/project-contexts', 'POST', {
         name: ctxNewForm.name,
         content: ctxNewForm.content,
-      }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
       })
-      .then((res: { size?: PromptSizeReport }) => {
+      .then(res => {
         applySizeWarning(setCtxSizeWarnings, name, res?.size)
         setCtxNewState('success')
         setCtxNewMsg('Created')
         setCtxShowNew(false)
         setCtxNewForm({ name: '', content: '' })
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
+        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
         setTimeout(() => setCtxNewState('idle'), 3000)
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         setCtxNewState('error')
-        setCtxNewMsg(err.message)
+        setCtxNewMsg(errorMessage(err))
         setTimeout(() => setCtxNewState('idle'), 5000)
       })
   }
@@ -1261,8 +1233,7 @@ export default function App() {
 
   function loadWfDefs() {
     setWfDefsLoading(true)
-    apiFetch('/api/workflow-definitions?includeInactive=true')
-      .then(r => r.json())
+    apiGet<WorkflowDefinitionSummary[]>('/api/workflow-definitions?includeInactive=true')
       .then((list: WorkflowDefinitionSummary[]) => { setWfDefs(list); setWfDefsLoaded(true) })
       .catch(() => {})
       .finally(() => setWfDefsLoading(false))
@@ -1270,8 +1241,7 @@ export default function App() {
 
   function loadWfDefDetail(name: string) {
     setWfDefDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}`)
-      .then(r => r.json())
+    apiGet<WorkflowDefinitionDetail>(`/api/workflow-definitions/${encodeURIComponent(name)}`)
       .then((detail: WorkflowDefinitionDetail) => {
         setWfDefDetails(prev => ({ ...prev, [name]: detail }))
         setWfDefEdits(prev => ({ ...prev, [name]: detail.definition }))
@@ -1289,15 +1259,7 @@ export default function App() {
     const content = wfDefEdits[name]
     const reason = wfDefReasons[name]?.trim() || undefined
     setWfDefSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ definition: content, reason }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
+    apiSend(`/api/workflow-definitions/${encodeURIComponent(name)}`, 'PUT', { definition: content, reason })
       .then(() => {
         setWfDefSaveState(prev => ({ ...prev, [name]: 'success' }))
         setWfDefSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
@@ -1305,9 +1267,9 @@ export default function App() {
         loadWfDefs()
         setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         setWfDefSaveState(prev => ({ ...prev, [name]: 'error' }))
-        setWfDefSaveMsg(prev => ({ ...prev, [name]: err.message }))
+        setWfDefSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
@@ -1321,15 +1283,7 @@ export default function App() {
       if (!verDef) return
       const reason = `Rollback to v${targetVersion}`
       setWfDefSaveState(prev => ({ ...prev, [name]: 'saving' }))
-      apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ definition: verDef, reason }),
-      })
-        .then(async r => {
-          if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-          return r.json()
-        })
+      apiSend(`/api/workflow-definitions/${encodeURIComponent(name)}`, 'PUT', { definition: verDef, reason })
         .then(() => {
           setWfDefSaveState(prev => ({ ...prev, [name]: 'success' }))
           setWfDefSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
@@ -1338,63 +1292,47 @@ export default function App() {
           loadWfDefs()
           setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
         })
-        .catch((err: Error) => {
+        .catch((err: unknown) => {
           setWfDefSaveState(prev => ({ ...prev, [name]: 'error' }))
-          setWfDefSaveMsg(prev => ({ ...prev, [name]: err.message }))
+          setWfDefSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
           setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
         })
     } else {
       setWfDefRollbackConfirm(prev => ({ ...prev, [name]: key }))
-      setTimeout(() => setWfDefRollbackConfirm(prev => prev[name] === key ? { ...prev, [name]: null } : prev), 5000)
+      timers.after(`wfdef-rollback:${name}`, 5000, () => setWfDefRollbackConfirm(prev => prev[name] === key ? { ...prev, [name]: null } : prev))
     }
   }
 
   function handleWfDefToggleConfirmClick(name: string) {
     setWfDefToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setWfDefToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
+    timers.after(`wfdef-toggle:${name}`, 5000, () => setWfDefToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
   }
 
   function toggleWfDefActive(name: string, isActive: boolean) {
     setWfDefToggleConfirm(prev => ({ ...prev, [name]: false }))
     setWfDefToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}/toggle-active`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isActive }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
+    apiSend(`/api/workflow-definitions/${encodeURIComponent(name)}/toggle-active`, 'POST', { isActive })
       .then(() => {
         setWfDefToggleState(prev => ({ ...prev, [name]: 'success' }))
         setWfDefToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
         loadWfDefs()
         setTimeout(() => setWfDefToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         setWfDefToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setWfDefToggleMsg(prev => ({ ...prev, [name]: err.message }))
+        setWfDefToggleMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
         setTimeout(() => setWfDefToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
       })
   }
 
   function createWfDef() {
     setWfDefNewState('saving')
-    apiFetch('/api/workflow-definitions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    apiSend('/api/workflow-definitions', 'POST', {
         name: wfDefNewForm.name,
         namespace: wfDefNewForm.namespace,
         taskQueue: wfDefNewForm.taskQueue,
         definition: wfDefNewForm.definition,
         description: wfDefNewForm.description || undefined,
-      }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
       })
       .then(() => {
         setWfDefNewState('success')
@@ -1404,9 +1342,9 @@ export default function App() {
         loadWfDefs()
         setTimeout(() => setWfDefNewState('idle'), 3000)
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         setWfDefNewState('error')
-        setWfDefNewMsg(err.message)
+        setWfDefNewMsg(errorMessage(err))
         setTimeout(() => setWfDefNewState('idle'), 5000)
       })
   }
@@ -1420,14 +1358,12 @@ export default function App() {
     setExpandedEvents(new Set())
     setWfHistoryLoading(true)
     try {
-      const res = await apiFetch(`/api/workflows/${encodeURIComponent(wf.namespace)}/history/${encodeURIComponent(wf.workflowId)}`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const events: WorkflowEvent[] = await res.json()
+      const events = await apiGet<WorkflowEvent[]>(`/api/workflows/${encodeURIComponent(wf.namespace)}/history/${encodeURIComponent(wf.workflowId)}`)
       const sorted = [...events].reverse()
       setWfHistory(sorted)
       if (sorted.length > 0) setExpandedEvents(new Set([sorted[0].eventId]))
     } catch (e: unknown) {
-      setWfHistoryError(e instanceof Error ? e.message : 'Unknown error')
+      setWfHistoryError(errorMessage(e))
     } finally {
       setWfHistoryLoading(false)
     }
@@ -1449,23 +1385,20 @@ export default function App() {
       const url = action === 'restart'
         ? `/api/workflows/${encodeURIComponent(wf.namespace)}/restart/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}&terminateExisting=true`
         : `/api/workflows/${encodeURIComponent(wf.namespace)}/${action}/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}`
-      apiFetch(url, { method: 'POST' })
-        .then(async r => {
-          if (r.ok) { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) }
-          else { const b = await r.json().catch(() => ({})); setWfState(wf, 'error', b?.error ?? b?.title ?? `Error ${r.status}`) }
-        })
-        .catch(() => setWfState(wf, 'error', 'Request failed'))
-        .finally(() => setTimeout(() => setWfState(wf, 'idle'), 4000))
+      apiSend(url, 'POST')
+        .then(() => { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) })
+        .catch((e: unknown) => { setWfState(wf, 'error', errorMessage(e)) })
+        .finally(() => timers.after(`wf:${wfKey(wf)}`, 4000, () => setWfState(wf, 'idle')))
       return
     }
     setWfState(wf, `confirming-${action}`)
-    setTimeout(() => {
+    timers.after(`wf:${wfKey(wf)}`, 5000, () => {
       setWfActionStates(prev => {
         const cur = prev[wfKey(wf)]
         if (cur === `confirming-${action}`) return { ...prev, [wfKey(wf)]: 'idle' }
         return prev
       })
-    }, 5000)
+    })
   }
 
   function signalKey(wf: WorkflowSummary): string { return `${wf.namespace}/${wf.workflowId}` }
@@ -1475,13 +1408,10 @@ export default function App() {
     const url = action === 'restart'
       ? `/api/workflows/${encodeURIComponent(wf.namespace)}/restart/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}&terminateExisting=true`
       : `/api/workflows/${encodeURIComponent(wf.namespace)}/${action}/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}`
-    apiFetch(url, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) }
-        else { const b = await r.json().catch(() => ({})); setWfState(wf, 'error', b?.error ?? b?.title ?? `Error ${r.status}`) }
-      })
-      .catch(() => setWfState(wf, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setWfState(wf, 'idle'), 4000))
+    apiSend(url, 'POST')
+      .then(() => { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) })
+      .catch((e: unknown) => { setWfState(wf, 'error', errorMessage(e)) })
+      .finally(() => timers.after(`wf:${wfKey(wf)}`, 4000, () => setWfState(wf, 'idle')))
   }
 
   function getSignalDefs(wf: WorkflowSummary): SignalDef[] {
@@ -1505,7 +1435,7 @@ export default function App() {
       sendSignal(wf, sig.name, btn.payload)
     } else {
       setSignalConfirm(ck)
-      setTimeout(() => setSignalConfirm(prev => prev === ck ? null : prev), 5000)
+      timers.after('signal-confirm', 5000, () => setSignalConfirm(prev => prev === ck ? null : prev))
     }
   }
 
@@ -1556,127 +1486,49 @@ export default function App() {
     if (!sourceName) return
     setCopyFromLoading(true)
     try {
-      const r = await apiFetch(`/api/agents/${encodeURIComponent(sourceName)}/config`)
-      if (!r.ok) return
-      const cfg: AgentConfig = await r.json()
-      setCreateForm(prev => ({
-        ...prev,
-        role: (cfg as unknown as { role?: string }).role ?? prev.role,
-        model: cfg.model,
-        memoryLimitMb: String(cfg.memoryLimitMb),
-        image: cfg.image ?? '',
-        permissionMode: cfg.permissionMode,
-        maxTurns: String(cfg.maxTurns),
-        workDir: cfg.workDir,
-        proactiveIntervalMinutes: String(cfg.proactiveIntervalMinutes),
-        groupListenMode: cfg.groupListenMode,
-        groupDebounceSeconds: String(cfg.groupDebounceSeconds),
-        warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
-        showStats: cfg.showStats,
-        prefixMessages: cfg.prefixMessages,
-        formattingMode: cfg.formattingMode,
-        suppressToolMessages: cfg.suppressToolMessages ?? false,
-        telegramSendOnly: cfg.telegramSendOnly,
-        provider: cfg.provider ?? 'claude',
-        codexSandboxMode: cfg.codexSandboxMode ?? '',
-        effort: cfg.effort ?? '',
-        jsonSchema: cfg.jsonSchema ?? '',
-        agentsJson: cfg.agentsJson ?? '',
-        autoMemoryEnabled: cfg.autoMemoryEnabled,
-        tools: cfg.tools.filter(t => t.isEnabled).map(t => t.toolName).join('\n'),
-        projects: cfg.projects.join('\n'),
-        networks: cfg.networks.join('\n'),
-        envRefs: cfg.envRefs.join('\n'),
-        mcpEndpoints: cfg.mcpEndpoints,
-        telegramUsers: cfg.telegramUsers.join('\n'),
-        telegramGroups: cfg.telegramGroups.join('\n'),
-        localBaseUrl: cfg.localBaseUrl ?? '',
-        contextWindow: cfg.contextWindow ? String(cfg.contextWindow) : '',
-      }))
+      const cfg = await apiGet<AgentConfig>(`/api/agents/${encodeURIComponent(sourceName)}/config`)
+      // The config route carries no role; the agent list does.
+      setCreateForm(prev => createFormFromConfig(prev, cfg, agents[sourceName]?.role))
+    } catch { /* the form keeps what it had */
     } finally {
       setCopyFromLoading(false)
     }
   }
 
   async function handleCreateSubmit() {
-    if (!createForm.name.trim()) { setCreateMsg('Name is required'); return }
-    const createProvider = createForm.provider || 'claude'
-    const createModel = createForm.model.trim() || PROVIDER_DEFAULT_MODEL[createProvider] || ''
-    if (!createModel) { setCreateMsg('Model is required'); return }
-    if (!createForm.role.trim()) { setCreateMsg('Role is required'); return }
-    const createWarmupTimeout = parseWarmupTimeoutSeconds(createForm.warmupTimeoutSeconds)
-    if (!createWarmupTimeout.ok) { setCreateMsg(createWarmupTimeout.error); return }
+    // The body is built in agentCreate.ts, where a test holds it against the create route.
+    const create = createAgentBody(createForm, !!createTemplateName)
+    if (!create.ok) { setCreateMsg(create.error); return }
     setCreateState('creating'); setCreateMsg('')
     try {
-      const body = {
-        name: createForm.name.trim(),
-        displayName: createForm.displayName.trim() || createForm.name.trim(),
-        role: createForm.role.trim(),
-        model: createModel,
-        containerName: createForm.containerName.trim() || `fleet-${createForm.name.trim()}`,
-        memoryLimitMb: parseInt(createForm.memoryLimitMb) || 4096,
-        isEnabled: createForm.isEnabled,
-        image: createForm.image.trim() || null,
-        permissionMode: createForm.permissionMode || 'acceptEdits',
-        maxTurns: parseInt(createForm.maxTurns) || 50,
-        workDir: createForm.workDir || '/workspace',
-        proactiveIntervalMinutes: parseInt(createForm.proactiveIntervalMinutes) || 0,
-        groupListenMode: createForm.groupListenMode || 'mention',
-        groupDebounceSeconds: parseInt(createForm.groupDebounceSeconds) || 15,
-        warmupTimeoutSeconds: createWarmupTimeout.value,
-        shortName: createForm.shortName,
-        showStats: createForm.showStats,
-        prefixMessages: createForm.prefixMessages,
-        formattingMode: createForm.formattingMode,
-        suppressToolMessages: createForm.suppressToolMessages,
-        telegramSendOnly: createForm.telegramSendOnly,
-        effort: createForm.effort.trim() || null,
-        jsonSchema: createForm.jsonSchema.trim() || null,
-        agentsJson: createForm.agentsJson.trim() || null,
-        autoMemoryEnabled: createForm.autoMemoryEnabled,
-        provider: createForm.provider || 'claude',
-        codexSandboxMode: createForm.codexSandboxMode.trim() || null,
-        tools: createForm.tools.split('\n').map(s => s.trim()).filter(Boolean),
-        projects: createForm.projects.split('\n').map(s => s.trim()).filter(Boolean),
-        networks: createForm.networks.split('\n').map(s => s.trim()).filter(Boolean),
-        envRefs: createForm.envRefs.split('\n').map(s => s.trim()).filter(Boolean),
-        mcpEndpoints: createForm.mcpEndpoints,
-        telegramUsers: createForm.telegramUsers.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        telegramGroups: createForm.telegramGroups.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        provision: !!createTemplateName,
-      }
-      const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      const data = await r.json().catch(() => ({}))
-      if (r.ok || r.status === 201 || r.status === 207) {
-        // Apply instruction assignments if any were selected
-        if (createForm.instructions.length > 0) {
-          await apiFetch(`/api/agents/${encodeURIComponent(createForm.name.trim())}/config`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              instructions: createForm.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
-            }),
-          }).catch(() => {/* non-fatal — user can set via config panel */})
+      const data = await apiSend<{ message?: string } | null>('/api/agents', 'POST', create.body)
+      // Apply instruction assignments if any were selected. Non-fatal (they can be set in the
+      // config panel), but a refusal is said, not hidden behind "created".
+      let instructionsNote = ''
+      if (createForm.instructions.length > 0) {
+        try {
+          await apiSend(`/api/agents/${encodeURIComponent(createForm.name.trim())}/config`, 'PUT', {
+            instructions: createForm.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
+          })
+        } catch (e) {
+          instructionsNote = ` Instructions were not assigned (${errorMessage(e)}); set them in the config panel.`
         }
-        setCreateState('success')
-        const defaultMsg = createTemplateName
-          ? `✓ ${createForm.name.trim()} provisioned`
-          : 'Agent created — configure and provision when ready'
-        setCreateMsg(data.message ?? defaultMsg)
-        setTimeout(() => { setCreateModalOpen(false); setCreateState('idle'); setCreateMsg(''); setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom(''); setCreateTemplateName(undefined) }, 3000)
-      } else {
-        setCreateState('error'); setCreateMsg(data.error ?? `Error ${r.status}`)
       }
-    } catch {
-      setCreateState('error'); setCreateMsg('Request failed')
+      setCreateState('success')
+      const defaultMsg = createTemplateName
+        ? `✓ ${createForm.name.trim()} provisioned`
+        : 'Agent created — configure and provision when ready'
+      setCreateMsg((data?.message ?? defaultMsg) + instructionsNote)
+      // A note about instructions stays up longer: it is the only place it is shown.
+      setTimeout(() => { setCreateModalOpen(false); setCreateState('idle'); setCreateMsg(''); setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom(''); setCreateTemplateName(undefined) }, instructionsNote ? 8000 : 3000)
+    } catch (e) {
+      setCreateState('error'); setCreateMsg(errorMessage(e))
     }
   }
 
   async function handleNewAgentFromTemplate(templateName: string) {
     try {
-      const r = await apiFetch(`/api/agent-templates/${encodeURIComponent(templateName)}`)
-      if (!r.ok) return
-      const t = await r.json()
+      const t = await apiGet<AgentTemplateDetail>(`/api/agent-templates/${encodeURIComponent(templateName)}`)
       const form: CreateForm = {
         ...DEFAULT_CREATE_FORM,
         role: t.role ?? '',
@@ -1696,14 +1548,14 @@ export default function App() {
         suppressToolMessages: t.suppressToolMessages ?? false,
         telegramSendOnly: t.telegramSendOnly ?? false,
         autoMemoryEnabled: t.autoMemoryEnabled ?? true,
-        tools: (t.tools ?? []).map((x: { toolName: string }) => x.toolName).join('\n'),
+        tools: (t.tools ?? []).map(x => x.toolName).join('\n'),
         projects: (t.projects ?? []).join('\n'),
         networks: (t.networks ?? []).join('\n'),
         envRefs: (t.envRefs ?? []).join('\n'),
-        mcpEndpoints: (t.mcpEndpoints ?? []).map((e: { mcpName: string; url: string; transportType: string }) => ({
+        mcpEndpoints: (t.mcpEndpoints ?? []).map(e => ({
           mcpName: e.mcpName, url: e.url, transportType: e.transportType,
         })),
-        instructions: (t.instructions ?? []).map((i: { name: string; loadOrder: number }) => ({
+        instructions: (t.instructions ?? []).map(i => ({
           name: i.name, loadOrder: i.loadOrder,
         })),
       }
@@ -1719,7 +1571,8 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const deleteAgent = params.get('delete')
-    if (deleteAgent) setDeleteStates(prev => ({ ...prev, [deleteAgent]: 'confirming' }))
+    // Longer than a click's five seconds: the page is still loading when this is armed.
+    if (deleteAgent) armDeleteConfirm(deleteAgent, 30_000)
     const hasCreate = params.has('create') || params.has('name')
     if (hasCreate) {
       const form = { ...DEFAULT_CREATE_FORM }
@@ -1734,7 +1587,10 @@ export default function App() {
     }
     const templateParam = params.get('template')
     if (templateParam) handleNewAgentFromTemplate(templateParam)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    // Once, on load: this reads the URL the page was opened with, and must not run again when the
+    // handlers it calls are re-created.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
 
@@ -1783,12 +1639,7 @@ export default function App() {
           <SetupBanner
             status={setupStatus}
             agentCount={Object.keys(agents).length}
-            onConnected={() => {
-              apiFetch('/api/setup/status')
-                .then(r => r.ok ? r.json() : null)
-                .then(data => { if (data) setSetupStatus(data) })
-                .catch(() => {})
-            }}
+            onConnected={loadSetupStatus}
             onNewAgentFromTemplate={handleNewAgentFromTemplate}
           />
         )}
@@ -2082,12 +1933,7 @@ export default function App() {
         )}
 
         {activeView === 'credentials' && (
-          <CredentialsView onSetupConnected={() => {
-            apiFetch('/api/setup/status')
-              .then(r => r.ok ? r.json() : null)
-              .then(data => { if (data) setSetupStatus(data) })
-              .catch(() => {})
-          }} />
+          <CredentialsView onSetupConnected={loadSetupStatus} />
         )}
 
         {activeView === 'memory' && (

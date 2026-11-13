@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
 import type { AnyStep, StepPath, StepType } from './editorTypes'
 import { STEP_COLORS, STEP_TYPES } from './editorTypes'
-import { updateStepAtPath, updateBranchCase, removeBranchCase, renameBranchCase, genId, ensureIds, getStepAtPath } from './treeUtils'
+import { updateStepAtPath, updateBranchCase, removeBranchCase, renameBranchCase, ensureIds, getStepAtPath } from './treeUtils'
 import { makeStep } from './stepDefaults'
 import KeyValueEditor from './KeyValueEditor'
-import { apiFetch } from '../../utils'
+import { apiGet } from '../../utils'
+import { agentNamesFromList } from '../../agentList'
 import { parseSchema, SchemaField, WorkflowTypeSelector, convertFieldValue } from './schemaUtils'
 import type { SchemaProperty } from './schemaUtils'
 import type { WorkflowTypeInfo } from '../../types'
@@ -34,15 +35,13 @@ export default function StepConfigPanel({ root, selectedPath, onChange, workflow
   const [attributeNames, setAttributeNames] = useState<string[]>(DEFAULT_ATTRIBUTE_NAMES)
 
   useEffect(() => {
-    apiFetch('/api/agents')
-      .then(r => r.json())
-      .then((data: Array<{ name: string }>) => {
-        const names = data.map(a => a.name).filter(Boolean)
+    apiGet<unknown>('/api/agents')
+      .then(list => {
+        const names = agentNamesFromList(list)
         if (names.length > 0) setAgentNames(names)
       })
       .catch(() => {})
-    apiFetch('/api/search-attributes')
-      .then(r => r.json())
+    apiGet<string[]>('/api/search-attributes')
       .then((data: string[]) => {
         if (Array.isArray(data) && data.length > 0) setAttributeNames(data)
       })
@@ -329,7 +328,6 @@ function BranchFields({ step, path, root, onChange }: BranchFieldsProps) {
   }
 
   function clearDefault() {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     onChange(updateStepAtPath(root, path, ({ default: _d, ...rest }) => rest as AnyStep))
   }
 

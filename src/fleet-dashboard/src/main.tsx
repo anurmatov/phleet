@@ -3,11 +3,14 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App'
 import SignInGate from './components/SignInGate'
+import ErrorBoundary from './components/ErrorBoundary'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <SignInGate>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </SignInGate>
   </StrictMode>,
 )

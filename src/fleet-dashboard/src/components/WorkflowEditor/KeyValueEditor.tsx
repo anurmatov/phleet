@@ -12,7 +12,10 @@ interface KeyValueEditorProps {
 export default function KeyValueEditor({ rows, keyPlaceholder = 'key', valuePlaceholder = 'value', onChange }: KeyValueEditorProps) {
   const [localRows, setLocalRows] = useState<KVRow[]>(rows)
 
-  // Sync from parent when external data changes (e.g. step switch)
+  // Sync from parent when external data changes (e.g. step switch). Keyed on the rows' content,
+  // not their identity: the parent hands in a new array on every render, and resetting on each
+  // would discard a row being typed.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { setLocalRows(rows) }, [JSON.stringify(rows)])
 
   function emit(updated: KVRow[]) {

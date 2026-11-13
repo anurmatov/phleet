@@ -94,12 +94,8 @@ public sealed class GeminiExecutor : IAgentExecutor
         _lastActivity = DateTimeOffset.UtcNow;
         _lastSessionId = null; // no session resumption for CLI-per-task
 
-        await foreach (var progress in RunCliAsync(task, images, documents, command: false, ct))
-        {
-            _lastActivity = DateTimeOffset.UtcNow;
+        await foreach (var progress in RunToResultAsync(task, images, documents, command: false, ct))
             yield return progress;
-            if (progress.FinalResult is not null) yield break;
-        }
     }
 
     public async IAsyncEnumerable<AgentProgress> SendCommandAsync(
@@ -110,7 +106,22 @@ public sealed class GeminiExecutor : IAgentExecutor
         // Run the command as a regular task so the agent at least sees the input and can respond.
         _lastActivity = DateTimeOffset.UtcNow;
 
-        await foreach (var progress in RunCliAsync(command, images: null, documents: null, command: true, ct: ct))
+        await foreach (var progress in RunToResultAsync(command, images: null, documents: null, command: true, ct))
+            yield return progress;
+    }
+
+    /// <summary>
+    /// The one read loop behind a task and a command: runs the CLI, stamps the activity time on
+    /// every event and stops after the terminal result.
+    /// </summary>
+    private async IAsyncEnumerable<AgentProgress> RunToResultAsync(
+        string input,
+        IReadOnlyList<MessageImage>? images,
+        IReadOnlyList<MessageDocument>? documents,
+        bool command,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var progress in RunCliAsync(input, images, documents, command, ct))
         {
             _lastActivity = DateTimeOffset.UtcNow;
             yield return progress;

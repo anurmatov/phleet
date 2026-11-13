@@ -12,8 +12,12 @@ namespace Fleet.Agent.Configuration;
 /// slow local model can take minutes before its first token, and an agent that calls
 /// <c>temporal_get_workflow_result</c> on a running workflow waits, silently, for that workflow to
 /// finish. Sixty minutes would cut the last of those. Three hours is past all of them in ordinary
-/// use and still ends a wedged process the same night. Turns delegated by a workflow are bounded
-/// sooner anyway: the bridge cancels them when the step times out.
+/// use and still ends a wedged process the same night.
+/// </para>
+/// <para>
+/// A workflow's own step timeout does not do this job. When a delegated step times out the bridge
+/// stops waiting and reports it, but it sends the agent a cancel only when the activity itself is
+/// cancelled, so a stalled delegated turn keeps the agent's slot until this limit ends it.
 /// </para>
 /// <para>
 /// <c>0</c> turns the watchdog off.

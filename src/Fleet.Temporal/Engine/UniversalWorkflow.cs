@@ -108,11 +108,13 @@ public class UniversalWorkflow
     /// <summary>
     /// Logged when a wait registers for a signal name another wait is still parked on. The engine
     /// keeps one waiter per name, so the earlier wait is no longer reachable by a signal and ends
-    /// only by its own timeout, if it has one. Operators search for the leading text. Only the
-    /// signal name is logged.
+    /// only by its own timeout, if it has one. The usual cause is two parallel branches waiting on
+    /// one name; the other is a wait that failed after registering (a notify step that threw) and
+    /// left its waiter behind. Operators search for the leading text. Only the signal name is
+    /// logged.
     /// </summary>
     internal const string WaiterReplacedLogTemplate =
-        "signal waiter replaced while still pending: two waits are parked on '{Signal}' at once and only the newer one can be woken";
+        "signal waiter replaced while still pending: an earlier wait on '{Signal}' never completed, and only the newer one can be woken";
 
     /// <summary>A signal that arrived with no waiter registered, plus its arrival ordinal.</summary>
     private readonly record struct BufferedSignal(JsonElement Payload, long Seq);
@@ -923,7 +925,7 @@ public class UniversalWorkflow
     ///
     /// <para>
     /// One waiter per signal name is all <c>_signalWaiters</c> holds. Two waits on the same name
-    /// can only be parked together from parallel branches; the second registration then replaces
+    /// are parked together only from parallel branches; the second registration then replaces
     /// the first, and the first wait is stranded. A definition that spells that out with literal
     /// names is refused at load (<see cref="WorkflowDefinitionValidator"/>), but a templated name
     /// is unknowable there and two failed <c>delegate_with_escalation</c> branches share

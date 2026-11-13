@@ -6,14 +6,16 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
+using RabbitMQ.Client;
 using Temporalio.Client;
 using Temporalio.Exceptions;
 
 namespace Fleet.Temporal.Tests.Services;
 
 /// <summary>
-/// A relayed workflow signal used to be acknowledged whether or not Temporal took it. These pin
-/// the retry that replaced that, without a broker or a Temporal server.
+/// A relayed workflow signal used to be acknowledged whether or not Temporal took it, and a
+/// listener that failed to start stayed down for the life of the bridge. These pin the retries
+/// that replaced both, without a broker or a Temporal server.
 /// </summary>
 public sealed class TemporalRelayListenerTests
 {
@@ -114,5 +116,51 @@ public sealed class TemporalRelayListenerTests
 
         Assert.Equal(RelaySignalOutcome.Interrupted, await listener.HandleWorkflowSignalAsync(Signal));
         Assert.Equal(1, SignalCalls);
+    }
+
+    [Fact]
+    public async Task AListenerWithNoBrokerConfigured_ReportsDisabled()
+    {
+        var listener = Listener();
+
+        await listener.StartAsync(CancellationToken.None);
+
+        Assert.Equal("disabled", listener.State);
+    }
+
+    /// <summary>
+    /// The first attempt failing no longer ends the listener. It reports <c>retrying</c>, tries
+    /// again on its own, and reports <c>consuming</c> once a consumer is actually registered.
+    /// </summary>
+    [Fact]
+    public async Task AListenerWhoseFirstStartFails_KeepsTryingUntilItIsConsuming()
+    {
+        var channel = Substitute.For<IChannel>();
+        channel.IsOpen.Returns(true);
+        var connection = Substitute.For<IConnection>();
+        connection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(channel);
+
+        var attempts = 0;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var listener = Listener(host: "broker.invalid");
+        listener.ConnectAsync = _ => Interlocked.Increment(ref attempts) <= 2
+            ? Task.FromException<IConnection>(new InvalidOperationException("broker unreachable"))
+            : Task.FromResult(connection);
+        listener.DelayAsync = (_, _) => release.Task;
+
+        await listener.StartAsync(CancellationToken.None);
+        Assert.Equal("retrying", listener.State);
+
+        release.SetResult();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (listener.State != "consuming" && DateTime.UtcNow < deadline)
+            await Task.Delay(20);
+
+        Assert.Equal("consuming", listener.State);
+        Assert.Equal(3, attempts);
+        Assert.Equal(1, channel.ReceivedCalls().Count(c => c.GetMethodInfo().Name == nameof(IChannel.BasicConsumeAsync)));
+
+        await listener.StopAsync(CancellationToken.None);
+        Assert.Equal("stopped", listener.State);
     }
 }

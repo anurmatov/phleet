@@ -41,6 +41,9 @@ internal enum RelaySignalOutcome
 /// </summary>
 public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 {
+    private const string QueueName = "fleet.agent.temporal-bridge";
+    private const string RoutingKey = "temporal-bridge";
+
     private static readonly Regex StatusPrefixRegex =
         new(@"^\[status:\s*(\w+)\]\s*", RegexOptions.Compiled);
 
@@ -61,6 +64,19 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
         TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(30),
     ];
 
+    /// <summary>
+    /// Waits between attempts to start consuming once the first attempt has failed. The last value
+    /// repeats: the listener never stops trying, because a bridge that is up without it accepts
+    /// delegations whose replies it cannot receive.
+    /// </summary>
+    internal static readonly TimeSpan[] DefaultStartRetryDelays =
+    [
+        TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10),
+        TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(40), TimeSpan.FromSeconds(60),
+    ];
+
+    private enum Phase { NotStarted, Disabled, Starting, Consuming, Retrying, Stopped }
+
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TaskCompletionRegistry _registry;
     private readonly ITemporalClientFactory _clientFactory;
@@ -69,6 +85,8 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 
     private IConnection? _connection;
     private IChannel? _channel;
+    private Task? _startRetry;
+    private volatile Phase _phase = Phase.NotStarted;
 
     public TemporalRelayListener(
         IOptions<RabbitMqOptions> rabbitConfig,
@@ -80,81 +98,163 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
         _registry = registry;
         _clientFactory = clientFactory;
         _logger = logger;
+        ConnectAsync = ConnectToBrokerAsync;
     }
+
+    /// <summary>Opens the broker connection. Replaced in tests, which have no broker.</summary>
+    internal Func<CancellationToken, Task<IConnection>> ConnectAsync { get; set; }
 
     /// <summary>The wait between attempts. Replaced in tests so they do not sleep.</summary>
     internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } = Task.Delay;
 
     internal IReadOnlyList<TimeSpan> SignalRetryDelays { get; set; } = DefaultSignalRetryDelays;
 
+    internal IReadOnlyList<TimeSpan> StartRetryDelays { get; set; } = DefaultStartRetryDelays;
+
+    /// <summary>
+    /// Where the listener is, for <c>/health</c>: <c>disabled</c> (no broker host configured),
+    /// <c>starting</c>, <c>consuming</c>, <c>retrying</c> (it has never consumed and is still
+    /// trying), <c>recovering</c> (it was consuming and the channel is closed; the client library
+    /// is reconnecting) or <c>stopped</c>. Only <c>consuming</c> receives agent replies.
+    /// </summary>
+    public string State => _phase switch
+    {
+        Phase.Disabled => "disabled",
+        Phase.Consuming => _channel is { IsOpen: true } ? "consuming" : "recovering",
+        Phase.Retrying => "retrying",
+        Phase.Stopped => "stopped",
+        _ => "starting",
+    };
+
     public async Task StartAsync(CancellationToken ct)
     {
         if (string.IsNullOrEmpty(_rabbitConfig.Host))
         {
             _logger.LogWarning("RabbitMq:Host not configured — relay listener disabled");
+            _phase = Phase.Disabled;
             return;
         }
 
+        _phase = Phase.Starting;
+
+        // The first attempt is awaited, as it always was, so that in the ordinary case the queue
+        // is declared and consumed before the workers that publish delegations start.
+        if (await TryStartConsumingAsync(attempt: 1, ct))
+            return;
+
+        // It used to stop here: one log line, and a bridge that answered /health while every
+        // delegation it accepted ran to its timeout. Host startup is not held up any longer, but
+        // the listener keeps trying for as long as the bridge runs.
+        _phase = Phase.Retrying;
+        _startRetry = Task.Run(() => RetryStartAsync(_stopping.Token), CancellationToken.None);
+    }
+
+    private async Task RetryStartAsync(CancellationToken ct)
+    {
+        for (var attempt = 2; !ct.IsCancellationRequested; attempt++)
+        {
+            var delay = StartRetryDelays[Math.Min(attempt - 2, StartRetryDelays.Count - 1)];
+            _logger.LogWarning(
+                "TemporalRelayListener is not consuming — agent replies are not being received. Next start attempt {Attempt} in {Delay}s",
+                attempt, delay.TotalSeconds);
+
+            try { await DelayAsync(delay, ct); }
+            catch (OperationCanceledException) { return; }
+
+            if (await TryStartConsumingAsync(attempt, ct))
+                return;
+        }
+    }
+
+    /// <summary>
+    /// One attempt to connect, declare the topology and start consuming. On failure everything
+    /// the attempt opened is closed again, so a retry never leaves a second connection behind.
+    /// </summary>
+    private async Task<bool> TryStartConsumingAsync(int attempt, CancellationToken ct)
+    {
+        IConnection? connection = null;
+        IChannel? channel = null;
         try
         {
-            var factory = new ConnectionFactory
-            {
-                HostName = _rabbitConfig.Host,
-                ClientProvidedName = "fleet-temporal-bridge",
-                AutomaticRecoveryEnabled = true,
-                TopologyRecoveryEnabled = true,
-                RequestedHeartbeat = TimeSpan.FromSeconds(30),
-                NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
-            };
-
-            _connection = await RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
-            _connection.ConnectionShutdownAsync += (_, args) =>
+            connection = await ConnectAsync(ct);
+            connection.ConnectionShutdownAsync += (_, args) =>
             {
                 _logger.LogWarning("RabbitMQ connection lost (reason: {Reason}) — auto-recovery in progress", args.ReplyText);
                 return Task.CompletedTask;
             };
 
-            _channel = await _connection.CreateChannelAsync(cancellationToken: ct);
+            channel = await connection.CreateChannelAsync(cancellationToken: ct);
 
             // Idempotent exchange declare — must match what agents declare
-            await _channel.ExchangeDeclareAsync(
+            await channel.ExchangeDeclareAsync(
                 _rabbitConfig.Exchange, ExchangeType.Direct, durable: true, autoDelete: false,
                 cancellationToken: ct);
 
             // Dedicated queue for the temporal bridge
-            const string queueName = "fleet.agent.temporal-bridge";
-            const string routingKey = "temporal-bridge";
-
-            await _channel.QueueDeclareAsync(
-                queue: queueName, durable: true, exclusive: false, autoDelete: false,
+            await channel.QueueDeclareAsync(
+                queue: QueueName, durable: true, exclusive: false, autoDelete: false,
                 cancellationToken: ct);
 
-            await _channel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: routingKey,
+            await channel.QueueBindAsync(QueueName, _rabbitConfig.Exchange, routingKey: RoutingKey,
                 cancellationToken: ct);
 
-            await _channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false,
+            // One message at a time: a signal and the reply that follows it are handled in the
+            // order the agent sent them.
+            await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false,
                 cancellationToken: ct);
 
-            var consumer = new AsyncEventingBasicConsumer(_channel);
+            // Published before the consumer exists, so the first delivery finds them set.
+            _connection = connection;
+            _channel = channel;
+
+            var consumer = new AsyncEventingBasicConsumer(channel);
             consumer.ReceivedAsync += OnMessageReceivedAsync;
-            await _channel.BasicConsumeAsync(queueName, autoAck: false, consumer: consumer,
+            await channel.BasicConsumeAsync(QueueName, autoAck: false, consumer: consumer,
                 cancellationToken: ct);
 
+            _phase = Phase.Consuming;
             _logger.LogInformation(
-                "TemporalRelayListener started on exchange={Exchange}, queue={Queue}",
-                _rabbitConfig.Exchange, queueName);
+                "TemporalRelayListener started on exchange={Exchange}, queue={Queue} (attempt {Attempt})",
+                _rabbitConfig.Exchange, QueueName, attempt);
+            return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to start TemporalRelayListener");
+            _channel = null;
+            _connection = null;
+            _logger.LogError(ex, "Failed to start TemporalRelayListener (attempt {Attempt})", attempt);
+            await CloseQuietlyAsync(channel, connection);
+            return false;
         }
+    }
+
+    private Task<IConnection> ConnectToBrokerAsync(CancellationToken ct)
+    {
+        var factory = new ConnectionFactory
+        {
+            HostName = _rabbitConfig.Host,
+            ClientProvidedName = "fleet-temporal-bridge",
+            AutomaticRecoveryEnabled = true,
+            TopologyRecoveryEnabled = true,
+            RequestedHeartbeat = TimeSpan.FromSeconds(30),
+            NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
+        };
+
+        return RabbitMqConnectionHelper.ConnectWithRetryAsync(factory, _logger, ct);
     }
 
     public async Task StopAsync(CancellationToken ct)
     {
-        // First, so a signal waiting out a retry lets go instead of holding shutdown for the rest
-        // of its backoff.
+        // First, so a start attempt or a signal waiting out a retry lets go instead of holding
+        // shutdown for the rest of its backoff.
         await _stopping.CancelAsync();
+        if (_startRetry is not null)
+        {
+            try { await _startRetry.WaitAsync(ct); }
+            catch { /* the loop logs its own failures; shutdown goes on */ }
+        }
+
+        _phase = Phase.Stopped;
         _registry.CancelAll();
         await DisposeAsync();
     }
@@ -330,9 +430,25 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_channel is not null)
-            await _channel.CloseAsync();
-        if (_connection is not null)
-            await _connection.CloseAsync();
+        var channel = _channel;
+        var connection = _connection;
+        _channel = null;
+        _connection = null;
+        await CloseQuietlyAsync(channel, connection);
+    }
+
+    private static async Task CloseQuietlyAsync(IChannel? channel, IConnection? connection)
+    {
+        if (channel is not null)
+        {
+            try { await channel.CloseAsync(); }
+            catch { /* already closed, or the connection under it is gone */ }
+        }
+
+        if (connection is not null)
+        {
+            try { await connection.CloseAsync(); }
+            catch { /* already closed */ }
+        }
     }
 }

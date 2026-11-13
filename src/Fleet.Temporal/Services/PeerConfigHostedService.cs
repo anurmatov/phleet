@@ -41,6 +41,10 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
 
         // EscalationTarget is now an alias for CtoAgent — no separate check needed.
 
+        // From here the escalation target and the group chat id are the deployment's. Durable
+        // delegation holds its relay sends (a timeout notice above all) until this is set.
+        FleetWorkflowConfig.MarkPeerConfigLoaded();
+
         await _client.SubscribeAsync(cancellationToken);
     }
 

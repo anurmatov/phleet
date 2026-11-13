@@ -430,7 +430,9 @@ histories replay. `DelegationRelay` is a deliberate second copy of the activity'
 and timeout-report code so the switch-off path is untouched; `DelegationRelayParityTests` keeps the
 two byte-identical. The pass (`TickAsync`) talks to Temporal only; every relay send (directive,
 cancel, timeout notice) goes out on a separate lane that reads what a record owes and writes back
-what was sent (4 at once, one per record, given up after 30 s).
+what was sent (4 at once, one per record, given up after 30 s). The service is registered before
+the peer-config bootstrap on purpose: heartbeats start with the host, relay sends wait for
+`IDelegationRelay.Ready` (`FleetWorkflowConfig.PeerConfigLoaded` and a non-empty escalation target).
 
 MUST NOT: await a relay send from a pass or a reply (ten 10 s cancels once put another activity's
 heartbeat past its 90 s timeout); log or return an instruction, an answer or a task token (the state file is the only place

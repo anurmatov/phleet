@@ -129,6 +129,9 @@ internal sealed class FakeRelay : IDelegationRelay
     /// <summary>When set, every publish throws it.</summary>
     public Exception? PublishFailure { get; set; }
 
+    /// <summary>Whether the bridge has its configuration yet; a relay that is not ready is asked for nothing.</summary>
+    public bool Ready { get; set; } = true;
+
     public int PublishAttempts => Volatile.Read(ref _publishAttempts);
 
     /// <summary>

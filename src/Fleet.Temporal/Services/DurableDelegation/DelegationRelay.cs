@@ -11,6 +11,14 @@ namespace Fleet.Temporal.Services;
 /// <summary>What a pending delegation sends outside the process.</summary>
 public interface IDelegationRelay
 {
+    /// <summary>
+    /// False until the relay knows where to send: the bridge has its configuration from the
+    /// orchestrator and the escalation target is set. Nothing is sent before then. A record found
+    /// at start-up can owe a timeout notice before the bridge has learnt who the escalation target
+    /// is, and a notice published to an empty target is lost without a trace.
+    /// </summary>
+    bool Ready => true;
+
     /// <summary>Publishes the directive the delegation is waiting on. Throws when it could not.</summary>
     Task PublishDirectiveAsync(PendingDelegation delegation, CancellationToken ct);
 
@@ -59,6 +67,22 @@ public sealed class DelegationRelay : IDelegationRelay
 
     private long EffectiveGroupChatId =>
         FleetWorkflowConfig.GroupChatId != 0 ? FleetWorkflowConfig.GroupChatId : _bridgeConfig.GroupChatId;
+
+    public bool Ready
+    {
+        get
+        {
+            if (!FleetWorkflowConfig.PeerConfigLoaded) return false;
+            try
+            {
+                return !string.IsNullOrWhiteSpace(FleetWorkflowConfig.Instance.EscalationTarget);
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+    }
 
     public Task PublishDirectiveAsync(PendingDelegation delegation, CancellationToken ct) =>
         PublishAsync(

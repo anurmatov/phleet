@@ -30,4 +30,10 @@
     <None Update="Fixtures/journal-read/*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Fleet.Agent.Tests/Fixtures/journal-send/*.json" Link="Fixtures/journal-send/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- The wire contracts are used throughout; see src/Fleet.Contracts. -->
+    <Using Include="Fleet.Contracts" />
+  </ItemGroup>
+
 </Project>

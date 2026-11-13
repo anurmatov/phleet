@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Fleet.Contracts</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    What one fleet service puts on the broker or sends over HTTP for another: message records,
+    message type and gate names, exchange and queue names with their arguments, and the journal
+    token format. One declaration, used by the producer and the consumer.
+
+    MUST NOT add a PackageReference or a ProjectReference. Every service references this project,
+    the secret forwarder's neighbours included, so a dependency added here ships in all of them.
+    ContractsProjectDependencyTests (tests/Fleet.Protocol.Tests) fails on one.
+
+    Not Fleet.Protocol: that is the versioned conversation protocol a client outside the fleet can
+    implement. These are internal shapes with no version, changed only together with the samples
+    under tests/fixtures/wire, and a client has no use for them.
+  -->
+
+</Project>

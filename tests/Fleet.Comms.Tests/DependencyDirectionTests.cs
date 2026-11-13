@@ -35,4 +35,41 @@ public sealed class DependencyDirectionTests
         Assert.DoesNotContain("Fleet.Agent", comms);
         Assert.DoesNotContain("Fleet.Telegram", comms);
     }
+
+    /// <summary>
+    /// What NuGet resolved for this service, read from its restore output.
+    /// </summary>
+    /// <remarks>
+    /// The test above looks at the assemblies the compiled service names, and missed what it only
+    /// shipped: this service used <c>Fleet.Shared</c> for the sign-in names, reached it through
+    /// <c>Fleet.Conversations</c>, and so carried <c>Telegram.Bot.dll</c> without naming it anywhere.
+    /// </remarks>
+    [Fact]
+    public void FleetCommsResolvesNoTelegramClientAndNoAgentSideProject()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "Fleet.sln")))
+            root = root.Parent;
+        Assert.True(root is not null, "could not locate the repository root");
+
+        var path = Path.Combine(root!.FullName, "src", "Fleet.Comms", "obj", "project.assets.json");
+        Assert.True(File.Exists(path), $"{path} is missing: Fleet.Comms was not restored before this test ran.");
+
+        using var assets = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        var target = assets.RootElement.GetProperty("targets").EnumerateObject().First().Value;
+        var resolved = target.EnumerateObject()
+            .Select(library => $"{library.Value.GetProperty("type").GetString()} {library.Name.Split('/')[0]}")
+            .ToArray();
+
+        Assert.DoesNotContain("package Telegram.Bot", resolved);
+
+        // RabbitMQ.Client is here on purpose: Fleet.Conversations publishes the outbox with it. The
+        // helper other services connect with is not, and neither is anything of the agent's.
+        Assert.Contains("package RabbitMQ.Client", resolved);
+        Assert.Equal(
+            ["project Fleet.Contracts", "project Fleet.Conversations", "project Fleet.Conversations.Contracts",
+             "project Fleet.Protocol", "project Fleet.Shared"],
+            resolved.Where(library => library.StartsWith("project ", StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal));
+    }
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import type { AgentState, WorkflowTypeInfo } from '../../types'
-import { apiFetch } from '../../utils'
+import { apiGet } from '../../utils'
 import FieldHint from '../FieldHint'
 
 // ── Repository types ────────────────────────────────────────────────────────────
@@ -125,8 +125,7 @@ export function AgentPill({ agent, selected, onClick }: {
 export function useRepositories(): RepoInfo[] {
   const [repos, setRepos] = useState<RepoInfo[]>([])
   useEffect(() => {
-    apiFetch('/api/repositories')
-      .then(r => r.json())
+    apiGet<RepoInfo[]>('/api/repositories')
       .then((data: RepoInfo[]) => setRepos(data))
       .catch(() => {})
   }, [])

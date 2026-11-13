@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { apiFetch } from '../utils'
+import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
 import SecretBindingsSection from './SecretBindingsSection'
 import DevicesSection from './DevicesSection'
 
@@ -52,20 +52,11 @@ function ConfigEditModal({ editKey, onClose, onSaved }: ConfigEditModalProps) {
     setSaving(true)
     setErr('')
     try {
-      const putRes = await apiFetch('/api/config/values', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key.trim()]: value.trim() }),
-      })
-      if (!putRes.ok) {
-        const data = await putRes.json().catch(() => ({}))
-        setErr((data as { error?: string }).error ?? `Error ${putRes.status}`)
-        return
-      }
+      await apiSend('/api/config/values', 'PUT', { [key.trim()]: value.trim() })
       // PUT /api/config/values already calls ReloadAsync internally — no separate reload needed
       onSaved('1 key changed, peers notified')
       onClose()
-    } catch (e) { setErr(String(e)) }
+    } catch (e) { setErr(errorMessage(e)) }
     finally { setSaving(false) }
   }
 
@@ -204,19 +195,10 @@ function MountModal({ fileId, fileName, onClose, onMounted }: MountModalProps) {
     setSaving(true)
     setErr('')
     try {
-      const res = await apiFetch(`/api/credential-files/${fileId}/mount`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentName: agentName.trim(), mountPath: mountPath.trim(), mode }),
-      })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        setErr((data as { error?: string }).error ?? `Error ${res.status}`)
-      } else {
-        onMounted()
-        onClose()
-      }
-    } catch (e) { setErr(String(e)) }
+      await apiSend(`/api/credential-files/${fileId}/mount`, 'POST', { agentName: agentName.trim(), mountPath: mountPath.trim(), mode })
+      onMounted()
+      onClose()
+    } catch (e) { setErr(errorMessage(e)) }
     finally { setSaving(false) }
   }
 
@@ -291,34 +273,29 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
 
   async function loadConnections() {
     try {
-      const res = await apiFetch('/api/credentials/connections')
-      if (res.ok) setConnections(await res.json())
+      setConnections(await apiGet<ConnectionsStatus>('/api/credentials/connections'))
     } catch { /* ignore */ }
   }
 
   async function loadConfigEntries() {
     setConfigLoading(true)
     try {
-      const res = await apiFetch('/api/config/all')
-      if (res.ok) {
-        const data = await res.json()
-        // data is an object: { KEY: maskedValue, ... }
-        const entries: ConfigEntry[] = Object.entries(data as Record<string, string>).map(([key, maskedValue]) => ({
-          key,
-          maskedValue,
-          isSensitive: isSensitiveKey(key),
-        }))
-        entries.sort((a, b) => a.key.localeCompare(b.key))
-        setConfigEntries(entries)
-      }
+      // data is an object: { KEY: maskedValue, ... }
+      const data = await apiGet<Record<string, string>>('/api/config/all')
+      const entries: ConfigEntry[] = Object.entries(data).map(([key, maskedValue]) => ({
+        key,
+        maskedValue,
+        isSensitive: isSensitiveKey(key),
+      }))
+      entries.sort((a, b) => a.key.localeCompare(b.key))
+      setConfigEntries(entries)
     } catch { /* ignore */ }
     finally { setConfigLoading(false) }
   }
 
   async function loadCredFiles() {
     try {
-      const res = await apiFetch('/api/credential-files')
-      if (res.ok) setCredFiles(await res.json())
+      setCredFiles(await apiGet<CredentialFile[]>('/api/credential-files'))
     } catch { /* ignore */ }
   }
 
@@ -371,19 +348,19 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
 
   async function handleDeleteFile(id: number) {
     try {
-      await apiFetch(`/api/credential-files/${id}`, { method: 'DELETE' })
+      await apiSend(`/api/credential-files/${id}`, 'DELETE')
       await loadCredFiles()
       setDeleteFileConfirm(null)
       showToast('File deleted')
-    } catch (e) { showToast(`Failed: ${e}`) }
+    } catch (e) { setDeleteFileConfirm(null); showToast(`Not deleted: ${errorMessage(e)}`) }
   }
 
   async function handleUnmount(fileId: number, mountId: number) {
     try {
-      await apiFetch(`/api/credential-files/${fileId}/mount/${mountId}`, { method: 'DELETE' })
+      await apiSend(`/api/credential-files/${fileId}/mount/${mountId}`, 'DELETE')
       await loadCredFiles()
       setUnmountConfirm(null)
-    } catch (e) { showToast(`Failed: ${e}`) }
+    } catch (e) { setUnmountConfirm(null); showToast(`Not unmounted: ${errorMessage(e)}`) }
   }
 
   const handleDragOver = useCallback((e: React.DragEvent) => {

@@ -7,7 +7,7 @@ import { CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES, PROVIDER_OPTIONS } from '
 import { harnessExtraPlaceholder } from '../effectiveHarness'
 import { crossChatDisabledReason, editedTools } from '../journalCrossChat'
 import { effortChoices, effortOptions, isLocalHarness, switchProvider } from '../localModel'
-import { apiFetch } from '../utils'
+import { apiGet } from '../utils'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
 import LocalModelFields from './LocalModelFields'
@@ -117,12 +117,8 @@ export default function AgentConfigModal({
   const [saveCount, setSaveCount] = useState(0)
   useEffect(() => {
     let active = true
-    apiFetch('/api/comms/journal/status')
-      .then(async response => {
-        if (!response.ok) return
-        const status = await response.json()
-        if (active) setJournalDisabled(status.status === 'disabled')
-      })
+    apiGet<{ status?: string }>('/api/comms/journal/status')
+      .then(status => { if (active) setJournalDisabled(status.status === 'disabled') })
       .catch(() => { /* The server guard still applies when status cannot be loaded. */ })
     return () => { active = false }
   }, [])

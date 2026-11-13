@@ -4,7 +4,7 @@ import { STEP_COLORS, STEP_TYPES } from './editorTypes'
 import { updateStepAtPath, updateBranchCase, removeBranchCase, renameBranchCase, genId, ensureIds, getStepAtPath } from './treeUtils'
 import { makeStep } from './stepDefaults'
 import KeyValueEditor from './KeyValueEditor'
-import { apiFetch } from '../../utils'
+import { apiGet } from '../../utils'
 import { parseSchema, SchemaField, WorkflowTypeSelector, convertFieldValue } from './schemaUtils'
 import type { SchemaProperty } from './schemaUtils'
 import type { WorkflowTypeInfo } from '../../types'
@@ -34,15 +34,13 @@ export default function StepConfigPanel({ root, selectedPath, onChange, workflow
   const [attributeNames, setAttributeNames] = useState<string[]>(DEFAULT_ATTRIBUTE_NAMES)
 
   useEffect(() => {
-    apiFetch('/api/agents')
-      .then(r => r.json())
+    apiGet<Array<{ name: string }>>('/api/agents')
       .then((data: Array<{ name: string }>) => {
         const names = data.map(a => a.name).filter(Boolean)
         if (names.length > 0) setAgentNames(names)
       })
       .catch(() => {})
-    apiFetch('/api/search-attributes')
-      .then(r => r.json())
+    apiGet<string[]>('/api/search-attributes')
       .then((data: string[]) => {
         if (Array.isArray(data) && data.length > 0) setAttributeNames(data)
       })

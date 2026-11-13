@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { apiFetch } from '../utils'
+import { apiGet, apiSend, errorMessage } from '../utils'
 import FieldHint from './FieldHint'
 
 interface RepoRow {
@@ -26,8 +26,7 @@ export default function RepositoriesView() {
 
   function load() {
     setLoading(true)
-    apiFetch('/api/repositories?includeInactive=true')
-      .then(r => r.json())
+    apiGet<RepoRow[]>('/api/repositories?includeInactive=true')
       .then((data: RepoRow[]) => setRepos(data))
       .catch(() => setRepos([]))
       .finally(() => setLoading(false))
@@ -56,19 +55,14 @@ export default function RepositoriesView() {
     setToggleConfirm(prev => ({ ...prev, [name]: false }))
     setToggleState(prev => ({ ...prev, [name]: 'pending' }))
     try {
-      const res = await apiFetch(`/api/repositories/${name}/toggle-active`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isActive }),
-      })
-      if (!res.ok) throw new Error(await res.text())
+      await apiSend(`/api/repositories/${name}/toggle-active`, 'POST', { isActive })
       setToggleState(prev => ({ ...prev, [name]: 'success' }))
       setToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Activated' : 'Archived' }))
       load()
       setTimeout(() => setToggleState(prev => ({ ...prev, [name]: 'idle' })), 2000)
     } catch (e) {
       setToggleState(prev => ({ ...prev, [name]: 'error' }))
-      setToggleMsg(prev => ({ ...prev, [name]: String(e) }))
+      setToggleMsg(prev => ({ ...prev, [name]: errorMessage(e) }))
       setTimeout(() => setToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
     }
   }
@@ -80,12 +74,7 @@ export default function RepositoriesView() {
     if (!nameValid || !fullNameValid) return
     setNewFormState('saving')
     try {
-      const res = await apiFetch('/api/repositories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName, fullName: newFullName }),
-      })
-      if (!res.ok) throw new Error(await res.text())
+      await apiSend('/api/repositories', 'POST', { name: newName, fullName: newFullName })
       setNewFormState('success')
       setNewFormMsg('Created')
       setNewName('')
@@ -95,7 +84,7 @@ export default function RepositoriesView() {
       setTimeout(() => setNewFormState('idle'), 2000)
     } catch (e) {
       setNewFormState('error')
-      setNewFormMsg(String(e))
+      setNewFormMsg(errorMessage(e))
       setTimeout(() => setNewFormState('idle'), 3000)
     }
   }

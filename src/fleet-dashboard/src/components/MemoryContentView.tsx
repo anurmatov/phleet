@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import type { MemoryDoc, MemorySizeReport } from '../types'
-import { apiFetch } from '../utils'
+import { apiFetch, apiSend } from '../utils'
 import { formatBytes } from '../sizeMeter'
 import SizeMeter from './SizeMeter'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
@@ -128,8 +128,7 @@ export default function MemoryContentView({ id, onDeleted, onSaved }: MemoryCont
     if (!doc) return
     setShowDeleteModal(false)
     try {
-      const resp = await apiFetch(`/api/memory/${encodeURIComponent(doc.id)}`, { method: 'DELETE' })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      await apiSend(`/api/memory/${encodeURIComponent(doc.id)}`, 'DELETE')
       refreshIdCache()
       onDeleted?.(doc.id)
     } catch (e) {

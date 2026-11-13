@@ -3,10 +3,7 @@ import type {
   AgentState,
   TaskRecord,
   WorkflowSummary,
-  WorkflowEvent,
   SignalDef,
-  SignalButton,
-  SignalModalState,
   Alert,
   McpEndpointEntry,
   CreateForm,
@@ -18,7 +15,6 @@ import type {
   RestartState,
   ReprovisionState,
   StopStartState,
-  WfActionState,
   CancelState,
   ConfigSaveState,
   ActiveView,
@@ -28,8 +24,7 @@ import type {
   OutputStyleSummary,
   PromptSizeLimits,
 } from './types'
-import { apiFetch, apiGet, apiSend, errorMessage, firstFailure } from './utils'
-import { buildSignalRequest, signalErrorMessage } from './signalRequest'
+import { apiGet, apiSend, errorMessage, firstFailure } from './utils'
 import { humanInputIdentity } from './humanInputRequest'
 import { PROVIDER_DEFAULT_MODEL } from './constants'
 import { warmupTimeoutEditValue } from './warmupTimeout'
@@ -43,6 +38,8 @@ import { KeyedTimers, afterClose } from './reconnect'
 import { useInstructions } from './hooks/useInstructions'
 import { useVersionedResource } from './hooks/useVersionedResource'
 import { useWorkflowDefinitions } from './hooks/useWorkflowDefinitions'
+import { useWorkflowActions } from './hooks/useWorkflowActions'
+import { useWorkflowLists } from './hooks/useWorkflowLists'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -111,11 +108,6 @@ interface AgentTemplateDetail {
 export default function App() {
   const [agents, setAgents] = useState<Record<string, AgentState>>({})
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([])
-  const [workflowsLoading, setWorkflowsLoading] = useState(false)
-  const [completedWorkflows, setCompletedWorkflows] = useState<WorkflowSummary[]>([])
-  const [completedCollapsed, setCompletedCollapsed] = useState(true)
-  const [completedLoading, setCompletedLoading] = useState(false)
-  const [nsFilter, setNsFilter] = useState<string>('all')
   const [wsStatus, setWsStatus] = useState<WsStatus>('connecting')
   const [lastUpdated, setLastUpdated] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
@@ -142,9 +134,6 @@ export default function App() {
   const [cancelMsg, setCancelMsg] = useState<Record<string, string>>({})
   const [bgCancelStates, setBgCancelStates] = useState<Record<string, 'idle' | 'cancelling' | 'done' | 'error'>>({})
 
-  const [wfActionStates, setWfActionStates] = useState<Record<string, WfActionState>>({})
-  const [wfActionMsg, setWfActionMsg] = useState<Record<string, string>>({})
-
   const [stopStates, setStopStates] = useState<Record<string, StopStartState>>({})
   const [stopMsg, setStopMsg] = useState<Record<string, string>>({})
   const [startStates, setStartStates] = useState<Record<string, StopStartState>>({})
@@ -153,12 +142,10 @@ export default function App() {
   const [signalRegistry, setSignalRegistry] = useState<Record<string, SignalDef[]>>({})
   const [workflowTypes, setWorkflowTypes] = useState<WorkflowTypeInfo[]>([])
   const [apiNamespaces, setApiNamespaces] = useState<string[]>([])
-  const [startWfModalOpen, setStartWfModalOpen] = useState(false)
-  const [signalModal, setSignalModal] = useState<SignalModalState | null>(null)
-  const [signalStates, setSignalStates] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [signalMsg, setSignalMsg] = useState<Record<string, string>>({})
-  const [sentSignals, setSentSignals] = useState<Set<string>>(new Set())
-  const [signalConfirm, setSignalConfirm] = useState<string | null>(null)
+  const wfLists = useWorkflowLists(workflows, setWorkflows)
+  const wfActions = useWorkflowActions(timers, signalRegistry)
+  const { pruneSentSignals, getSignalDefs } = wfActions
+  const { refreshWorkflows: fetchWorkflows, refreshCompleted: fetchCompleted } = wfLists
 
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set())
   function toggleTaskExpand(key: string) {
@@ -216,14 +203,6 @@ export default function App() {
   const seenFailedWorkflowsRef = useRef<Set<string>>(new Set())
 
   const [copiedContainer, setCopiedContainer] = useState<string | null>(null)
-  const [wfMenuOpen, setWfMenuOpen] = useState<Record<string, boolean>>({})
-
-  const [selectedWf, setSelectedWf] = useState<WorkflowSummary | null>(null)
-  const [wfHistory, setWfHistory] = useState<WorkflowEvent[]>([])
-  const [wfHistoryLoading, setWfHistoryLoading] = useState(false)
-  const [wfHistoryError, setWfHistoryError] = useState<string | null>(null)
-  const [expandedEvents, setExpandedEvents] = useState<Set<number>>(new Set())
-
   const [createModalOpen, setCreateModalOpen] = useState(false)
   const [createForm, setCreateForm] = useState<CreateForm>(DEFAULT_CREATE_FORM)
   const [createState, setCreateState] = useState<'idle' | 'creating' | 'success' | 'error'>('idle')
@@ -352,19 +331,7 @@ export default function App() {
         const msg: WsMessage = JSON.parse(event.data)
         if (msg.type === 'workflows') {
           setWorkflows(msg.data)
-          setSentSignals(prev => {
-            const next = new Set(prev)
-            for (const entry of prev) {
-              const sepIdx = entry.lastIndexOf('::')
-              const wfId = entry.slice(0, sepIdx)
-              const oldPhase = entry.slice(sepIdx + 2)
-              const updated = (msg.data as WorkflowSummary[]).find((w: WorkflowSummary) => w.workflowId === wfId)
-              if (!updated || updated.phase !== oldPhase || updated.status !== 'Running') {
-                next.delete(entry)
-              }
-            }
-            return next.size !== prev.size ? next : prev
-          })
+          pruneSentSignals(msg.data)
         } else {
           const agent = msg as AgentState
           setAgents(prev => ({ ...prev, [agent.agentName]: agent }))
@@ -384,23 +351,7 @@ export default function App() {
       reconnectTimer.current = setTimeout(connect, next.delayMs)
     }
     ws.onerror = () => ws.close()
-  }, [refreshAgents])
-
-  function fetchWorkflows() {
-    setWorkflowsLoading(true)
-    apiGet<WorkflowSummary[]>('/api/workflows')
-      .then((list: WorkflowSummary[]) => setWorkflows(list))
-      .catch(() => {})
-      .finally(() => setWorkflowsLoading(false))
-  }
-
-  function fetchCompleted() {
-    setCompletedLoading(true)
-    apiGet<WorkflowSummary[]>('/api/workflows/completed?hours=24')
-      .then((list: WorkflowSummary[]) => setCompletedWorkflows(list))
-      .catch(() => {})
-      .finally(() => setCompletedLoading(false))
-  }
+  }, [refreshAgents, pruneSentSignals])
 
   // Populates the output-style select and the sidenav count. On failure the list stays empty and
   // the select still offers "none", so a styled agent can always be switched back off.
@@ -441,7 +392,7 @@ export default function App() {
     fetchCompleted()
 
     loadSetupStatus()
-  }, [refreshAgents, loadInstructions, loadProjectContexts])
+  }, [refreshAgents, loadInstructions, loadProjectContexts, fetchWorkflows, fetchCompleted])
 
   useEffect(() => {
     unmounted.current = false
@@ -549,10 +500,6 @@ export default function App() {
     const id = setInterval(checkFailures, 60_000)
     return () => clearInterval(id)
   }, [addAlert])
-
-  const namespaces = useMemo(() => Array.from(new Set(workflows.map(w => w.namespace))).sort(), [workflows])
-  const filteredWorkflows = useMemo(() => nsFilter === 'all' ? workflows : workflows.filter(w => w.namespace === nsFilter), [workflows, nsFilter])
-  const filteredCompletedWorkflows = useMemo(() => nsFilter === 'all' ? completedWorkflows : completedWorkflows.filter(w => w.namespace === nsFilter), [completedWorkflows, nsFilter])
 
   const { agentByWorkflow, workflowByAgent } = useMemo(() => {
     const agentByWorkflow: Record<string, string> = {}
@@ -881,112 +828,6 @@ export default function App() {
     })()
   }
 
-  function wfKey(wf: WorkflowSummary): string { return `${wf.namespace}/${wf.workflowId}` }
-
-  async function handleWfClick(wf: WorkflowSummary) {
-    setSelectedWf(wf)
-    setWfHistory([])
-    setWfHistoryError(null)
-    setExpandedEvents(new Set())
-    setWfHistoryLoading(true)
-    try {
-      const events = await apiGet<WorkflowEvent[]>(`/api/workflows/${encodeURIComponent(wf.namespace)}/history/${encodeURIComponent(wf.workflowId)}`)
-      const sorted = [...events].reverse()
-      setWfHistory(sorted)
-      if (sorted.length > 0) setExpandedEvents(new Set([sorted[0].eventId]))
-    } catch (e: unknown) {
-      setWfHistoryError(errorMessage(e))
-    } finally {
-      setWfHistoryLoading(false)
-    }
-  }
-
-  function getWfActionState(wf: WorkflowSummary): WfActionState { return wfActionStates[wfKey(wf)] ?? 'idle' }
-
-  function setWfState(wf: WorkflowSummary, state: WfActionState, msg = '') {
-    const k = wfKey(wf)
-    setWfActionStates(prev => ({ ...prev, [k]: state }))
-    setWfActionMsg(prev => ({ ...prev, [k]: msg }))
-  }
-
-  function handleWfAction(wf: WorkflowSummary, action: 'cancel' | 'restart' | 'terminate') {
-    const state = getWfActionState(wf)
-    if (state === 'pending') return
-    if (state === `confirming-${action}`) {
-      setWfState(wf, 'pending')
-      const url = action === 'restart'
-        ? `/api/workflows/${encodeURIComponent(wf.namespace)}/restart/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}&terminateExisting=true`
-        : `/api/workflows/${encodeURIComponent(wf.namespace)}/${action}/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}`
-      apiSend(url, 'POST')
-        .then(() => { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) })
-        .catch((e: unknown) => { setWfState(wf, 'error', errorMessage(e)) })
-        .finally(() => timers.after(`wf:${wfKey(wf)}`, 4000, () => setWfState(wf, 'idle')))
-      return
-    }
-    setWfState(wf, `confirming-${action}`)
-    timers.after(`wf:${wfKey(wf)}`, 5000, () => {
-      setWfActionStates(prev => {
-        const cur = prev[wfKey(wf)]
-        if (cur === `confirming-${action}`) return { ...prev, [wfKey(wf)]: 'idle' }
-        return prev
-      })
-    })
-  }
-
-  function signalKey(wf: WorkflowSummary): string { return `${wf.namespace}/${wf.workflowId}` }
-
-  function handleWfActionDirect(wf: WorkflowSummary, action: 'cancel' | 'restart' | 'terminate') {
-    setWfState(wf, 'pending')
-    const url = action === 'restart'
-      ? `/api/workflows/${encodeURIComponent(wf.namespace)}/restart/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}&terminateExisting=true`
-      : `/api/workflows/${encodeURIComponent(wf.namespace)}/${action}/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}`
-    apiSend(url, 'POST')
-      .then(() => { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) })
-      .catch((e: unknown) => { setWfState(wf, 'error', errorMessage(e)) })
-      .finally(() => timers.after(`wf:${wfKey(wf)}`, 4000, () => setWfState(wf, 'idle')))
-  }
-
-  function getSignalDefs(wf: WorkflowSummary): SignalDef[] {
-    const defs = signalRegistry[wf.workflowType] ?? []
-    if (!wf.phase) return []
-    return defs.filter(sig => !sig.validPhases || sig.validPhases.includes(wf.phase!))
-  }
-
-  function signalConfirmKey(wf: WorkflowSummary, sigName: string, btnLabel: string): string {
-    return `${signalKey(wf)}|${sigName}|${btnLabel}`
-  }
-
-  function handleSignalClick(wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) {
-    if (btn.requiresComment || sig.name === 'request-input') {
-      setSignalModal({ wf, signalName: sig.name, button: btn, comment: '' })
-      return
-    }
-    const ck = signalConfirmKey(wf, sig.name, btn.label)
-    if (signalConfirm === ck) {
-      setSignalConfirm(null)
-      sendSignal(wf, sig.name, btn.payload)
-    } else {
-      setSignalConfirm(ck)
-      timers.after('signal-confirm', 5000, () => setSignalConfirm(prev => prev === ck ? null : prev))
-    }
-  }
-
-  function sendSignal(wf: WorkflowSummary, signalName: string, payload: string, comment?: string) {
-    const key = signalKey(wf)
-    setSignalStates(prev => ({ ...prev, [key]: 'pending' }))
-    apiFetch(`/api/workflows/${encodeURIComponent(wf.namespace)}/signal/${encodeURIComponent(wf.workflowId)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildSignalRequest(wf, signalName, payload, comment)),
-    })
-      .then(async r => {
-        if (r.ok) { setSignalStates(prev => ({ ...prev, [key]: 'success' })); setSignalMsg(prev => ({ ...prev, [key]: 'Signal sent' })); setSentSignals(prev => new Set(prev).add(`${wf.workflowId}::${wf.phase}`)) }
-        else { const b = await r.json().catch(() => ({})); setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalName === 'request-input' && r.status >= 500 ? 'Answer delivery is uncertain. Refresh this exact run before retrying.' : signalErrorMessage(r.status, b) })) }
-      })
-      .catch(() => { setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalName === 'request-input' ? 'Answer delivery is uncertain. Refresh this exact run before retrying.' : 'Request failed' })) })
-      .finally(() => { if (signalName !== 'request-input') setTimeout(() => setSignalStates(prev => ({ ...prev, [key]: 'idle' })), 4000) })
-  }
-
   function applyLogFilter(lines: string[]): string[] {
     if (logFilter === 'all') return lines
     return lines.filter(l => {
@@ -1003,14 +844,6 @@ export default function App() {
       setCopiedContainer(name)
       setTimeout(() => setCopiedContainer(null), 2000)
     }).catch(() => {})
-  }
-
-  function wfStatusClass(wf: WorkflowSummary, signalDefs: SignalDef[]): string {
-    const s = wf.status
-    if (s === 'TimedOut' || s === 'Canceled' || s === 'Terminated' || s === 'Completed' || s === 'Failed') return 'wf-row-muted'
-    if (s === 'Running' && signalDefs.length > 0) return 'wf-row-signal-waiting'
-    if (s === 'Running') return 'wf-row-running'
-    return ''
   }
 
   async function handleCopyFrom(sourceName: string) {
@@ -1124,6 +957,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const signalModal = wfActions.signalModal
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
 
   return (
@@ -1201,18 +1035,7 @@ export default function App() {
             workflowByAgent={workflowByAgent}
             workflows={workflows}
             agentByWorkflow={agentByWorkflow}
-            wfActionStates={wfActionStates}
-            wfActionMsg={wfActionMsg}
-            signalStates={signalStates}
-            signalMsg={signalMsg}
-            signalConfirm={signalConfirm}
-            signalRegistry={signalRegistry}
-            wfMenuOpen={wfMenuOpen}
-            selectedWf={selectedWf}
-            wfHistory={wfHistory}
-            wfHistoryLoading={wfHistoryLoading}
-            wfHistoryError={wfHistoryError}
-            expandedEvents={expandedEvents}
+            workflowActions={wfActions}
             onExpandAgent={toggleHistory}
             onRestart={handleRestart}
             onRestartConfirm={handleRestartConfirm}
@@ -1233,19 +1056,6 @@ export default function App() {
             onEditConfig={openConfig}
             onToggleTask={toggleTaskExpand}
             onCopyContainer={handleContainerCopy}
-            onWfClick={handleWfClick}
-            onWfAction={handleWfAction}
-            onSignalClick={handleSignalClick}
-            onToggleMenu={k => setWfMenuOpen(prev => ({ ...prev, [k]: !prev[k] }))}
-            onToggleEvent={id => setExpandedEvents(prev => { const next = new Set(prev); prev.has(id) ? next.delete(id) : next.add(id); return next })}
-            onCloseDetail={() => setSelectedWf(null)}
-            onRefreshDetail={() => selectedWf && handleWfClick(selectedWf)}
-            getSignalDefs={getSignalDefs}
-            wfActionState={getWfActionState}
-            signalKey={signalKey}
-            wfKey={wfKey}
-            wfStatusClass={wfStatusClass}
-            signalConfirmKey={signalConfirmKey}
             highlightedEntityId={highlightedEntityId}
             onClearHighlight={onClearHighlight}
           />
@@ -1254,52 +1064,11 @@ export default function App() {
         {activeView === 'workflows' && (
           <WorkflowsView
             workflows={workflows}
-            completedWorkflows={completedWorkflows}
-            completedCollapsed={completedCollapsed}
-            completedLoading={completedLoading}
-            nsFilter={nsFilter}
-            namespaces={namespaces}
-            filteredWorkflows={filteredWorkflows}
-            filteredCompletedWorkflows={filteredCompletedWorkflows}
+            lists={wfLists}
+            actions={wfActions}
             agentByWorkflow={agentByWorkflow}
-            wfActionStates={wfActionStates}
-            wfActionMsg={wfActionMsg}
-            signalStates={signalStates}
-            signalMsg={signalMsg}
-            sentSignals={sentSignals}
-            signalRegistry={signalRegistry}
-            wfMenuOpen={wfMenuOpen}
-            selectedWf={selectedWf}
-            wfHistory={wfHistory}
-            wfHistoryLoading={wfHistoryLoading}
-            wfHistoryError={wfHistoryError}
-            expandedEvents={expandedEvents}
-            onNsFilter={setNsFilter}
-            onToggleCompleted={() => setCompletedCollapsed(c => !c)}
-            onRefreshCompleted={fetchCompleted}
-            onWfClick={handleWfClick}
-            onSignalClick={handleSignalClick}
-            onToggleMenu={k => setWfMenuOpen(prev => {
-              // Support close-only key (from handleWfActionLocal)
-              const realKey = k.endsWith('__close__') ? k.slice(0, -9) : k
-              if (k.endsWith('__close__')) return { ...prev, [realKey]: false }
-              return { ...prev, [realKey]: !prev[realKey] }
-            })}
-            onToggleEvent={id => setExpandedEvents(prev => { const next = new Set(prev); prev.has(id) ? next.delete(id) : next.add(id); return next })}
-            onCloseDetail={() => setSelectedWf(null)}
-            onRefreshDetail={() => selectedWf && handleWfClick(selectedWf)}
-            getSignalDefs={getSignalDefs}
-            wfActionState={getWfActionState}
-            signalKey={signalKey}
-            wfKey={wfKey}
-            wfStatusClass={wfStatusClass}
-            onSendSignal={sendSignal}
-            onExecuteWfAction={handleWfActionDirect}
             highlightedEntityId={highlightedEntityId}
             onClearHighlight={onClearHighlight}
-            onStartWorkflow={() => setStartWfModalOpen(true)}
-            onRefreshWorkflows={fetchWorkflows}
-            workflowsLoading={workflowsLoading}
           />
         )}
 
@@ -1421,11 +1190,11 @@ export default function App() {
           modal={signalModal}
           currentGate={signalModal.signalName !== 'request-input' || workflows.some(wf =>
             humanInputIdentity(wf) === humanInputIdentity(signalModal.wf))}
-          onClose={() => setSignalModal(null)}
-          onCommentChange={comment => setSignalModal(m => m ? { ...m, comment } : null)}
+          onClose={() => wfActions.setSignalModal(null)}
+          onCommentChange={comment => wfActions.setSignalModal(m => m ? { ...m, comment } : null)}
           onSend={(payload) => {
-            sendSignal(signalModal.wf, signalModal.signalName, payload ?? signalModal.button.payload, signalModal.comment || undefined)
-            setSignalModal(null)
+            wfActions.sendSignal(signalModal.wf, signalModal.signalName, payload ?? signalModal.button.payload, signalModal.comment || undefined)
+            wfActions.setSignalModal(null)
           }}
         />
       )}
@@ -1472,11 +1241,11 @@ export default function App() {
         />
       )}
 
-      {startWfModalOpen && (
+      {wfLists.startOpen && (
         <StartWorkflowModal
           workflowTypes={workflowTypes}
           agents={Object.values(agents)}
-          onClose={() => setStartWfModalOpen(false)}
+          onClose={() => wfLists.setStartOpen(false)}
         />
       )}
 

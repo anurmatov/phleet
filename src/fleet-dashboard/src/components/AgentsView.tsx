@@ -6,11 +6,8 @@ import type {
   StopStartState,
   CancelState,
   WorkflowSummary,
-  WorkflowEvent,
-  SignalDef,
-  SignalButton,
-  WfActionState,
 } from '../types'
+import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
 import AgentCard from './AgentCard'
 import CommsJournalPanel from './CommsJournalPanel'
@@ -41,18 +38,8 @@ interface AgentsViewProps {
   workflows: WorkflowSummary[]
   // Workflow section
   agentByWorkflow: Record<string, string>
-  wfActionStates: Record<string, WfActionState>
-  wfActionMsg: Record<string, string>
-  signalStates: Record<string, 'idle' | 'pending' | 'success' | 'error'>
-  signalMsg: Record<string, string>
-  signalConfirm: string | null
-  signalRegistry: Record<string, SignalDef[]>
-  wfMenuOpen: Record<string, boolean>
-  selectedWf: WorkflowSummary | null
-  wfHistory: WorkflowEvent[]
-  wfHistoryLoading: boolean
-  wfHistoryError: string | null
-  expandedEvents: Set<number>
+  /** Signals, cancel/restart/kill and the history panel (hooks/useWorkflowActions.ts). */
+  workflowActions: WorkflowActions
   onExpandAgent: (agentName: string) => void
   onRestart: (agentName: string) => void
   onRestartConfirm: (agentName: string) => void
@@ -73,20 +60,6 @@ interface AgentsViewProps {
   onEditConfig: (agentName: string) => void
   onToggleTask: (key: string) => void
   onCopyContainer: (name: string) => void
-  // Workflow handlers
-  onWfClick: (wf: WorkflowSummary) => void
-  onWfAction: (wf: WorkflowSummary, action: 'cancel' | 'restart' | 'terminate') => void
-  onSignalClick: (wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) => void
-  onToggleMenu: (k: string) => void
-  onToggleEvent: (eventId: number) => void
-  onCloseDetail: () => void
-  onRefreshDetail: () => void
-  getSignalDefs: (wf: WorkflowSummary) => SignalDef[]
-  wfActionState: (wf: WorkflowSummary) => WfActionState
-  signalKey: (wf: WorkflowSummary) => string
-  wfKey: (wf: WorkflowSummary) => string
-  wfStatusClass: (wf: WorkflowSummary, signalDefs: SignalDef[]) => string
-  signalConfirmKey: (wf: WorkflowSummary, sigName: string, btnLabel: string) => string
   highlightedEntityId: string | null
   onClearHighlight: () => void
 }
@@ -116,16 +89,7 @@ export default function AgentsView({
   workflowByAgent,
   workflows,
   agentByWorkflow,
-  wfActionMsg,
-  signalStates,
-  signalMsg,
-  signalConfirm,
-  wfMenuOpen,
-  selectedWf,
-  wfHistory,
-  wfHistoryLoading,
-  wfHistoryError,
-  expandedEvents,
+  workflowActions,
   onExpandAgent,
   onRestart,
   onRestartConfirm,
@@ -146,22 +110,24 @@ export default function AgentsView({
   onEditConfig,
   onToggleTask,
   onCopyContainer,
-  onWfClick,
-  onWfAction,
-  onSignalClick,
-  onToggleMenu,
-  onToggleEvent,
-  onCloseDetail,
-  onRefreshDetail,
-  getSignalDefs,
-  wfActionState,
-  signalKey,
-  wfKey,
-  wfStatusClass,
-  signalConfirmKey,
   highlightedEntityId,
   onClearHighlight,
 }: AgentsViewProps) {
+  const {
+    wfActionMsg, signalStates, signalMsg, signalConfirm, selectedWf, expandedEvents,
+    menuOpen: wfMenuOpen,
+    history: wfHistory,
+    historyLoading: wfHistoryLoading,
+    historyError: wfHistoryError,
+    openDetail: onWfClick,
+    confirmAction: onWfAction,
+    signalClick: onSignalClick,
+    toggleMenu: onToggleMenu,
+    toggleEvent: onToggleEvent,
+    closeDetail: onCloseDetail,
+    refreshDetail: onRefreshDetail,
+    getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass, signalConfirmKey,
+  } = workflowActions
   if (sorted.length === 0) {
     return (
       <div className="view-page">

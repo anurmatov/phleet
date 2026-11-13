@@ -12,6 +12,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
+    <ProjectReference Include="..\Fleet.Shared.Telegram\Fleet.Shared.Telegram.csproj" />
+    <ProjectReference Include="..\Fleet.Shared.Messaging\Fleet.Shared.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>

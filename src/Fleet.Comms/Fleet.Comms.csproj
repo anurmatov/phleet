@@ -7,6 +7,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Protocol\Fleet.Protocol.csproj" />
     <ProjectReference Include="..\Fleet.Conversations\Fleet.Conversations.csproj" />
+    <!-- For Fleet.Shared.SignIn alone: the names sign-in shares with the orchestrator. -->
+    <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>

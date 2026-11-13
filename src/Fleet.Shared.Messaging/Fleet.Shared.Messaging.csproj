@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The types keep the namespace they had in Fleet.Shared, so no caller changed. -->
+    <RootNamespace>Fleet.Shared</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    The RabbitMQ connection helper and the peer-config client, split out of Fleet.Shared so that
+    referencing Fleet.Shared no longer brings RabbitMQ.Client with it. Referenced by the services
+    that hold a broker connection.
+  -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+    <!-- The wire contracts are used throughout; see src/Fleet.Contracts. -->
+    <Using Include="Fleet.Contracts" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="RabbitMQ.Client" />
+  </ItemGroup>
+
+</Project>

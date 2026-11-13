@@ -368,7 +368,10 @@ public sealed class DurableDelegationLocalTests : IClassFixture<LocalTemporalFix
 
         await second.Durable.TickAsync(default);
 
-        Assert.Empty((await second.Durable.SnapshotAsync()).Pending);
+        // The cancel goes out off the pass, and the record goes when it has.
+        await WaitForAsync(
+            async () => _relay.Cancels.Count == 1 && (await second.Durable.SnapshotAsync()).Pending.Count == 0,
+            "the agent was told to stop and the record was dropped");
         Assert.Equal((Agent, $"{id}/probe"), Assert.Single(_relay.Cancels));
         // The agent's late answer then belongs to nothing, as an orphan always did.
         Assert.False(await second.Listener.TryRouteReplyAsync(Reply($"{id}/probe", "[status: completed] too late")));
@@ -392,8 +395,11 @@ public sealed class DurableDelegationLocalTests : IClassFixture<LocalTemporalFix
 
         var failure = await Assert.ThrowsAsync<WorkflowFailedException>(() => handle.GetResultAsync());
         Assert.IsType<CanceledFailureException>(failure.InnerException);
+        // Temporal is told at once; the cancel to the agent follows off the pass.
+        await WaitForAsync(
+            async () => _relay.Cancels.Count == 1 && (await bridge.Durable.SnapshotAsync()).Pending.Count == 0,
+            "the agent was told to stop and the record was removed");
         Assert.Equal((Agent, $"{id}/probe"), Assert.Single(_relay.Cancels));
-        Assert.Empty((await bridge.Durable.SnapshotAsync()).Pending);
         Assert.Contains(EventType.ActivityTaskCanceled, ActivityEvents(await handle.FetchHistoryAsync()));
     }
 
@@ -426,8 +432,11 @@ public sealed class DurableDelegationLocalTests : IClassFixture<LocalTemporalFix
 
         if (durable)
         {
+            // The notice to the escalation target follows off the pass.
+            await WaitForAsync(
+                async () => _relay.TimeoutReports.Count == 1 && (await bridge.Durable.SnapshotAsync()).Pending.Count == 0,
+                "the timeout was reported and the record was removed");
             Assert.Equal($"{id}/probe", Assert.Single(_relay.TimeoutReports).TaskId);
-            Assert.Empty((await bridge.Durable.SnapshotAsync()).Pending);
         }
     }
 }

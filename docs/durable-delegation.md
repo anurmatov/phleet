@@ -18,7 +18,7 @@ Temporal the activity will be completed later (asynchronous activity completion)
 | heartbeat the activity | every pass (`TickSeconds`, default 15) | yes; it was every 30 s |
 | re-send the directive | every 5 minutes | yes |
 | fail the activity with `TimeoutException` | the agent's budget runs out | yes, same message and error type |
-| tell the escalation target about the timeout | once, at that moment | yes |
+| tell the escalation target about the timeout | once, after Temporal has been told | yes, but it no longer comes first |
 | continue an `incomplete` answer (`/incomplete-retry-N`) | when it arrives, up to `maxIncompleteRetries` | yes, same prompt and same joined text |
 | tell the agent to stop | the workflow cancels the activity, or Temporal no longer has it | yes |
 | complete the activity | the agent's answer arrives at the relay listener | yes, same result |
@@ -31,6 +31,28 @@ schedule the same activity.
 After a restart the service reads the file and carries on: the first pass heartbeats every pending
 delegation, and an answer that reached the broker while the bridge was down is consumed from the
 bridge's durable queue and completes its activity.
+
+## A pass never waits for the relay
+
+A heartbeat has a deadline and a publish does not, so the two are kept apart.
+
+- **The pass** talks to Temporal only: heartbeat, fail on a budget, report a cancellation, deliver
+  an answer Temporal could not be told earlier. What it learns it writes to the record.
+- **The relay lane** sends what a record owes the outside: the directive (a continuation, the
+  five-minute re-send, one that was recorded but never published), a cancel to the agent, a timeout
+  notice. It reads what is owed from the record, sends, and writes back what was sent.
+
+Neither a pass nor a reply waits for a send, its own record's included. A relay that is slow or
+does not return delays relay effects and nothing else. What that means in numbers:
+
+- at most 4 sends are in progress at once, and one per record;
+- a send that has not ended after 10 seconds is told to stop and gives its place to the next;
+- a send still not ended after 30 seconds is given up, so the record's next effect can go out. A
+  cancel or a timeout notice is then treated as sent: each is one best-effort attempt, as it was
+  inside the activity, and its record must not wait for ever. A directive is owed again;
+- a send that ends late changes nothing for a record that has since been completed, removed, or
+  replaced by a later attempt under the same task id;
+- what is owed is in the state file, so a restart sends it.
 
 ## The switch
 
@@ -69,14 +91,17 @@ was last sent, plus `enabled` and `durable` (false when the file cannot be writt
   survive a restart. `/pending-delegations` reports `durable: false` and the log says so once.
 - **An answer for a delegation Temporal cannot be told about** (Temporal unreachable) is written to
   the record and the message is acknowledged; a later pass completes the activity with it.
-- **Temporal or the broker being away** costs a pass one bounded call each (10 seconds), not one
-  per delegation, so heartbeats for the reachable ones are not starved.
+- **Temporal being away** costs a pass one bounded call (10 seconds) per namespace, not one per
+  delegation. The broker or the orchestrator being away costs a pass nothing: see above.
 - Not covered: local activities (none delegate today) keep the in-process wait.
 
 Differences from the in-process wait, all deliberate:
 
-- A continuation that cannot be published is kept and sent by a later pass. The activity used to
-  fail there, discarding the partial answer.
+- A continuation is recorded when the incomplete answer arrives and sent by the relay lane. One
+  that cannot be published is tried again after the next pass. The activity used to fail there,
+  discarding the partial answer.
+- A cancelled or timed-out record stays in `/pending-delegations` (`cancelling`, `timed-out`) until
+  its cancel or notice has gone out, although Temporal has already been told.
 - A cancel after a continuation names the continuation task (`…/incomplete-retry-N`), which is the
   one the agent is running. It used to name the original task.
 - A budget is checked on a pass, so a timeout is reported up to a pass late when Temporal or the

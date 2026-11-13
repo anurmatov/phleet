@@ -9,11 +9,11 @@ namespace Fleet.Temporal.Tests.Services.DurableDelegation;
 /// <summary>A clock the test moves.</summary>
 internal sealed class FakeClock : TimeProvider
 {
-    private DateTimeOffset _now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private long _ticks = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).UtcTicks;
 
-    public override DateTimeOffset GetUtcNow() => _now;
+    public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref _ticks), TimeSpan.Zero);
 
-    public void Advance(TimeSpan by) => _now += by;
+    public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
 }
 
 /// <summary>Stands in for Temporal: records every call and answers what the test scripted.</summary>
@@ -24,6 +24,11 @@ internal sealed class FakeGateway : IAsyncActivityGateway
     public List<(string TaskId, Exception Failure)> Failed { get; } = [];
     public List<string> Cancelled { get; } = [];
 
+    /// <summary>When each heartbeat was made, on <see cref="Clock"/>.</summary>
+    public List<(string TaskId, DateTimeOffset At)> HeartbeatTimes { get; } = [];
+
+    public TimeProvider Clock { get; set; } = TimeProvider.System;
+
     public ActivityCallOutcome Heartbeat { get; set; } = ActivityCallOutcome.Ok;
     public ActivityCallOutcome Complete { get; set; } = ActivityCallOutcome.Ok;
     public ActivityCallOutcome Fail { get; set; } = ActivityCallOutcome.Ok;
@@ -32,67 +37,143 @@ internal sealed class FakeGateway : IAsyncActivityGateway
     /// <summary>Overrides <see cref="Heartbeat"/> for one task id.</summary>
     public Dictionary<string, ActivityCallOutcome> HeartbeatFor { get; } = new(StringComparer.Ordinal);
 
-    public int Count(string call) => Calls.Count(c => c.StartsWith(call + ":", StringComparison.Ordinal));
+    public int Count(string call)
+    {
+        lock (Calls) return Calls.Count(c => c.StartsWith(call + ":", StringComparison.Ordinal));
+    }
 
     public Task<ActivityCallOutcome> HeartbeatAsync(PendingDelegation delegation, CancellationToken ct)
     {
-        Calls.Add($"heartbeat:{delegation.TaskId}");
+        lock (Calls)
+        {
+            Calls.Add($"heartbeat:{delegation.TaskId}");
+            HeartbeatTimes.Add((delegation.TaskId, Clock.GetUtcNow()));
+        }
+
         return Task.FromResult(HeartbeatFor.GetValueOrDefault(delegation.TaskId, Heartbeat));
     }
 
     public Task<ActivityCallOutcome> CompleteAsync(PendingDelegation delegation, AgentTaskResult result, CancellationToken ct)
     {
-        Calls.Add($"complete:{delegation.TaskId}");
-        if (Complete == ActivityCallOutcome.Ok) Completed.Add((delegation.TaskId, result));
+        lock (Calls)
+        {
+            Calls.Add($"complete:{delegation.TaskId}");
+            if (Complete == ActivityCallOutcome.Ok) Completed.Add((delegation.TaskId, result));
+        }
+
         return Task.FromResult(Complete);
     }
 
     public Task<ActivityCallOutcome> FailAsync(PendingDelegation delegation, Exception failure, CancellationToken ct)
     {
-        Calls.Add($"fail:{delegation.TaskId}");
-        if (Fail == ActivityCallOutcome.Ok) Failed.Add((delegation.TaskId, failure));
+        lock (Calls)
+        {
+            Calls.Add($"fail:{delegation.TaskId}");
+            if (Fail == ActivityCallOutcome.Ok) Failed.Add((delegation.TaskId, failure));
+        }
+
         return Task.FromResult(Fail);
     }
 
     public Task<ActivityCallOutcome> ReportCancellationAsync(PendingDelegation delegation, CancellationToken ct)
     {
-        Calls.Add($"report-cancellation:{delegation.TaskId}");
-        if (ReportCancellation == ActivityCallOutcome.Ok) Cancelled.Add(delegation.TaskId);
+        lock (Calls)
+        {
+            Calls.Add($"report-cancellation:{delegation.TaskId}");
+            if (ReportCancellation == ActivityCallOutcome.Ok) Cancelled.Add(delegation.TaskId);
+        }
+
         return Task.FromResult(ReportCancellation);
     }
 }
 
-/// <summary>Stands in for the broker and the orchestrator: records what would have been sent.</summary>
+/// <summary>
+/// Stands in for the broker and the orchestrator: records what would have been sent. A test can
+/// make any send slow, or make it never return, through <see cref="BeforeSend"/>.
+/// </summary>
 internal sealed class FakeRelay : IDelegationRelay
 {
-    public List<(string Agent, string TaskId, string Instruction, string? Repo)> Published { get; } = [];
-    public List<(string Agent, string TaskId)> Cancels { get; } = [];
-    public List<(string TaskId, string Detail)> TimeoutReports { get; } = [];
+    private readonly Lock _lock = new();
+    private readonly List<(string Agent, string TaskId, string Instruction, string? Repo)> _published = [];
+    private readonly List<(string Agent, string TaskId)> _cancels = [];
+    private readonly List<(string TaskId, string Detail)> _timeoutReports = [];
+    private readonly List<string> _started = [];
+    private int _publishAttempts;
+    private int _inProgress;
+    private int _mostInProgress;
+
+    public IReadOnlyList<(string Agent, string TaskId, string Instruction, string? Repo)> Published
+    {
+        get { lock (_lock) return [.. _published]; }
+    }
+
+    public IReadOnlyList<(string Agent, string TaskId)> Cancels
+    {
+        get { lock (_lock) return [.. _cancels]; }
+    }
+
+    public IReadOnlyList<(string TaskId, string Detail)> TimeoutReports
+    {
+        get { lock (_lock) return [.. _timeoutReports]; }
+    }
+
+    /// <summary>Every send that was started, finished or not: <c>publish:id</c>, <c>cancel:id</c>, <c>timeout:id</c>.</summary>
+    public IReadOnlyList<string> Started
+    {
+        get { lock (_lock) return [.. _started]; }
+    }
+
+    /// <summary>The most sends that were in progress at one moment.</summary>
+    public int MostInProgress => Volatile.Read(ref _mostInProgress);
 
     /// <summary>When set, every publish throws it.</summary>
     public Exception? PublishFailure { get; set; }
 
-    public int PublishAttempts { get; private set; }
+    public int PublishAttempts => Volatile.Read(ref _publishAttempts);
 
-    public Task PublishDirectiveAsync(PendingDelegation delegation, CancellationToken ct)
+    /// <summary>
+    /// Awaited at the start of every send with its kind (<c>publish</c>, <c>cancel</c>,
+    /// <c>timeout</c>) and the record, before anything is recorded as sent.
+    /// </summary>
+    public Func<string, PendingDelegation, CancellationToken, Task>? BeforeSend { get; set; }
+
+    private async Task EnterAsync(string kind, PendingDelegation delegation, CancellationToken ct)
     {
-        PublishAttempts++;
-        if (PublishFailure is not null) return Task.FromException(PublishFailure);
-        lock (Published)
-            Published.Add((delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction, delegation.Repo));
-        return Task.CompletedTask;
+        lock (_lock) _started.Add($"{kind}:{delegation.CurrentTaskId}");
+        var now = Interlocked.Increment(ref _inProgress);
+        int seen;
+        while (now > (seen = Volatile.Read(ref _mostInProgress)))
+            Interlocked.CompareExchange(ref _mostInProgress, now, seen);
+
+        try
+        {
+            if (BeforeSend is { } before) await before(kind, delegation, ct);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _inProgress);
+        }
     }
 
-    public Task SendCancelAsync(PendingDelegation delegation)
+    public async Task PublishDirectiveAsync(PendingDelegation delegation, CancellationToken ct)
     {
-        Cancels.Add((delegation.Agent, delegation.CurrentTaskId));
-        return Task.CompletedTask;
+        Interlocked.Increment(ref _publishAttempts);
+        await EnterAsync("publish", delegation, ct);
+        if (PublishFailure is not null) throw PublishFailure;
+        lock (_lock)
+            _published.Add((delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction, delegation.Repo));
     }
 
-    public Task ReportTimeoutAsync(PendingDelegation delegation, string detail)
+    public async Task SendCancelAsync(PendingDelegation delegation)
     {
-        TimeoutReports.Add((delegation.TaskId, detail));
-        return Task.CompletedTask;
+        await EnterAsync("cancel", delegation, CancellationToken.None);
+        lock (_lock) _cancels.Add((delegation.Agent, delegation.CurrentTaskId));
+    }
+
+    public async Task ReportTimeoutAsync(PendingDelegation delegation, string detail)
+    {
+        await EnterAsync("timeout", delegation, CancellationToken.None);
+        lock (_lock) _timeoutReports.Add((delegation.TaskId, detail));
     }
 }
 
@@ -127,6 +208,7 @@ internal sealed class DurableHarness : IDisposable
     {
         Directory = Path.Combine(Path.GetTempPath(), "durable-delegation-" + Guid.NewGuid().ToString("N"));
         System.IO.Directory.CreateDirectory(Directory);
+        Gateway.Clock = Clock;
         Service = Build(enabled);
     }
 
@@ -136,6 +218,54 @@ internal sealed class DurableHarness : IDisposable
     private DurableDelegationService Build(bool enabled) => new(
         Options.Create(new DurableDelegationOptions { Enabled = enabled, StateFile = StateFile }),
         Gateway, Relay, Log, Clock);
+
+    /// <summary>A delegation started the way the activity starts one.</summary>
+    public async Task StartAsync(DelegationStart start)
+    {
+        await Service.StartDelegationAsync(start, default);
+        await SettleAsync();
+    }
+
+    /// <summary>One pass, and then everything the relay lane had to send because of it.</summary>
+    public async Task TickAsync()
+    {
+        await Service.TickAsync(default);
+        await SettleAsync();
+    }
+
+    /// <summary>An agent's reply, and then everything the relay lane had to send because of it.</summary>
+    public async Task<DurableReplyOutcome> ReplyAsync(string taskId, AgentTaskResult result)
+    {
+        var outcome = await Service.TryHandleReplyAsync(taskId, result, default);
+        await SettleAsync();
+        return outcome;
+    }
+
+    /// <summary>
+    /// Waits until the relay lane has nothing in progress and nothing asked for. Looked up by
+    /// name so that these tests also build against the service as it was when relay sends ran
+    /// inside the pass (it has no such method and needs no waiting): that is how a regression
+    /// here is shown to fail on the code it is a regression for.
+    /// </summary>
+    public async Task SettleAsync()
+    {
+        var idle = typeof(DurableDelegationService).GetMethod(
+            "RelayIdleAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        // Bounded: a test that leaves a send hanging and then waits for the lane to be idle is a
+        // mistake in the test, and it should say so and not hang the run.
+        if (idle is not null) await ((Task)idle.Invoke(Service, null)!).WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>Waits, in real time, for something a relay send or a pass will make true.</summary>
+    public static async Task WaitForAsync(Func<bool> condition, string what, int seconds = 10)
+    {
+        var deadline = Environment.TickCount64 + seconds * 1000;
+        while (!condition())
+        {
+            Assert.True(Environment.TickCount64 < deadline, $"timed out waiting until {what}");
+            await Task.Delay(10);
+        }
+    }
 
     public static DelegationStart Start(
         string taskId = "wf-1/review",

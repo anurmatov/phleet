@@ -20,7 +20,7 @@ public sealed class DurableDelegationServiceTests
     {
         using var h = new DurableHarness();
 
-        await h.Service.StartDelegationAsync(DurableHarness.Start(repo: "owner/name"), default);
+        await h.StartAsync(DurableHarness.Start(repo: "owner/name"));
 
         var published = Assert.Single(h.Relay.Published);
         Assert.Equal(("reviewer-one", "wf-1/review", "review the change", "owner/name"), published);
@@ -39,7 +39,7 @@ public sealed class DurableDelegationServiceTests
         h.Relay.PublishFailure = new InvalidOperationException("broker away");
 
         var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => h.Service.StartDelegationAsync(DurableHarness.Start(), default));
+            () => h.StartAsync(DurableHarness.Start()));
 
         Assert.Equal("broker away", thrown.Message);
         Assert.Empty(await h.PendingAsync());
@@ -52,9 +52,9 @@ public sealed class DurableDelegationServiceTests
     public async Task ACompletedReply_CompletesTheActivityVerbatim_AndRemovesTheRecord()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
 
-        var outcome = await h.Service.TryHandleReplyAsync("wf-1/review", Done, default);
+        var outcome = await h.ReplyAsync("wf-1/review", Done);
 
         Assert.Equal(DurableReplyOutcome.Completed, outcome);
         Assert.Equal(("wf-1/review", Done), Assert.Single(h.Gateway.Completed));
@@ -65,10 +65,10 @@ public sealed class DurableDelegationServiceTests
     public async Task AReplyForAnUnknownTask_IsNotPending_SoTheCallerKeepsItsOldHandling()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
 
-        Assert.Equal(DurableReplyOutcome.NotPending, await h.Service.TryHandleReplyAsync("wf-2/other", Done, default));
-        Assert.Equal(DurableReplyOutcome.NotPending, await h.Service.TryHandleReplyAsync("wf-1/review/timeout-report", Done, default));
+        Assert.Equal(DurableReplyOutcome.NotPending, await h.ReplyAsync("wf-2/other", Done));
+        Assert.Equal(DurableReplyOutcome.NotPending, await h.ReplyAsync("wf-1/review/timeout-report", Done));
         Assert.Empty(h.Gateway.Calls);
         Assert.Single(await h.PendingAsync());
     }
@@ -78,10 +78,10 @@ public sealed class DurableDelegationServiceTests
     public async Task ADuplicateReply_AfterCompletion_IsNotPending()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review", Done, default);
+        await h.StartAsync(DurableHarness.Start());
+        await h.ReplyAsync("wf-1/review", Done);
 
-        Assert.Equal(DurableReplyOutcome.NotPending, await h.Service.TryHandleReplyAsync("wf-1/review", Done, default));
+        Assert.Equal(DurableReplyOutcome.NotPending, await h.ReplyAsync("wf-1/review", Done));
         Assert.Single(h.Gateway.Completed);
     }
 
@@ -91,8 +91,8 @@ public sealed class DurableDelegationServiceTests
         using var h = new DurableHarness(enabled: false);
 
         Assert.False(h.Service.Enabled);
-        Assert.Equal(DurableReplyOutcome.NotPending, await h.Service.TryHandleReplyAsync("wf-1/review", Done, default));
-        await h.Service.TickAsync(default);
+        Assert.Equal(DurableReplyOutcome.NotPending, await h.ReplyAsync("wf-1/review", Done));
+        await h.TickAsync();
         Assert.Empty(h.Gateway.Calls);
         Assert.False(File.Exists(h.StateFile));
         var snapshot = await h.Service.SnapshotAsync();
@@ -106,11 +106,11 @@ public sealed class DurableDelegationServiceTests
     public async Task AnIncompleteReply_IsContinued_AndTheTextIsAccumulatedAsTheActivityDid()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(repo: "owner/name"), default);
+        await h.StartAsync(DurableHarness.Start(repo: "owner/name"));
 
         Assert.Equal(
             DurableReplyOutcome.Continued,
-            await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part one", "incomplete"), default));
+            await h.ReplyAsync("wf-1/review", new AgentTaskResult("part one", "incomplete")));
 
         var continuation = h.Relay.Published[1];
         Assert.Equal("wf-1/review/incomplete-retry-1", continuation.TaskId);
@@ -124,7 +124,7 @@ public sealed class DurableDelegationServiceTests
 
         Assert.Equal(
             DurableReplyOutcome.Completed,
-            await h.Service.TryHandleReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult("part two", "completed"), default));
+            await h.ReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult("part two", "completed")));
 
         var completed = Assert.Single(h.Gateway.Completed);
         Assert.Equal(new AgentTaskResult("part one\npart two", "completed"), completed.Result);
@@ -134,11 +134,11 @@ public sealed class DurableDelegationServiceTests
     public async Task AnAnswerStillIncompleteAfterEveryRetry_ReturnsWhatItHas()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(maxIncompleteRetries: 2), default);
+        await h.StartAsync(DurableHarness.Start(maxIncompleteRetries: 2));
 
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("a", "incomplete"), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult("b", "incomplete"), default);
-        var last = await h.Service.TryHandleReplyAsync("wf-1/review/incomplete-retry-2", new AgentTaskResult("c", "incomplete"), default);
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult("a", "incomplete"));
+        await h.ReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult("b", "incomplete"));
+        var last = await h.ReplyAsync("wf-1/review/incomplete-retry-2", new AgentTaskResult("c", "incomplete"));
 
         Assert.Equal(DurableReplyOutcome.Completed, last);
         Assert.Equal(3, h.Relay.Published.Count);
@@ -149,9 +149,9 @@ public sealed class DurableDelegationServiceTests
     public async Task RetryOnIncompleteOff_ReturnsTheIncompleteAnswerUnchanged()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(retryOnIncomplete: false), default);
+        await h.StartAsync(DurableHarness.Start(retryOnIncomplete: false));
 
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("half", "incomplete"), default);
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult("half", "incomplete"));
 
         Assert.Single(h.Relay.Published);
         Assert.Equal(new AgentTaskResult("half", "incomplete"), Assert.Single(h.Gateway.Completed).Result);
@@ -162,12 +162,12 @@ public sealed class DurableDelegationServiceTests
     public async Task AContinuation_StartsANewBudget()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(budgetSeconds: 600), default);
+        await h.StartAsync(DurableHarness.Start(budgetSeconds: 600));
         h.Clock.Advance(TimeSpan.FromSeconds(500));
 
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"), default);
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"));
         h.Clock.Advance(TimeSpan.FromSeconds(500));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Empty(h.Gateway.Failed);
         Assert.Equal(1, h.Gateway.Count("heartbeat"));
@@ -177,13 +177,13 @@ public sealed class DurableDelegationServiceTests
     public async Task AReplyToADirectiveTheDelegationHasMovedPast_IsIgnored()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"), default);
+        await h.StartAsync(DurableHarness.Start());
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"));
 
         // The agent's first reply, delivered twice.
         Assert.Equal(
             DurableReplyOutcome.Ignored,
-            await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"), default));
+            await h.ReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete")));
 
         Assert.Equal(2, h.Relay.Published.Count);
         Assert.Empty(h.Gateway.Calls);
@@ -198,16 +198,17 @@ public sealed class DurableDelegationServiceTests
     public async Task AContinuationThatCannotBePublished_IsSentByALaterPass()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
         h.Relay.PublishFailure = new InvalidOperationException("broker away");
 
         Assert.Equal(
             DurableReplyOutcome.Continued,
-            await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"), default));
+            await h.ReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete")));
         Assert.Single(h.Relay.Published);
 
         h.Relay.PublishFailure = null;
-        await h.Service.TickAsync(default);
+        h.Clock.Advance(TimeSpan.FromSeconds(15));
+        await h.TickAsync();
 
         Assert.Equal("wf-1/review/incomplete-retry-1", h.Relay.Published[1].TaskId);
         Assert.Empty(h.Gateway.Failed);
@@ -223,21 +224,21 @@ public sealed class DurableDelegationServiceTests
     public async Task AnAnswerTemporalCouldNotBeTold_IsRecorded_AndDeliveredByALaterPass_EvenAfterARestart()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
         h.Gateway.Complete = ActivityCallOutcome.Unavailable;
 
-        Assert.Equal(DurableReplyOutcome.Stored, await h.Service.TryHandleReplyAsync("wf-1/review", Done, default));
+        Assert.Equal(DurableReplyOutcome.Stored, await h.ReplyAsync("wf-1/review", Done));
         Assert.Equal("answer-recorded", Assert.Single(await h.PendingAsync()).State);
 
         // The redelivered copy of the same reply changes nothing.
-        Assert.Equal(DurableReplyOutcome.Ignored, await h.Service.TryHandleReplyAsync("wf-1/review", Done, default));
+        Assert.Equal(DurableReplyOutcome.Ignored, await h.ReplyAsync("wf-1/review", Done));
 
-        var restarted = h.Restart();
-        await restarted.TickAsync(default);
+        h.Restart();
+        await h.TickAsync();
         Assert.Single(await h.PendingAsync());
 
         h.Gateway.Complete = ActivityCallOutcome.Ok;
-        await restarted.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Equal(("wf-1/review", Done), Assert.Single(h.Gateway.Completed));
         Assert.Empty(await h.PendingAsync());
@@ -250,12 +251,12 @@ public sealed class DurableDelegationServiceTests
     public async Task ANamespaceThatIsAway_IsAskedOncePerPass_AndOtherNamespacesAreStillHeartbeated()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/a", @namespace: "one"), default);
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/b", @namespace: "one"), default);
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/c", @namespace: "two"), default);
+        await h.StartAsync(DurableHarness.Start("wf-1/a", @namespace: "one"));
+        await h.StartAsync(DurableHarness.Start("wf-1/b", @namespace: "one"));
+        await h.StartAsync(DurableHarness.Start("wf-1/c", @namespace: "two"));
         h.Gateway.HeartbeatFor["wf-1/a"] = ActivityCallOutcome.Unavailable;
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Equal(["heartbeat:wf-1/a", "heartbeat:wf-1/c"], h.Gateway.Calls);
         Assert.Equal(3, (await h.PendingAsync()).Count);
@@ -267,12 +268,12 @@ public sealed class DurableDelegationServiceTests
     public async Task EveryPass_HeartbeatsEveryPendingDelegation()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/a"), default);
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/b"), default);
+        await h.StartAsync(DurableHarness.Start("wf-1/a"));
+        await h.StartAsync(DurableHarness.Start("wf-1/b"));
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
         h.Clock.Advance(TimeSpan.FromSeconds(30));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Equal(["heartbeat:wf-1/a", "heartbeat:wf-1/b", "heartbeat:wf-1/a", "heartbeat:wf-1/b"], h.Gateway.Calls);
     }
@@ -281,59 +282,63 @@ public sealed class DurableDelegationServiceTests
     public async Task TheDirective_IsReSentEveryFiveMinutes_AndNotBefore()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(budgetSeconds: 3600), default);
+        await h.StartAsync(DurableHarness.Start(budgetSeconds: 3600));
 
         h.Clock.Advance(TimeSpan.FromMinutes(4));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
         Assert.Single(h.Relay.Published);
 
         h.Clock.Advance(TimeSpan.FromMinutes(1));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
         Assert.Equal(2, h.Relay.Published.Count);
         Assert.Equal(h.Relay.Published[0], h.Relay.Published[1]);
 
         h.Clock.Advance(TimeSpan.FromMinutes(4));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
         Assert.Equal(2, h.Relay.Published.Count);
     }
 
     /// <summary>
-    /// With the broker away, a pass costs one publish attempt, not one per delegation, and every
-    /// delegation is still heartbeated first.
+    /// With the broker away every delegation is still heartbeated, a failed re-send is not tried
+    /// again until the next pass is due, and when the broker is back each directive goes out once.
     /// </summary>
     [Fact]
-    public async Task ABrokerThatIsAway_CostsAPassOnePublishAttempt_AndNoHeartbeat()
+    public async Task ABrokerThatIsAway_CostsNoHeartbeat_AndTheReSendsGoOutWhenItIsBack()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/a", budgetSeconds: 3600), default);
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/b", budgetSeconds: 3600), default);
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf-1/c", budgetSeconds: 3600), default);
+        await h.StartAsync(DurableHarness.Start("wf-1/a", budgetSeconds: 3600));
+        await h.StartAsync(DurableHarness.Start("wf-1/b", budgetSeconds: 3600));
+        await h.StartAsync(DurableHarness.Start("wf-1/c", budgetSeconds: 3600));
         h.Clock.Advance(TimeSpan.FromMinutes(6));
         h.Relay.PublishFailure = new InvalidOperationException("broker away");
         var attemptsBefore = h.Relay.PublishAttempts;
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Equal(3, h.Gateway.Count("heartbeat"));
-        Assert.Equal(1, h.Relay.PublishAttempts - attemptsBefore);
+        // At most one failed attempt per delegation in a pass: a failure is not retried at once.
+        Assert.InRange(h.Relay.PublishAttempts - attemptsBefore, 1, 3);
+        Assert.Equal(3, (await h.PendingAsync()).Count);
 
         h.Relay.PublishFailure = null;
-        await h.Service.TickAsync(default);
+        h.Clock.Advance(TimeSpan.FromSeconds(15));
+        await h.TickAsync();
         Assert.Equal(6, h.Relay.Published.Count);
+        Assert.Equal(6, h.Gateway.Count("heartbeat"));
     }
 
     [Fact]
     public async Task ABudgetThatRunsOut_FailsTheActivityWithTheMeasuredTime_AndTellsTheEscalationTargetOnce()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(budgetSeconds: 600), default);
+        await h.StartAsync(DurableHarness.Start(budgetSeconds: 600));
 
         h.Clock.Advance(TimeSpan.FromSeconds(599));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
         Assert.Empty(h.Gateway.Failed);
 
         h.Clock.Advance(TimeSpan.FromSeconds(31));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         var failed = Assert.Single(h.Gateway.Failed);
         var timeout = Assert.IsType<TimeoutException>(failed.Failure);
@@ -352,19 +357,20 @@ public sealed class DurableDelegationServiceTests
     public async Task ATimeoutTemporalCouldNotBeTold_IsRepeatedWithTheSameMessage_AndOneReport()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(budgetSeconds: 60), default);
+        await h.StartAsync(DurableHarness.Start(budgetSeconds: 60));
         h.Clock.Advance(TimeSpan.FromSeconds(60));
         h.Gateway.Fail = ActivityCallOutcome.Unavailable;
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
         Assert.Equal("timed-out", Assert.Single(await h.PendingAsync()).State);
 
         // A late answer does not undo a timeout the escalation target has already been told about.
-        Assert.Equal(DurableReplyOutcome.Ignored, await h.Service.TryHandleReplyAsync("wf-1/review", Done, default));
+        Assert.Equal(DurableReplyOutcome.Ignored, await h.ReplyAsync("wf-1/review", Done));
 
         h.Clock.Advance(TimeSpan.FromMinutes(10));
         h.Gateway.Fail = ActivityCallOutcome.Ok;
-        await h.Restart().TickAsync(default);
+        h.Restart();
+        await h.TickAsync();
 
         var failed = Assert.Single(h.Gateway.Failed);
         Assert.Contains("elapsed 1.0m (budget 1.0m", failed.Failure.Message);
@@ -379,10 +385,10 @@ public sealed class DurableDelegationServiceTests
     public async Task AWorkflowCancel_IsPassedToTheAgent_AndReportedToTemporal()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
         h.Gateway.Heartbeat = ActivityCallOutcome.CancelRequested;
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Equal(("reviewer-one", "wf-1/review"), Assert.Single(h.Relay.Cancels));
         Assert.Equal("wf-1/review", Assert.Single(h.Gateway.Cancelled));
@@ -394,11 +400,11 @@ public sealed class DurableDelegationServiceTests
     public async Task ACancelDuringAContinuation_NamesTheContinuationTask()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"), default);
+        await h.StartAsync(DurableHarness.Start());
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"));
         h.Gateway.Heartbeat = ActivityCallOutcome.CancelRequested;
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Equal(("reviewer-one", "wf-1/review/incomplete-retry-1"), Assert.Single(h.Relay.Cancels));
     }
@@ -407,15 +413,16 @@ public sealed class DurableDelegationServiceTests
     public async Task ACancellationTemporalCouldNotBeTold_IsReportedAgain_WithoutCancellingTheAgentTwice()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
         h.Gateway.Heartbeat = ActivityCallOutcome.CancelRequested;
         h.Gateway.ReportCancellation = ActivityCallOutcome.Unavailable;
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
         Assert.Equal("cancelling", Assert.Single(await h.PendingAsync()).State);
 
         h.Gateway.ReportCancellation = ActivityCallOutcome.Ok;
-        await h.Restart().TickAsync(default);
+        h.Restart();
+        await h.TickAsync();
 
         Assert.Single(h.Relay.Cancels);
         Assert.Single(h.Gateway.Cancelled);
@@ -430,11 +437,11 @@ public sealed class DurableDelegationServiceTests
     public async Task ARecordWhoseActivityIsGone_IsDropped_TheAgentIsToldToStop_AndOneLineSaysSo()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
         h.Gateway.Heartbeat = ActivityCallOutcome.Gone;
         h.Log.Lines.Clear();
 
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.Empty(await h.PendingAsync());
         Assert.Equal(("reviewer-one", "wf-1/review"), Assert.Single(h.Relay.Cancels));
@@ -448,10 +455,10 @@ public sealed class DurableDelegationServiceTests
     public async Task AnAnswerForAnActivityThatIsGone_DropsTheRecord_AndSettlesTheReply()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
+        await h.StartAsync(DurableHarness.Start());
         h.Gateway.Complete = ActivityCallOutcome.Gone;
 
-        Assert.Equal(DurableReplyOutcome.Completed, await h.Service.TryHandleReplyAsync("wf-1/review", Done, default));
+        Assert.Equal(DurableReplyOutcome.Completed, await h.ReplyAsync("wf-1/review", Done));
         Assert.Empty(await h.PendingAsync());
     }
 
@@ -466,21 +473,21 @@ public sealed class DurableDelegationServiceTests
     public async Task AfterARestart_TheDelegationIsHeartbeated_KeepsItsBudget_AndIsCompletedByTheReply()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(budgetSeconds: 600, repo: "owner/name"), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part one", "incomplete"), default);
+        await h.StartAsync(DurableHarness.Start(budgetSeconds: 600, repo: "owner/name"));
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult("part one", "incomplete"));
         h.Clock.Advance(TimeSpan.FromSeconds(100));
 
-        var restarted = h.Restart();
+        h.Restart();
 
         var resumed = Assert.Single(await h.PendingAsync());
         Assert.Equal("wf-1/review/incomplete-retry-1", resumed.CurrentTaskId);
         Assert.Equal(1, resumed.IncompleteAttempt);
         Assert.Equal(h.Clock.GetUtcNow().AddSeconds(500), resumed.Deadline);
 
-        await restarted.TickAsync(default);
+        await h.TickAsync();
         Assert.Equal(["heartbeat:wf-1/review"], h.Gateway.Calls);
 
-        await restarted.TryHandleReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult("part two", "completed"), default);
+        await h.ReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult("part two", "completed"));
 
         Assert.Equal(new AgentTaskResult("part one\npart two", "completed"), Assert.Single(h.Gateway.Completed).Result);
         Assert.Empty(await h.PendingAsync());
@@ -494,8 +501,8 @@ public sealed class DurableDelegationServiceTests
     public async Task ADirectiveRecordedButNeverPublished_IsSentByTheFirstPassAfterARestart()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"), default);
+        await h.StartAsync(DurableHarness.Start());
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult("part", "incomplete"));
         Assert.Equal(2, h.Relay.Published.Count);
 
         // Rewind the file to the moment before the continuation went out.
@@ -503,7 +510,8 @@ public sealed class DurableDelegationServiceTests
         var published = System.Text.RegularExpressions.Regex.Match(json, "\"LastPublishedAt\": \"[^\"]+\"").Value;
         File.WriteAllText(h.StateFile, json.Replace(published, "\"LastPublishedAt\": \"0001-01-01T00:00:00+00:00\""));
 
-        await h.Restart().TickAsync(default);
+        h.Restart();
+        await h.TickAsync();
 
         Assert.Equal(3, h.Relay.Published.Count);
         Assert.Equal("wf-1/review/incomplete-retry-1", h.Relay.Published[2].TaskId);
@@ -514,8 +522,8 @@ public sealed class DurableDelegationServiceTests
     public async Task ASecondStartUnderTheSameTaskId_ReplacesTheRecord()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start(instruction: "first"), default);
-        await h.Service.StartDelegationAsync(DurableHarness.Start(instruction: "second") with { Attempt = 2 }, default);
+        await h.StartAsync(DurableHarness.Start(instruction: "first"));
+        await h.StartAsync(DurableHarness.Start(instruction: "second") with { Attempt = 2 });
 
         Assert.Single(await h.PendingAsync());
         Assert.Equal("second", h.Relay.Published[1].Instruction);
@@ -531,12 +539,12 @@ public sealed class DurableDelegationServiceTests
         using var h = new DurableHarness();
         h.Gateway.Complete = ActivityCallOutcome.Unavailable;
 
-        await h.Service.StartDelegationAsync(DurableHarness.Start(instruction: instruction, budgetSeconds: 60), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review", new AgentTaskResult(answer, "incomplete"), default);
-        await h.Service.TryHandleReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult(answer, "completed"), default);
+        await h.StartAsync(DurableHarness.Start(instruction: instruction, budgetSeconds: 60));
+        await h.ReplyAsync("wf-1/review", new AgentTaskResult(answer, "incomplete"));
+        await h.ReplyAsync("wf-1/review/incomplete-retry-1", new AgentTaskResult(answer, "completed"));
         var snapshot = System.Text.Json.JsonSerializer.Serialize(await h.Service.SnapshotAsync());
         h.Clock.Advance(TimeSpan.FromMinutes(6));
-        await h.Service.TickAsync(default);
+        await h.TickAsync();
 
         Assert.DoesNotContain(h.Log.Lines, l => l.Contains(instruction) || l.Contains(answer));
         Assert.DoesNotContain(instruction, snapshot);

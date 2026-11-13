@@ -80,8 +80,28 @@ public sealed class PendingDelegation
     /// </summary>
     public string? TimeoutMessage { get; set; }
 
-    /// <summary>The agent has already been told to stop; only Temporal still needs to hear it.</summary>
+    /// <summary>
+    /// The timeout notice for <see cref="TimeoutMessage"/> has been handed to the relay (or given
+    /// up on). Until then the record is kept, whatever Temporal has been told, so the notice is
+    /// sent once and is not lost to a restart.
+    /// </summary>
+    public bool TimeoutReported { get; set; }
+
+    /// <summary>
+    /// The agent has to be told to stop: the workflow cancelled the activity, or Temporal no
+    /// longer has it. Recorded when that is learnt; the cancel itself is sent off the pass.
+    /// </summary>
+    public bool CancelRequested { get; set; }
+
+    /// <summary>The agent has been told to stop (or the attempt was given up).</summary>
     public bool CancelSent { get; set; }
+
+    /// <summary>
+    /// Temporal needs nothing more for this activity: it has been failed, reported cancelled, or
+    /// is gone. The record is no longer heartbeated and stays only until what it still owes the
+    /// relay (a cancel, a timeout notice) has been sent.
+    /// </summary>
+    public bool TemporalSettled { get; set; }
 
     /// <summary>
     /// The activity that started this delegation is publishing its first directive right now.
@@ -89,6 +109,22 @@ public sealed class PendingDelegation
     /// </summary>
     [JsonIgnore]
     public bool Publishing { get; set; }
+
+    /// <summary>
+    /// Not before this: the last attempt to publish the directive failed. In memory only, so a
+    /// restart tries at once.
+    /// </summary>
+    [JsonIgnore]
+    public DateTimeOffset PublishRetryAfter { get; set; }
+
+    /// <summary>
+    /// True once nothing is owed to Temporal or to the relay, which is when the record goes.
+    /// </summary>
+    [JsonIgnore]
+    public bool Finished =>
+        TemporalSettled
+        && (!CancelRequested || CancelSent)
+        && (TimeoutMessage is null || TimeoutReported);
 
     [JsonIgnore]
     public bool HasResult => ResultStatus is not null;

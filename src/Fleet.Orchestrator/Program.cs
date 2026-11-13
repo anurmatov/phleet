@@ -738,118 +738,8 @@ app.Map("/ws/logs/{agentName}", async (string agentName, HttpContext context, Ag
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stream ended", CancellationToken.None);
 });
 
-// ─── Workflow Definitions ────────────────────────────────────────────────────
-
-app.MapGet("/api/workflow-definitions", async (bool? includeInactive, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var query = db.WorkflowDefinitions.AsQueryable();
-    if (includeInactive != true) query = query.Where(d => d.IsActive);
-    var defs = await query
-        .OrderBy(d => d.Name)
-        .AsNoTracking()
-        .Select(d => new { d.Name, d.Namespace, d.TaskQueue, d.Description, d.Version, d.IsActive, d.CreatedAt, d.UpdatedAt })
-        .ToListAsync();
-    return Results.Ok(defs);
-});
-
-app.MapGet("/api/workflow-definitions/{name}", async (string name, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var def = await db.WorkflowDefinitions
-        .Include(d => d.Versions)
-        .AsNoTracking()
-        .FirstOrDefaultAsync(d => d.Name == name);
-    if (def is null) return Results.NotFound(new { error = $"Workflow definition '{name}' not found" });
-    return Results.Ok(new {
-        def.Name, def.Namespace, def.TaskQueue, def.Description,
-        def.Version, def.IsActive, def.Definition,
-        def.CreatedAt, def.UpdatedAt, def.CreatedBy,
-        Versions = def.Versions.OrderByDescending(v => v.Version)
-            .Select(v => new { v.Version, v.Definition, v.Reason, v.CreatedAt, v.CreatedBy })
-            .ToList()
-    });
-});
-
-app.MapPost("/api/workflow-definitions", async (WorkflowDefinitionRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    if (string.IsNullOrWhiteSpace(req.Name)) return Results.BadRequest(new { error = "Name is required" });
-    if (string.IsNullOrWhiteSpace(req.Namespace)) return Results.BadRequest(new { error = "Namespace is required" });
-    if (string.IsNullOrWhiteSpace(req.TaskQueue)) return Results.BadRequest(new { error = "TaskQueue is required" });
-    if (string.IsNullOrWhiteSpace(req.Definition)) return Results.BadRequest(new { error = "Definition is required" });
-    var def = new WorkflowDefinition
-    {
-        Name        = req.Name,
-        Namespace   = req.Namespace,
-        TaskQueue   = req.TaskQueue,
-        Description = req.Description,
-        Definition  = req.Definition,
-        Version     = 1,
-        IsActive    = true,
-        CreatedBy   = req.CreatedBy,
-        CreatedAt   = DateTime.UtcNow,
-        UpdatedAt   = DateTime.UtcNow,
-    };
-    db.WorkflowDefinitions.Add(def);
-    await db.SaveChangesAsync();
-    return Results.Created($"/api/workflow-definitions/{def.Name}", def);
-});
-
-app.MapPut("/api/workflow-definitions/{name}", async (string name, WorkflowDefinitionRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var def = await db.WorkflowDefinitions.FirstOrDefaultAsync(d => d.Name == name);
-    if (def is null) return Results.NotFound(new { error = $"Workflow definition '{name}' not found" });
-
-    if (req.Definition is not null)
-    {
-        // Save previous version to history before overwriting
-        db.WorkflowDefinitionVersions.Add(new WorkflowDefinitionVersion
-        {
-            WorkflowDefinitionId = def.Id,
-            Version              = def.Version,
-            Definition           = def.Definition,
-            Reason               = req.Reason,
-            CreatedBy            = req.CreatedBy,
-            CreatedAt            = DateTime.UtcNow,
-        });
-        def.Definition = req.Definition;
-        def.Version   += 1;
-    }
-
-    def.Namespace   = req.Namespace   ?? def.Namespace;
-    def.TaskQueue   = req.TaskQueue   ?? def.TaskQueue;
-    def.Description = req.Description ?? def.Description;
-    def.UpdatedAt   = DateTime.UtcNow;
-
-    await db.SaveChangesAsync();
-    return Results.Ok(new {
-        def.Name, def.Namespace, def.TaskQueue, def.Description,
-        def.Version, def.IsActive, def.UpdatedAt
-    });
-});
-
-app.MapPost("/api/workflow-definitions/{name}/toggle-active", async (string name, ToggleActiveRequest req, IServiceScopeFactory scopeFactory) =>
-{
-    using var scope = scopeFactory.CreateScope();
-    var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
-    if (db is null) return Results.Problem("Database is not configured");
-    var def = await db.WorkflowDefinitions.FirstOrDefaultAsync(d => d.Name == name);
-    if (def is null) return Results.NotFound(new { error = $"Workflow definition '{name}' not found" });
-    def.IsActive  = req.IsActive;
-    def.UpdatedAt = DateTime.UtcNow;
-    await db.SaveChangesAsync();
-    return Results.Ok(new { def.Name, def.Namespace, def.TaskQueue, def.Description, def.Version, def.IsActive, def.UpdatedAt });
-});
+// Workflow definitions: list, detail, create, update, toggle-active — Endpoints/WorkflowDefinitionEndpoints.cs
+app.MapWorkflowDefinitionEndpoints();
 
 // ─── Schedules ───────────────────────────────────────────────────────────────
 
@@ -1525,17 +1415,6 @@ app.MapDelete("/api/memory/{id}", async (string id, MemoryProxyService memProxy,
 
 app.Run();
 return 0;
-
-record WorkflowDefinitionRequest
-{
-    public string? Name { get; init; }
-    public string? Namespace { get; init; }
-    public string? TaskQueue { get; init; }
-    public string? Definition { get; init; }
-    public string? Description { get; init; }
-    public string? Reason { get; init; }
-    public string? CreatedBy { get; init; }
-}
 
 record ToggleActiveRequest(bool IsActive);
 

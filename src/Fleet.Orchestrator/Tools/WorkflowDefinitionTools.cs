@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Data;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
@@ -7,7 +8,7 @@ using ModelContextProtocol.Server;
 namespace Fleet.Orchestrator.Tools;
 
 [McpServerToolType]
-public sealed class WorkflowDefinitionTools(IServiceScopeFactory scopeFactory)
+public sealed class WorkflowDefinitionTools(IServiceScopeFactory scopeFactory, WorkflowDefinitionWriter writer)
 {
     [McpServerTool(Name = "list_workflow_definitions")]
     [Description("List UWE workflow definitions stored in the orchestrator DB.")]
@@ -80,72 +81,29 @@ public sealed class WorkflowDefinitionTools(IServiceScopeFactory scopeFactory)
         [Description("JSON string containing the root StepDefinition step tree")] string definition,
         [Description("Optional human-readable description of what this workflow does")] string? description = null)
     {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        var outcome = await writer.CreateAsync(new NewWorkflowDefinition(
+            name, workflow_namespace, task_queue, definition, description, CreatedBy: null));
 
-        var def = new WorkflowDefinition
-        {
-            Name        = name,
-            Namespace   = workflow_namespace,
-            TaskQueue   = task_queue,
-            Definition  = definition,
-            Description = description,
-            Version     = 1,
-            IsActive    = true,
-            CreatedAt   = DateTime.UtcNow,
-            UpdatedAt   = DateTime.UtcNow,
-        };
-
-        db.WorkflowDefinitions.Add(def);
-        try
-        {
-            await db.SaveChangesAsync();
-        }
-        catch (DbUpdateException ex)
-        {
-            return $"Failed to create workflow definition '{name}': {ex.InnerException?.Message ?? ex.Message}";
-        }
-
-        return $"Created workflow definition '{name}' v1.";
+        return outcome.Fault is { } fault
+            ? fault.Code == "workflow_definition_rejected" ? fault.Message : $"Failed to create workflow definition '{name}': {fault.Message}"
+            : $"Created workflow definition '{name}' v1.";
     }
 
     [McpServerTool(Name = "update_workflow_definition")]
-    [Description("Update a UWE workflow definition. Auto-versions the definition change. Namespace and TaskQueue are not updatable.")]
+    [Description("Update a UWE workflow definition. A new step tree becomes a new version and the previous one is kept in history; a description-only update keeps the version. Namespace and TaskQueue are not updatable.")]
     public async Task<string> UpdateWorkflowDefinitionAsync(
         [Description("Workflow definition name to update")] string name,
         [Description("New JSON step tree. If omitted, only description is updated.")] string? definition = null,
         [Description("New description. If omitted, description is unchanged.")] string? description = null)
     {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        // Namespace and task queue are left out on purpose: this tool does not move a definition.
+        var outcome = await writer.UpdateAsync(name, new WorkflowDefinitionPatch(Definition: definition, Description: description));
 
-        var def = await db.WorkflowDefinitions
-            .FirstOrDefaultAsync(d => d.Name == name);
+        if (outcome.Fault is { } fault)
+            return fault.Code == "workflow_definition_not_found" ? $"Workflow definition '{name}' not found." : fault.Message;
 
-        if (def is null)
-            return $"Workflow definition '{name}' not found.";
-
-        if (definition is not null)
-        {
-            // Save current version to history before overwriting
-            db.WorkflowDefinitionVersions.Add(new WorkflowDefinitionVersion
-            {
-                WorkflowDefinitionId = def.Id,
-                Version              = def.Version,
-                Definition           = def.Definition,
-                CreatedAt            = DateTime.UtcNow,
-            });
-            def.Definition = definition;
-        }
-
-        if (description is not null)
-            def.Description = description;
-
-        def.Version  += 1;
-        def.UpdatedAt = DateTime.UtcNow;
-
-        await db.SaveChangesAsync();
-
-        return $"Updated workflow definition '{name}' to v{def.Version}.";
+        return definition is not null
+            ? $"Updated workflow definition '{name}' to v{outcome.Value!.Version}."
+            : $"Updated workflow definition '{name}' (description only; still v{outcome.Value!.Version}).";
     }
 }

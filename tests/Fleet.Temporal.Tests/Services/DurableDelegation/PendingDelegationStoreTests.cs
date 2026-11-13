@@ -204,6 +204,94 @@ public sealed class PendingDelegationStoreTests : IDisposable
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(StateFile));
     }
 
+    /// <summary>
+    /// The temp file holds the task tokens, the instructions and the partial answers before it is
+    /// renamed into place, so it has to be owner-only from the moment it exists, not narrowed
+    /// after it was written. A second thread reads its mode for as long as the store is writing
+    /// (the records are large so each write takes a while) and must never see anything wider.
+    /// </summary>
+    [Fact]
+    public void TheTempFile_IsOwnerOnlyFromTheMomentItExists()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var store = Store();
+        store.Put(Record("wf-1/seed"));
+        var temp = StateFile + ".tmp";
+        var payload = new string('x', 24 * 1024 * 1024);
+
+        var widest = default(UnixFileMode);
+        var seen = 0;
+        var stop = 0;
+        var watcher = new Thread(() =>
+        {
+            while (Volatile.Read(ref stop) == 0)
+            {
+                try
+                {
+                    widest |= File.GetUnixFileMode(temp);
+                    seen++;
+                }
+                catch (IOException) { /* not there at this instant */ }
+                catch (UnauthorizedAccessException) { /* being replaced */ }
+            }
+        });
+        watcher.Start();
+        try
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                var record = Record("wf-1/large-" + i);
+                record.CurrentInstruction = payload;
+                store.Put(record);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref stop, 1);
+            watcher.Join();
+        }
+
+        Assert.True(seen > 0, "the temp file was never observed while it was being written");
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, widest);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(StateFile));
+    }
+
+    /// <summary>A directory the store has to create is the owner's alone; one that exists is left as it is.</summary>
+    [Fact]
+    public void ADirectoryTheStoreCreates_IsOwnerOnly_AndAnExistingOneKeepsItsMode()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        Store().Put(Record());
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+            File.GetUnixFileMode(Path.GetDirectoryName(StateFile)!));
+
+        var shared = Path.Combine(_dir, "shared");
+        const UnixFileMode operators = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute;
+        Directory.CreateDirectory(shared, operators);
+        Store(Path.Combine(shared, "pending-delegations.json")).Put(Record());
+        Assert.Equal(operators, File.GetUnixFileMode(shared));
+    }
+
+    /// <summary>A file moved aside because it could not be read is still payload.</summary>
+    [Fact]
+    public void AFileMovedAside_IsOwnerOnly()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(StateFile)!);
+        File.WriteAllText(StateFile, "restored by hand, and not a record list");
+        File.SetUnixFileMode(StateFile, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+        Store().Load();
+
+        var aside = Assert.Single(Directory.GetFiles(Path.GetDirectoryName(StateFile)!, "pending-delegations.json.unreadable-*"));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(aside));
+    }
+
     [Fact]
     public void TheDefaultStateFile_IsInTheBridgesMountedStateDirectory() =>
         Assert.Equal("/var/lib/fleet-temporal-bridge/pending-delegations.json", new DurableDelegationOptions().StateFile);

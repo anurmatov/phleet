@@ -20,19 +20,22 @@ public sealed class WarmupService : BackgroundService
     private readonly ILogger<WarmupService> _logger;
     private readonly TimeSpan _startupDelay;
     private readonly int _warmupTimeoutSeconds;
+    private readonly TaskManager? _taskManager;
 
-    public WarmupService(IAgentExecutor executor, IOptions<AgentOptions> options, ILogger<WarmupService> logger)
-        : this(executor, options.Value.WarmupTimeoutSeconds, logger)
+    public WarmupService(IAgentExecutor executor, IOptions<AgentOptions> options, ILogger<WarmupService> logger,
+        TaskManager? taskManager = null)
+        : this(executor, options.Value.WarmupTimeoutSeconds, logger, taskManager: taskManager)
     {
     }
 
     internal WarmupService(IAgentExecutor executor, int warmupTimeoutSeconds, ILogger<WarmupService> logger,
-        TimeSpan? startupDelay = null)
+        TimeSpan? startupDelay = null, TaskManager? taskManager = null)
     {
         _executor = executor;
         _warmupTimeoutSeconds = warmupTimeoutSeconds;
         _logger = logger;
         _startupDelay = startupDelay ?? StartupDelay;
+        _taskManager = taskManager;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -48,6 +51,10 @@ public sealed class WarmupService : BackgroundService
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             cts.CancelAfter(TimeSpan.FromSeconds(_warmupTimeoutSeconds));
+
+            // The ping is a turn the task queue knows nothing about. A real message can arrive while
+            // it runs; tell the queue, so it does not inject a second one into the ping.
+            using var sideUse = _taskManager?.BeginExecutorSideUse();
 
             await foreach (var progress in _executor.ExecuteAsync("ping", ct: cts.Token))
             {

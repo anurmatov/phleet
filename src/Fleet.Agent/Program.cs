@@ -93,7 +93,13 @@ if (!isCliMode)
 
     var startedAt = DateTimeOffset.UtcNow;
 
-    app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+    // `status` and the 200 never depend on the relay: a broker outage must not restart agents.
+    // `relay` is extra, for whoever is looking: disabled, connecting, connected or retrying.
+    app.MapGet("/health", (IServiceProvider sp) => Results.Ok(new
+    {
+        status = "ok",
+        relay = sp.GetService<GroupRelayService>()?.State ?? GroupRelayService.States.Disabled,
+    }));
 
     app.MapPost("/cancel", async (IServiceProvider sp) =>
     {

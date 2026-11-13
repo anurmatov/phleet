@@ -63,7 +63,8 @@ on unhandled-exception propagation at all. There is no fallback to codex's `loca
 which inside a container is the container itself.
 
 ⚠️ A wedged local inference server takes the whole agent down, not one turn: `CodexExecutor` holds
-`_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it.
+`_turnLock` for the turn and a chat-driven turn has no deadline, so everything queues behind it
+until the stall watchdog stops the silent turn (below).
 See `docs/providers/local-models.md` (setup, validation, rollout, rollback, troubleshooting) and
 `docs/providers/codex-local-models.md`.
 
@@ -435,6 +436,12 @@ compose var `FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES`, default 0 = off). `0`
 default with one Warning. They are parsed from the raw config string — never add them to an options class — and read once at
 startup, so a change needs a recreate. Writes always succeed; REST adds `size`, MCP appends `Size:` lines. Suggested memory
 values are in the README.
+
+`Agent:TurnStallTimeoutMinutes` (agent, default 180, `0` = off, 1–10080; out of range exits 1 at startup) limits how long a
+running turn may go without one executor event, on every provider. It is a limit on silence, never a deadline: `TaskManager`
+restarts it on each event, and when it runs out cancels the executor read, so the provider process is stopped and the turn
+fails with a fixed message. The orchestrator does not write it; until it does, set `Agent__TurnStallTimeoutMinutes` through an
+Env Ref. MUST NOT lower the default without rechecking the silent cases listed in `TurnStallTimeout`.
 
 The tracked repo root stays clean: only source, `.env.example`, `seed.example.json`, and `docker-compose.example.yml`. All runtime state lives under `./fleet/`.
 

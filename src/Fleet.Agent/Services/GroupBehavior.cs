@@ -406,12 +406,19 @@ public sealed class GroupBehavior
 
             _ = Task.Run(() =>
             {
-                var buffer = GetGroupBuffer(chatId);
-                var prompt = _prompts.ForRelayDirective(buffer, sender, text);
-                buffer.MarkChecked();
-                var displayText = $"[Bridge: {sender}] {TaskManager.TruncateText(text, 500)}";
-                _ = _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
-                    source: TaskSource.Bridge, relaySender: "bridge", correlationId: correlationId, taskId: taskId);
+                try
+                {
+                    var buffer = GetGroupBuffer(chatId);
+                    var prompt = _prompts.ForRelayDirective(buffer, sender, text);
+                    buffer.MarkChecked();
+                    var displayText = $"[Bridge: {sender}] {TaskManager.TruncateText(text, 500)}";
+                    _taskManager.StartTaskDetached(chatId, prompt, displayText, isSessionTask: true,
+                        source: TaskSource.Bridge, relaySender: "bridge", correlationId: correlationId, taskId: taskId);
+                }
+                catch (Exception ex)
+                {
+                    LogRelayDispatchFault(ex, chatId, sender, type, taskId);
+                }
             });
             return;
         }
@@ -447,14 +454,31 @@ public sealed class GroupBehavior
 
         _ = Task.Run(() =>
         {
-            var buffer = GetGroupBuffer(chatId);
-            var prompt = _prompts.ForRelayDirective(buffer, sender, text);
-            buffer.MarkChecked();
-            var displayText = $"[From: {sender}] {TaskManager.TruncateText(text, 500)}";
-            _ = _taskManager.StartTask(chatId, prompt, displayText, isSessionTask: true,
-                source: TaskSource.Relay, relaySender: sender, taskId: taskId);
+            try
+            {
+                var buffer = GetGroupBuffer(chatId);
+                var prompt = _prompts.ForRelayDirective(buffer, sender, text);
+                buffer.MarkChecked();
+                var displayText = $"[From: {sender}] {TaskManager.TruncateText(text, 500)}";
+                _taskManager.StartTaskDetached(chatId, prompt, displayText, isSessionTask: true,
+                    source: TaskSource.Relay, relaySender: sender, taskId: taskId);
+            }
+            catch (Exception ex)
+            {
+                LogRelayDispatchFault(ex, chatId, sender, type, taskId);
+            }
         });
     }
+
+    /// <summary>
+    /// A relay or bridge directive that could not be turned into a task. The sender is waiting for
+    /// an answer that will not come, so this must at least be visible. Identifiers only, never the
+    /// directive's text.
+    /// </summary>
+    private void LogRelayDispatchFault(Exception ex, long chatId, string sender, string type, string? taskId) =>
+        _logger.LogError(ex,
+            "Relay message could not be dispatched and was dropped (chat={ChatId}, sender={Sender}, type={Type}, taskId={TaskId})",
+            chatId, sender, type, taskId ?? "none");
 
     internal Task ApplyTokenUpdateForTestsAsync(string tokenJson) => ApplyTokenUpdateAsync(tokenJson);
 
@@ -757,7 +781,7 @@ public sealed class GroupBehavior
 
         // Delegate entirely to TaskManager — it handles typing, execution,
         // session tracking, tool buffering, IDLE suppression, and completion events.
-        _ = _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
+        _taskManager.StartTaskDetached(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.CheckIn,
             images: pendingImages.Count > 0 ? pendingImages : null);
     }
@@ -835,7 +859,7 @@ public sealed class GroupBehavior
             them know they can now message you directly.
             """;
         var display = $"[Welcome DM → {displayName}]";
-        _ = _taskManager.StartTask(user.UserId, prompt, display, isSessionTask: false,
+        _taskManager.StartTaskDetached(user.UserId, prompt, display, isSessionTask: false,
             source: TaskSource.CheckIn);
         return Task.CompletedTask;
     }

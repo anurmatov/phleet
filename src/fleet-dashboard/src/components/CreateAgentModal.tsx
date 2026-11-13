@@ -1,46 +1,43 @@
 import { useState } from 'react'
-import type { CreateForm, InstructionSummary } from '../types'
+import type { InstructionSummary } from '../types'
+import type { CreateAgentState } from '../hooks/useCreateAgent'
 import { PROVIDER_OPTIONS } from '../constants'
-import { createFormProviderPatch } from '../localModel'
+import { isLocalHarness, switchProvider } from '../localModel'
+import { createFormLocalEdits } from '../agentCreate'
 import ModelSelector from './ModelSelector'
+import LocalModelFields from './LocalModelFields'
 import FieldHint from './FieldHint'
+import Modal from './Modal'
 import InstructionPicker from './InstructionPicker'
 
 interface CreateAgentModalProps {
-  createForm: CreateForm
-  createState: 'idle' | 'creating' | 'success' | 'error'
-  createMsg: string
+  /** The dialog's form and requests (hooks/useCreateAgent.ts). */
+  create: CreateAgentState
   agentNames: string[]
-  copyFrom: string
-  copyFromLoading: boolean
   allInstructions: InstructionSummary[]
-  templateName?: string
-  onCopyFrom: (name: string) => void
-  onFormChange: (patch: Partial<CreateForm>) => void
-  onSubmit: () => void
-  onClose: () => void
 }
 
-export default function CreateAgentModal({
-  createForm,
-  createState,
-  createMsg,
-  agentNames,
-  copyFrom,
-  copyFromLoading,
-  allInstructions,
-  templateName,
-  onCopyFrom,
-  onFormChange,
-  onSubmit,
-  onClose,
-}: CreateAgentModalProps) {
+export default function CreateAgentModal({ create, agentNames, allInstructions }: CreateAgentModalProps) {
+  const {
+    form: createForm,
+    state: createState,
+    msg: createMsg,
+    copyFrom, copyFromLoading, templateName,
+    copy: onCopyFrom,
+    change: onFormChange,
+    submit: onSubmit,
+    close: onClose,
+  } = create
   const [shortNameTouched, setShortNameTouched] = useState(false)
   const provider = createForm.provider || 'claude'
+  // The same local-model rules and fields as the config dialog, so an agent can be created (or
+  // copied) as a local-model agent and not only switched to one afterwards.
+  const localEdits = createFormLocalEdits(createForm)
+  const hasLocalMode = isLocalHarness(provider)
+  const isLocal = hasLocalMode && createForm.localMode
 
   return (
-    <div className="config-modal-overlay" onClick={onClose}>
-      <div className="config-modal create-agent-modal" onClick={e => e.stopPropagation()}>
+    <Modal label="New Agent" overlayClassName="config-modal-overlay" className="config-modal create-agent-modal" onClose={onClose}>
         <div className="config-modal-header">
           <span className="config-modal-title">New Agent</span>
           <button className="config-modal-close" onClick={onClose}>✕ close</button>
@@ -105,11 +102,13 @@ export default function CreateAgentModal({
             <select
               className="config-input"
               value={provider}
-              onChange={e => onFormChange(createFormProviderPatch({ ...createForm, provider }, e.target.value))}
+              onChange={e => onFormChange(switchProvider(localEdits, e.target.value))}
             >
               {PROVIDER_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
             </select>
           </div>
+          {hasLocalMode && <LocalModelFields edits={localEdits} onEditsChange={onFormChange} />}
+          {!isLocal && (
           <div className="config-row">
             <label className="config-label">
               Model{provider !== 'codex' && <span style={{ color: 'var(--red)' }}> *</span>}
@@ -120,6 +119,7 @@ export default function CreateAgentModal({
               onChange={model => onFormChange({ model })}
             />
           </div>
+          )}
           <div className="config-row">
             <label className="config-label">Memory (MB)</label>
             <input className="config-input config-input-short" type="number" value={createForm.memoryLimitMb} onChange={e => onFormChange({ memoryLimitMb: e.target.value })} />
@@ -158,7 +158,6 @@ export default function CreateAgentModal({
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

@@ -11,7 +11,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { MemoryListItem, MemorySearchResult, MemoryStatsResponse } from '../types'
-import { apiFetch } from '../utils'
+import { apiGet } from '../utils'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
 import MemoryContentView from './MemoryContentView'
 
@@ -77,9 +77,7 @@ export default function MemoryView() {
     setLoading(true)
     setLoadError('')
     try {
-      const resp = await apiFetch('/api/memory')
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const data: MemoryListItem[] = await resp.json()
+      const data = await apiGet<MemoryListItem[]>('/api/memory')
       setItems(data)
       // M2: restore per-project collapse state from localStorage; default is collapsed
       setExpandedProjects(() => {
@@ -101,9 +99,7 @@ export default function MemoryView() {
     setStatsError('')
     setStatsLoading(true)
     try {
-      const resp = await apiFetch('/api/memory/stats/reads')
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const data: MemoryStatsResponse = await resp.json()
+      const data = await apiGet<MemoryStatsResponse>('/api/memory/stats/reads')
       setStats(data)
       setStatsSince(data.since)
     } catch (e) {
@@ -125,9 +121,7 @@ export default function MemoryView() {
     setSearchLoading(true)
     setSearchError('')
     try {
-      const resp = await apiFetch(`/api/memory/search?q=${encodeURIComponent(q)}`)
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const data: MemorySearchResult[] = await resp.json()
+      const data = await apiGet<MemorySearchResult[]>(`/api/memory/search?q=${encodeURIComponent(q)}`)
       setSearchResults(data)
     } catch (e) {
       setSearchError(e instanceof Error ? e.message : String(e))

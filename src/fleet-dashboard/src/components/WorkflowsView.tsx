@@ -1,13 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type {
-  WorkflowSummary,
-  WorkflowEvent,
-  SignalDef,
-  SignalButton,
-  WfActionState,
-} from '../types'
-import { temporalUiUrl, heartbeatAge, decodeUnicode } from '../utils'
+import type { WorkflowSummary, SignalDef, SignalButton } from '../types'
+import type { WorkflowActions } from '../hooks/useWorkflowActions'
+import type { WorkflowLists } from '../hooks/useWorkflowLists'
+import { useTick } from '../hooks/useTick'
+import { temporalUiUrl, heartbeatAge } from '../utils'
 import { PHASE_LABELS } from '../constants'
+import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 
 type CompletedStatusFilter = 'all' | 'failed' | 'completed' | 'canceled' | 'terminated'
 
@@ -93,91 +91,42 @@ function SignalButtons({
 // ── WorkflowsView ─────────────────────────────────────────────────────────────
 
 interface WorkflowsViewProps {
+  /** The running workflows, kept current by the dashboard socket. */
   workflows: WorkflowSummary[]
-  completedWorkflows: WorkflowSummary[]
-  completedCollapsed: boolean
-  completedLoading: boolean
-  nsFilter: string
-  namespaces: string[]
-  filteredWorkflows: WorkflowSummary[]
-  filteredCompletedWorkflows: WorkflowSummary[]
+  /** Filter, completed runs and manual re-reads (hooks/useWorkflowLists.ts). */
+  lists: WorkflowLists
+  /** Signals, cancel/restart/kill and the history panel (hooks/useWorkflowActions.ts). */
+  actions: WorkflowActions
   agentByWorkflow: Record<string, string>
-  wfActionStates: Record<string, WfActionState>
-  wfActionMsg: Record<string, string>
-  signalStates: Record<string, 'idle' | 'pending' | 'success' | 'error'>
-  signalMsg: Record<string, string>
-  sentSignals: Set<string>
-  signalRegistry: Record<string, SignalDef[]>
-  wfMenuOpen: Record<string, boolean>
-  selectedWf: WorkflowSummary | null
-  wfHistory: WorkflowEvent[]
-  wfHistoryLoading: boolean
-  wfHistoryError: string | null
-  expandedEvents: Set<number>
-  onNsFilter: (ns: string) => void
-  onToggleCompleted: () => void
-  onRefreshCompleted: () => void
-  onWfClick: (wf: WorkflowSummary) => void
-  onSignalClick: (wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) => void
-  onToggleMenu: (k: string) => void
-  onToggleEvent: (eventId: number) => void
-  onCloseDetail: () => void
-  onRefreshDetail: () => void
-  getSignalDefs: (wf: WorkflowSummary) => SignalDef[]
-  wfActionState: (wf: WorkflowSummary) => WfActionState
-  signalKey: (wf: WorkflowSummary) => string
-  wfKey: (wf: WorkflowSummary) => string
-  wfStatusClass: (wf: WorkflowSummary, signalDefs: SignalDef[]) => string
-  onSendSignal: (wf: WorkflowSummary, sigName: string, payload: string) => void
-  onExecuteWfAction: (wf: WorkflowSummary, action: 'cancel' | 'restart' | 'terminate') => void
   highlightedEntityId?: string | null
   onClearHighlight?: () => void
-  onStartWorkflow: () => void
-  onRefreshWorkflows: () => void
-  workflowsLoading: boolean
 }
 
 export default function WorkflowsView({
-  workflows,
-  completedCollapsed,
-  completedLoading,
-  nsFilter,
-  namespaces,
-  filteredWorkflows,
-  filteredCompletedWorkflows,
-  agentByWorkflow,
-  wfActionMsg,
-  signalStates,
-  signalMsg,
-  sentSignals,
-  wfMenuOpen,
-  selectedWf,
-  wfHistory,
-  wfHistoryLoading,
-  wfHistoryError,
-  expandedEvents,
-  onNsFilter,
-  onToggleCompleted,
-  onRefreshCompleted,
-  onWfClick,
-  onSignalClick,
-  onToggleMenu,
-  onToggleEvent,
-  onCloseDetail,
-  onRefreshDetail,
-  getSignalDefs,
-  wfActionState,
-  signalKey,
-  wfKey,
-  wfStatusClass,
-  onSendSignal,
-  onExecuteWfAction,
-  highlightedEntityId,
-  onClearHighlight,
-  onStartWorkflow,
-  onRefreshWorkflows,
-  workflowsLoading,
+  workflows, lists, actions, agentByWorkflow, highlightedEntityId, onClearHighlight,
 }: WorkflowsViewProps) {
+  const {
+    completedCollapsed, completedLoading, nsFilter, namespaces, filteredWorkflows, filteredCompletedWorkflows,
+    workflowsLoading,
+    setNsFilter: onNsFilter,
+    toggleCompleted: onToggleCompleted,
+    refreshCompleted: onRefreshCompleted,
+    refreshWorkflows: onRefreshWorkflows,
+  } = lists
+  const onStartWorkflow = () => lists.setStartOpen(true)
+  const {
+    wfActionMsg, signalStates, signalMsg, sentSignals,
+    menuOpen: wfMenuOpen,
+    openDetail: onWfClick,
+    signalClick: onSignalClick,
+    toggleMenu: onToggleMenu,
+    sendSignal: onSendSignal,
+    runAction: onExecuteWfAction,
+    getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass,
+  } = actions
+  // The rows show ages ("3m ago"): redraw as the clock moves.
+  useTick()
+
   // ── Highlight / scroll-to ────────────────────────────────────────────────
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const setRowRef = useCallback((id: string, el: HTMLDivElement | null) => {
@@ -553,81 +502,7 @@ export default function WorkflowsView({
         </div>
       )}
 
-      {/* ── Workflow detail panel ── */}
-      {selectedWf && (
-        <div className="wf-detail-overlay" onClick={onCloseDetail}>
-          <div className="wf-detail-modal" onClick={e => e.stopPropagation()}>
-            <div className="wf-detail-header">
-              <span className="wf-detail-title">
-                {selectedWf.workflowType} / <span className="wf-detail-id">{selectedWf.workflowId}</span>
-              </span>
-              <div className="wf-detail-header-actions">
-                <button className="wf-detail-refresh" onClick={onRefreshDetail} disabled={wfHistoryLoading} title="Refresh history">↻</button>
-                <button className="wf-detail-close" onClick={onCloseDetail}>✕</button>
-              </div>
-            </div>
-            <div className="wf-detail-body">
-              {wfHistoryLoading && <div className="wf-detail-loading">Loading history…</div>}
-              {wfHistoryError && <div className="wf-detail-error">Error: {wfHistoryError}</div>}
-              {!wfHistoryLoading && !wfHistoryError && wfHistory.length === 0 && (
-                <div className="wf-detail-empty">No history events found.</div>
-              )}
-              {(() => {
-                const agentByActivityType = new Map<string, string>()
-                for (const e of wfHistory) {
-                  if (e.eventType === 'ActivityScheduled' && e.agent && e.activityType) {
-                    agentByActivityType.set(e.activityType, e.agent)
-                  }
-                }
-                return wfHistory.map(ev => {
-                  const agent = ev.agent ?? (ev.activityType ? agentByActivityType.get(ev.activityType) ?? null : null)
-                  const expanded = expandedEvents.has(ev.eventId)
-                  const hasDetail = !!(ev.inputSummary || ev.outputSummary || ev.failureMessage)
-                  return (
-                    <div key={ev.eventId} className={`wf-ev wf-ev-${ev.eventType.toLowerCase()}`}>
-                      <div
-                        className="wf-ev-header"
-                        onClick={hasDetail ? () => onToggleEvent(ev.eventId) : undefined}
-                        style={hasDetail ? { cursor: 'pointer' } : undefined}
-                      >
-                        <span className="wf-ev-type">{ev.eventType}</span>
-                        {ev.activityType && <span className="wf-ev-activity">{ev.activityType}</span>}
-                        {agent && <span className="wf-ev-agent">→ {agent}</span>}
-                        {ev.signalName && <span className="wf-ev-signal">{ev.signalName}</span>}
-                        {ev.failureMessage && !hasDetail && <span className="wf-ev-failure">{ev.failureMessage}</span>}
-                        <span className="wf-ev-time">{new Date(ev.timestamp).toLocaleTimeString()}</span>
-                        {hasDetail && <span className="wf-ev-expand">{expanded ? '▲' : '▼'}</span>}
-                      </div>
-                      {expanded && hasDetail && (
-                        <div className="wf-ev-detail">
-                          {ev.inputSummary && (
-                            <div className="wf-ev-section">
-                              <div className="wf-ev-section-label">Input</div>
-                              <pre className="wf-ev-payload">{decodeUnicode(ev.inputSummary)}</pre>
-                            </div>
-                          )}
-                          {ev.outputSummary && (
-                            <div className="wf-ev-section">
-                              <div className="wf-ev-section-label">Output</div>
-                              <pre className="wf-ev-payload">{decodeUnicode(ev.outputSummary)}</pre>
-                            </div>
-                          )}
-                          {ev.failureMessage && (
-                            <div className="wf-ev-section">
-                              <div className="wf-ev-section-label">Failure</div>
-                              <pre className="wf-ev-payload">{decodeUnicode(ev.failureMessage)}</pre>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })
-              })()}
-            </div>
-          </div>
-        </div>
-      )}
+      <WorkflowHistoryPanel actions={actions} />
 
       {/* ── Confirm bar ── */}
       {pendingConfirm && (

@@ -111,6 +111,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The two hook rules (rules-of-hooks, exhaustive-deps) plus the recommended sets; zero
+      # warnings allowed, so a new one fails here instead of accumulating.
+      - name: Lint
+        run: npm run lint
+
       - name: Test
         run: npm test
 
@@ -119,6 +124,11 @@ jobs:
 
       - name: Human-input production App click path
         run: npm run test:human-input-browser
+
+      # Every view through the production App against a substituted orchestrator: what each
+      # click sends and what the page then shows. This is the net under the App.tsx refactors.
+      - name: View behaviour through the production App
+        run: npm run test:views-browser
 
       - name: Human-input browser evidence
         if: always()

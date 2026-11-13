@@ -2,8 +2,9 @@ import { useState, useMemo } from 'react'
 import type { AgentState, WorkflowTypeInfo } from '../types'
 import { apiFetch } from '../utils'
 import { parseSchema, formToJson, jsonToForm, initFormValues, SchemaField, useRepositories } from './WorkflowEditor/schemaUtils'
-import type { FormValues, ParsedSchema } from './WorkflowEditor/schemaUtils'
+import type { FormValues } from './WorkflowEditor/schemaUtils'
 import FieldHint from './FieldHint'
+import Modal from './Modal'
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -80,20 +81,6 @@ export default function StartWorkflowModal({ workflowTypes, agents, onClose }: S
     }
   }
 
-  function buildInputJson(): string | null {
-    if (!selectedType || !schema) return null // null schema → pass rawJson
-    if (schema === null) {
-      // UWE type
-      return rawJson.replace(/\s/g, '') === '{}' ? null : rawJson
-    }
-    if (!schema.hasFields) return null // no input needed
-    if (isRawMode) {
-      return rawJson.replace(/\s/g, '') === '{}' ? null : rawJson
-    }
-    const json = formToJson(formValues, schema)
-    return JSON.parse(json) && Object.keys(JSON.parse(json)).length === 0 ? null : json
-  }
-
   // If null schema (UWE) the raw JSON is the input
   const effectiveInputJson = (() => {
     if (!selectedType) return null
@@ -148,8 +135,7 @@ export default function StartWorkflowModal({ workflowTypes, agents, onClose }: S
   }
 
   return (
-    <div className="swf-overlay" onClick={onClose}>
-      <div className="swf-modal" onClick={e => e.stopPropagation()}>
+    <Modal label="Start Workflow" overlayClassName="swf-overlay" className="swf-modal" onClose={onClose}>
 
         {/* ── Header ── */}
         <div className="swf-header">
@@ -329,7 +315,6 @@ export default function StartWorkflowModal({ workflowTypes, agents, onClose }: S
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   )
 }

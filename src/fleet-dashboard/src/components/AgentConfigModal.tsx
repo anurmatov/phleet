@@ -7,9 +7,10 @@ import { CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES, PROVIDER_OPTIONS } from '
 import { harnessExtraPlaceholder } from '../effectiveHarness'
 import { crossChatDisabledReason, editedTools } from '../journalCrossChat'
 import { effortChoices, effortOptions, isLocalHarness, switchProvider } from '../localModel'
-import { apiFetch } from '../utils'
+import { apiGet } from '../utils'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
+import Modal from './Modal'
 import LocalModelFields from './LocalModelFields'
 import InstructionPicker from './InstructionPicker'
 import ProjectAssignmentTable from './ProjectAssignmentTable'
@@ -117,12 +118,8 @@ export default function AgentConfigModal({
   const [saveCount, setSaveCount] = useState(0)
   useEffect(() => {
     let active = true
-    apiFetch('/api/comms/journal/status')
-      .then(async response => {
-        if (!response.ok) return
-        const status = await response.json()
-        if (active) setJournalDisabled(status.status === 'disabled')
-      })
+    apiGet<{ status?: string }>('/api/comms/journal/status')
+      .then(status => { if (active) setJournalDisabled(status.status === 'disabled') })
       .catch(() => { /* The server guard still applies when status cannot be loaded. */ })
     return () => { active = false }
   }, [])
@@ -150,8 +147,7 @@ export default function AgentConfigModal({
   }
 
   return (
-    <div className="config-modal-overlay" onClick={onClose}>
-      <div className="config-modal config-modal-sectioned" onClick={e => e.stopPropagation()}>
+    <Modal label={`Config — ${agentName}`} overlayClassName="config-modal-overlay" className="config-modal config-modal-sectioned" onClose={onClose}>
         <div className="config-modal-header">
           <span className="config-modal-title">Config — {agentName}</span>
           <button className="instructions-modal-close" onClick={onClose} title="Close">✕ close</button>
@@ -585,7 +581,6 @@ export default function AgentConfigModal({
         {!configLoading && configSaveState === 'error' && !configData && (
           <div className="config-modal-body"><div className="config-feedback config-feedback-error">{configSaveMsg}</div></div>
         )}
-      </div>
-    </div>
+    </Modal>
   )
 }

@@ -63,7 +63,7 @@ const wf: WorkflowSummary = {
   taskQueue: 'fleet', status: 'Running', startTime: '2026-11-12T12:00:00Z', closeTime: null,
   issueNumber: null, prNumber: null, repo: null, docPrs: null,
 }
-const request = { Question: ' \"read\"\nКыргыз \\ {{config.Secret}} ', Context: 'only this report', AnswerMode: 'approve-reject' as const, Origin: { Kind: 'agent' as const, RequesterAgent: 'agent1' } }
+const request = { Question: ' "read"\nКыргыз \\ {{config.Secret}} ', Context: 'only this report', AnswerMode: 'approve-reject' as const, Origin: { Kind: 'agent' as const, RequesterAgent: 'agent1' } }
 const history = [{ eventType: 'WorkflowStarted', inputSummary: JSON.stringify(request) }]
 
 test('both workflows request actions must load the exact request before sending', async t => {
@@ -85,15 +85,19 @@ test('both workflows request actions must load the exact request before sending'
         globalThis.fetch = ((url: string) => { urls.push(url); return new Promise<Response>(r => { resolve = r }) }) as typeof fetch
         const sig = { name: 'request-input', label: 'request approval', validPhases: ['request-input'],
           buttons: [{ label: 'Answer', requiresComment: false, payload: '{}' }] }
+        // The view takes its state as two objects (hooks/useWorkflowLists.ts, useWorkflowActions.ts).
         const tree = new Hooks().render(View, {
-          workflows: [wf], filteredWorkflows: [wf], filteredCompletedWorkflows: [], completedCollapsed: true,
-          completedLoading: false, nsFilter: 'all', namespaces: [], agentByWorkflow: {}, wfActionMsg: {},
-          signalStates: {}, signalMsg: {}, sentSignals: new Set(), wfMenuOpen: {}, selectedWf: null,
-          wfHistory: [], wfHistoryLoading: false, wfHistoryError: null, expandedEvents: new Set(),
-          getSignalDefs: () => [sig], wfActionState: () => 'idle', signalKey: () => 'request', wfKey: () => 'request',
-          wfStatusClass: () => '', onSendSignal: () => { sends++ },
-          onSignalClick: (wf: WorkflowSummary, signal: typeof sig, button: typeof sig.buttons[number]) => {
-            modal = { wf, signalName: signal.name, button, comment: '' }
+          workflows: [wf], agentByWorkflow: {},
+          lists: { filteredWorkflows: [wf], filteredCompletedWorkflows: [], completedCollapsed: true,
+            completedLoading: false, nsFilter: 'all', namespaces: [] },
+          actions: { wfActionMsg: {},
+            signalStates: {}, signalMsg: {}, sentSignals: new Set(), menuOpen: {}, selectedWf: null,
+            history: [], historyLoading: false, historyError: null, expandedEvents: new Set(),
+            getSignalDefs: () => [sig], wfActionState: () => 'idle', signalKey: () => 'request', wfKey: () => 'request',
+            wfStatusClass: () => '', sendSignal: () => { sends++ },
+            signalClick: (wf: WorkflowSummary, signal: typeof sig, button: typeof sig.buttons[number]) => {
+              modal = { wf, signalName: signal.name, button, comment: '' }
+            },
           },
         })
         const button = elements(tree).find(e => e.type === 'button' && e.props.className?.includes('wf-btn-signal') && text(e.props.children) === label)!

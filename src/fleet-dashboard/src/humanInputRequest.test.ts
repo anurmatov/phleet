@@ -4,7 +4,7 @@ import { humanInputRequestFromHistory, humanInputHistoryUrl, humanInputIdentity 
 
 const gate = { namespace: 'fleet', workflowId: 'human-input-example', runId: 'run-1', gateRef: 'run-1',
   workflowType: 'UweHumanInputWorkflow', status: 'Running', phase: 'request-input' }
-const request = { Question: ' \"read\"\nКыргыз \\ {{config.Secret}} ', Context: 'report only', AnswerMode: 'approve-reject' as const, Origin: { Kind: 'agent' as const, RequesterAgent: 'agent1' } }
+const request = { Question: ' "read"\nКыргыз \\ {{config.Secret}} ', Context: 'report only', AnswerMode: 'approve-reject' as const, Origin: { Kind: 'agent' as const, RequesterAgent: 'agent1' } }
 const history = [{ eventType: 'WorkflowStarted', inputSummary: JSON.stringify(request) }]
 test('exact literal request comes only from the rendered run history', () => {
   assert.deepEqual(humanInputRequestFromHistory(gate, history), request)

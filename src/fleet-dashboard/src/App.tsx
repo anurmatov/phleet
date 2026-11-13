@@ -1,46 +1,29 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import type {
   AgentState,
-  TaskRecord,
   WorkflowSummary,
-  WorkflowEvent,
-  SignalDef,
-  SignalButton,
-  SignalModalState,
   Alert,
-  McpEndpointEntry,
-  CreateForm,
-  AgentConfig,
-  ConfigEdits,
-  InstructionSummary,
-  InstructionDetail,
   ProjectContextSummary,
   ProjectContextDetail,
   WsStatus,
-  RestartState,
-  ReprovisionState,
-  StopStartState,
-  WfActionState,
-  CancelState,
-  ConfigSaveState,
   ActiveView,
-  ReprovisionAllState,
-  WorkflowDefinitionSummary,
-  WorkflowDefinitionDetail,
-  WorkflowTypeInfo,
-  ScheduleSummary,
-  OutputStyleSummary,
-  PromptSizeLimits,
-  PromptSizeReport,
 } from './types'
-import { apiFetch, heartbeatAge } from './utils'
-import { buildSignalRequest, signalErrorMessage } from './signalRequest'
+import { apiGet } from './utils'
 import { humanInputIdentity } from './humanInputRequest'
-import { PROVIDER_DEFAULT_MODEL } from './constants'
-import { parseWarmupTimeoutSeconds, warmupTimeoutEditValue } from './warmupTimeout'
-import { contextWindowEditValue } from './contextWindow'
-import { localModelEditValues } from './localModel'
-import { configSaveBody } from './agentConfigSave'
+import { DEFAULT_CREATE_FORM } from './agentCreate'
+import { parseViewHash } from './activeViews'
+import { reconcileAgents } from './agentList'
+import { KeyedTimers, afterClose } from './reconnect'
+import { useFleetCatalog } from './hooks/useFleetCatalog'
+import { useInstructions } from './hooks/useInstructions'
+import { useVersionedResource } from './hooks/useVersionedResource'
+import { useWorkflowDefinitions } from './hooks/useWorkflowDefinitions'
+import { useWorkflowActions } from './hooks/useWorkflowActions'
+import { useWorkflowLists } from './hooks/useWorkflowLists'
+import { useAgentActions } from './hooks/useAgentActions'
+import { useAgentConfig } from './hooks/useAgentConfig'
+import { useCreateAgent } from './hooks/useCreateAgent'
+import { useLogViewer } from './hooks/useLogViewer'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -67,194 +50,37 @@ import MemoryView from './components/MemoryView'
 import { MemoryIdCacheProvider } from './context/MemoryIdCacheContext'
 import SetupBanner from './components/SetupBanner'
 
+// App holds what every page shares: which page is showing, the agent and workflow lists the socket
+// keeps current, and the alerts raised from them. Each page's own state lives in a hook beside it
+// (src/hooks). Those hooks are called here, not inside the pages, on purpose: a page is unmounted
+// when another is shown, and an unsaved draft or an open row has to still be there on the way back.
+
 type WsMessage =
   | { type: 'workflows'; data: WorkflowSummary[] }
   | (AgentState & { type?: undefined })
 
 const STUCK_TASK_MS = 30 * 60 * 1000
 
-const DEFAULT_CREATE_FORM: CreateForm = {
-  name: '', displayName: '', role: '', model: PROVIDER_DEFAULT_MODEL['claude'],
-  containerName: '', memoryLimitMb: '4096', isEnabled: true, image: '',
-  permissionMode: 'acceptEdits', maxTurns: '50', workDir: '/workspace',
-  proactiveIntervalMinutes: '0',
-  groupListenMode: 'mention', groupDebounceSeconds: '15', warmupTimeoutSeconds: '60', shortName: '',
-  effort: '', jsonSchema: '', agentsJson: '', autoMemoryEnabled: true,
-  showStats: true, prefixMessages: false, formattingMode: 0, suppressToolMessages: false, telegramSendOnly: false, provider: 'claude',
-  codexSandboxMode: '',
-  tools: '', projects: '', networks: '', envRefs: '',
-  mcpEndpoints: [], telegramUsers: '', telegramGroups: '', instructions: [],
-}
-
 export default function App() {
   const [agents, setAgents] = useState<Record<string, AgentState>>({})
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([])
-  const [workflowsLoading, setWorkflowsLoading] = useState(false)
-  const [completedWorkflows, setCompletedWorkflows] = useState<WorkflowSummary[]>([])
-  const [completedCollapsed, setCompletedCollapsed] = useState(true)
-  const [completedLoading, setCompletedLoading] = useState(false)
-  const [nsFilter, setNsFilter] = useState<string>('all')
   const [wsStatus, setWsStatus] = useState<WsStatus>('connecting')
   const [lastUpdated, setLastUpdated] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reconnectFailures = useRef(0)
   const unmounted = useRef(false)
 
-  const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
-  const [taskHistory, setTaskHistory] = useState<Record<string, TaskRecord[]>>({})
-  const [historyLoading, setHistoryLoading] = useState<Record<string, boolean>>({})
+  // Confirmations ("confirm?") and result messages ("Stopped") go back to idle on timers. Each
+  // action on each target owns one timer, so a timer left by an earlier click or an earlier
+  // result cannot expire a confirmation armed after it (reconnect.ts, KeyedTimers).
+  const [timers] = useState(() => new KeyedTimers())
+  useEffect(() => () => timers.cancelAll(), [timers])
 
-  const [restartStates, setRestartStates] = useState<Record<string, RestartState>>({})
-  const [restartMsg, setRestartMsg] = useState<Record<string, string>>({})
-
-  const [reprovisionStates, setReprovisionStates] = useState<Record<string, ReprovisionState>>({})
-  const [reprovisionMsg, setReprovisionMsg] = useState<Record<string, string>>({})
-  const [cancelStates, setCancelStates] = useState<Record<string, CancelState>>({})
-  const [cancelMsg, setCancelMsg] = useState<Record<string, string>>({})
-  const [bgCancelStates, setBgCancelStates] = useState<Record<string, 'idle' | 'cancelling' | 'done' | 'error'>>({})
-
-  const [wfActionStates, setWfActionStates] = useState<Record<string, WfActionState>>({})
-  const [wfActionMsg, setWfActionMsg] = useState<Record<string, string>>({})
-
-  const [stopStates, setStopStates] = useState<Record<string, StopStartState>>({})
-  const [stopMsg, setStopMsg] = useState<Record<string, string>>({})
-  const [startStates, setStartStates] = useState<Record<string, StopStartState>>({})
-  const [startMsg, setStartMsg] = useState<Record<string, string>>({})
-
-  const [signalRegistry, setSignalRegistry] = useState<Record<string, SignalDef[]>>({})
-  const [workflowTypes, setWorkflowTypes] = useState<WorkflowTypeInfo[]>([])
-  const [apiNamespaces, setApiNamespaces] = useState<string[]>([])
-  const [startWfModalOpen, setStartWfModalOpen] = useState(false)
-  const [signalModal, setSignalModal] = useState<SignalModalState | null>(null)
-  const [signalStates, setSignalStates] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [signalMsg, setSignalMsg] = useState<Record<string, string>>({})
-  const [sentSignals, setSentSignals] = useState<Set<string>>(new Set())
-  const [signalConfirm, setSignalConfirm] = useState<string | null>(null)
-
-  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set())
-  function toggleTaskExpand(key: string) {
-    setExpandedTasks(prev => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  const [configAgent, setConfigAgent] = useState<string | null>(null)
-  const [configData, setConfigData] = useState<AgentConfig | null>(null)
-  const [configEdits, setConfigEdits] = useState<ConfigEdits | null>(null)
-  const [configSaveState, setConfigSaveState] = useState<ConfigSaveState>('idle')
-  const [configSaveMsg, setConfigSaveMsg] = useState('')
-  const [configLoading, setConfigLoading] = useState(false)
-  const [configReprovisionConfirm, setConfigReprovisionConfirm] = useState(false)
-  const [projectAccess, setProjectAccess] = useState<string[] | null>(null)
-  const [projectAccessLoading, setProjectAccessLoading] = useState(false)
-  const [reprovisionAllState, setReprovisionAllState] = useState<ReprovisionAllState>('idle')
-  const [reprovisionAllMsg, setReprovisionAllMsg] = useState('')
-
-  const [instructions, setInstructions] = useState<InstructionSummary[]>([])
-  const [outputStyles, setOutputStyles] = useState<OutputStyleSummary[]>([])
-  const [instructionsLoading, setInstructionsLoading] = useState(false)
-  const [expandedInstruction, setExpandedInstruction] = useState<string | null>(null)
-  const [instructionDetail, setInstructionDetail] = useState<Record<string, InstructionDetail>>({})
-  const [instructionDetailLoading, setInstructionDetailLoading] = useState<Record<string, boolean>>({})
-  const [instructionEdits, setInstructionEdits] = useState<Record<string, string>>({})
-  const [instructionReason, setInstructionReason] = useState<Record<string, string>>({})
-  const [instructionSaveState, setInstructionSaveState] = useState<Record<string, 'idle' | 'saving' | 'success' | 'error'>>({})
-  const [instructionSaveMsg, setInstructionSaveMsg] = useState<Record<string, string>>({})
-  const [instrToggleConfirm, setInstrToggleConfirm] = useState<Record<string, boolean>>({})
-  const [instrToggleState, setInstrToggleState] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [instrToggleMsg, setInstrToggleMsg] = useState<Record<string, string>>({})
-  const [instrShowNew, setInstrShowNew] = useState(false)
-  const [instrNewForm, setInstrNewForm] = useState({ name: '', content: '', reason: '' })
-  const [instrNewState, setInstrNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
-  const [instrNewMsg, setInstrNewMsg] = useState('')
-  // #346: the active soft limits (null until loaded, or when the policy route is unavailable) and
-  // the last write's size warning per row.
-  const [promptSizeLimits, setPromptSizeLimits] = useState<PromptSizeLimits | null>(null)
-  const [instrSizeWarnings, setInstrSizeWarnings] = useState<Record<string, string>>({})
-  const [ctxSizeWarnings, setCtxSizeWarnings] = useState<Record<string, string>>({})
-
-  // Project contexts
-  const [projectContexts, setProjectContexts] = useState<ProjectContextSummary[]>([])
-  const [projectContextsLoading, setProjectContextsLoading] = useState(false)
-  const [expandedContext, setExpandedContext] = useState<string | null>(null)
-  const [contextDetail, setContextDetail] = useState<Record<string, ProjectContextDetail>>({})
-  const [contextDetailLoading, setContextDetailLoading] = useState<Record<string, boolean>>({})
-  const [contextEdits, setContextEdits] = useState<Record<string, string>>({})
-  const [contextReason, setContextReason] = useState<Record<string, string>>({})
-  const [contextSaveState, setContextSaveState] = useState<Record<string, 'idle' | 'saving' | 'success' | 'error'>>({})
-  const [contextSaveMsg, setContextSaveMsg] = useState<Record<string, string>>({})
-  const [contextSelectedVersion, setContextSelectedVersion] = useState<Record<string, number | null>>({})
-  const [contextRollbackConfirm, setContextRollbackConfirm] = useState<Record<string, boolean>>({})
-  const [ctxToggleConfirm, setCtxToggleConfirm] = useState<Record<string, boolean>>({})
-  const [ctxToggleState, setCtxToggleState] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [ctxToggleMsg, setCtxToggleMsg] = useState<Record<string, string>>({})
-  const [ctxShowNew, setCtxShowNew] = useState(false)
-  const [ctxNewForm, setCtxNewForm] = useState({ name: '', content: '' })
-  const [ctxNewState, setCtxNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
-  const [ctxNewMsg, setCtxNewMsg] = useState('')
-  const [selectedVersion, setSelectedVersion] = useState<Record<string, number | null>>({})
-  const [rollbackConfirm, setRollbackConfirm] = useState<Record<string, boolean>>({})
-  const [deployConfirm, setDeployConfirm] = useState<Record<string, boolean>>({})
-  const [deployState, setDeployState] = useState<Record<string, 'idle' | 'deploying' | 'success' | 'error'>>({})
-  const [deployMsg, setDeployMsg] = useState<Record<string, string>>({})
-
-  const [setupStatus, setSetupStatus] = useState<{
-    telegram: { configured: boolean; groupChatEnabled: boolean }
-    gitHub: { configured: boolean }
-  } | null>(null)
-
-  const [logViewer, setLogViewer] = useState<string | null>(null)
-  const [logLines, setLogLines] = useState<string[]>([])
-  const [logAutoScroll, setLogAutoScroll] = useState(true)
-  const [logPaused, setLogPaused] = useState(false)
-  const [logFilter, setLogFilter] = useState<'all' | 'error' | 'warn' | 'info'>('all')
-  const logWsRef = useRef<WebSocket | null>(null)
-  const logPausedRef = useRef(false)
-
-  const [alerts, setAlerts] = useState<Alert[]>([])
-  const alertIdRef = useRef(0)
-  const prevAgentsRef = useRef<Record<string, AgentState>>({})
-  const taskFirstSeenRef = useRef<Record<string, { task: string; since: number }>>({})
-  const stuckAlertedRef = useRef<Record<string, string>>({})
-  const seenFailedWorkflowsRef = useRef<Set<string>>(new Set())
-
-  const [copiedContainer, setCopiedContainer] = useState<string | null>(null)
-  const [wfMenuOpen, setWfMenuOpen] = useState<Record<string, boolean>>({})
-
-  const [selectedWf, setSelectedWf] = useState<WorkflowSummary | null>(null)
-  const [wfHistory, setWfHistory] = useState<WorkflowEvent[]>([])
-  const [wfHistoryLoading, setWfHistoryLoading] = useState(false)
-  const [wfHistoryError, setWfHistoryError] = useState<string | null>(null)
-  const [expandedEvents, setExpandedEvents] = useState<Set<number>>(new Set())
-
-  const [createModalOpen, setCreateModalOpen] = useState(false)
-  const [createForm, setCreateForm] = useState<CreateForm>(DEFAULT_CREATE_FORM)
-  const [createState, setCreateState] = useState<'idle' | 'creating' | 'success' | 'error'>('idle')
-  const [createMsg, setCreateMsg] = useState('')
-  const [copyFrom, setCopyFrom] = useState('')
-  const [copyFromLoading, setCopyFromLoading] = useState(false)
-  const [createTemplateName, setCreateTemplateName] = useState<string | undefined>(undefined)
-
-  const [deleteStates, setDeleteStates] = useState<Record<string, 'idle' | 'confirming' | 'deleting' | 'success' | 'error'>>({})
-  const [deleteMsg, setDeleteMsg] = useState<Record<string, string>>({})
-
-  // Navigation state — synced with URL hash
-  const VALID_VIEWS: ActiveView[] = ['agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles', 'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials', 'epic-grants']
-  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
-  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
-  // `#view` or `#view/param`. The second segment exists so a link can name a row rather than
-  // only a page — without it `#output-styles/alpha` matches no view and silently lands on agents.
-  // Null for anything unrecognised, which leaves the current view alone exactly as before.
-  function parseHash(): { view: ActiveView; param: string } | null {
-    const raw = window.location.hash.slice(1)
-    const slash = raw.indexOf('/')
-    const head = (slash === -1 ? raw : raw.slice(0, slash)) as ActiveView
-    if (!VALID_VIEWS.includes(head)) return null
-    return { view: head, param: slash === -1 ? '' : decodeURIComponent(raw.slice(slash + 1)) }
-  }
+  // ── Navigation, synced with the URL hash ────────────────────────────────────────────────────
+  // The hash is `#view` or `#view/param` (activeViews.ts). Null for anything unrecognised, which
+  // leaves the current view alone.
+  const parseHash = () => parseViewHash(window.location.hash)
   const [activeView, setActiveViewState] = useState<ActiveView>(() => parseHash()?.view ?? 'agents')
   const [viewParam, setViewParam] = useState<string>(() => parseHash()?.param ?? '')
   const setActiveView = useCallback((view: ActiveView) => {
@@ -272,56 +98,19 @@ export default function App() {
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
-  useEffect(() => {
-    if (activeView === 'wf-definitions' && !wfDefsLoaded) loadWfDefs()
-    if ((activeView === 'schedules' || activeView === 'namespaces') && !schedulesLoaded) loadSchedules()
-  }, [activeView])
   const [navOpen, setNavOpen] = useState(false)
-
-  // Visual editor state: undefined=closed, null=new definition, string=editing named def
-  const [wfEditorDef, setWfEditorDef] = useState<string | null | undefined>(undefined)
-
-  // Workflow Definitions state
-  const [wfDefs, setWfDefs] = useState<WorkflowDefinitionSummary[]>([])
-  const [wfDefsLoading, setWfDefsLoading] = useState(false)
-  const [wfDefsLoaded, setWfDefsLoaded] = useState(false)
-  const [expandedWfDef, setExpandedWfDef] = useState<string | null>(null)
-  const [wfDefDetails, setWfDefDetails] = useState<Record<string, WorkflowDefinitionDetail>>({})
-  const [wfDefDetailLoading, setWfDefDetailLoading] = useState<Record<string, boolean>>({})
-  const [wfDefEdits, setWfDefEdits] = useState<Record<string, string>>({})
-  const [wfDefReasons, setWfDefReasons] = useState<Record<string, string>>({})
-  const [wfDefSaveState, setWfDefSaveState] = useState<Record<string, ConfigSaveState>>({})
-  const [wfDefSaveMsg, setWfDefSaveMsg] = useState<Record<string, string>>({})
-  const [wfDefSelectedVersion, setWfDefSelectedVersion] = useState<Record<string, number | null>>({})
-  const [wfDefRollbackConfirm, setWfDefRollbackConfirm] = useState<Record<string, string | null>>({})
-  const [wfDefToggleConfirm, setWfDefToggleConfirm] = useState<Record<string, boolean>>({})
-  const [wfDefToggleState, setWfDefToggleState] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [wfDefToggleMsg, setWfDefToggleMsg] = useState<Record<string, string>>({})
-  const [wfDefNsFilter, setWfDefNsFilter] = useState('all')
-  const [wfDefSearch, setWfDefSearch] = useState('')
-  const [wfDefShowNew, setWfDefShowNew] = useState(false)
-  const [wfDefNewForm, setWfDefNewForm] = useState({ name: '', namespace: '', taskQueue: '', description: '', definition: '' })
-  const [wfDefNewState, setWfDefNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
-  const [wfDefNewMsg, setWfDefNewMsg] = useState('')
-
-
-  // Schedules state
-  const [schedules, setSchedules] = useState<ScheduleSummary[]>([])
-  const [schedulesLoading, setSchedulesLoading] = useState(false)
-  const [schedulesLoaded, setSchedulesLoaded] = useState(false)
-
-  function loadSchedules() {
-    setSchedulesLoading(true)
-    apiFetch('/api/schedules')
-      .then(r => r.json())
-      .then((list: ScheduleSummary[]) => { setSchedules(list); setSchedulesLoaded(true) })
-      .catch(() => {})
-      .finally(() => setSchedulesLoading(false))
-  }
 
   const [highlightedEntityId, setHighlightedEntityId] = useState<string | null>(null)
   const onClearHighlight = useCallback(() => setHighlightedEntityId(null), [])
   const onHighlight = useCallback((id: string) => setHighlightedEntityId(id), [])
+
+  // ── Alerts ──────────────────────────────────────────────────────────────────────────────────
+  const [alerts, setAlerts] = useState<Alert[]>([])
+  const alertIdRef = useRef(0)
+  const prevAgentsRef = useRef<Record<string, AgentState>>({})
+  const taskFirstSeenRef = useRef<Record<string, { task: string; since: number }>>({})
+  const stuckAlertedRef = useRef<Record<string, string>>({})
+  const seenFailedWorkflowsRef = useRef<Set<string>>(new Set())
 
   const addAlert = useCallback((
     type: Alert['type'],
@@ -357,33 +146,61 @@ export default function App() {
       setActiveView('agents')
       setTimeout(() => setHighlightedEntityId(alert.agentName!), 50)
     }
-  }, [workflows, addAlert])
+  }, [workflows, addAlert, setActiveView])
 
+  // ── The agent list ──────────────────────────────────────────────────────────────────────────
+  // Replaces the list with what the server lists now (see reconcileAgents). On failure the rows
+  // held so far stay.
+  const refreshAgents = useCallback(() => {
+    apiGet<AgentState[]>('/api/agents')
+      .then(list => {
+        setAgents(prev => reconcileAgents(prev, list))
+        setLastUpdated(new Date().toLocaleTimeString())
+      })
+      .catch(() => {})
+  }, [])
+
+  // ── Each page's state (see the note at the top of this file) ────────────────────────────────
+  const catalog = useFleetCatalog()
+  const wfLists = useWorkflowLists(workflows, setWorkflows)
+  const wfActions = useWorkflowActions(timers, catalog.signalRegistry)
+  const wfDefs = useWorkflowDefinitions(timers)
+  const instr = useInstructions(timers)
+  const ctx = useVersionedResource<ProjectContextSummary, ProjectContextDetail>('/api/project-contexts', 'ctx', timers)
+  const agentActions = useAgentActions(timers, refreshAgents,
+    () => addAlert('agent-stale', 'Reprovision all triggered — agents restarting'))
+  // Opening a config re-reads the lists its dialog offers, in case one changed since page load:
+  // the output styles, and the project and instruction tables whose Size columns show current bytes.
+  const config = useAgentConfig(timers, () => { catalog.loadOutputStyles(); ctx.reload(); instr.reload() })
+  const create = useCreateAgent(agents)
+  const log = useLogViewer()
+
+  const { pruneSentSignals, getSignalDefs, signalModal } = wfActions
+  const { refreshWorkflows, refreshCompleted } = wfLists
+  const loadInstructions = instr.reload
+  const loadProjectContexts = ctx.reload
+
+  // ── The socket ──────────────────────────────────────────────────────────────────────────────
   const connect = useCallback(() => {
     if (unmounted.current) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws`)
     wsRef.current = ws
     setWsStatus('connecting')
-    ws.onopen = () => { setWsStatus('connected') }
+    let openedAt: number | null = null
+    ws.onopen = () => {
+      openedAt = Date.now()
+      setWsStatus('connected')
+      // The socket only adds and updates rows. Re-reading the list on every (re)connect is what
+      // drops an agent that was deleted while this page was not listening.
+      refreshAgents()
+    }
     ws.onmessage = (event) => {
       try {
         const msg: WsMessage = JSON.parse(event.data)
         if (msg.type === 'workflows') {
           setWorkflows(msg.data)
-          setSentSignals(prev => {
-            const next = new Set(prev)
-            for (const entry of prev) {
-              const sepIdx = entry.lastIndexOf('::')
-              const wfId = entry.slice(0, sepIdx)
-              const oldPhase = entry.slice(sepIdx + 2)
-              const updated = (msg.data as WorkflowSummary[]).find((w: WorkflowSummary) => w.workflowId === wfId)
-              if (!updated || updated.phase !== oldPhase || updated.status !== 'Running') {
-                next.delete(entry)
-              }
-            }
-            return next.size !== prev.size ? next : prev
-          })
+          pruneSentSignals(msg.data)
         } else {
           const agent = msg as AgentState
           setAgents(prev => ({ ...prev, [agent.agentName]: agent }))
@@ -393,121 +210,25 @@ export default function App() {
     }
     ws.onclose = () => {
       setWsStatus('disconnected')
-      if (!unmounted.current) reconnectTimer.current = setTimeout(connect, 3000)
+      if (unmounted.current) return
+      // A handshake the orchestrator refuses (a session that lapsed) looks, from here, like any
+      // other close: the browser hides the status. The list request is an ordinary HTTP read, so
+      // a 401 on it reaches the sign-in gate; it also keeps the list honest while the socket is down.
+      if (openedAt === null) refreshAgents()
+      const next = afterClose(reconnectFailures.current, openedAt, Date.now(), Math.random())
+      reconnectFailures.current = next.failures
+      reconnectTimer.current = setTimeout(connect, next.delayMs)
     }
     ws.onerror = () => ws.close()
-  }, [])
-
-  function fetchWorkflows() {
-    setWorkflowsLoading(true)
-    apiFetch('/api/workflows')
-      .then(r => r.json())
-      .then((list: WorkflowSummary[]) => setWorkflows(list))
-      .catch(() => {})
-      .finally(() => setWorkflowsLoading(false))
-  }
-
-  function fetchCompleted() {
-    setCompletedLoading(true)
-    apiFetch('/api/workflows/completed?hours=24')
-      .then(r => r.json())
-      .then((list: WorkflowSummary[]) => setCompletedWorkflows(list))
-      .catch(() => {})
-      .finally(() => setCompletedLoading(false))
-  }
-
-  function loadInstructions() {
-    setInstructionsLoading(true)
-    apiFetch('/api/instructions')
-      .then(r => r.json())
-      .then((list: InstructionSummary[]) => setInstructions(list))
-      .catch(() => {})
-      .finally(() => setInstructionsLoading(false))
-  }
-
-  // Populates the output-style select and the sidenav count. On failure the list stays empty and
-  // the select still offers "none", so a styled agent can always be switched back off.
-  function loadOutputStyles() {
-    apiFetch('/api/output-styles')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((list: OutputStyleSummary[]) => setOutputStyles(list))
-      .catch(() => setOutputStyles([]))
-  }
-
-  // #346: fetched once. On failure or 404 (an older orchestrator) the meters show bytes only.
-  function loadPromptSizeLimits() {
-    apiFetch('/api/prompt-size-policy')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((policy: PromptSizeLimits) => setPromptSizeLimits(policy))
-      .catch(() => setPromptSizeLimits(null))
-  }
-
-  /**
-   * #346: a write's `size.warning` sets the row's ⚠ badge and notice; a write with no warning clears
-   * it. A response without `size` (an older orchestrator) changes nothing.
-   */
-  function applySizeWarning(
-    set: React.Dispatch<React.SetStateAction<Record<string, string>>>,
-    name: string,
-    size: PromptSizeReport | undefined,
-  ) {
-    if (!size) return
-    set(prev => {
-      const next = { ...prev }
-      if (size.warning) next[name] = size.warning
-      else delete next[name]
-      return next
-    })
-  }
-
-  function loadProjectContexts() {
-    setProjectContextsLoading(true)
-    apiFetch('/api/project-contexts')
-      .then(r => r.json())
-      .then((list: ProjectContextSummary[]) => setProjectContexts(list))
-      .catch(() => {})
-      .finally(() => setProjectContextsLoading(false))
-  }
+  }, [refreshAgents, pruneSentSignals])
 
   useEffect(() => {
-    apiFetch('/api/agents')
-      .then(r => r.json())
-      .then((list: AgentState[]) => {
-        const map: Record<string, AgentState> = {}
-        for (const a of list) map[a.agentName] = a
-        setAgents(map)
-        setLastUpdated(new Date().toLocaleTimeString())
-      })
-      .catch(() => {})
-
-    fetchWorkflows()
-
-    apiFetch('/api/signals')
-      .then(r => r.json())
-      .then((reg: Record<string, SignalDef[]>) => setSignalRegistry(reg))
-      .catch(() => {})
-
-    apiFetch('/api/workflow-types')
-      .then(r => r.json())
-      .then((list: WorkflowTypeInfo[]) => setWorkflowTypes(list))
-      .catch(() => {})
-
-    apiFetch('/api/namespaces')
-      .then(r => r.json())
-      .then((list: string[]) => setApiNamespaces(list))
-      .catch(() => {})
-
+    refreshAgents()
+    refreshWorkflows()
     loadInstructions()
     loadProjectContexts()
-    loadPromptSizeLimits()
-    loadOutputStyles()
-    fetchCompleted()
-
-    apiFetch('/api/setup/status')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data) setSetupStatus(data) })
-      .catch(() => {})
-  }, [])
+    refreshCompleted()
+  }, [refreshAgents, refreshWorkflows, loadInstructions, loadProjectContexts, refreshCompleted])
 
   useEffect(() => {
     unmounted.current = false
@@ -519,37 +240,15 @@ export default function App() {
     }
   }, [connect])
 
-  const [tick, setTick] = useState(0)
+  // Workflow definitions and schedules are read the first time a page that shows them opens.
   useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 5000)
-    return () => clearInterval(id)
-  }, [])
-  void tick
+    if (activeView === 'wf-definitions' && !wfDefs.loaded) wfDefs.load()
+    if ((activeView === 'schedules' || activeView === 'namespaces') && !catalog.schedulesLoaded) catalog.loadSchedules()
+    // Runs when the view changes; the two `loaded` flags only guard the calls.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView])
 
-  useEffect(() => {
-    if (logWsRef.current) {
-      logWsRef.current.close()
-      logWsRef.current = null
-    }
-    if (!logViewer) return
-    setLogLines([])
-    setLogPaused(false)
-    logPausedRef.current = false
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/ws/logs/${encodeURIComponent(logViewer)}`)
-    logWsRef.current = ws
-    ws.onmessage = (event) => {
-      if (logPausedRef.current) return
-      const line = event.data as string
-      setLogLines(prev => {
-        const next = [...prev, line]
-        return next.length > 2000 ? next.slice(-2000) : next
-      })
-    }
-    ws.onerror = () => ws.close()
-    return () => { ws.close(); logWsRef.current = null }
-  }, [logViewer])
-
+  // ── What raises an alert ────────────────────────────────────────────────────────────────────
   useEffect(() => {
     const prev = prevAgentsRef.current
     for (const [name, agent] of Object.entries(agents)) {
@@ -591,8 +290,7 @@ export default function App() {
 
   useEffect(() => {
     function checkFailures() {
-      apiFetch('/api/workflows/failures')
-        .then(r => r.json())
+      apiGet<WorkflowSummary[]>('/api/workflows/failures')
         .then((list: WorkflowSummary[]) => {
           for (const wf of list) {
             const key = `${wf.namespace}/${wf.workflowId}/${wf.runId}`
@@ -609,9 +307,29 @@ export default function App() {
     return () => clearInterval(id)
   }, [addAlert])
 
-  const namespaces = useMemo(() => Array.from(new Set(workflows.map(w => w.namespace))).sort(), [workflows])
-  const filteredWorkflows = useMemo(() => nsFilter === 'all' ? workflows : workflows.filter(w => w.namespace === nsFilter), [workflows, nsFilter])
-  const filteredCompletedWorkflows = useMemo(() => nsFilter === 'all' ? completedWorkflows : completedWorkflows.filter(w => w.namespace === nsFilter), [completedWorkflows, nsFilter])
+  // ── Links that open the page already doing something ────────────────────────────────────────
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const deleteAgent = params.get('delete')
+    // Longer than a click's five seconds: the page is still loading when this is armed.
+    if (deleteAgent) agentActions.armDelete(deleteAgent, 30_000)
+    const hasCreate = params.has('create') || params.has('name')
+    if (hasCreate) {
+      const form = { ...DEFAULT_CREATE_FORM }
+      const p = (k: string) => params.get(k) ?? ''
+      if (p('name')) form.name = p('name')
+      if (p('displayName')) form.displayName = p('displayName')
+      if (p('role')) form.role = p('role')
+      if (p('model')) form.model = p('model')
+      if (p('memory')) form.memoryLimitMb = p('memory')
+      create.open(form)
+    }
+    const templateParam = params.get('template')
+    if (templateParam) void create.openFromTemplate(templateParam)
+    // Once, on load: this reads the URL the page was opened with, and must not run again when the
+    // handlers it calls are re-created.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const { agentByWorkflow, workflowByAgent } = useMemo(() => {
     const agentByWorkflow: Record<string, string> = {}
@@ -631,1112 +349,9 @@ export default function App() {
 
   const unreadAlerts = alerts.filter(a => !a.dismissed)
   const toastAlerts = alerts.filter(a => a.showToast)
-
-  function toggleHistory(agentName: string) {
-    if (expandedAgent === agentName) { setExpandedAgent(null); return }
-    setExpandedAgent(agentName)
-    setHistoryLoading(prev => ({ ...prev, [agentName]: true }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/history`)
-      .then(r => r.json())
-      .then((records: TaskRecord[]) => setTaskHistory(prev => ({ ...prev, [agentName]: records })))
-      .catch(() => setTaskHistory(prev => ({ ...prev, [agentName]: [] })))
-      .finally(() => setHistoryLoading(prev => ({ ...prev, [agentName]: false })))
-  }
-
-  function setAgentRestartState(agentName: string, state: RestartState, msg = '') {
-    setRestartStates(prev => ({ ...prev, [agentName]: state }))
-    setRestartMsg(prev => ({ ...prev, [agentName]: msg }))
-  }
-
-  function handleRestart(agentName: string) {
-    const state = restartStates[agentName] ?? 'idle'
-    if (state === 'restarting') return
-    if (state === 'confirming') { setAgentRestartState(agentName, 'idle'); return }
-    setAgentRestartState(agentName, 'confirming')
-  }
-
-  function handleRestartConfirm(agentName: string) {
-    setAgentRestartState(agentName, 'restarting')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/restart`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) setAgentRestartState(agentName, 'success', 'Restart triggered')
-        else { const b = await r.json().catch(() => ({})); setAgentRestartState(agentName, 'error', b?.error ?? `Error ${r.status}`) }
-      })
-      .catch(() => setAgentRestartState(agentName, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setAgentRestartState(agentName, 'idle'), 4000))
-  }
-
-  function setAgentCancelState(agentName: string, state: CancelState, msg = '') {
-    setCancelStates(prev => ({ ...prev, [agentName]: state }))
-    setCancelMsg(prev => ({ ...prev, [agentName]: msg }))
-  }
-
-  function handleCancel(agentName: string) {
-    const state = cancelStates[agentName] ?? 'idle'
-    if (state === 'cancelling') return
-    if (state === 'confirming') { setAgentCancelState(agentName, 'idle'); return }
-    setAgentCancelState(agentName, 'confirming')
-  }
-
-  function handleCancelConfirm(agentName: string) {
-    setAgentCancelState(agentName, 'cancelling')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/cancel`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) setAgentCancelState(agentName, 'success', 'Cancelled')
-        else { const b = await r.json().catch(() => ({})); setAgentCancelState(agentName, 'error', b?.error ?? `Error ${r.status}`) }
-      })
-      .catch(() => setAgentCancelState(agentName, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setAgentCancelState(agentName, 'idle'), 4000))
-  }
-
-  function handleBgCancel(agentName: string, taskId: string) {
-    const key = `${agentName}/${taskId}`
-    if (bgCancelStates[key] === 'cancelling') return
-    setBgCancelStates(prev => ({ ...prev, [key]: 'cancelling' }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/cancel_bg/${encodeURIComponent(taskId)}`, { method: 'POST' })
-      .then(r => setBgCancelStates(prev => ({ ...prev, [key]: r.ok ? 'done' : 'error' })))
-      .catch(() => setBgCancelStates(prev => ({ ...prev, [key]: 'error' })))
-      .finally(() => setTimeout(() => setBgCancelStates(prev => ({ ...prev, [key]: 'idle' })), 4000))
-  }
-
-  function setAgentReprovisionState(agentName: string, state: ReprovisionState, msg = '') {
-    setReprovisionStates(prev => ({ ...prev, [agentName]: state }))
-    setReprovisionMsg(prev => ({ ...prev, [agentName]: msg }))
-  }
-
-  function handleReprovision(agentName: string) {
-    const state = reprovisionStates[agentName] ?? 'idle'
-    if (state === 'provisioning') return
-    if (state === 'confirming') { setAgentReprovisionState(agentName, 'idle'); return }
-    setAgentReprovisionState(agentName, 'confirming')
-  }
-
-  function handleReprovisionConfirm(agentName: string) {
-    setAgentReprovisionState(agentName, 'provisioning')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) setAgentReprovisionState(agentName, 'success', 'Reprovisioning...')
-        else { const b = await r.json().catch(() => ({})); setAgentReprovisionState(agentName, 'error', b?.error ?? `Error ${r.status}`) }
-      })
-      .catch(() => setAgentReprovisionState(agentName, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setAgentReprovisionState(agentName, 'idle'), 5000))
-  }
-
-  function handleReprovisionAll() {
-    setReprovisionAllState('confirming')
-    setTimeout(() => setReprovisionAllState(s => s === 'confirming' ? 'idle' : s), 5000)
-  }
-
-  function handleReprovisionAllConfirm() {
-    setReprovisionAllState('running')
-    apiFetch('/api/agents/reprovision-running', { method: 'POST' })
-      .then(async r => {
-        if (r.ok) {
-          setReprovisionAllState('success')
-          setReprovisionAllMsg('All agents reprovisioning…')
-          addAlert('agent-stale', 'Reprovision all triggered — agents restarting')
-        } else {
-          const b = await r.json().catch(() => ({}))
-          setReprovisionAllState('error')
-          setReprovisionAllMsg(b?.error ?? `Error ${r.status}`)
-        }
-      })
-      .catch(() => { setReprovisionAllState('error'); setReprovisionAllMsg('Request failed') })
-      .finally(() => setTimeout(() => { setReprovisionAllState('idle'); setReprovisionAllMsg('') }, 5000))
-  }
-
-  function handleReprovisionAllCancel() {
-    setReprovisionAllState('idle')
-  }
-
-  function handleStop(agentName: string) {
-    const ss = stopStates[agentName] ?? 'idle'
-    if (ss === 'pending') return
-    if (ss === 'confirming') {
-      setStopStates(prev => ({ ...prev, [agentName]: 'pending' }))
-      apiFetch(`/api/agents/${encodeURIComponent(agentName)}/stop`, { method: 'POST' })
-        .then(async r => {
-          if (r.ok) { setStopStates(prev => ({ ...prev, [agentName]: 'success' })); setStopMsg(prev => ({ ...prev, [agentName]: 'Stopped' })) }
-          else { const b = await r.json().catch(() => ({})); setStopStates(prev => ({ ...prev, [agentName]: 'error' })); setStopMsg(prev => ({ ...prev, [agentName]: b?.error ?? `Error ${r.status}` })) }
-        })
-        .catch(() => { setStopStates(prev => ({ ...prev, [agentName]: 'error' })); setStopMsg(prev => ({ ...prev, [agentName]: 'Request failed' })) })
-        .finally(() => setTimeout(() => setStopStates(prev => ({ ...prev, [agentName]: 'idle' })), 4000))
-      return
-    }
-    setStopStates(prev => ({ ...prev, [agentName]: 'confirming' }))
-    setTimeout(() => setStopStates(prev => prev[agentName] === 'confirming' ? { ...prev, [agentName]: 'idle' } : prev), 5000)
-  }
-
-  function handleStart(agentName: string) {
-    const ss = startStates[agentName] ?? 'idle'
-    if (ss === 'pending') return
-    setStartStates(prev => ({ ...prev, [agentName]: 'pending' }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/start`, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) { setStartStates(prev => ({ ...prev, [agentName]: 'success' })); setStartMsg(prev => ({ ...prev, [agentName]: 'Started' })) }
-        else { const b = await r.json().catch(() => ({})); setStartStates(prev => ({ ...prev, [agentName]: 'error' })); setStartMsg(prev => ({ ...prev, [agentName]: b?.error ?? `Error ${r.status}` })) }
-      })
-      .catch(() => { setStartStates(prev => ({ ...prev, [agentName]: 'error' })); setStartMsg(prev => ({ ...prev, [agentName]: 'Request failed' })) })
-      .finally(() => setTimeout(() => setStartStates(prev => ({ ...prev, [agentName]: 'idle' })), 4000))
-  }
-
-  function handleDeleteClick(agentName: string) {
-    const state = deleteStates[agentName] ?? 'idle'
-    if (state === 'deleting') return
-    if (state === 'confirming') { setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })); return }
-    setDeleteStates(prev => ({ ...prev, [agentName]: 'confirming' }))
-  }
-
-  function handleDeleteConfirm(agentName: string) {
-    setDeleteStates(prev => ({ ...prev, [agentName]: 'deleting' }))
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}`, { method: 'DELETE' })
-      .then(async r => {
-        const d = await r.json().catch(() => ({}))
-        if (r.ok) { setDeleteStates(prev => ({ ...prev, [agentName]: 'success' })); setDeleteMsg(prev => ({ ...prev, [agentName]: d.message ?? 'Deleted' })) }
-        else { setDeleteStates(prev => ({ ...prev, [agentName]: 'error' })); setDeleteMsg(prev => ({ ...prev, [agentName]: d.error ?? `Error ${r.status}` })) }
-      })
-      .catch(() => { setDeleteStates(prev => ({ ...prev, [agentName]: 'error' })); setDeleteMsg(prev => ({ ...prev, [agentName]: 'Request failed' })) })
-      .finally(() => setTimeout(() => setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })), 5000))
-  }
-
-  function openConfig(agentName: string) {
-    if (configAgent === agentName) {
-      setConfigAgent(null); setConfigData(null); setConfigEdits(null); setConfigReprovisionConfirm(false)
-      return
-    }
-    setConfigAgent(agentName)
-    setConfigData(null); setConfigEdits(null)
-    setConfigSaveState('idle'); setConfigReprovisionConfirm(false)
-    setProjectAccess(null)
-    setConfigLoading(true)
-    setProjectAccessLoading(true)
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((data: { projects: string[] }) => setProjectAccess(data.projects))
-      .catch(() => setProjectAccess([]))
-      .finally(() => setProjectAccessLoading(false))
-    // Refresh in case a style was added or removed since the page loaded.
-    loadOutputStyles()
-    // Same for the project and instruction tables, whose Size columns show the current bytes.
-    loadProjectContexts()
-    loadInstructions()
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((cfg: AgentConfig) => {
-        setConfigData(cfg)
-        setConfigEdits({
-          model: cfg.model,
-          memoryLimitMb: String(cfg.memoryLimitMb),
-          isEnabled: cfg.isEnabled,
-          image: cfg.image ?? '',
-          permissionMode: cfg.permissionMode,
-          maxTurns: String(cfg.maxTurns),
-          workDir: cfg.workDir,
-          proactiveIntervalMinutes: String(cfg.proactiveIntervalMinutes),
-          groupListenMode: cfg.groupListenMode,
-          groupDebounceSeconds: String(cfg.groupDebounceSeconds),
-          warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
-          shortName: cfg.shortName,
-          displayName: cfg.displayName,
-          showStats: cfg.showStats,
-          prefixMessages: cfg.prefixMessages,
-          formattingMode: cfg.formattingMode,
-          suppressToolMessages: cfg.suppressToolMessages ?? false,
-          telegramSendOnly: cfg.telegramSendOnly,
-          provider: cfg.provider ?? 'claude',
-          codexSandboxMode: cfg.codexSandboxMode ?? '',
-          effort: cfg.effort ?? '',
-          jsonSchema: cfg.jsonSchema ?? '',
-          agentsJson: cfg.agentsJson ?? '',
-          autoMemoryEnabled: cfg.autoMemoryEnabled,
-          journalEnabled: cfg.journalEnabled ?? false,
-          journalCrossChatEnabled: cfg.journalCrossChatEnabled ?? false,
-          chatEnabled: cfg.chatEnabled ?? false,
-          hostPort: cfg.hostPort != null ? String(cfg.hostPort) : '',
-          tools: cfg.tools.map(t => t.toolName).join(', '),
-          projects: cfg.projects,
-          mcpEndpoints: cfg.mcpEndpoints,
-          networks: cfg.networks.join(', '),
-          envRefs: cfg.envRefs.join(', '),
-          telegramUsers: cfg.telegramUsers.join(', '),
-          telegramGroups: cfg.telegramGroups.join(', '),
-          canReceiveChatRequests: cfg.canReceiveChatRequests ?? false,
-          requestReceivedMessage: cfg.requestReceivedMessage ?? '',
-          mountDockerSock: cfg.mountDockerSock ?? false,
-          outputStyle: cfg.outputStyle ?? '',
-          ...localModelEditValues(cfg),
-          contextWindow: contextWindowEditValue(cfg.contextWindow),
-          harnessExtra: cfg.harnessExtra ?? '',
-          instructions: cfg.instructions ?? [],
-        })
-      })
-      .catch(() => { setConfigSaveMsg('Failed to load config'); setConfigSaveState('error') })
-      .finally(() => setConfigLoading(false))
-  }
-
-  function closeConfig() {
-    setConfigAgent(null); setConfigData(null); setConfigEdits(null)
-    setConfigReprovisionConfirm(false); setConfigSaveState('idle')
-    setProjectAccess(null)
-  }
-
-  async function addProjectAccess(agentName: string, project: string) {
-    await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project }),
-    })
-    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
-    setProjectAccess(data.projects)
-  }
-
-  async function removeProjectAccess(agentName: string, project: string) {
-    await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access/${encodeURIComponent(project)}`, { method: 'DELETE' })
-    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
-    setProjectAccess(data.projects)
-  }
-
-  async function toggleProjectAccessWildcard(agentName: string, enable: boolean) {
-    if (enable) {
-      await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project: '*' }),
-      })
-    } else {
-      await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access/${encodeURIComponent('*')}`, { method: 'DELETE' })
-    }
-    const data = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/project-access`).then(r => r.json())
-    setProjectAccess(data.projects)
-  }
-
-  function saveConfig(agentName: string, andReprovision: boolean) {
-    if (!configEdits) return
-    // The body is built in agentConfigSave.ts (#460 AC-D2: the same body the unsectioned dialog sent).
-    const save = configSaveBody(configEdits, configData?.harnessExtra, configData?.chatEnabled)
-    if (!save.ok) { setConfigSaveMsg(save.error); setConfigSaveState('error'); return }
-    const projects = save.body.projects as string[]
-    const newTelegramUsers = configEdits.telegramUsers.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
-    const newTelegramGroups = configEdits.telegramGroups.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n))
-    const prevUsers = configData?.telegramUsers ?? []
-    const prevGroups = configData?.telegramGroups ?? []
-    const addedUsers = newTelegramUsers.filter(id => !prevUsers.includes(id))
-    const removedUsers = prevUsers.filter(id => !newTelegramUsers.includes(id))
-    const addedGroups = newTelegramGroups.filter(id => !prevGroups.includes(id))
-    const removedGroups = prevGroups.filter(id => !newTelegramGroups.includes(id))
-    setConfigSaveState('saving')
-    apiFetch(`/api/agents/${encodeURIComponent(agentName)}/config`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(save.body),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        // Apply telegram user/group diffs via dedicated endpoints (live, no reprovision needed)
-        const userOps = [
-          ...addedUsers.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-users`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: id }) })),
-          ...removedUsers.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-users/${id}`, { method: 'DELETE' })),
-          ...addedGroups.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-groups`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groupId: id }) })),
-          ...removedGroups.map(id => apiFetch(`/api/agents/${encodeURIComponent(agentName)}/telegram-groups/${id}`, { method: 'DELETE' })),
-        ]
-        if (userOps.length > 0) await Promise.all(userOps)
-        if (andReprovision) return apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' }).then(r2 => { if (!r2.ok) throw new Error('Reprovision failed') })
-      })
-      .then(() => {
-        setConfigData(prev => prev ? { ...prev, projects, harnessExtra: configEdits.harnessExtra === '' ? null : configEdits.harnessExtra, chatEnabled: configEdits.chatEnabled } : prev)
-        setConfigSaveState('success')
-        setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
-        setTimeout(() => setConfigSaveState('idle'), 4000)
-      })
-      .catch((err: Error) => {
-        setConfigSaveState('error'); setConfigSaveMsg(err.message)
-        setTimeout(() => setConfigSaveState('idle'), 5000)
-      })
-  }
-
-  function loadInstructionDetail(name: string) {
-    setInstructionDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((detail: InstructionDetail) => {
-        setInstructionDetail(prev => ({ ...prev, [name]: detail }))
-        const current = detail.versions.find(v => v.versionNumber === detail.currentVersion)
-        if (current) setInstructionEdits(prev => ({ ...prev, [name]: current.content }))
-      })
-      .catch(() => { setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: 'Failed to load' })) })
-      .finally(() => setInstructionDetailLoading(prev => ({ ...prev, [name]: false })))
-  }
-
-  function toggleInstruction(name: string) {
-    if (expandedInstruction === name) { setExpandedInstruction(null); return }
-    setExpandedInstruction(name)
-    if (!instructionDetail[name]) loadInstructionDetail(name)
-  }
-
-  function saveInstruction(name: string) {
-    const content = instructionEdits[name]
-    if (!content?.trim()) return
-    const reason = instructionReason[name]?.trim() || undefined
-    setInstructionSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}/versions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, reason }),
-    })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
-        applySizeWarning(setInstrSizeWarnings, name, res?.size)
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setInstructionSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
-        setInstructionReason(prev => ({ ...prev, [name]: '' }))
-        loadInstructionDetail(name)
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function rollbackInstruction(name: string, targetVersion: number) {
-    setInstructionSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}/rollback/${targetVersion}`, { method: 'POST' })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
-        applySizeWarning(setInstrSizeWarnings, name, res?.size)
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setInstructionSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
-        setSelectedVersion(prev => ({ ...prev, [name]: null }))
-        loadInstructionDetail(name)
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function handleRollbackClick(e: React.MouseEvent, instrName: string, versionNumber: number, saveState: ConfigSaveState) {
-    e.stopPropagation()
-    if (saveState === 'saving') return
-    const key = `${instrName}:${versionNumber}`
-    if (rollbackConfirm[key]) {
-      setRollbackConfirm(prev => ({ ...prev, [key]: false }))
-      rollbackInstruction(instrName, versionNumber)
-    } else {
-      setRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      setTimeout(() => setRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev), 5000)
-    }
-  }
-
-  function handleDeployClick(e: React.MouseEvent, instrName: string, versionNumber: number, agentName: string) {
-    e.stopPropagation()
-    const deployKey = `${instrName}:${versionNumber}:${agentName}`
-    if (deployState[deployKey] === 'deploying') return
-    if (deployConfirm[deployKey]) {
-      setDeployConfirm(prev => ({ ...prev, [deployKey]: false }))
-      setDeployState(prev => ({ ...prev, [deployKey]: 'deploying' }))
-      apiFetch(`/api/agents/${encodeURIComponent(agentName)}/restart-with-version`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instructionName: instrName, versionNumber }),
-      })
-        .then(async r => {
-          if (r.ok) { setDeployState(prev => ({ ...prev, [deployKey]: 'success' })); setDeployMsg(prev => ({ ...prev, [deployKey]: `Deployed to ${agentName}` })) }
-          else { const b = await r.json().catch(() => ({})); setDeployState(prev => ({ ...prev, [deployKey]: 'error' })); setDeployMsg(prev => ({ ...prev, [deployKey]: b?.error ?? `Error ${r.status}` })) }
-        })
-        .catch(() => { setDeployState(prev => ({ ...prev, [deployKey]: 'error' })); setDeployMsg(prev => ({ ...prev, [deployKey]: 'Request failed' })) })
-        .finally(() => setTimeout(() => setDeployState(prev => ({ ...prev, [deployKey]: 'idle' })), 4000))
-    } else {
-      setDeployConfirm(prev => ({ ...prev, [deployKey]: true }))
-      setTimeout(() => setDeployConfirm(prev => prev[deployKey] ? { ...prev, [deployKey]: false } : prev), 5000)
-    }
-  }
-
-  function handleInstrToggleConfirmClick(name: string) {
-    setInstrToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setInstrToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
-  }
-
-  function toggleInstrActive(name: string, isActive: boolean) {
-    setInstrToggleConfirm(prev => ({ ...prev, [name]: false }))
-    setInstrToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiFetch(`/api/instructions/${encodeURIComponent(name)}/toggle-active`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isActive }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
-      .then(() => {
-        setInstrToggleState(prev => ({ ...prev, [name]: 'success' }))
-        setInstrToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstrToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setInstrToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setInstrToggleMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setInstrToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function createInstruction() {
-    const name = instrNewForm.name
-    setInstrNewState('saving')
-    apiFetch('/api/instructions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: instrNewForm.name,
-        content: instrNewForm.content,
-        reason: instrNewForm.reason || undefined,
-      }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
-      .then((res: { size?: PromptSizeReport }) => {
-        applySizeWarning(setInstrSizeWarnings, name, res?.size)
-        setInstrNewState('success')
-        setInstrNewMsg('Created')
-        setInstrShowNew(false)
-        setInstrNewForm({ name: '', content: '', reason: '' })
-        apiFetch('/api/instructions').then(r => r.json()).then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstrNewState('idle'), 3000)
-      })
-      .catch((err: Error) => {
-        setInstrNewState('error')
-        setInstrNewMsg(err.message)
-        setTimeout(() => setInstrNewState('idle'), 5000)
-      })
-  }
-
-  // ─── Project Context handlers ───────────────────────────────────────────────
-
-  function loadContextDetail(name: string) {
-    setContextDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((detail: ProjectContextDetail) => {
-        setContextDetail(prev => ({ ...prev, [name]: detail }))
-        const current = detail.versions.find(v => v.versionNumber === detail.currentVersion)
-        if (current) setContextEdits(prev => ({ ...prev, [name]: current.content }))
-      })
-      .catch(() => { setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: 'Failed to load' })) })
-      .finally(() => setContextDetailLoading(prev => ({ ...prev, [name]: false })))
-  }
-
-  function toggleContext(name: string) {
-    if (expandedContext === name) { setExpandedContext(null); return }
-    setExpandedContext(name)
-    if (!contextDetail[name]) loadContextDetail(name)
-  }
-
-  function saveContext(name: string) {
-    const content = contextEdits[name]
-    if (!content?.trim()) return
-    const reason = contextReason[name]?.trim() || undefined
-    setContextSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}/versions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, reason }),
-    })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
-        applySizeWarning(setCtxSizeWarnings, name, res?.size)
-        setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setContextSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
-        setContextReason(prev => ({ ...prev, [name]: '' }))
-        loadContextDetail(name)
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function rollbackContext(name: string, targetVersion: number) {
-    setContextSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}/rollback/${targetVersion}`, { method: 'POST' })
-      .then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }; return r.json() })
-      .then((res: { size?: PromptSizeReport }) => {
-        applySizeWarning(setCtxSizeWarnings, name, res?.size)
-        setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setContextSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
-        setContextSelectedVersion(prev => ({ ...prev, [name]: null }))
-        loadContextDetail(name)
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function handleContextRollbackClick(e: React.MouseEvent, ctxName: string, versionNumber: number, saveState: ConfigSaveState) {
-    e.stopPropagation()
-    if (saveState === 'saving') return
-    const key = `${ctxName}:${versionNumber}`
-    if (contextRollbackConfirm[key]) {
-      setContextRollbackConfirm(prev => ({ ...prev, [key]: false }))
-      rollbackContext(ctxName, versionNumber)
-    } else {
-      setContextRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      setTimeout(() => setContextRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev), 5000)
-    }
-  }
-
-  function handleCtxToggleConfirmClick(name: string) {
-    setCtxToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setCtxToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
-  }
-
-  function toggleCtxActive(name: string, isActive: boolean) {
-    setCtxToggleConfirm(prev => ({ ...prev, [name]: false }))
-    setCtxToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiFetch(`/api/project-contexts/${encodeURIComponent(name)}/toggle-active`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isActive }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
-      .then(() => {
-        setCtxToggleState(prev => ({ ...prev, [name]: 'success' }))
-        setCtxToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setCtxToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setCtxToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setCtxToggleMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setCtxToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function createContext() {
-    const name = ctxNewForm.name
-    setCtxNewState('saving')
-    apiFetch('/api/project-contexts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: ctxNewForm.name,
-        content: ctxNewForm.content,
-      }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
-      .then((res: { size?: PromptSizeReport }) => {
-        applySizeWarning(setCtxSizeWarnings, name, res?.size)
-        setCtxNewState('success')
-        setCtxNewMsg('Created')
-        setCtxShowNew(false)
-        setCtxNewForm({ name: '', content: '' })
-        apiFetch('/api/project-contexts').then(r => r.json()).then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setCtxNewState('idle'), 3000)
-      })
-      .catch((err: Error) => {
-        setCtxNewState('error')
-        setCtxNewMsg(err.message)
-        setTimeout(() => setCtxNewState('idle'), 5000)
-      })
-  }
-
-  // ─── Workflow Definitions handlers ────────────────────────────────────────
-
-  function loadWfDefs() {
-    setWfDefsLoading(true)
-    apiFetch('/api/workflow-definitions?includeInactive=true')
-      .then(r => r.json())
-      .then((list: WorkflowDefinitionSummary[]) => { setWfDefs(list); setWfDefsLoaded(true) })
-      .catch(() => {})
-      .finally(() => setWfDefsLoading(false))
-  }
-
-  function loadWfDefDetail(name: string) {
-    setWfDefDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}`)
-      .then(r => r.json())
-      .then((detail: WorkflowDefinitionDetail) => {
-        setWfDefDetails(prev => ({ ...prev, [name]: detail }))
-        setWfDefEdits(prev => ({ ...prev, [name]: detail.definition }))
-      })
-      .catch(() => {})
-      .finally(() => setWfDefDetailLoading(prev => ({ ...prev, [name]: false })))
-  }
-
-  function toggleWfDefExpand(name: string) {
-    setExpandedWfDef(prev => prev === name ? null : name)
-    if (expandedWfDef !== name && !wfDefDetails[name]) loadWfDefDetail(name)
-  }
-
-  function saveWfDef(name: string) {
-    const content = wfDefEdits[name]
-    const reason = wfDefReasons[name]?.trim() || undefined
-    setWfDefSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ definition: content, reason }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
-      .then(() => {
-        setWfDefSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setWfDefSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
-        loadWfDefDetail(name)
-        loadWfDefs()
-        setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setWfDefSaveState(prev => ({ ...prev, [name]: 'error' }))
-        setWfDefSaveMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function handleWfDefRollback(name: string, targetVersion: number) {
-    const key = `${name}:${targetVersion}`
-    if (wfDefRollbackConfirm[name] === key) {
-      // Confirmed — execute rollback
-      setWfDefRollbackConfirm(prev => ({ ...prev, [name]: null }))
-      const verDef = wfDefDetails[name]?.versions.find(v => v.version === targetVersion)?.definition
-      if (!verDef) return
-      const reason = `Rollback to v${targetVersion}`
-      setWfDefSaveState(prev => ({ ...prev, [name]: 'saving' }))
-      apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ definition: verDef, reason }),
-      })
-        .then(async r => {
-          if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-          return r.json()
-        })
-        .then(() => {
-          setWfDefSaveState(prev => ({ ...prev, [name]: 'success' }))
-          setWfDefSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
-          setWfDefSelectedVersion(prev => ({ ...prev, [name]: null }))
-          loadWfDefDetail(name)
-          loadWfDefs()
-          setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-        })
-        .catch((err: Error) => {
-          setWfDefSaveState(prev => ({ ...prev, [name]: 'error' }))
-          setWfDefSaveMsg(prev => ({ ...prev, [name]: err.message }))
-          setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-        })
-    } else {
-      setWfDefRollbackConfirm(prev => ({ ...prev, [name]: key }))
-      setTimeout(() => setWfDefRollbackConfirm(prev => prev[name] === key ? { ...prev, [name]: null } : prev), 5000)
-    }
-  }
-
-  function handleWfDefToggleConfirmClick(name: string) {
-    setWfDefToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setWfDefToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
-  }
-
-  function toggleWfDefActive(name: string, isActive: boolean) {
-    setWfDefToggleConfirm(prev => ({ ...prev, [name]: false }))
-    setWfDefToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiFetch(`/api/workflow-definitions/${encodeURIComponent(name)}/toggle-active`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isActive }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
-      .then(() => {
-        setWfDefToggleState(prev => ({ ...prev, [name]: 'success' }))
-        setWfDefToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        loadWfDefs()
-        setTimeout(() => setWfDefToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: Error) => {
-        setWfDefToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setWfDefToggleMsg(prev => ({ ...prev, [name]: err.message }))
-        setTimeout(() => setWfDefToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function createWfDef() {
-    setWfDefNewState('saving')
-    apiFetch('/api/workflow-definitions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: wfDefNewForm.name,
-        namespace: wfDefNewForm.namespace,
-        taskQueue: wfDefNewForm.taskQueue,
-        definition: wfDefNewForm.definition,
-        description: wfDefNewForm.description || undefined,
-      }),
-    })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
-      .then(() => {
-        setWfDefNewState('success')
-        setWfDefNewMsg('Created')
-        setWfDefShowNew(false)
-        setWfDefNewForm({ name: '', namespace: '', taskQueue: '', description: '', definition: '' })
-        loadWfDefs()
-        setTimeout(() => setWfDefNewState('idle'), 3000)
-      })
-      .catch((err: Error) => {
-        setWfDefNewState('error')
-        setWfDefNewMsg(err.message)
-        setTimeout(() => setWfDefNewState('idle'), 5000)
-      })
-  }
-
-  function wfKey(wf: WorkflowSummary): string { return `${wf.namespace}/${wf.workflowId}` }
-
-  async function handleWfClick(wf: WorkflowSummary) {
-    setSelectedWf(wf)
-    setWfHistory([])
-    setWfHistoryError(null)
-    setExpandedEvents(new Set())
-    setWfHistoryLoading(true)
-    try {
-      const res = await apiFetch(`/api/workflows/${encodeURIComponent(wf.namespace)}/history/${encodeURIComponent(wf.workflowId)}`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const events: WorkflowEvent[] = await res.json()
-      const sorted = [...events].reverse()
-      setWfHistory(sorted)
-      if (sorted.length > 0) setExpandedEvents(new Set([sorted[0].eventId]))
-    } catch (e: unknown) {
-      setWfHistoryError(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setWfHistoryLoading(false)
-    }
-  }
-
-  function getWfActionState(wf: WorkflowSummary): WfActionState { return wfActionStates[wfKey(wf)] ?? 'idle' }
-
-  function setWfState(wf: WorkflowSummary, state: WfActionState, msg = '') {
-    const k = wfKey(wf)
-    setWfActionStates(prev => ({ ...prev, [k]: state }))
-    setWfActionMsg(prev => ({ ...prev, [k]: msg }))
-  }
-
-  function handleWfAction(wf: WorkflowSummary, action: 'cancel' | 'restart' | 'terminate') {
-    const state = getWfActionState(wf)
-    if (state === 'pending') return
-    if (state === `confirming-${action}`) {
-      setWfState(wf, 'pending')
-      const url = action === 'restart'
-        ? `/api/workflows/${encodeURIComponent(wf.namespace)}/restart/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}&terminateExisting=true`
-        : `/api/workflows/${encodeURIComponent(wf.namespace)}/${action}/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}`
-      apiFetch(url, { method: 'POST' })
-        .then(async r => {
-          if (r.ok) { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) }
-          else { const b = await r.json().catch(() => ({})); setWfState(wf, 'error', b?.error ?? b?.title ?? `Error ${r.status}`) }
-        })
-        .catch(() => setWfState(wf, 'error', 'Request failed'))
-        .finally(() => setTimeout(() => setWfState(wf, 'idle'), 4000))
-      return
-    }
-    setWfState(wf, `confirming-${action}`)
-    setTimeout(() => {
-      setWfActionStates(prev => {
-        const cur = prev[wfKey(wf)]
-        if (cur === `confirming-${action}`) return { ...prev, [wfKey(wf)]: 'idle' }
-        return prev
-      })
-    }, 5000)
-  }
-
-  function signalKey(wf: WorkflowSummary): string { return `${wf.namespace}/${wf.workflowId}` }
-
-  function handleWfActionDirect(wf: WorkflowSummary, action: 'cancel' | 'restart' | 'terminate') {
-    setWfState(wf, 'pending')
-    const url = action === 'restart'
-      ? `/api/workflows/${encodeURIComponent(wf.namespace)}/restart/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}&terminateExisting=true`
-      : `/api/workflows/${encodeURIComponent(wf.namespace)}/${action}/${encodeURIComponent(wf.workflowId)}?runId=${encodeURIComponent(wf.runId)}`
-    apiFetch(url, { method: 'POST' })
-      .then(async r => {
-        if (r.ok) { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) }
-        else { const b = await r.json().catch(() => ({})); setWfState(wf, 'error', b?.error ?? b?.title ?? `Error ${r.status}`) }
-      })
-      .catch(() => setWfState(wf, 'error', 'Request failed'))
-      .finally(() => setTimeout(() => setWfState(wf, 'idle'), 4000))
-  }
-
-  function getSignalDefs(wf: WorkflowSummary): SignalDef[] {
-    const defs = signalRegistry[wf.workflowType] ?? []
-    if (!wf.phase) return []
-    return defs.filter(sig => !sig.validPhases || sig.validPhases.includes(wf.phase!))
-  }
-
-  function signalConfirmKey(wf: WorkflowSummary, sigName: string, btnLabel: string): string {
-    return `${signalKey(wf)}|${sigName}|${btnLabel}`
-  }
-
-  function handleSignalClick(wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) {
-    if (btn.requiresComment || sig.name === 'request-input') {
-      setSignalModal({ wf, signalName: sig.name, button: btn, comment: '' })
-      return
-    }
-    const ck = signalConfirmKey(wf, sig.name, btn.label)
-    if (signalConfirm === ck) {
-      setSignalConfirm(null)
-      sendSignal(wf, sig.name, btn.payload)
-    } else {
-      setSignalConfirm(ck)
-      setTimeout(() => setSignalConfirm(prev => prev === ck ? null : prev), 5000)
-    }
-  }
-
-  function sendSignal(wf: WorkflowSummary, signalName: string, payload: string, comment?: string) {
-    const key = signalKey(wf)
-    setSignalStates(prev => ({ ...prev, [key]: 'pending' }))
-    apiFetch(`/api/workflows/${encodeURIComponent(wf.namespace)}/signal/${encodeURIComponent(wf.workflowId)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildSignalRequest(wf, signalName, payload, comment)),
-    })
-      .then(async r => {
-        if (r.ok) { setSignalStates(prev => ({ ...prev, [key]: 'success' })); setSignalMsg(prev => ({ ...prev, [key]: 'Signal sent' })); setSentSignals(prev => new Set(prev).add(`${wf.workflowId}::${wf.phase}`)) }
-        else { const b = await r.json().catch(() => ({})); setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalName === 'request-input' && r.status >= 500 ? 'Answer delivery is uncertain. Refresh this exact run before retrying.' : signalErrorMessage(r.status, b) })) }
-      })
-      .catch(() => { setSignalStates(prev => ({ ...prev, [key]: 'error' })); setSignalMsg(prev => ({ ...prev, [key]: signalName === 'request-input' ? 'Answer delivery is uncertain. Refresh this exact run before retrying.' : 'Request failed' })) })
-      .finally(() => { if (signalName !== 'request-input') setTimeout(() => setSignalStates(prev => ({ ...prev, [key]: 'idle' })), 4000) })
-  }
-
-  function applyLogFilter(lines: string[]): string[] {
-    if (logFilter === 'all') return lines
-    return lines.filter(l => {
-      const low = l.toLowerCase()
-      if (logFilter === 'error') return low.includes('error') || low.includes(' err ') || low.includes('[err') || low.includes('exception')
-      if (logFilter === 'warn') return low.includes('warn')
-      if (logFilter === 'info') return low.includes('info')
-      return true
-    })
-  }
-
-  function handleContainerCopy(name: string) {
-    navigator.clipboard.writeText(name).then(() => {
-      setCopiedContainer(name)
-      setTimeout(() => setCopiedContainer(null), 2000)
-    }).catch(() => {})
-  }
-
-  function wfStatusClass(wf: WorkflowSummary, signalDefs: SignalDef[]): string {
-    const s = wf.status
-    if (s === 'TimedOut' || s === 'Canceled' || s === 'Terminated' || s === 'Completed' || s === 'Failed') return 'wf-row-muted'
-    if (s === 'Running' && signalDefs.length > 0) return 'wf-row-signal-waiting'
-    if (s === 'Running') return 'wf-row-running'
-    return ''
-  }
-
-  async function handleCopyFrom(sourceName: string) {
-    setCopyFrom(sourceName)
-    if (!sourceName) return
-    setCopyFromLoading(true)
-    try {
-      const r = await apiFetch(`/api/agents/${encodeURIComponent(sourceName)}/config`)
-      if (!r.ok) return
-      const cfg: AgentConfig = await r.json()
-      setCreateForm(prev => ({
-        ...prev,
-        role: (cfg as unknown as { role?: string }).role ?? prev.role,
-        model: cfg.model,
-        memoryLimitMb: String(cfg.memoryLimitMb),
-        image: cfg.image ?? '',
-        permissionMode: cfg.permissionMode,
-        maxTurns: String(cfg.maxTurns),
-        workDir: cfg.workDir,
-        proactiveIntervalMinutes: String(cfg.proactiveIntervalMinutes),
-        groupListenMode: cfg.groupListenMode,
-        groupDebounceSeconds: String(cfg.groupDebounceSeconds),
-        warmupTimeoutSeconds: warmupTimeoutEditValue(cfg.warmupTimeoutSeconds),
-        showStats: cfg.showStats,
-        prefixMessages: cfg.prefixMessages,
-        formattingMode: cfg.formattingMode,
-        suppressToolMessages: cfg.suppressToolMessages ?? false,
-        telegramSendOnly: cfg.telegramSendOnly,
-        provider: cfg.provider ?? 'claude',
-        codexSandboxMode: cfg.codexSandboxMode ?? '',
-        effort: cfg.effort ?? '',
-        jsonSchema: cfg.jsonSchema ?? '',
-        agentsJson: cfg.agentsJson ?? '',
-        autoMemoryEnabled: cfg.autoMemoryEnabled,
-        tools: cfg.tools.filter(t => t.isEnabled).map(t => t.toolName).join('\n'),
-        projects: cfg.projects.join('\n'),
-        networks: cfg.networks.join('\n'),
-        envRefs: cfg.envRefs.join('\n'),
-        mcpEndpoints: cfg.mcpEndpoints,
-        telegramUsers: cfg.telegramUsers.join('\n'),
-        telegramGroups: cfg.telegramGroups.join('\n'),
-        localBaseUrl: cfg.localBaseUrl ?? '',
-        contextWindow: cfg.contextWindow ? String(cfg.contextWindow) : '',
-      }))
-    } finally {
-      setCopyFromLoading(false)
-    }
-  }
-
-  async function handleCreateSubmit() {
-    if (!createForm.name.trim()) { setCreateMsg('Name is required'); return }
-    const createProvider = createForm.provider || 'claude'
-    const createModel = createForm.model.trim() || PROVIDER_DEFAULT_MODEL[createProvider] || ''
-    if (!createModel) { setCreateMsg('Model is required'); return }
-    if (!createForm.role.trim()) { setCreateMsg('Role is required'); return }
-    const createWarmupTimeout = parseWarmupTimeoutSeconds(createForm.warmupTimeoutSeconds)
-    if (!createWarmupTimeout.ok) { setCreateMsg(createWarmupTimeout.error); return }
-    setCreateState('creating'); setCreateMsg('')
-    try {
-      const body = {
-        name: createForm.name.trim(),
-        displayName: createForm.displayName.trim() || createForm.name.trim(),
-        role: createForm.role.trim(),
-        model: createModel,
-        containerName: createForm.containerName.trim() || `fleet-${createForm.name.trim()}`,
-        memoryLimitMb: parseInt(createForm.memoryLimitMb) || 4096,
-        isEnabled: createForm.isEnabled,
-        image: createForm.image.trim() || null,
-        permissionMode: createForm.permissionMode || 'acceptEdits',
-        maxTurns: parseInt(createForm.maxTurns) || 50,
-        workDir: createForm.workDir || '/workspace',
-        proactiveIntervalMinutes: parseInt(createForm.proactiveIntervalMinutes) || 0,
-        groupListenMode: createForm.groupListenMode || 'mention',
-        groupDebounceSeconds: parseInt(createForm.groupDebounceSeconds) || 15,
-        warmupTimeoutSeconds: createWarmupTimeout.value,
-        shortName: createForm.shortName,
-        showStats: createForm.showStats,
-        prefixMessages: createForm.prefixMessages,
-        formattingMode: createForm.formattingMode,
-        suppressToolMessages: createForm.suppressToolMessages,
-        telegramSendOnly: createForm.telegramSendOnly,
-        effort: createForm.effort.trim() || null,
-        jsonSchema: createForm.jsonSchema.trim() || null,
-        agentsJson: createForm.agentsJson.trim() || null,
-        autoMemoryEnabled: createForm.autoMemoryEnabled,
-        provider: createForm.provider || 'claude',
-        codexSandboxMode: createForm.codexSandboxMode.trim() || null,
-        tools: createForm.tools.split('\n').map(s => s.trim()).filter(Boolean),
-        projects: createForm.projects.split('\n').map(s => s.trim()).filter(Boolean),
-        networks: createForm.networks.split('\n').map(s => s.trim()).filter(Boolean),
-        envRefs: createForm.envRefs.split('\n').map(s => s.trim()).filter(Boolean),
-        mcpEndpoints: createForm.mcpEndpoints,
-        telegramUsers: createForm.telegramUsers.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        telegramGroups: createForm.telegramGroups.split('\n').map(s => parseInt(s.trim())).filter(n => !isNaN(n)),
-        provision: !!createTemplateName,
-      }
-      const r = await apiFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      const data = await r.json().catch(() => ({}))
-      if (r.ok || r.status === 201 || r.status === 207) {
-        // Apply instruction assignments if any were selected
-        if (createForm.instructions.length > 0) {
-          await apiFetch(`/api/agents/${encodeURIComponent(createForm.name.trim())}/config`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              instructions: createForm.instructions.map(i => ({ instructionName: i.name, loadOrder: i.loadOrder })),
-            }),
-          }).catch(() => {/* non-fatal — user can set via config panel */})
-        }
-        setCreateState('success')
-        const defaultMsg = createTemplateName
-          ? `✓ ${createForm.name.trim()} provisioned`
-          : 'Agent created — configure and provision when ready'
-        setCreateMsg(data.message ?? defaultMsg)
-        setTimeout(() => { setCreateModalOpen(false); setCreateState('idle'); setCreateMsg(''); setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom(''); setCreateTemplateName(undefined) }, 3000)
-      } else {
-        setCreateState('error'); setCreateMsg(data.error ?? `Error ${r.status}`)
-      }
-    } catch {
-      setCreateState('error'); setCreateMsg('Request failed')
-    }
-  }
-
-  async function handleNewAgentFromTemplate(templateName: string) {
-    try {
-      const r = await apiFetch(`/api/agent-templates/${encodeURIComponent(templateName)}`)
-      if (!r.ok) return
-      const t = await r.json()
-      const form: CreateForm = {
-        ...DEFAULT_CREATE_FORM,
-        role: t.role ?? '',
-        model: t.model ?? PROVIDER_DEFAULT_MODEL['claude'],
-        provider: t.provider ?? 'claude',
-        memoryLimitMb: String(t.memoryLimitMb ?? 4096),
-        permissionMode: t.permissionMode ?? 'acceptEdits',
-        maxTurns: String(t.maxTurns ?? 50),
-        workDir: t.workDir ?? '/workspace',
-        proactiveIntervalMinutes: String(t.proactiveIntervalMinutes ?? 0),
-        groupListenMode: t.groupListenMode ?? 'mention',
-        groupDebounceSeconds: String(t.groupDebounceSeconds ?? 15),
-        warmupTimeoutSeconds: warmupTimeoutEditValue(t.warmupTimeoutSeconds),
-        showStats: t.showStats ?? false,
-        prefixMessages: t.prefixMessages ?? false,
-        formattingMode: t.formattingMode ?? 0,
-        suppressToolMessages: t.suppressToolMessages ?? false,
-        telegramSendOnly: t.telegramSendOnly ?? false,
-        autoMemoryEnabled: t.autoMemoryEnabled ?? true,
-        tools: (t.tools ?? []).map((x: { toolName: string }) => x.toolName).join('\n'),
-        projects: (t.projects ?? []).join('\n'),
-        networks: (t.networks ?? []).join('\n'),
-        envRefs: (t.envRefs ?? []).join('\n'),
-        mcpEndpoints: (t.mcpEndpoints ?? []).map((e: { mcpName: string; url: string; transportType: string }) => ({
-          mcpName: e.mcpName, url: e.url, transportType: e.transportType,
-        })),
-        instructions: (t.instructions ?? []).map((i: { name: string; loadOrder: number }) => ({
-          name: i.name, loadOrder: i.loadOrder,
-        })),
-      }
-      setCreateTemplateName(t.displayName ?? templateName)
-      setCreateForm(form)
-      setCopyFrom('')
-      setCreateState('idle')
-      setCreateMsg('')
-      setCreateModalOpen(true)
-    } catch {/* ignore */}
-  }
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const deleteAgent = params.get('delete')
-    if (deleteAgent) setDeleteStates(prev => ({ ...prev, [deleteAgent]: 'confirming' }))
-    const hasCreate = params.has('create') || params.has('name')
-    if (hasCreate) {
-      const form = { ...DEFAULT_CREATE_FORM }
-      const p = (k: string) => params.get(k) ?? ''
-      if (p('name')) form.name = p('name')
-      if (p('displayName')) form.displayName = p('displayName')
-      if (p('role')) form.role = p('role')
-      if (p('model')) form.model = p('model')
-      if (p('memory')) form.memoryLimitMb = p('memory')
-      setCreateForm(form)
-      setCreateModalOpen(true)
-    }
-    const templateParam = params.get('template')
-    if (templateParam) handleNewAgentFromTemplate(templateParam)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
+  const instructions = instr.items
+  const projectContexts = ctx.items
 
   return (
   <MemoryIdCacheProvider>
@@ -1757,23 +372,23 @@ export default function App() {
         activeView={activeView}
         onNavigate={view => {
           setActiveView(view)
-          if (view === 'wf-definitions' && !wfDefsLoaded) loadWfDefs()
+          if (view === 'wf-definitions' && !wfDefs.loaded) wfDefs.load()
         }}
         agentCount={sorted.length}
         activeWorkflowCount={workflows.length}
         attentionWorkflowCount={workflows.filter(wf => getSignalDefs(wf).length > 0).length}
         instructionCount={instructions.length}
         projectContextCount={projectContexts.length}
-        outputStyleCount={outputStyles.length}
-        wfDefinitionCount={wfDefs.length}
-        namespaceCount={apiNamespaces.length}
+        outputStyleCount={catalog.outputStyles.length}
+        wfDefinitionCount={wfDefs.definitions.length}
+        namespaceCount={catalog.namespaces.length}
         unreadAlertCount={unreadAlerts.length}
-        reprovisionAllState={reprovisionAllState}
-        reprovisionAllMsg={reprovisionAllMsg}
-        onReprovisionAll={handleReprovisionAll}
-        onReprovisionAllConfirm={handleReprovisionAllConfirm}
-        onReprovisionAllCancel={handleReprovisionAllCancel}
-        onNewAgent={() => { setCreateForm(DEFAULT_CREATE_FORM); setCopyFrom(''); setCreateState('idle'); setCreateMsg(''); setCreateModalOpen(true) }}
+        reprovisionAllState={agentActions.reprovisionAllState}
+        reprovisionAllMsg={agentActions.reprovisionAllMsg}
+        onReprovisionAll={agentActions.reprovisionAll}
+        onReprovisionAllConfirm={agentActions.reprovisionAllConfirm}
+        onReprovisionAllCancel={agentActions.reprovisionAllCancel}
+        onNewAgent={() => create.open()}
         navOpen={navOpen}
         onNavClose={() => setNavOpen(false)}
       />
@@ -1781,88 +396,24 @@ export default function App() {
       <main className={`app-main${activeView === 'memory' ? ' app-main--memory' : activeView === 'chat' ? ' app-main--chat' : ''}`}>
         {activeView === 'agents' && (
           <SetupBanner
-            status={setupStatus}
+            status={catalog.setupStatus}
             agentCount={Object.keys(agents).length}
-            onConnected={() => {
-              apiFetch('/api/setup/status')
-                .then(r => r.ok ? r.json() : null)
-                .then(data => { if (data) setSetupStatus(data) })
-                .catch(() => {})
-            }}
-            onNewAgentFromTemplate={handleNewAgentFromTemplate}
+            onConnected={catalog.loadSetupStatus}
+            onNewAgentFromTemplate={create.openFromTemplate}
           />
         )}
         {activeView === 'agents' && (
           <AgentsView
             sorted={sorted}
-            expandedAgent={expandedAgent}
-            taskHistory={taskHistory}
-            historyLoading={historyLoading}
-            restartStates={restartStates}
-            restartMsg={restartMsg}
-            reprovisionStates={reprovisionStates}
-            reprovisionMsg={reprovisionMsg}
-            stopStates={stopStates}
-            stopMsg={stopMsg}
-            startStates={startStates}
-            startMsg={startMsg}
-            cancelStates={cancelStates}
-            cancelMsg={cancelMsg}
-            deleteStates={deleteStates}
-            deleteMsg={deleteMsg}
-            bgCancelStates={bgCancelStates}
-            expandedTasks={expandedTasks}
-            copiedContainer={copiedContainer}
-            configAgent={configAgent}
-            logViewer={logViewer}
+            actions={agentActions}
+            configAgent={config.agent}
+            logViewer={log.agent}
+            onViewLogs={log.toggle}
+            onEditConfig={config.open}
             workflowByAgent={workflowByAgent}
             workflows={workflows}
             agentByWorkflow={agentByWorkflow}
-            wfActionStates={wfActionStates}
-            wfActionMsg={wfActionMsg}
-            signalStates={signalStates}
-            signalMsg={signalMsg}
-            signalConfirm={signalConfirm}
-            signalRegistry={signalRegistry}
-            wfMenuOpen={wfMenuOpen}
-            selectedWf={selectedWf}
-            wfHistory={wfHistory}
-            wfHistoryLoading={wfHistoryLoading}
-            wfHistoryError={wfHistoryError}
-            expandedEvents={expandedEvents}
-            onExpandAgent={toggleHistory}
-            onRestart={handleRestart}
-            onRestartConfirm={handleRestartConfirm}
-            onRestartCancel={name => setAgentRestartState(name, 'idle')}
-            onReprovision={handleReprovision}
-            onReprovisionConfirm={handleReprovisionConfirm}
-            onReprovisionCancel={name => setAgentReprovisionState(name, 'idle')}
-            onStop={handleStop}
-            onStart={handleStart}
-            onCancel={handleCancel}
-            onCancelConfirm={handleCancelConfirm}
-            onCancelCancel={name => setAgentCancelState(name, 'idle')}
-            onDeleteClick={handleDeleteClick}
-            onDeleteConfirm={handleDeleteConfirm}
-            onDeleteCancel={name => setDeleteStates(prev => ({ ...prev, [name]: 'idle' }))}
-            onBgCancel={handleBgCancel}
-            onViewLogs={name => setLogViewer(logViewer === name ? null : name)}
-            onEditConfig={openConfig}
-            onToggleTask={toggleTaskExpand}
-            onCopyContainer={handleContainerCopy}
-            onWfClick={handleWfClick}
-            onWfAction={handleWfAction}
-            onSignalClick={handleSignalClick}
-            onToggleMenu={k => setWfMenuOpen(prev => ({ ...prev, [k]: !prev[k] }))}
-            onToggleEvent={id => setExpandedEvents(prev => { const next = new Set(prev); prev.has(id) ? next.delete(id) : next.add(id); return next })}
-            onCloseDetail={() => setSelectedWf(null)}
-            onRefreshDetail={() => selectedWf && handleWfClick(selectedWf)}
-            getSignalDefs={getSignalDefs}
-            wfActionState={getWfActionState}
-            signalKey={signalKey}
-            wfKey={wfKey}
-            wfStatusClass={wfStatusClass}
-            signalConfirmKey={signalConfirmKey}
+            workflowActions={wfActions}
             highlightedEntityId={highlightedEntityId}
             onClearHighlight={onClearHighlight}
           />
@@ -1871,52 +422,11 @@ export default function App() {
         {activeView === 'workflows' && (
           <WorkflowsView
             workflows={workflows}
-            completedWorkflows={completedWorkflows}
-            completedCollapsed={completedCollapsed}
-            completedLoading={completedLoading}
-            nsFilter={nsFilter}
-            namespaces={namespaces}
-            filteredWorkflows={filteredWorkflows}
-            filteredCompletedWorkflows={filteredCompletedWorkflows}
+            lists={wfLists}
+            actions={wfActions}
             agentByWorkflow={agentByWorkflow}
-            wfActionStates={wfActionStates}
-            wfActionMsg={wfActionMsg}
-            signalStates={signalStates}
-            signalMsg={signalMsg}
-            sentSignals={sentSignals}
-            signalRegistry={signalRegistry}
-            wfMenuOpen={wfMenuOpen}
-            selectedWf={selectedWf}
-            wfHistory={wfHistory}
-            wfHistoryLoading={wfHistoryLoading}
-            wfHistoryError={wfHistoryError}
-            expandedEvents={expandedEvents}
-            onNsFilter={setNsFilter}
-            onToggleCompleted={() => setCompletedCollapsed(c => !c)}
-            onRefreshCompleted={fetchCompleted}
-            onWfClick={handleWfClick}
-            onSignalClick={handleSignalClick}
-            onToggleMenu={k => setWfMenuOpen(prev => {
-              // Support close-only key (from handleWfActionLocal)
-              const realKey = k.endsWith('__close__') ? k.slice(0, -9) : k
-              if (k.endsWith('__close__')) return { ...prev, [realKey]: false }
-              return { ...prev, [realKey]: !prev[realKey] }
-            })}
-            onToggleEvent={id => setExpandedEvents(prev => { const next = new Set(prev); prev.has(id) ? next.delete(id) : next.add(id); return next })}
-            onCloseDetail={() => setSelectedWf(null)}
-            onRefreshDetail={() => selectedWf && handleWfClick(selectedWf)}
-            getSignalDefs={getSignalDefs}
-            wfActionState={getWfActionState}
-            signalKey={signalKey}
-            wfKey={wfKey}
-            wfStatusClass={wfStatusClass}
-            onSendSignal={sendSignal}
-            onExecuteWfAction={handleWfActionDirect}
             highlightedEntityId={highlightedEntityId}
             onClearHighlight={onClearHighlight}
-            onStartWorkflow={() => setStartWfModalOpen(true)}
-            onRefreshWorkflows={fetchWorkflows}
-            workflowsLoading={workflowsLoading}
           />
         )}
 
@@ -1926,150 +436,49 @@ export default function App() {
 
         {activeView === 'instructions' && (
           <InstructionsView
-            instructions={instructions}
-            instructionsLoading={instructionsLoading}
-            expandedInstruction={expandedInstruction}
-            instructionDetail={instructionDetail}
-            instructionDetailLoading={instructionDetailLoading}
-            instructionEdits={instructionEdits}
-            instructionReason={instructionReason}
-            instructionSaveState={instructionSaveState as Record<string, ConfigSaveState>}
-            instructionSaveMsg={instructionSaveMsg}
-            selectedVersion={selectedVersion}
-            rollbackConfirm={rollbackConfirm}
-            deployConfirm={deployConfirm}
-            deployState={deployState}
-            deployMsg={deployMsg}
-            instrToggleConfirm={instrToggleConfirm}
-            instrToggleState={instrToggleState}
-            instrToggleMsg={instrToggleMsg}
-            showNewForm={instrShowNew}
-            newForm={instrNewForm}
-            newFormState={instrNewState}
-            newFormMsg={instrNewMsg}
-            onToggleInstruction={toggleInstruction}
-            onSetEdits={(name, content) => setInstructionEdits(prev => ({ ...prev, [name]: content }))}
-            onSetReason={(name, reason) => setInstructionReason(prev => ({ ...prev, [name]: reason }))}
-            onSave={saveInstruction}
-            onSelectVersion={(name, version) => setSelectedVersion(prev => ({ ...prev, [name]: prev[name] === version ? null : version }))}
-            onRollbackClick={handleRollbackClick}
-            onDeployClick={handleDeployClick}
-            onToggleActive={toggleInstrActive}
-            onToggleConfirmClick={handleInstrToggleConfirmClick}
-            onShowNewForm={setInstrShowNew}
-            onNewFormChange={(field, value) => setInstrNewForm(prev => ({ ...prev, [field]: value }))}
-            onNewFormSubmit={createInstruction}
-            onRefresh={loadInstructions}
-            sizeLimit={promptSizeLimits ? promptSizeLimits.instruction.limitBytes : undefined}
-            sizeWarnings={instrSizeWarnings}
+            state={instr}
+            sizeLimit={catalog.promptSizeLimits ? catalog.promptSizeLimits.instruction.limitBytes : undefined}
           />
         )}
 
         {activeView === 'project-contexts' && (
           <ProjectContextsView
-            contexts={projectContexts}
-            contextsLoading={projectContextsLoading}
-            expandedContext={expandedContext}
-            contextDetail={contextDetail}
-            contextDetailLoading={contextDetailLoading}
-            contextEdits={contextEdits}
-            contextReason={contextReason}
-            contextSaveState={contextSaveState as Record<string, ConfigSaveState>}
-            contextSaveMsg={contextSaveMsg}
-            selectedVersion={contextSelectedVersion}
-            rollbackConfirm={contextRollbackConfirm}
-            ctxToggleConfirm={ctxToggleConfirm}
-            ctxToggleState={ctxToggleState}
-            ctxToggleMsg={ctxToggleMsg}
-            showNewForm={ctxShowNew}
-            newForm={ctxNewForm}
-            newFormState={ctxNewState}
-            newFormMsg={ctxNewMsg}
-            onToggleContext={toggleContext}
-            onSetEdits={(name, content) => setContextEdits(prev => ({ ...prev, [name]: content }))}
-            onSetReason={(name, reason) => setContextReason(prev => ({ ...prev, [name]: reason }))}
-            onSave={saveContext}
-            onSelectVersion={(name, version) => setContextSelectedVersion(prev => ({ ...prev, [name]: prev[name] === version ? null : version }))}
-            onRollbackClick={handleContextRollbackClick}
-            onToggleActive={toggleCtxActive}
-            onToggleConfirmClick={handleCtxToggleConfirmClick}
-            onShowNewForm={setCtxShowNew}
-            onNewFormChange={(field, value) => setCtxNewForm(prev => ({ ...prev, [field]: value }))}
-            onNewFormSubmit={createContext}
-            onRefresh={loadProjectContexts}
-            sizeLimit={promptSizeLimits ? promptSizeLimits.projectContext.limitBytes : undefined}
-            sizeWarnings={ctxSizeWarnings}
+            state={ctx}
+            sizeLimit={catalog.promptSizeLimits ? catalog.promptSizeLimits.projectContext.limitBytes : undefined}
           />
         )}
 
         {activeView === 'wf-definitions' && (
-          <WorkflowDefinitionsView
-            definitions={wfDefs}
-            loading={wfDefsLoading}
-            namespaces={apiNamespaces}
-            expandedDef={expandedWfDef}
-            defDetails={wfDefDetails}
-            defDetailLoading={wfDefDetailLoading}
-            defEdits={wfDefEdits}
-            defReasons={wfDefReasons}
-            defSaveState={wfDefSaveState}
-            defSaveMsg={wfDefSaveMsg}
-            defSelectedVersion={wfDefSelectedVersion}
-            defRollbackConfirm={wfDefRollbackConfirm}
-            defToggleConfirm={wfDefToggleConfirm}
-            defToggleState={wfDefToggleState}
-            defToggleMsg={wfDefToggleMsg}
-            nsFilter={wfDefNsFilter}
-            searchQuery={wfDefSearch}
-            showNewForm={wfDefShowNew}
-            newForm={wfDefNewForm}
-            newFormState={wfDefNewState}
-            newFormMsg={wfDefNewMsg}
-            onToggleExpand={toggleWfDefExpand}
-            onSetEdit={(name, value) => setWfDefEdits(prev => ({ ...prev, [name]: value }))}
-            onSetReason={(name, value) => setWfDefReasons(prev => ({ ...prev, [name]: value }))}
-            onSave={saveWfDef}
-            onSelectVersion={(name, ver) => setWfDefSelectedVersion(prev => ({ ...prev, [name]: ver }))}
-            onRollbackClick={handleWfDefRollback}
-            onToggleActive={toggleWfDefActive}
-            onToggleConfirmClick={handleWfDefToggleConfirmClick}
-            onNsFilter={setWfDefNsFilter}
-            onSearch={setWfDefSearch}
-            onShowNewForm={setWfDefShowNew}
-            onNewFormChange={(field, value) => setWfDefNewForm(prev => ({ ...prev, [field]: value }))}
-            onNewFormSubmit={createWfDef}
-            onEditVisual={name => setWfEditorDef(name)}
-            onNewVisual={() => setWfEditorDef(null)}
-            onRefresh={loadWfDefs}
-          />
+          <WorkflowDefinitionsView state={wfDefs} namespaces={catalog.namespaces} />
         )}
 
         {activeView === 'schedules' && (
           <SchedulesView
-            schedules={schedules}
-            loading={schedulesLoading}
-            workflowTypes={workflowTypes}
-            namespaces={apiNamespaces}
-            onRefresh={loadSchedules}
+            schedules={catalog.schedules}
+            loading={catalog.schedulesLoading}
+            workflowTypes={catalog.workflowTypes}
+            namespaces={catalog.namespaces}
+            onRefresh={catalog.loadSchedules}
           />
         )}
 
         {activeView === 'namespaces' && (
           <NamespacesView
-            namespaces={apiNamespaces}
+            namespaces={catalog.namespaces}
             workflows={workflows}
-            schedules={schedules}
-            workflowTypes={workflowTypes}
-            schedulesLoading={schedulesLoading}
+            schedules={catalog.schedules}
+            workflowTypes={catalog.workflowTypes}
+            schedulesLoading={catalog.schedulesLoading}
           />
         )}
 
         {activeView === 'output-styles' && (
           <OutputStylesView
             initialStyle={viewParam}
-            // The sidenav badge and the agent config select both read App's copy of the list, so a
-            // create or delete on this page has to say so or they stay at the count from mount.
-            onStylesChanged={loadOutputStyles}
+            // The sidenav badge and the agent config select both read the catalog's copy of the
+            // list, so a create or delete on this page has to say so or they stay at the count
+            // from page load.
+            onStylesChanged={catalog.loadOutputStyles}
           />
         )}
 
@@ -2082,12 +491,7 @@ export default function App() {
         )}
 
         {activeView === 'credentials' && (
-          <CredentialsView onSetupConnected={() => {
-            apiFetch('/api/setup/status')
-              .then(r => r.ok ? r.json() : null)
-              .then(data => { if (data) setSetupStatus(data) })
-              .catch(() => {})
-          }} />
+          <CredentialsView onSetupConnected={catalog.loadSetupStatus} />
         )}
 
         {activeView === 'memory' && (
@@ -2105,14 +509,14 @@ export default function App() {
       </main>
 
       {/* Visual Workflow Editor overlay */}
-      {wfEditorDef !== undefined && (
+      {wfDefs.editorDef !== undefined && (
         <div className="wfe-overlay">
           <WorkflowDefinitionEditor
-            defName={wfEditorDef}
-            onBack={() => setWfEditorDef(undefined)}
-            onSaved={() => { setWfEditorDef(undefined); loadWfDefs() }}
-            workflowTypes={workflowTypes}
-            namespaces={apiNamespaces}
+            defName={wfDefs.editorDef}
+            onBack={wfDefs.closeEditor}
+            onSaved={() => { wfDefs.closeEditor(); wfDefs.load() }}
+            workflowTypes={catalog.workflowTypes}
+            namespaces={catalog.namespaces}
           />
         </div>
       )}
@@ -2120,87 +524,57 @@ export default function App() {
       <AppFooter wsStatus={wsStatus} lastUpdated={lastUpdated} />
 
       {/* Overlay modals */}
-      {logViewer && (
-        <LogViewer
-          agentName={logViewer}
-          logLines={logLines}
-          logFilter={logFilter}
-          logPaused={logPaused}
-          logAutoScroll={logAutoScroll}
-          onSetFilter={setLogFilter}
-          onTogglePause={() => {
-            const next = !logPaused
-            setLogPaused(next)
-            logPausedRef.current = next
-          }}
-          onToggleAutoScroll={() => setLogAutoScroll(a => !a)}
-          onClear={() => setLogLines([])}
-          onClose={() => setLogViewer(null)}
-          applyLogFilter={applyLogFilter}
-        />
-      )}
+      {log.agent && <LogViewer agentName={log.agent} log={log} />}
 
       {signalModal && (
         <SignalModal
           modal={signalModal}
           currentGate={signalModal.signalName !== 'request-input' || workflows.some(wf =>
             humanInputIdentity(wf) === humanInputIdentity(signalModal.wf))}
-          onClose={() => setSignalModal(null)}
-          onCommentChange={comment => setSignalModal(m => m ? { ...m, comment } : null)}
+          onClose={() => wfActions.setSignalModal(null)}
+          onCommentChange={comment => wfActions.setSignalModal(m => m ? { ...m, comment } : null)}
           onSend={(payload) => {
-            sendSignal(signalModal.wf, signalModal.signalName, payload ?? signalModal.button.payload, signalModal.comment || undefined)
-            setSignalModal(null)
+            wfActions.sendSignal(signalModal.wf, signalModal.signalName, payload ?? signalModal.button.payload, signalModal.comment || undefined)
+            wfActions.setSignalModal(null)
           }}
         />
       )}
 
-      {createModalOpen && (
-        <CreateAgentModal
-          createForm={createForm}
-          createState={createState}
-          createMsg={createMsg}
-          agentNames={sorted.map(a => a.agentName)}
-          copyFrom={copyFrom}
-          copyFromLoading={copyFromLoading}
-          allInstructions={instructions}
-          templateName={createTemplateName}
-          onCopyFrom={handleCopyFrom}
-          onFormChange={patch => setCreateForm(f => ({ ...f, ...patch }))}
-          onSubmit={handleCreateSubmit}
-          onClose={() => { setCreateModalOpen(false); setCreateTemplateName(undefined) }}
-        />
+      {create.isOpen && (
+        <CreateAgentModal create={create} agentNames={sorted.map(a => a.agentName)} allInstructions={instructions} />
       )}
 
-      {configAgent && (
+      {config.agent && (
+        // This dialog keeps its flat props: agentConfigSections.test.ts renders it with them.
         <AgentConfigModal
-          agentName={configAgent}
-          configData={configData}
-          configEdits={configEdits}
-          configSaveState={configSaveState}
-          configSaveMsg={configSaveMsg}
-          configLoading={configLoading}
-          configReprovisionConfirm={configReprovisionConfirm}
+          agentName={config.agent}
+          configData={config.data}
+          configEdits={config.edits}
+          configSaveState={config.saveState}
+          configSaveMsg={config.saveMsg}
+          configLoading={config.loading}
+          configReprovisionConfirm={config.reprovisionConfirm}
           allInstructions={instructions}
-          outputStyles={outputStyles}
+          outputStyles={catalog.outputStyles}
           projectContexts={projectContexts}
-          promptSizeLimits={promptSizeLimits}
-          projectAccess={projectAccess}
-          projectAccessLoading={projectAccessLoading}
-          onEditsChange={patch => setConfigEdits(prev => prev ? { ...prev, ...patch } : prev)}
-          onSave={andReprovision => saveConfig(configAgent, andReprovision)}
-          onReprovisionConfirmToggle={() => setConfigReprovisionConfirm(c => !c)}
-          onProjectAccessAdd={project => addProjectAccess(configAgent, project)}
-          onProjectAccessRemove={project => removeProjectAccess(configAgent, project)}
-          onProjectAccessToggleWildcard={enable => toggleProjectAccessWildcard(configAgent, enable)}
-          onClose={closeConfig}
+          promptSizeLimits={catalog.promptSizeLimits}
+          projectAccess={config.projectAccess}
+          projectAccessLoading={config.projectAccessLoading}
+          onEditsChange={config.change}
+          onSave={config.save}
+          onReprovisionConfirmToggle={config.toggleReprovisionConfirm}
+          onProjectAccessAdd={config.addProjectAccess}
+          onProjectAccessRemove={config.removeProjectAccess}
+          onProjectAccessToggleWildcard={config.toggleProjectAccessWildcard}
+          onClose={config.close}
         />
       )}
 
-      {startWfModalOpen && (
+      {wfLists.startOpen && (
         <StartWorkflowModal
-          workflowTypes={workflowTypes}
+          workflowTypes={catalog.workflowTypes}
           agents={Object.values(agents)}
-          onClose={() => setStartWfModalOpen(false)}
+          onClose={() => wfLists.setStartOpen(false)}
         />
       )}
 

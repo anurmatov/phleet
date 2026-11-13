@@ -1,9 +1,6 @@
 import { useState } from 'react'
-import type {
-  ProjectContextSummary,
-  ProjectContextDetail,
-  ConfigSaveState,
-} from '../types'
+import type { ProjectContextSummary, ProjectContextDetail } from '../types'
+import type { VersionedResource } from '../hooks/useVersionedResource'
 import { computeDiff } from '../utils'
 import FieldHint from './FieldHint'
 import SizeMeter from './SizeMeter'
@@ -12,76 +9,46 @@ import { sizeCell, type MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
 
 interface ProjectContextsViewProps {
-  contexts: ProjectContextSummary[]
-  contextsLoading: boolean
-  expandedContext: string | null
-  contextDetail: Record<string, ProjectContextDetail>
-  contextDetailLoading: Record<string, boolean>
-  contextEdits: Record<string, string>
-  contextReason: Record<string, string>
-  contextSaveState: Record<string, ConfigSaveState>
-  contextSaveMsg: Record<string, string>
-  selectedVersion: Record<string, number | null>
-  rollbackConfirm: Record<string, boolean>
-  ctxToggleConfirm: Record<string, boolean>
-  ctxToggleState: Record<string, 'idle' | 'pending' | 'success' | 'error'>
-  ctxToggleMsg: Record<string, string>
-  showNewForm: boolean
-  newForm: { name: string; content: string }
-  newFormState: 'idle' | 'saving' | 'success' | 'error'
-  newFormMsg: string
-  onToggleContext: (name: string) => void
-  onSetEdits: (name: string, content: string) => void
-  onSetReason: (name: string, reason: string) => void
-  onSave: (name: string) => void
-  onSelectVersion: (name: string, version: number | null) => void
-  onRollbackClick: (e: React.MouseEvent, name: string, version: number, saveState: ConfigSaveState) => void
-  onToggleActive: (name: string, isActive: boolean) => void
-  onToggleConfirmClick: (name: string) => void
-  onShowNewForm: (show: boolean) => void
-  onNewFormChange: (field: string, value: string) => void
-  onNewFormSubmit: () => void
-  onRefresh: () => void
+  /** The page's state and requests: the same versioned editor the instructions page uses. */
+  state: VersionedResource<ProjectContextSummary, ProjectContextDetail>
   /** #346 — the project-context soft limit from GET /api/prompt-size-policy; undefined when unavailable. */
   sizeLimit: MeterLimit
-  /** #346 — the last write's size warning per row; cleared by a later write with none. */
-  sizeWarnings: Record<string, string>
 }
 
-export default function ProjectContextsView({
-  contexts,
-  contextsLoading,
-  expandedContext,
-  contextDetail,
-  contextDetailLoading,
-  contextEdits,
-  contextReason,
-  contextSaveState,
-  contextSaveMsg,
-  selectedVersion,
-  rollbackConfirm,
-  ctxToggleConfirm,
-  ctxToggleState,
-  ctxToggleMsg,
-  showNewForm,
-  newForm,
-  newFormState,
-  newFormMsg,
-  onToggleContext,
-  onSetEdits,
-  onSetReason,
-  onSave,
-  onSelectVersion,
-  onRollbackClick,
-  onToggleActive,
-  onToggleConfirmClick,
-  onShowNewForm,
-  onNewFormChange,
-  onNewFormSubmit,
-  onRefresh,
-  sizeLimit,
-  sizeWarnings,
-}: ProjectContextsViewProps) {
+export default function ProjectContextsView({ state, sizeLimit }: ProjectContextsViewProps) {
+  const {
+    items: contexts,
+    loading: contextsLoading,
+    expanded: expandedContext,
+    detail: contextDetail,
+    detailLoading: contextDetailLoading,
+    edits: contextEdits,
+    reasons: contextReason,
+    saveState: contextSaveState,
+    saveMsg: contextSaveMsg,
+    selectedVersion,
+    rollbackConfirm,
+    toggleConfirm: ctxToggleConfirm,
+    toggleState: ctxToggleState,
+    toggleMsg: ctxToggleMsg,
+    showNew: showNewForm,
+    newForm,
+    newState: newFormState,
+    newMsg: newFormMsg,
+    toggleExpanded: onToggleContext,
+    setEdit: onSetEdits,
+    setReason: onSetReason,
+    save: onSave,
+    selectVersion: onSelectVersion,
+    rollbackClick: onRollbackClick,
+    toggleActive: onToggleActive,
+    toggleConfirmClick: onToggleConfirmClick,
+    setShowNew: onShowNewForm,
+    changeNewForm: onNewFormChange,
+    create: onNewFormSubmit,
+    reload: onRefresh,
+    sizeWarnings,
+  } = state
   const [showArchived, setShowArchived] = useState(false)
 
   const activeContexts = contexts.filter(c => c.isActive)

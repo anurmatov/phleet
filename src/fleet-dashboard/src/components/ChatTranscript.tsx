@@ -1,31 +1,7 @@
 import { memo } from 'react'
-import ReactMarkdown, { type Components } from 'react-markdown'
+import AgentMarkdown from './AgentMarkdown'
 import { statusLabel, type Entry, type SubmissionStatus } from '../chatTranscript'
 import type { PendingSend } from '../chatConnection'
-
-/**
- * Links in an agent's reply open in a new tab and give that tab no handle back to this one.
- *
- * Images are shown as links, never loaded: an agent's reply can carry any URL, and loading it would
- * tell that server who is reading and when.
- *
- * Raw HTML is never rendered: react-markdown escapes it to text unless a plugin is added, and none
- * is. Its default URL filter empties `javascript:` and other unsafe URLs; such a link keeps its
- * words and loses the link.
- */
-const MARKDOWN_COMPONENTS: Components = {
-  a: ({ node: _node, href, children, ...props }) => (href
-    ? <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>
-    : <span>{children}</span>),
-  img: ({ src, alt }) => (src
-    ? <a href={src} target="_blank" rel="noopener noreferrer">{alt || 'image'}</a>
-    : <>{alt}</>),
-}
-
-/** An agent's reply, as Markdown. */
-export function AgentMarkdown({ text }: { text: string }) {
-  return <ReactMarkdown components={MARKDOWN_COMPONENTS}>{text}</ReactMarkdown>
-}
 
 const EntryRow = memo(function EntryRow({ entry, label }: { entry: Entry; label: string | null }) {
   if (entry.type === 'you') {

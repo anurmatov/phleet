@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react'
 import type { ScheduleSummary, ScheduleDetail, WorkflowTypeInfo } from '../types'
-import { apiFetch } from '../utils'
+import { apiGet, apiSend, errorMessage } from '../utils'
 import CreateScheduleModal from './CreateScheduleModal'
+import { useTick } from '../hooks/useTick'
 
 function formatRelativeOrFuture(iso: string): string {
   const diff = new Date(iso).getTime() - Date.now()
@@ -84,42 +85,36 @@ function ScheduleCard({ schedule, onRefresh }: ScheduleCardProps) {
   function loadDetail() {
     setDetailLoading(true)
     setDetailError(null)
-    apiFetch(`/api/schedules/${encodeURIComponent(schedule.namespace)}/${encodeURIComponent(schedule.scheduleId)}`)
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
-        return r.json()
-      })
+    apiGet<ScheduleDetail>(`/api/schedules/${encodeURIComponent(schedule.namespace)}/${encodeURIComponent(schedule.scheduleId)}`)
       .then((d: ScheduleDetail) => setDetail(d))
-      .catch((e: Error) => setDetailError(e.message))
+      .catch((e: unknown) => setDetailError(errorMessage(e)))
       .finally(() => setDetailLoading(false))
   }
 
   function doAction(action: 'pause' | 'unpause' | 'trigger') {
     setActionState('pending')
     const url = `/api/schedules/${encodeURIComponent(schedule.namespace)}/${action}/${encodeURIComponent(schedule.scheduleId)}`
-    apiFetch(url, { method: 'POST' })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
+    apiSend(url, 'POST')
+      .then(() => {
         setActionState('success')
         setActionMsg(action === 'pause' ? 'Paused' : action === 'unpause' ? 'Unpaused' : 'Triggered')
         onRefresh()
         // Reload detail if expanded
         if (expanded) { setDetail(null); loadDetail() }
       })
-      .catch((e: Error) => { setActionState('error'); setActionMsg(e.message) })
+      .catch((e: unknown) => { setActionState('error'); setActionMsg(errorMessage(e)) })
       .finally(() => setTimeout(() => { setActionState('idle'); setActionMsg('') }, 3000))
   }
 
   function doDelete() {
     setActionState('pending')
-    apiFetch(`/api/schedules/${encodeURIComponent(schedule.namespace)}/${encodeURIComponent(schedule.scheduleId)}`, { method: 'DELETE' })
-      .then(async r => {
-        if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error ?? `Error ${r.status}`) }
+    apiSend(`/api/schedules/${encodeURIComponent(schedule.namespace)}/${encodeURIComponent(schedule.scheduleId)}`, 'DELETE')
+      .then(() => {
         setActionState('success')
         setActionMsg('Deleted')
         onRefresh()
       })
-      .catch((e: Error) => { setActionState('error'); setActionMsg(e.message) })
+      .catch((e: unknown) => { setActionState('error'); setActionMsg(errorMessage(e)) })
       .finally(() => setTimeout(() => { setActionState('idle'); setActionMsg('') }, 3000))
   }
 
@@ -232,6 +227,8 @@ interface SchedulesViewProps {
 }
 
 export default function SchedulesView({ schedules, loading, workflowTypes, namespaces, onRefresh }: SchedulesViewProps) {
+  // Next and last runs are shown relative to now ("in 4m"): redraw as the clock moves.
+  useTick()
   const [nsFilter, setNsFilter] = useState('all')
   const [showCreateModal, setShowCreateModal] = useState(false)
 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { apiFetch } from '../utils'
+import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
 import type { AgentTemplateSummary } from '../types'
 
 // Matches the nested shape returned by SetupStatusDto
@@ -107,22 +107,12 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
       if (payload.groupChatId) values['FLEET_GROUP_CHAT_ID'] = payload.groupChatId
       if (payload.userId) values['TELEGRAM_USER_ID'] = payload.userId
 
-      const putRes = await apiFetch('/api/config/values', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
-      })
-      if (!putRes.ok) {
-        const data = await putRes.json().catch(() => ({}))
-        setSaveState('error')
-        setSaveMsg((data as { error?: string }).error ?? `Error ${putRes.status}`)
-        return
-      }
+      await apiSend('/api/config/values', 'PUT', values)
       onConnected('✓ Telegram connected')
       onClose()
     } catch (e) {
       setSaveState('error')
-      setSaveMsg(String(e))
+      setSaveMsg(errorMessage(e))
     }
   }
 
@@ -363,22 +353,12 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
     try {
       // GITHUB_APP_PEM is on the config-API denylist, so use the dedicated setup endpoint
       // instead of PUT /api/config/values (which would return 403 for GITHUB_APP_PEM).
-      const putRes = await apiFetch('/api/setup/github/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appId: appId || undefined, privateKeyPem: pem || undefined }),
-      })
-      if (!putRes.ok) {
-        const data = await putRes.json().catch(() => ({}))
-        setSaveState('error')
-        setSaveMsg((data as { error?: string }).error ?? `Error ${putRes.status}`)
-        return
-      }
+      await apiSend('/api/setup/github/save', 'POST', { appId: appId || undefined, privateKeyPem: pem || undefined })
       onConnected('✓ GitHub connected')
       onClose()
     } catch (e) {
       setSaveState('error')
-      setSaveMsg(String(e))
+      setSaveMsg(errorMessage(e))
     }
   }
 
@@ -536,10 +516,9 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
   const [templates, setTemplates] = useState<AgentTemplateSummary[]>([])
 
   useEffect(() => {
-    apiFetch('/api/agent-templates')
-      .then(r => r.ok ? r.json() : [])
-      .then(data => setTemplates(Array.isArray(data) ? data : []))
-      .catch(() => {})
+    apiGet<unknown>('/api/agent-templates')
+      .then(data => setTemplates(Array.isArray(data) ? data as AgentTemplateSummary[] : []))
+      .catch(() => setTemplates([]))
   }, [])
 
   if (!status) return null

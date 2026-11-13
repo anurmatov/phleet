@@ -29,7 +29,6 @@ import type {
   ScheduleSummary,
   OutputStyleSummary,
   PromptSizeLimits,
-  PromptSizeReport,
 } from './types'
 import { apiFetch, apiGet, apiSend, errorMessage, firstFailure } from './utils'
 import { buildSignalRequest, signalErrorMessage } from './signalRequest'
@@ -44,6 +43,7 @@ import { parseViewHash } from './activeViews'
 import { reconcileAgents } from './agentList'
 import { KeyedTimers, afterClose } from './reconnect'
 import { useInstructions } from './hooks/useInstructions'
+import { useVersionedResource } from './hooks/useVersionedResource'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -80,9 +80,6 @@ interface SetupStatus {
   telegram: { configured: boolean; groupChatEnabled: boolean }
   gitHub: { configured: boolean }
 }
-
-/** A write that may answer with the #346 size report. Null when the answer has no body. */
-type SizedWrite = { size?: PromptSizeReport } | null
 
 /** `GET /api/agent-templates/{name}`: the template's create-form defaults. */
 interface AgentTemplateDetail {
@@ -193,27 +190,10 @@ export default function App() {
   // #346: the active soft limits (null until loaded, or when the policy route is unavailable) and
   // the last write's size warning per row.
   const [promptSizeLimits, setPromptSizeLimits] = useState<PromptSizeLimits | null>(null)
-  const [ctxSizeWarnings, setCtxSizeWarnings] = useState<Record<string, string>>({})
 
-  // Project contexts
-  const [projectContexts, setProjectContexts] = useState<ProjectContextSummary[]>([])
-  const [projectContextsLoading, setProjectContextsLoading] = useState(false)
-  const [expandedContext, setExpandedContext] = useState<string | null>(null)
-  const [contextDetail, setContextDetail] = useState<Record<string, ProjectContextDetail>>({})
-  const [contextDetailLoading, setContextDetailLoading] = useState<Record<string, boolean>>({})
-  const [contextEdits, setContextEdits] = useState<Record<string, string>>({})
-  const [contextReason, setContextReason] = useState<Record<string, string>>({})
-  const [contextSaveState, setContextSaveState] = useState<Record<string, 'idle' | 'saving' | 'success' | 'error'>>({})
-  const [contextSaveMsg, setContextSaveMsg] = useState<Record<string, string>>({})
-  const [contextSelectedVersion, setContextSelectedVersion] = useState<Record<string, number | null>>({})
-  const [contextRollbackConfirm, setContextRollbackConfirm] = useState<Record<string, boolean>>({})
-  const [ctxToggleConfirm, setCtxToggleConfirm] = useState<Record<string, boolean>>({})
-  const [ctxToggleState, setCtxToggleState] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [ctxToggleMsg, setCtxToggleMsg] = useState<Record<string, string>>({})
-  const [ctxShowNew, setCtxShowNew] = useState(false)
-  const [ctxNewForm, setCtxNewForm] = useState({ name: '', content: '' })
-  const [ctxNewState, setCtxNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
-  const [ctxNewMsg, setCtxNewMsg] = useState('')
+  const ctx = useVersionedResource<ProjectContextSummary, ProjectContextDetail>('/api/project-contexts', 'ctx', timers)
+  const projectContexts = ctx.items
+  const loadProjectContexts = ctx.reload
 
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
   // On failure the banner keeps what it last knew (nothing, on a first load).
@@ -461,32 +441,6 @@ export default function App() {
       .catch(() => setPromptSizeLimits(null))
   }
 
-  /**
-   * #346: a write's `size.warning` sets the row's ⚠ badge and notice; a write with no warning clears
-   * it. A response without `size` (an older orchestrator) changes nothing.
-   */
-  function applySizeWarning(
-    set: React.Dispatch<React.SetStateAction<Record<string, string>>>,
-    name: string,
-    size: PromptSizeReport | undefined,
-  ) {
-    if (!size) return
-    set(prev => {
-      const next = { ...prev }
-      if (size.warning) next[name] = size.warning
-      else delete next[name]
-      return next
-    })
-  }
-
-  function loadProjectContexts() {
-    setProjectContextsLoading(true)
-    apiGet<ProjectContextSummary[]>('/api/project-contexts')
-      .then((list: ProjectContextSummary[]) => setProjectContexts(list))
-      .catch(() => {})
-      .finally(() => setProjectContextsLoading(false))
-  }
-
   useEffect(() => {
     refreshAgents()
 
@@ -511,7 +465,7 @@ export default function App() {
     fetchCompleted()
 
     loadSetupStatus()
-  }, [refreshAgents, loadInstructions])
+  }, [refreshAgents, loadInstructions, loadProjectContexts])
 
   useEffect(() => {
     unmounted.current = false
@@ -949,123 +903,6 @@ export default function App() {
       setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
       setTimeout(() => setConfigSaveState('idle'), 4000)
     })()
-  }
-
-  // ─── Project Context handlers ───────────────────────────────────────────────
-
-  function loadContextDetail(name: string) {
-    setContextDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiGet<ProjectContextDetail>(`/api/project-contexts/${encodeURIComponent(name)}`)
-      .then((detail: ProjectContextDetail) => {
-        setContextDetail(prev => ({ ...prev, [name]: detail }))
-        const current = detail.versions.find(v => v.versionNumber === detail.currentVersion)
-        if (current) setContextEdits(prev => ({ ...prev, [name]: current.content }))
-      })
-      .catch(() => { setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: 'Failed to load' })) })
-      .finally(() => setContextDetailLoading(prev => ({ ...prev, [name]: false })))
-  }
-
-  function toggleContext(name: string) {
-    if (expandedContext === name) { setExpandedContext(null); return }
-    setExpandedContext(name)
-    if (!contextDetail[name]) loadContextDetail(name)
-  }
-
-  function saveContext(name: string) {
-    const content = contextEdits[name]
-    if (!content?.trim()) return
-    const reason = contextReason[name]?.trim() || undefined
-    setContextSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiSend<SizedWrite>(`/api/project-contexts/${encodeURIComponent(name)}/versions`, 'POST', { content, reason })
-      .then(res => {
-        applySizeWarning(setCtxSizeWarnings, name, res?.size)
-        setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setContextSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
-        setContextReason(prev => ({ ...prev, [name]: '' }))
-        loadContextDetail(name)
-        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function rollbackContext(name: string, targetVersion: number) {
-    setContextSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiSend<SizedWrite>(`/api/project-contexts/${encodeURIComponent(name)}/rollback/${targetVersion}`, 'POST')
-      .then(res => {
-        applySizeWarning(setCtxSizeWarnings, name, res?.size)
-        setContextSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setContextSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
-        setContextSelectedVersion(prev => ({ ...prev, [name]: null }))
-        loadContextDetail(name)
-        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setContextSaveState(prev => ({ ...prev, [name]: 'error' })); setContextSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setContextSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function handleContextRollbackClick(e: React.MouseEvent, ctxName: string, versionNumber: number, saveState: ConfigSaveState) {
-    e.stopPropagation()
-    if (saveState === 'saving') return
-    const key = `${ctxName}:${versionNumber}`
-    if (contextRollbackConfirm[key]) {
-      setContextRollbackConfirm(prev => ({ ...prev, [key]: false }))
-      rollbackContext(ctxName, versionNumber)
-    } else {
-      setContextRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      timers.after(`ctx-rollback:${key}`, 5000, () => setContextRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev))
-    }
-  }
-
-  function handleCtxToggleConfirmClick(name: string) {
-    setCtxToggleConfirm(prev => ({ ...prev, [name]: true }))
-    timers.after(`ctx-toggle:${name}`, 5000, () => setCtxToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
-  }
-
-  function toggleCtxActive(name: string, isActive: boolean) {
-    setCtxToggleConfirm(prev => ({ ...prev, [name]: false }))
-    setCtxToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiSend(`/api/project-contexts/${encodeURIComponent(name)}/toggle-active`, 'POST', { isActive })
-      .then(() => {
-        setCtxToggleState(prev => ({ ...prev, [name]: 'success' }))
-        setCtxToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setCtxToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setCtxToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setCtxToggleMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setCtxToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function createContext() {
-    const name = ctxNewForm.name
-    setCtxNewState('saving')
-    apiSend<SizedWrite>('/api/project-contexts', 'POST', {
-        name: ctxNewForm.name,
-        content: ctxNewForm.content,
-      })
-      .then(res => {
-        applySizeWarning(setCtxSizeWarnings, name, res?.size)
-        setCtxNewState('success')
-        setCtxNewMsg('Created')
-        setCtxShowNew(false)
-        setCtxNewForm({ name: '', content: '' })
-        apiGet<ProjectContextSummary[]>('/api/project-contexts').then((list: ProjectContextSummary[]) => setProjectContexts(list)).catch(() => {})
-        setTimeout(() => setCtxNewState('idle'), 3000)
-      })
-      .catch((err: unknown) => {
-        setCtxNewState('error')
-        setCtxNewMsg(errorMessage(err))
-        setTimeout(() => setCtxNewState('idle'), 5000)
-      })
   }
 
   // ─── Workflow Definitions handlers ────────────────────────────────────────
@@ -1623,38 +1460,8 @@ export default function App() {
 
         {activeView === 'project-contexts' && (
           <ProjectContextsView
-            contexts={projectContexts}
-            contextsLoading={projectContextsLoading}
-            expandedContext={expandedContext}
-            contextDetail={contextDetail}
-            contextDetailLoading={contextDetailLoading}
-            contextEdits={contextEdits}
-            contextReason={contextReason}
-            contextSaveState={contextSaveState as Record<string, ConfigSaveState>}
-            contextSaveMsg={contextSaveMsg}
-            selectedVersion={contextSelectedVersion}
-            rollbackConfirm={contextRollbackConfirm}
-            ctxToggleConfirm={ctxToggleConfirm}
-            ctxToggleState={ctxToggleState}
-            ctxToggleMsg={ctxToggleMsg}
-            showNewForm={ctxShowNew}
-            newForm={ctxNewForm}
-            newFormState={ctxNewState}
-            newFormMsg={ctxNewMsg}
-            onToggleContext={toggleContext}
-            onSetEdits={(name, content) => setContextEdits(prev => ({ ...prev, [name]: content }))}
-            onSetReason={(name, reason) => setContextReason(prev => ({ ...prev, [name]: reason }))}
-            onSave={saveContext}
-            onSelectVersion={(name, version) => setContextSelectedVersion(prev => ({ ...prev, [name]: prev[name] === version ? null : version }))}
-            onRollbackClick={handleContextRollbackClick}
-            onToggleActive={toggleCtxActive}
-            onToggleConfirmClick={handleCtxToggleConfirmClick}
-            onShowNewForm={setCtxShowNew}
-            onNewFormChange={(field, value) => setCtxNewForm(prev => ({ ...prev, [field]: value }))}
-            onNewFormSubmit={createContext}
-            onRefresh={loadProjectContexts}
+            state={ctx}
             sizeLimit={promptSizeLimits ? promptSizeLimits.projectContext.limitBytes : undefined}
-            sizeWarnings={ctxSizeWarnings}
           />
         )}
 

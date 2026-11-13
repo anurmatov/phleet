@@ -77,13 +77,14 @@ public class TaskManagerAdmissionGateTests
         Assert.Equal(TaskDispatchOutcome.Queued,
             await manager.StartTask(2, "queued", "queued", isSessionTask: true));
 
-        // OnStatusChanged is raised by the finishing turn after it has left the running set and
-        // before it starts the next queued entry: the exact gap an arrival used to slip through.
+        // The first status change after the finishing turn has left the running set. An arrival
+        // there used to find nothing running and start at once, ahead of the queued entry; now the
+        // queued entry's turn is registered in the same step, so the arrival waits behind it.
         Task<TaskDispatchOutcome>? late = null;
         var fired = 0;
         manager.OnStatusChanged += () =>
         {
-            if (manager.HasRunningTasks(1) || manager.HasRunningTasks(2)) return;
+            if (manager.HasRunningTasks(1)) return;
             if (Interlocked.Exchange(ref fired, 1) == 1) return;
             late = manager.StartTask(3, "late", "late", isSessionTask: true);
         };
@@ -94,6 +95,76 @@ public class TaskManagerAdmissionGateTests
         Assert.NotNull(late);
         Assert.Equal(TaskDispatchOutcome.Queued, await late!.WaitAsync(Wait));
         Assert.Equal(["running", "queued", "late"], executor.ExecutedTasks);
+    }
+
+    [Theory]
+    [InlineData(TaskSource.UserMessage)]
+    [InlineData(TaskSource.Relay)]
+    [InlineData(TaskSource.CheckIn)]
+    public async Task ArrivalWhenTheLastTurnHasStoppedCountingAsRunning_RunsAtOnce(TaskSource source)
+    {
+        // What an observer sees and what admission decides must be the same thing. This holds the
+        // finishing turn at the first moment HasRunningTasks reports it gone, with nothing queued,
+        // and sends a new message from there. Nothing is running, so it runs: not queued behind a
+        // slot the finishing turn still holds, not told the agent is busy, and, for a check-in,
+        // not dropped.
+        var executor = new HeldExecutor();
+        var sink = new TextSink();
+        var manager = BuildManager(executor, sink: sink);
+
+        _ = manager.StartTask(1, "running", "running", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        var late = new TaskCompletionSource<TaskDispatchOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? statusSeen = null;
+        var fired = 0;
+        manager.OnStatusChanged += () =>
+        {
+            if (manager.HasRunningTasks(1)) return;
+            if (Interlocked.Exchange(ref fired, 1) == 1) return;
+            statusSeen = manager.GetOrchestratorStatus().Status;
+            var outcome = manager.StartTask(2, "late", "late", isSessionTask: source != TaskSource.CheckIn,
+                source: source, relaySender: source == TaskSource.Relay ? "peer" : null);
+            outcome.ContinueWith(t => late.TrySetResult(t.Result), TaskScheduler.Default);
+        };
+
+        executor.ReleaseAllTurns();
+
+        Assert.Equal(TaskDispatchOutcome.Ran, await late.Task.WaitAsync(Wait));
+        Assert.Equal("idle", statusSeen);
+        await executor.WaitForExecuteCountAsync(2);
+        await WaitUntilAsync(() => !manager.HasRunningTasks(2));
+        Assert.DoesNotContain(sink.Texts, t => t.Contains("I'm busy") || t.Contains("Now processing your queued message"));
+    }
+
+    [Fact]
+    public async Task StatusDoesNotSayIdleBetweenAFinishingTurnAndTheQueuedOneItHandsOverTo()
+    {
+        // The other half of the same rule: while queued work is being started the agent is busy,
+        // and it must say so. The slot goes from the finishing turn to the next one in one step.
+        var executor = new HeldExecutor();
+        var manager = BuildManager(executor);
+
+        _ = manager.StartTask(1, "running", "running", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+        Assert.Equal(TaskDispatchOutcome.Queued,
+            await manager.StartTask(2, "queued", "queued", isSessionTask: true));
+
+        var statuses = new ConcurrentQueue<(string Status, bool Chat1, bool Chat2)>();
+        manager.OnStatusChanged += () =>
+            statuses.Enqueue((manager.GetOrchestratorStatus().Status, manager.HasRunningTasks(1), manager.HasRunningTasks(2)));
+
+        executor.ReleaseAllTurns();
+        await executor.WaitForExecuteCountAsync(2);
+        await WaitUntilAsync(() => !manager.HasRunningTasks(1) && !manager.HasRunningTasks(2));
+        await WaitUntilAsync(() => statuses.Any(s => s.Status == "idle"));
+
+        var seen = statuses.ToList();
+        var firstIdle = seen.FindIndex(s => s.Status == "idle");
+        // Idle is reported once, at the end, after the queued turn too has finished.
+        Assert.DoesNotContain(seen.Skip(firstIdle), s => s.Status != "idle");
+        Assert.Contains(seen.Take(firstIdle), s => s is { Status: "busy", Chat1: false, Chat2: true });
+        Assert.Equal(["running", "queued"], executor.ExecutedTasks);
     }
 
     [Fact]
@@ -268,7 +339,23 @@ public class TaskManagerAdmissionGateTests
         Attempt = 1,
     };
 
-    private static TaskManager BuildManager(IAgentExecutor executor, IConversationEventPublisher? events = null)
+    private sealed class TextSink : IMessageSink
+    {
+        private readonly ConcurrentQueue<string> _texts = new();
+        public IReadOnlyCollection<string> Texts => _texts.ToArray();
+
+        public Task SendTextAsync(long chatId, string text, CancellationToken ct = default)
+        {
+            _texts.Enqueue(text);
+            return Task.CompletedTask;
+        }
+
+        public Task SendTypingAsync(long chatId, CancellationToken ct = default) => Task.CompletedTask;
+        public Task SendPhotoAsync(long chatId, string filePath, string? caption, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private static TaskManager BuildManager(IAgentExecutor executor, IConversationEventPublisher? events = null,
+        IMessageSink? sink = null)
     {
         var options = Options.Create(new AgentOptions
         {
@@ -278,7 +365,7 @@ public class TaskManagerAdmissionGateTests
             Provider = "claude",
         });
         return new TaskManager(options, executor, new SessionManager(), NullLogger<TaskManager>.Instance,
-            events: events, sink: Substitute.For<IMessageSink>());
+            events: events, sink: sink ?? Substitute.For<IMessageSink>());
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

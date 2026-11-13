@@ -43,6 +43,8 @@ import { localModelEditValues } from './localModel'
 import { configSaveBody } from './agentConfigSave'
 import { DEFAULT_CREATE_FORM, createAgentBody, createFormFromConfig } from './agentCreate'
 import { parseViewHash } from './activeViews'
+import { reconcileAgents } from './agentList'
+import { KeyedTimers, afterClose } from './reconnect'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -123,7 +125,14 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reconnectFailures = useRef(0)
   const unmounted = useRef(false)
+
+  // Confirmations ("confirm?") and result messages ("Stopped") go back to idle on timers. Each
+  // action on each target owns one timer, so a timer left by an earlier click or an earlier
+  // result cannot expire a confirmation armed after it (reconnect.ts, KeyedTimers).
+  const [timers] = useState(() => new KeyedTimers())
+  useEffect(() => () => timers.cancelAll(), [timers])
 
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskRecord[]>>({})
@@ -374,13 +383,31 @@ export default function App() {
     }
   }, [workflows, addAlert])
 
+  // Replaces the list with what the server lists now (see reconcileAgents). On failure the rows
+  // held so far stay.
+  const refreshAgents = useCallback(() => {
+    apiGet<AgentState[]>('/api/agents')
+      .then(list => {
+        setAgents(prev => reconcileAgents(prev, list))
+        setLastUpdated(new Date().toLocaleTimeString())
+      })
+      .catch(() => {})
+  }, [])
+
   const connect = useCallback(() => {
     if (unmounted.current) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws`)
     wsRef.current = ws
     setWsStatus('connecting')
-    ws.onopen = () => { setWsStatus('connected') }
+    let openedAt: number | null = null
+    ws.onopen = () => {
+      openedAt = Date.now()
+      setWsStatus('connected')
+      // The socket only adds and updates rows. Re-reading the list on every (re)connect is what
+      // drops an agent that was deleted while this page was not listening.
+      refreshAgents()
+    }
     ws.onmessage = (event) => {
       try {
         const msg: WsMessage = JSON.parse(event.data)
@@ -408,10 +435,17 @@ export default function App() {
     }
     ws.onclose = () => {
       setWsStatus('disconnected')
-      if (!unmounted.current) reconnectTimer.current = setTimeout(connect, 3000)
+      if (unmounted.current) return
+      // A handshake the orchestrator refuses (a session that lapsed) looks, from here, like any
+      // other close: the browser hides the status. The list request is an ordinary HTTP read, so
+      // a 401 on it reaches the sign-in gate; it also keeps the list honest while the socket is down.
+      if (openedAt === null) refreshAgents()
+      const next = afterClose(reconnectFailures.current, openedAt, Date.now(), Math.random())
+      reconnectFailures.current = next.failures
+      reconnectTimer.current = setTimeout(connect, next.delayMs)
     }
     ws.onerror = () => ws.close()
-  }, [])
+  }, [refreshAgents])
 
   function fetchWorkflows() {
     setWorkflowsLoading(true)
@@ -479,14 +513,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    apiGet<AgentState[]>('/api/agents')
-      .then((list: AgentState[]) => {
-        const map: Record<string, AgentState> = {}
-        for (const a of list) map[a.agentName] = a
-        setAgents(map)
-        setLastUpdated(new Date().toLocaleTimeString())
-      })
-      .catch(() => {})
+    refreshAgents()
 
     fetchWorkflows()
 
@@ -549,7 +576,15 @@ export default function App() {
       })
     }
     ws.onerror = () => ws.close()
-    return () => { ws.close(); logWsRef.current = null }
+    // A stream that ends (the container stopped, the orchestrator restarted, the session lapsed)
+    // used to leave the last lines on screen looking live. It is not reopened by itself: the
+    // orchestrator replays the last 200 lines on every connect, which would repeat them here.
+    let closedHere = false
+    ws.onclose = () => {
+      if (closedHere) return
+      setLogLines(prev => [...prev, '── log stream ended; close and reopen the viewer to follow again ──'])
+    }
+    return () => { closedHere = true; ws.close(); logWsRef.current = null }
   }, [logViewer])
 
   useEffect(() => {
@@ -644,6 +679,7 @@ export default function App() {
   }
 
   function setAgentRestartState(agentName: string, state: RestartState, msg = '') {
+    if (state === 'confirming') timers.cancel(`restart:${agentName}`)
     setRestartStates(prev => ({ ...prev, [agentName]: state }))
     setRestartMsg(prev => ({ ...prev, [agentName]: msg }))
   }
@@ -660,10 +696,11 @@ export default function App() {
     apiSend(`/api/agents/${encodeURIComponent(agentName)}/restart`, 'POST')
       .then(() => setAgentRestartState(agentName, 'success', 'Restart triggered'))
       .catch((e: unknown) => { setAgentRestartState(agentName, 'error', errorMessage(e)) })
-      .finally(() => setTimeout(() => setAgentRestartState(agentName, 'idle'), 4000))
+      .finally(() => timers.after(`restart:${agentName}`, 4000, () => setAgentRestartState(agentName, 'idle')))
   }
 
   function setAgentCancelState(agentName: string, state: CancelState, msg = '') {
+    if (state === 'confirming') timers.cancel(`cancel:${agentName}`)
     setCancelStates(prev => ({ ...prev, [agentName]: state }))
     setCancelMsg(prev => ({ ...prev, [agentName]: msg }))
   }
@@ -680,7 +717,7 @@ export default function App() {
     apiSend(`/api/agents/${encodeURIComponent(agentName)}/cancel`, 'POST')
       .then(() => setAgentCancelState(agentName, 'success', 'Cancelled'))
       .catch((e: unknown) => { setAgentCancelState(agentName, 'error', errorMessage(e)) })
-      .finally(() => setTimeout(() => setAgentCancelState(agentName, 'idle'), 4000))
+      .finally(() => timers.after(`cancel:${agentName}`, 4000, () => setAgentCancelState(agentName, 'idle')))
   }
 
   function handleBgCancel(agentName: string, taskId: string) {
@@ -694,6 +731,7 @@ export default function App() {
   }
 
   function setAgentReprovisionState(agentName: string, state: ReprovisionState, msg = '') {
+    if (state === 'confirming') timers.cancel(`reprovision:${agentName}`)
     setReprovisionStates(prev => ({ ...prev, [agentName]: state }))
     setReprovisionMsg(prev => ({ ...prev, [agentName]: msg }))
   }
@@ -710,12 +748,12 @@ export default function App() {
     apiSend(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, 'POST')
       .then(() => setAgentReprovisionState(agentName, 'success', 'Reprovisioning...'))
       .catch((e: unknown) => { setAgentReprovisionState(agentName, 'error', errorMessage(e)) })
-      .finally(() => setTimeout(() => setAgentReprovisionState(agentName, 'idle'), 5000))
+      .finally(() => timers.after(`reprovision:${agentName}`, 5000, () => setAgentReprovisionState(agentName, 'idle')))
   }
 
   function handleReprovisionAll() {
     setReprovisionAllState('confirming')
-    setTimeout(() => setReprovisionAllState(s => s === 'confirming' ? 'idle' : s), 5000)
+    timers.after('reprovision-all', 5000, () => setReprovisionAllState(s => s === 'confirming' ? 'idle' : s))
   }
 
   function handleReprovisionAllConfirm() {
@@ -727,10 +765,11 @@ export default function App() {
         addAlert('agent-stale', 'Reprovision all triggered — agents restarting')
       })
       .catch((e: unknown) => { setReprovisionAllState('error'); setReprovisionAllMsg(errorMessage(e)) })
-      .finally(() => setTimeout(() => { setReprovisionAllState('idle'); setReprovisionAllMsg('') }, 5000))
+      .finally(() => timers.after('reprovision-all', 5000, () => { setReprovisionAllState('idle'); setReprovisionAllMsg('') }))
   }
 
   function handleReprovisionAllCancel() {
+    timers.cancel('reprovision-all')
     setReprovisionAllState('idle')
   }
 
@@ -742,11 +781,11 @@ export default function App() {
       apiSend(`/api/agents/${encodeURIComponent(agentName)}/stop`, 'POST')
         .then(() => { setStopStates(prev => ({ ...prev, [agentName]: 'success' })); setStopMsg(prev => ({ ...prev, [agentName]: 'Stopped' })) })
         .catch((e: unknown) => { setStopStates(prev => ({ ...prev, [agentName]: 'error' })); setStopMsg(prev => ({ ...prev, [agentName]: errorMessage(e) })) })
-        .finally(() => setTimeout(() => setStopStates(prev => ({ ...prev, [agentName]: 'idle' })), 4000))
+        .finally(() => timers.after(`stop:${agentName}`, 4000, () => setStopStates(prev => ({ ...prev, [agentName]: 'idle' }))))
       return
     }
     setStopStates(prev => ({ ...prev, [agentName]: 'confirming' }))
-    setTimeout(() => setStopStates(prev => prev[agentName] === 'confirming' ? { ...prev, [agentName]: 'idle' } : prev), 5000)
+    timers.after(`stop:${agentName}`, 5000, () => setStopStates(prev => prev[agentName] === 'confirming' ? { ...prev, [agentName]: 'idle' } : prev))
   }
 
   function handleStart(agentName: string) {
@@ -762,16 +801,24 @@ export default function App() {
   function handleDeleteClick(agentName: string) {
     const state = deleteStates[agentName] ?? 'idle'
     if (state === 'deleting') return
-    if (state === 'confirming') { setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })); return }
+    if (state === 'confirming') { timers.cancel(`delete:${agentName}`); setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })); return }
+    armDeleteConfirm(agentName, 5000)
+  }
+
+  // "confirm delete?" goes back to idle by itself, like every other confirmation here. It used to
+  // stay armed until clicked, and a `?delete=<agent>` link armed it on load with no limit at all.
+  function armDeleteConfirm(agentName: string, ms: number) {
     setDeleteStates(prev => ({ ...prev, [agentName]: 'confirming' }))
+    timers.after(`delete:${agentName}`, ms, () =>
+      setDeleteStates(prev => prev[agentName] === 'confirming' ? { ...prev, [agentName]: 'idle' } : prev))
   }
 
   function handleDeleteConfirm(agentName: string) {
     setDeleteStates(prev => ({ ...prev, [agentName]: 'deleting' }))
     apiSend<{ message?: string } | null>(`/api/agents/${encodeURIComponent(agentName)}`, 'DELETE')
-      .then(d => { setDeleteStates(prev => ({ ...prev, [agentName]: 'success' })); setDeleteMsg(prev => ({ ...prev, [agentName]: d?.message ?? 'Deleted' })) })
+      .then(d => { setDeleteStates(prev => ({ ...prev, [agentName]: 'success' })); setDeleteMsg(prev => ({ ...prev, [agentName]: d?.message ?? 'Deleted' })); refreshAgents() })
       .catch((e: unknown) => { setDeleteStates(prev => ({ ...prev, [agentName]: 'error' })); setDeleteMsg(prev => ({ ...prev, [agentName]: errorMessage(e) })) })
-      .finally(() => setTimeout(() => setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' })), 5000))
+      .finally(() => timers.after(`delete:${agentName}`, 5000, () => setDeleteStates(prev => ({ ...prev, [agentName]: 'idle' }))))
   }
 
   function openConfig(agentName: string) {
@@ -995,7 +1042,7 @@ export default function App() {
       rollbackInstruction(instrName, versionNumber)
     } else {
       setRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      setTimeout(() => setRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev), 5000)
+      timers.after(`instr-rollback:${key}`, 5000, () => setRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev))
     }
   }
 
@@ -1012,13 +1059,13 @@ export default function App() {
         .finally(() => setTimeout(() => setDeployState(prev => ({ ...prev, [deployKey]: 'idle' })), 4000))
     } else {
       setDeployConfirm(prev => ({ ...prev, [deployKey]: true }))
-      setTimeout(() => setDeployConfirm(prev => prev[deployKey] ? { ...prev, [deployKey]: false } : prev), 5000)
+      timers.after(`deploy:${deployKey}`, 5000, () => setDeployConfirm(prev => prev[deployKey] ? { ...prev, [deployKey]: false } : prev))
     }
   }
 
   function handleInstrToggleConfirmClick(name: string) {
     setInstrToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setInstrToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
+    timers.after(`instr-toggle:${name}`, 5000, () => setInstrToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
   }
 
   function toggleInstrActive(name: string, isActive: boolean) {
@@ -1130,13 +1177,13 @@ export default function App() {
       rollbackContext(ctxName, versionNumber)
     } else {
       setContextRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      setTimeout(() => setContextRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev), 5000)
+      timers.after(`ctx-rollback:${key}`, 5000, () => setContextRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev))
     }
   }
 
   function handleCtxToggleConfirmClick(name: string) {
     setCtxToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setCtxToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
+    timers.after(`ctx-toggle:${name}`, 5000, () => setCtxToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
   }
 
   function toggleCtxActive(name: string, isActive: boolean) {
@@ -1249,13 +1296,13 @@ export default function App() {
         })
     } else {
       setWfDefRollbackConfirm(prev => ({ ...prev, [name]: key }))
-      setTimeout(() => setWfDefRollbackConfirm(prev => prev[name] === key ? { ...prev, [name]: null } : prev), 5000)
+      timers.after(`wfdef-rollback:${name}`, 5000, () => setWfDefRollbackConfirm(prev => prev[name] === key ? { ...prev, [name]: null } : prev))
     }
   }
 
   function handleWfDefToggleConfirmClick(name: string) {
     setWfDefToggleConfirm(prev => ({ ...prev, [name]: true }))
-    setTimeout(() => setWfDefToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev), 5000)
+    timers.after(`wfdef-toggle:${name}`, 5000, () => setWfDefToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
   }
 
   function toggleWfDefActive(name: string, isActive: boolean) {
@@ -1338,17 +1385,17 @@ export default function App() {
       apiSend(url, 'POST')
         .then(() => { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) })
         .catch((e: unknown) => { setWfState(wf, 'error', errorMessage(e)) })
-        .finally(() => setTimeout(() => setWfState(wf, 'idle'), 4000))
+        .finally(() => timers.after(`wf:${wfKey(wf)}`, 4000, () => setWfState(wf, 'idle')))
       return
     }
     setWfState(wf, `confirming-${action}`)
-    setTimeout(() => {
+    timers.after(`wf:${wfKey(wf)}`, 5000, () => {
       setWfActionStates(prev => {
         const cur = prev[wfKey(wf)]
         if (cur === `confirming-${action}`) return { ...prev, [wfKey(wf)]: 'idle' }
         return prev
       })
-    }, 5000)
+    })
   }
 
   function signalKey(wf: WorkflowSummary): string { return `${wf.namespace}/${wf.workflowId}` }
@@ -1361,7 +1408,7 @@ export default function App() {
     apiSend(url, 'POST')
       .then(() => { const label = action === 'cancel' ? 'Cancel sent' : action === 'restart' ? 'Restarted' : 'Terminated'; setWfState(wf, 'success', label) })
       .catch((e: unknown) => { setWfState(wf, 'error', errorMessage(e)) })
-      .finally(() => setTimeout(() => setWfState(wf, 'idle'), 4000))
+      .finally(() => timers.after(`wf:${wfKey(wf)}`, 4000, () => setWfState(wf, 'idle')))
   }
 
   function getSignalDefs(wf: WorkflowSummary): SignalDef[] {
@@ -1385,7 +1432,7 @@ export default function App() {
       sendSignal(wf, sig.name, btn.payload)
     } else {
       setSignalConfirm(ck)
-      setTimeout(() => setSignalConfirm(prev => prev === ck ? null : prev), 5000)
+      timers.after('signal-confirm', 5000, () => setSignalConfirm(prev => prev === ck ? null : prev))
     }
   }
 
@@ -1521,7 +1568,8 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const deleteAgent = params.get('delete')
-    if (deleteAgent) setDeleteStates(prev => ({ ...prev, [deleteAgent]: 'confirming' }))
+    // Longer than a click's five seconds: the page is still loading when this is armed.
+    if (deleteAgent) armDeleteConfirm(deleteAgent, 30_000)
     const hasCreate = params.has('create') || params.has('name')
     if (hasCreate) {
       const form = { ...DEFAULT_CREATE_FORM }

@@ -1,5 +1,8 @@
 import type { WorkflowSummary } from './types'
 import { REQUEST_HEADER, isWrite } from './session'
+import { requestJson, requestWrite } from './apiClient'
+
+export { ApiError, ensureOk, errorMessage, firstFailure } from './apiClient'
 
 export const TEMPORAL_UI  = import.meta.env.VITE_TEMPORAL_UI_URL ?? ''
 
@@ -21,6 +24,23 @@ export async function apiFetch(url: string, init?: RequestInit): Promise<Respons
   // route's answer to give, and one route's 401 is not always that.
   if (response.status === 401) window.dispatchEvent(new Event(SIGNED_OUT_EVENT))
   return response
+}
+
+/**
+ * A read through {@link apiFetch} that fails loudly: the parsed JSON body of a 2xx answer, or a
+ * thrown `ApiError`. Use it wherever the body goes into state.
+ */
+export function apiGet<T>(url: string, init?: RequestInit): Promise<T> {
+  return requestJson<T>(apiFetch, url, init)
+}
+
+/**
+ * A write through {@link apiFetch} that fails loudly. `json`, when given, is the JSON body.
+ * Resolves with the answer's parsed body (null when it has none) or throws an `ApiError`, so
+ * "Saved" can only follow a write the server accepted.
+ */
+export function apiSend<T = unknown>(url: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', json?: unknown): Promise<T> {
+  return requestWrite<T>(apiFetch, url, method, json)
 }
 
 export function statusDot(effective: string) {

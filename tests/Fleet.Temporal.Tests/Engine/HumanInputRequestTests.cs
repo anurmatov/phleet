@@ -5,6 +5,7 @@ using Fleet.Temporal.Models;
 using Temporalio.Activities;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Api.OperatorService.V1;
+using Temporalio.Api.WorkflowService.V1;
 using Temporalio.Client;
 using Temporalio.Common;
 using Temporalio.Converters;
@@ -165,8 +166,10 @@ public class HumanInputRequestTests
         var timer = Assert.Single(run.History.Events, e => e.EventType == EventType.TimerFired);
         var signal = Assert.Single(run.History.Events, e => e.EventType == EventType.WorkflowExecutionSignaled);
         Assert.Equal(answerBeforeTimer, signal.EventId < timer.EventId);
-        // Both orders come from real server histories, without a worker consuming either event.
-        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.WorkflowTaskStarted &&
+        // Both orders come from real server histories, without a worker consuming either event:
+        // no workflow task COMPLETED between them. A task may have started there and been failed or
+        // timed out, which hands the workflow nothing (see FailTheOutstandingWorkflowTask).
+        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.WorkflowTaskCompleted &&
             e.EventId > Math.Min(timer.EventId, signal.EventId) && e.EventId < Math.Max(timer.EventId, signal.EventId));
         Assert.Equal(expected, JsonSerializer.Deserialize<JsonElement>(run.Result!).GetProperty("Response").GetProperty("Status").GetString());
         Assert.Single(run.Activities.Calls);
@@ -222,8 +225,11 @@ public class HumanInputRequestTests
         Assert.Equal(cancelFirst, canceled.EventId < signal.EventId);
         // Check the actual event batch before interpreting the terminal outcome. In particular,
         // a result assertion in the fixture must not hide the history of a failed CI race.
+        // The batch is the first workflow task that COMPLETED after either event, and it must come
+        // after both. A task that only started in between and was failed or timed out delivered
+        // nothing to the workflow (see FailTheOutstandingWorkflowTask).
         var activation = Assert.Single(run.History.Events.Where(e =>
-            e.EventType == EventType.WorkflowTaskStarted && e.EventId > Math.Min(canceled.EventId, signal.EventId)).Take(1));
+            e.EventType == EventType.WorkflowTaskCompleted && e.EventId > Math.Min(canceled.EventId, signal.EventId)).Take(1));
         Assert.True(activation.EventId > Math.Max(canceled.EventId, signal.EventId), Describe(run));
         if (fireTimer)
         {
@@ -333,6 +339,7 @@ public class HumanInputRequestTests
             }
         }
         if (!answerBeforeTimer) await submit(env, handle);
+        await FailTheOutstandingWorkflowTask(env);
         string? result = null;
         Exception? failure = null;
         var resumedOptions = new TemporalWorkerOptions("fleet") { MaxCachedWorkflows = 0 }.AddWorkflow<UniversalWorkflow>();
@@ -350,6 +357,44 @@ public class HumanInputRequestTests
         var run = new BatchedRun(result, await handle.FetchHistoryAsync(), activities, failure);
         Assert.True(canceled || failure is null, Describe(run));
         return run;
+    }
+
+    /// <summary>
+    /// Takes the workflow task that is outstanding while no worker runs, and fails it.
+    ///
+    /// Stopping a worker does not take its long polls off the server at once: the SDK cancels them
+    /// and the server learns of that a moment later. A poll that is still registered when the first
+    /// submitted event schedules a workflow task is handed that task. Nobody answers it, so it sits
+    /// in "started" until its ten-second timeout, and while it does the server BUFFERS every later
+    /// event instead of writing it to history. The resumed worker then met the first event alone,
+    /// and the scenario these tests exist for, both events in one activation, had not happened.
+    /// That was the intermittent CI failure: ten seconds long, with a WorkflowTaskStarted between
+    /// the two events and no worker alive to have started it.
+    ///
+    /// Nothing can show that a stopped worker's poll is gone, so this does not try to. It polls the
+    /// task queue itself. That returns the pending task at once, or, if a leftover poll took it, the
+    /// next one after the timeout. Failing a workflow task makes the server flush what it buffered
+    /// and schedule a fresh task, which therefore carries every submitted event whichever way it
+    /// went. A failed or timed-out task runs no workflow code and constrains no replay.
+    /// </summary>
+    private static async Task FailTheOutstandingWorkflowTask(WorkflowEnvironment env)
+    {
+        var service = env.Client.Connection.WorkflowService;
+        var deadline = DateTime.UtcNow.AddSeconds(40);
+        while (true)
+        {
+            // Never cancelled: a cancelled poll would be one more leftover poll.
+            var task = await service.PollWorkflowTaskQueueAsync(new PollWorkflowTaskQueueRequest
+            { Namespace = "fleet", TaskQueue = new() { Name = "fleet" }, Identity = "fence" });
+            if (!task.TaskToken.IsEmpty)
+            {
+                await service.RespondWorkflowTaskFailedAsync(new RespondWorkflowTaskFailedRequest
+                { Namespace = "fleet", TaskToken = task.TaskToken, Identity = "fence", Cause = WorkflowTaskFailedCause.WorkflowWorkerUnhandledFailure });
+                return;
+            }
+            // An empty answer is a long poll that ran out with no task; ask again.
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("No workflow task was outstanding to fail");
+        }
     }
 
     private static string Id() => "human-input-" + Guid.NewGuid();

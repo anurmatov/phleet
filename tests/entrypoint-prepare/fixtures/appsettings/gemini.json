@@ -1,0 +1,18 @@
+{
+  "Agent": {
+    "Name": "example-gemini",
+    "ContainerName": "fleet-example-gemini",
+    "Role": "developer",
+    "Model": "gemini-3-pro",
+    "Provider": "gemini",
+    "Projects": ["example"],
+    "AllowedTools": ["mcp__alpha__memory_get"],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ShortName": "gem",
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null
+  }
+}

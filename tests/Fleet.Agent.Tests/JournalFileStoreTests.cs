@@ -6,7 +6,7 @@ namespace Fleet.Agent.Tests;
 public sealed class JournalFileStoreTests : IDisposable
 {
     private const string Id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "journal-file-test-" + Guid.NewGuid().ToString("N"));
+    private readonly string _root = Path.Combine(TestTemp.Root, "journal-file-test-" + Guid.NewGuid().ToString("N"));
     private static readonly byte[] Bytes = Encoding.UTF8.GetBytes("synthetic sentinel");
     private static readonly string Digest = Convert.ToHexStringLower(SHA256.HashData(Bytes));
     [Theory]

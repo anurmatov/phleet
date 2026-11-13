@@ -13,7 +13,7 @@ public sealed class JournalFilesRegistrationTests
     [InlineData(true)]
     public void ActualGraphRegistersFilesOnlyWhenEnabledAndBeforeWarmup(bool enabled)
     {
-        var root = Path.Combine(Path.GetTempPath(), "files-reg-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(TestTemp.Root, "files-reg-" + Guid.NewGuid().ToString("N"));
         try
         {
             var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });

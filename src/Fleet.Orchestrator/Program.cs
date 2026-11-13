@@ -841,6 +841,8 @@ app.Map("/ws", async (HttpContext context, AgentRegistry registry) =>
     catch (WebSocketException) { }
     finally
     {
+        // Every reconnect of a dashboard would otherwise leave its old socket registered.
+        registry.RemoveSocket(socket);
         await lifetime.CancelAsync();
         await authWatch;
     }
@@ -1644,7 +1646,8 @@ app.MapPut("/api/agents/{name}/project-access", async (string name, HttpRequest 
     }));
     await db.SaveChangesAsync(ct);
 
-    await configService.PublishAclChangedAsync(ct);
+    if (!await configService.TryPublishAclChangedAsync(ct))
+        return LiveDelivery.NotDelivered(LiveDelivery.AccessNotDelivered($"the project access of agent '{agentName}'"));
     return Results.Ok(new { agent = agentName, projects = normalized });
 });
 
@@ -1672,7 +1675,8 @@ app.MapPost("/api/agents/{name}/project-access", async (string name, HttpRequest
             Source = AgentProjectAccessSource.Manual,
         });
         await db.SaveChangesAsync(ct);
-        await configService.PublishAclChangedAsync(ct);
+        if (!await configService.TryPublishAclChangedAsync(ct))
+            return LiveDelivery.NotDelivered(LiveDelivery.AccessNotDelivered($"access to project '{project}' for agent '{agentName}'"));
     }
 
     var rows = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).Select(x => x.Project).ToListAsync(ct);
@@ -1691,7 +1695,8 @@ app.MapDelete("/api/agents/{name}/project-access/{project}", async (string name,
 
     db.AgentProjectAccess.Remove(row);
     await db.SaveChangesAsync(ct);
-    await configService.PublishAclChangedAsync(ct);
+    if (!await configService.TryPublishAclChangedAsync(ct))
+        return LiveDelivery.NotDelivered(LiveDelivery.AccessNotDelivered($"the removal of project '{projectNorm}' from agent '{agentName}'"));
     return Results.NoContent();
 });
 
@@ -1712,9 +1717,10 @@ app.MapPost("/api/agents/{name}/telegram-users", async (string name, HttpRequest
 
     agent.TelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = body.UserId });
     await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [new Fleet.Orchestrator.Services.AddedUserInfo { UserId = body.UserId }],
-        removedUserIds: [], addedGroupIds: [], removedGroupIds: [], ct: ct);
+    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+            addedUsers: [new Fleet.Orchestrator.Services.AddedUserInfo { UserId = body.UserId }],
+            removedUserIds: [], addedGroupIds: [], removedGroupIds: [], ct: ct))
+        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"user {body.UserId}", name));
     return Results.Ok(new { message = $"Added user {body.UserId} to agent '{name}'" });
 });
 
@@ -1736,8 +1742,9 @@ app.MapDelete("/api/agents/{name}/telegram-users/{userId}", async (string name, 
 
     db.AgentTelegramUsers.Remove(existing);
     await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [], removedUserIds: [userId], addedGroupIds: [], removedGroupIds: [], ct: ct);
+    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+            addedUsers: [], removedUserIds: [userId], addedGroupIds: [], removedGroupIds: [], ct: ct))
+        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"the removal of user {userId}", name));
     return Results.Ok(new { message = $"Removed user {userId} from agent '{name}'" });
 });
 
@@ -1756,8 +1763,9 @@ app.MapPost("/api/agents/{name}/telegram-groups", async (string name, HttpReques
 
     agent.TelegramGroups.Add(new AgentTelegramGroup { AgentId = agent.Id, GroupId = body.GroupId });
     await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [], removedUserIds: [], addedGroupIds: [body.GroupId], removedGroupIds: [], ct: ct);
+    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+            addedUsers: [], removedUserIds: [], addedGroupIds: [body.GroupId], removedGroupIds: [], ct: ct))
+        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"group {body.GroupId}", name));
     return Results.Ok(new { message = $"Added group {body.GroupId} to agent '{name}'" });
 });
 
@@ -1774,8 +1782,9 @@ app.MapDelete("/api/agents/{name}/telegram-groups/{groupId}", async (string name
 
     db.AgentTelegramGroups.Remove(existing);
     await db.SaveChangesAsync(ct);
-    await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-        addedUsers: [], removedUserIds: [], addedGroupIds: [], removedGroupIds: [groupId], ct: ct);
+    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+            addedUsers: [], removedUserIds: [], addedGroupIds: [], removedGroupIds: [groupId], ct: ct))
+        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"the removal of group {groupId}", name));
     return Results.Ok(new { message = $"Removed group {groupId} from agent '{name}'" });
 });
 

@@ -1,0 +1,9 @@
+{
+  "Agent": {
+    "Name": "example-default",
+    "Role": "developer",
+    "Model": "sonnet",
+    "AllowedTools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+    "WorkDir": "/workspace"
+  }
+}

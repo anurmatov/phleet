@@ -111,6 +111,8 @@ All stateful services bind-mount their data under `./fleet/` — no named Docker
 
 `upgrade.sh` skips all prompts — it stops services, regenerates `docker-compose.yml`, rebuilds every image, and restarts. Use it after `git pull` instead of re-running the full `setup.sh`.
 
+Before upgrading past the loopback-ports change, read **[docs/upgrading/internal-ports-loopback.md](docs/upgrading/internal-ports-loopback.md)**: Temporal, its UI, fleet-memory and fleet-bridge stop being reachable from other machines, and Qdrant is pinned, so `upgrade.sh` refuses to move Qdrant by more than one minor release, or backwards.
+
 ## What you get after setup
 
 After `./setup.sh` you have a **single agent** running: the co-CTO. It is the only agent in the orchestrator granted the full agent-lifecycle and workflow-authoring toolset. You don't spin up more agents by editing JSON and restarting containers — you grow the fleet by talking to the co-CTO in Telegram, in plain English.
@@ -231,6 +233,14 @@ cd src/fleet-dashboard && npm install && npm run dev
 dotnet test
 # With output:
 dotnet test --logger "console;verbosity=normal"
+```
+
+On macOS a few tests are skipped, each with its reason: the `memory_stats` directory scan is Linux-only by design, and two push-key tests need a curve Apple's cryptography does not have. CI runs them. To run them from a Mac, or to loop a timing-sensitive test on the platform CI uses, run the suite in a Linux container (needs Docker):
+
+```bash
+scripts/test-linux.sh                              # the solution, with CI's filter
+scripts/test-linux.sh tests/Fleet.Memory.Tests     # one project
+FLEET_TEST_CPUS=1 scripts/test-linux.sh tests/Fleet.Comms.Tests --filter "FullyQualifiedName~JournalAttachment"
 ```
 
 ## Configuration

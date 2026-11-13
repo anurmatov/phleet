@@ -47,6 +47,9 @@ public static class WorkflowDefinitionValidator
             if (step is WaitForSignalStep gateWait)
                 ValidateGateVisit(gateWait, workflowTypeName);
 
+            if (step is ParallelStep parallel)
+                ValidateConcurrentWaits(parallel, workflowTypeName);
+
             // An approver-only gate written as a literal is refused before the definition can ever
             // run. The engine checks again at execution — a templated signal name is unknowable
             // here — but catching the literal case at load means the answer arrives when someone
@@ -140,6 +143,75 @@ public static class WorkflowDefinitionValidator
                 "\"VisitId\": \"{{vars.<visitVar>}}\".");
         }
     }
+
+    /// <summary>
+    /// Two branches of one <c>parallel</c> must not wait on the same signal name. The engine keeps
+    /// ONE waiter per name: the branch that registers second takes it, a signal wakes only that
+    /// branch, and the other is left parked until its own timeout — or for ever if it has none.
+    ///
+    /// <para>
+    /// Only what the tree proves is refused: LITERAL signal names. In a static parallel, the same
+    /// literal in two different branches; in a <c>forEach</c>, any literal at all, because every
+    /// item's branch runs the same step and so waits on the same name. Waits that follow one
+    /// another inside a single branch are fine and are not compared.
+    /// </para>
+    ///
+    /// <para>
+    /// A templated name is not judged here — whether <c>approve-{{vars.item}}</c> collides depends
+    /// on the items — and neither is <c>delegate_with_escalation</c>, whose
+    /// <c>escalation-decision</c> wait exists only if the step fails. The engine logs a warning
+    /// when either does collide at run time.
+    /// </para>
+    /// </summary>
+    private static void ValidateConcurrentWaits(ParallelStep parallel, string workflowTypeName)
+    {
+        var label = parallel.Name ?? "(unnamed)";
+
+        if (parallel.Steps is not { Length: > 0 })
+        {
+            // forEach: one step template, run once per item.
+            if (parallel.ForEach is null || parallel.Step is null) return;
+            if (LiteralWaits(parallel.Step).FirstOrDefault() is not { } shared) return;
+
+            throw new InvalidOperationException(
+                $"Workflow definition '{workflowTypeName}' is invalid: parallel step '{label}' fans out " +
+                $"wait_for_signal step '{shared.Name ?? shared.SignalName}', which waits on the literal " +
+                $"signal '{shared.SignalName}' in every branch. {OneWaiterPerName} Put the item in the " +
+                $"signal name, e.g. \"{shared.SignalName}-{{{{vars.{parallel.ItemVar ?? "item"}}}}}\".");
+        }
+
+        var seen = new Dictionary<string, WaitForSignalStep>(StringComparer.Ordinal);
+        foreach (var branch in parallel.Steps)
+        {
+            // Collected per branch and merged afterwards, so two waits in the SAME branch never
+            // meet each other here.
+            var inBranch = new Dictionary<string, WaitForSignalStep>(StringComparer.Ordinal);
+            foreach (var wait in LiteralWaits(branch))
+                inBranch.TryAdd(wait.SignalName, wait);
+
+            foreach (var (signalName, wait) in inBranch)
+            {
+                if (seen.TryGetValue(signalName, out var other))
+                {
+                    throw new InvalidOperationException(
+                        $"Workflow definition '{workflowTypeName}' is invalid: parallel step '{label}' has two " +
+                        $"branches that wait on signal '{signalName}' at the same time (wait_for_signal steps " +
+                        $"'{other.Name ?? other.SignalName}' and '{wait.Name ?? wait.SignalName}'). " +
+                        $"{OneWaiterPerName} Give each branch its own signal name.");
+                }
+
+                seen[signalName] = wait;
+            }
+        }
+    }
+
+    private const string OneWaiterPerName =
+        "The engine keeps one waiter per signal name, so a signal would wake only one of them and the " +
+        "others would stay parked until their own timeout, or for ever.";
+
+    private static IEnumerable<WaitForSignalStep> LiteralWaits(StepDefinition step) =>
+        Walk(step).OfType<WaitForSignalStep>()
+            .Where(w => !string.IsNullOrEmpty(w.SignalName) && !w.SignalName.Contains("{{", StringComparison.Ordinal));
 
     /// <summary>
     /// Depth-first walk over every step in the tree, including the steps nested inside composite

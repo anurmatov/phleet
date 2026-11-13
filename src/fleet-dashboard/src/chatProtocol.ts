@@ -351,15 +351,8 @@ export function closeAction(code: number, reason: string): CloseAction {
   }
 }
 
-/** The pause before reconnect attempt `failures` (0-based): doubling from 1 s to 30 s, jittered. */
-export function reconnectDelayMs(failures: number, random: number): number {
-  const ceiling = Math.min(30_000, 1_000 * 2 ** Math.min(Math.max(failures, 0), 5))
-  const fraction = Math.min(Math.max(random, 0), 1)
-  return Math.round(ceiling / 2 + (ceiling / 2) * fraction)
-}
-
-/** A connection that stayed up this long resets the backoff; one that drops sooner does not. */
-export const BACKOFF_RESET_MS = 60_000
+// The backoff is shared with the agent/workflow socket; it lives in reconnect.ts.
+export { BACKOFF_RESET_MS, reconnectDelayMs } from './reconnect.ts'
 
 /**
  * With no frame at all for this long the stream is taken as dead and replaced. The server pings

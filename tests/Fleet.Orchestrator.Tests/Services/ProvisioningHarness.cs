@@ -30,7 +30,7 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     public int DockerRequestCount => _dockerApi.RequestCount;
 
     /// <summary>Every Docker API call, as <c>METHOD /path</c>, in order.</summary>
-    public IReadOnlyList<string> DockerRequests => _dockerApi.Requests;
+    public IReadOnlyList<string> DockerRequests { get { lock (_dockerApi.Requests) return _dockerApi.Requests.ToList(); } }
 
     /// <summary>The JSON body of every <c>/containers/create</c> call; its <c>HostConfig.Binds</c> are the binds.</summary>
     public IReadOnlyList<string> CreateBodies => _dockerApi.CreateBodies;
@@ -43,6 +43,12 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
 
     /// <summary>Whether the fake Docker reports the container as existing (needed to deprovision).</summary>
     public bool ContainerExists { set => _dockerApi.ContainerExists = value; }
+
+    /// <summary>
+    /// Runs before the fake Docker answers a call, with the call as <c>METHOD /path</c>. A test uses
+    /// it to hold a call open, or to change the database at a known point of a provision.
+    /// </summary>
+    public Func<string, Task>? OnDockerRequest { set => _dockerApi.OnRequest = value; }
 
     public SecretProxySettings SecretSettings { get; }
     public SecretProxyStateWriter SecretState { get; }
@@ -126,12 +132,18 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
         public List<(string Network, string Body)> NetworkConnects { get; } = [];
         public bool FailNetworkConnect { get; set; }
         public bool ContainerExists { get; set; }
+        public Func<string, Task>? OnRequest { get; set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            RequestCount++;
             var path = request.RequestUri!.AbsolutePath;
-            Requests.Add($"{request.Method} {path}");
+            lock (Requests)
+            {
+                RequestCount++;
+                Requests.Add($"{request.Method} {path}");
+            }
+            if (OnRequest is { } onRequest)
+                await onRequest($"{request.Method} {path}");
             if (request.Method == HttpMethod.Post && path.EndsWith("/containers/create", StringComparison.Ordinal))
             {
                 CreateBodies.Add(request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct));

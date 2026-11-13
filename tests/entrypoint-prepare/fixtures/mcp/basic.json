@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "alpha": {
+      "type": "http",
+      "url": "http://alpha:3100?agent=example-dev"
+    },
+    "beta": {
+      "type": "http",
+      "url": "http://beta:3001"
+    },
+    "gamma": {
+      "type": "http",
+      "url": "http://gamma:8083/mcp",
+      "headers": {
+        "Authorization": "Bearer example-read-token"
+      }
+    },
+    "delta": {
+      "command": "node",
+      "args": ["server.js"]
+    },
+    "fleet-journal-files": {
+      "type": "http",
+      "url": "http://127.0.0.1:8091/journal-files/v1/mcp"
+    }
+  }
+}

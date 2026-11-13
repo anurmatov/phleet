@@ -1,0 +1,16 @@
+{
+  "Agent": {
+    "Name": "example-glm",
+    "ContainerName": "fleet-example-glm",
+    "Role": "developer",
+    "Model": "zai/glm-5.3",
+    "Provider": "codex",
+    "AllowedTools": ["mcp__alpha__memory_get", "mcp__gamma__send"],
+    "WorkDir": "/workspace",
+    "ShortName": "glm",
+    "Effort": "high",
+    "HostedProvider": true,
+    "HostedProviderKeyEnv": "ZAI_CODING_PLAN_API_KEY",
+    "AnthropicBaseUrl": null
+  }
+}

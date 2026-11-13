@@ -8,11 +8,8 @@ namespace Fleet.Orchestrator.Services;
 /// the result for up to 30 seconds. Cache is invalidated synchronously by the credentials
 /// save handler so the updated value is visible immediately on the next GET call.
 ///
-/// Parser rules (match save handler in CredentialsService):
-///   - Skip blank lines and lines starting with '#'
-///   - Split on first '=' only (preserves base64 values containing '=')
-///   - Trim surrounding '"' or '\'' from value
-///   - Return null for absent key or unreadable file (deliberately conflated)
+/// The parse rule is <see cref="EnvFile"/>'s, shared with provisioning and setup. A key that is
+/// absent and a file that cannot be read both return null (deliberately conflated).
 /// </summary>
 public sealed class EnvFileCredentialsReader : ICredentialsReader
 {
@@ -61,27 +58,6 @@ public sealed class EnvFileCredentialsReader : ICredentialsReader
         }
     }
 
-    public static Dictionary<string, string> LoadEnvFile(string path)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        try
-        {
-            if (!File.Exists(path)) return result;
-            foreach (var line in File.ReadAllLines(path))
-            {
-                var trimmed = line.Trim();
-                if (trimmed.StartsWith('#') || !trimmed.Contains('=')) continue;
-                var idx = trimmed.IndexOf('=');
-                var key = trimmed[..idx].Trim();
-                var val = trimmed[(idx + 1)..].Trim().Trim('"').Trim('\'');
-                if (!string.IsNullOrEmpty(key))
-                    result[key] = val;
-            }
-        }
-        catch
-        {
-            // Return empty dict — caller treats missing file and unreadable file identically
-        }
-        return result;
-    }
+    /// <summary>The file's keys and values, by the one rule in <see cref="EnvFile"/>. Never throws.</summary>
+    public static Dictionary<string, string> LoadEnvFile(string path) => EnvFile.Read(path);
 }

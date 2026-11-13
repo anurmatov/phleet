@@ -31,6 +31,14 @@ public sealed class AgentOptions
     /// re-clamped here.
     /// </summary>
     public int WarmupTimeoutSeconds { get; set; } = WarmupTimeout.DefaultSeconds;
+
+    /// <summary>
+    /// Minutes a running turn may go without one event from its provider process before the agent
+    /// stops it and reports it failed. A limit on silence, never on how long a turn runs.
+    /// <c>0</c> turns it off. Bounds, default and the reasoning for the default are in
+    /// <see cref="TurnStallTimeout"/>; an out-of-range value stops the host at startup.
+    /// </summary>
+    public int TurnStallTimeoutMinutes { get; set; } = TurnStallTimeout.DefaultMinutes;
     public string ShortName { get; set; } = "";
     public bool ShowStats { get; set; } = true;
     public bool PrefixMessages { get; set; } = false;
@@ -55,13 +63,21 @@ public sealed class AgentOptions
 
     /// <summary>
     /// True when the orchestrator resolved this agent's model to a hosted provider (#335 D5).
-    /// <c>entrypoint.sh</c> reads it to decide whether to hand a key over, and the agent checks it
-    /// against its own registry at startup (D8).
+    /// <c>entrypoint.sh</c> learns it through <see cref="Prepare.EntrypointPrepare"/> to decide
+    /// whether to hand a key over, and the agent checks it against its own registry at startup (D8).
     /// </summary>
     public bool HostedProvider { get; set; }
 
     /// <summary>The key env var the orchestrator named for the hosted provider, or null.</summary>
     public string? HostedProviderKeyEnv { get; set; }
+
+    /// <summary>
+    /// True when the orchestrator established that this agent's pinned provider CLI sends MCP
+    /// request headers. The running agent does not read it; <see cref="Prepare.EntrypointPrepare"/>
+    /// does, to decide whether a header-carrying MCP server may be written into the Codex or Gemini
+    /// CLI configuration. False leaves such a server out instead of writing it without its headers.
+    /// </summary>
+    public bool McpHeaderSupport { get; set; }
 
     /// <summary>
     /// Origin of a local Anthropic-compatible server (#340), already canonical, or null. Set on a

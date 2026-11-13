@@ -1,30 +1,82 @@
 #!/bin/bash
-# Read provider from generated appsettings (default: claude). A missing, null or empty value means
-# claude; any other value is used verbatim and must name a known provider (PV1, below).
-PROVIDER=$(node -e "try{const p=require('/app/appsettings.json').Agent.Provider;console.log(p===undefined||p===null||p===''?'claude':String(p))}catch{console.log('claude')}" 2>/dev/null || echo "claude")
+# What has to happen in the shell before the agent process exists: the hosted-key hand-off, CA
+# trust, credential files, GitHub auth, and waiting for the broker. Everything that reads the
+# generated appsettings.json is in the agent binary (`dotnet Fleet.Agent.dll prepare`,
+# src/Fleet.Agent/Prepare/): this script holds no option name, provider list or config-file format
+# of its own, and a configuration that cannot be read stops the container instead of starting it
+# as a claude agent.
+set -u
+
+# The agent binary's one-shot mode. `facts` prints NAME=value lines; `config` writes the provider
+# CLI's own configuration file. It reads appsettings.json through the options the host binds.
+fleet_prepare() { dotnet Fleet.Agent.dll prepare "$@"; }
+
+# Unconditionally, for every agent and provider: these names are reserved for hosted routing and
+# must not reach PID 1 or anything it starts, `fleet_prepare` included. So they leave the
+# environment first, before any process is started, and the values wait in shell variables that
+# are never exported. A non-hosted agent that carries one loses it here.
+# The list must equal HostedModelProviders.KeyEnvVars; EntrypointReservedKeysTests reads the line
+# directly below the marker, so keep it one line and in this exact form.
+_RESERVED_NAMES=""
+# phleet:reserved-key-names
+for _HOSTED_VAR in ZAI_CODING_PLAN_API_KEY; do
+    printf -v "_RESERVED_VALUE_${_HOSTED_VAR}" '%s' "${!_HOSTED_VAR:-}"
+    unset "$_HOSTED_VAR"
+    _RESERVED_NAMES="${_RESERVED_NAMES} ${_HOSTED_VAR}"
+done
+unset _HOSTED_VAR
+
+# Facts from the generated configuration. A missing or empty Agent.Provider means claude; an unknown
+# one (PV1), an unreadable file, or a hosted provider without a usable key name is refused there.
+if ! _PREPARE_FACTS="$(fleet_prepare facts)"; then
+    echo "ERROR: the agent configuration was refused (see above); not starting." >&2
+    exit 1
+fi
+PROVIDER="" HOSTED_PROVIDER="" HOSTED_KEY_ENV="" HOSTED_KEY_FILE="" HOSTED_KEY_MISSING=""
+CLAUDE_LOCAL_MODEL="" GH_TOKEN_PLACEHOLDER=""
+# The names are EntrypointPrepare.FactNames; EntrypointPrepareScriptTests keeps the two equal.
+# phleet:prepare-facts
+while IFS='=' read -r _FACT_NAME _FACT_VALUE; do
+    case "$_FACT_NAME" in
+        PROVIDER) PROVIDER="$_FACT_VALUE" ;;
+        HOSTED_PROVIDER) HOSTED_PROVIDER="$_FACT_VALUE" ;;
+        HOSTED_KEY_ENV) HOSTED_KEY_ENV="$_FACT_VALUE" ;;
+        HOSTED_KEY_FILE) HOSTED_KEY_FILE="$_FACT_VALUE" ;;
+        HOSTED_KEY_MISSING) HOSTED_KEY_MISSING="$_FACT_VALUE" ;;
+        CLAUDE_LOCAL_MODEL) CLAUDE_LOCAL_MODEL="$_FACT_VALUE" ;;
+        GH_TOKEN_PLACEHOLDER) GH_TOKEN_PLACEHOLDER="$_FACT_VALUE" ;;
+    esac
+done <<< "$_PREPARE_FACTS"
+unset _PREPARE_FACTS _FACT_NAME _FACT_VALUE
+if [ -z "$PROVIDER" ] || [ -z "$HOSTED_PROVIDER" ] || [ -z "$HOSTED_KEY_FILE" ] || [ -z "$HOSTED_KEY_MISSING" ] \
+    || [ -z "$CLAUDE_LOCAL_MODEL" ] || [ -z "$GH_TOKEN_PLACEHOLDER" ]; then
+    echo "ERROR: the agent binary did not report its configuration; not starting." >&2
+    exit 1
+fi
 
 # Hosted model provider (#335 D5). The orchestrator computes both values from the shared registry;
-# this script holds no prefix list of its own. When set, the key moves from this environment into a
-# 0400 file that the agent reads once and deletes, so PID 1 never carries it.
-HOSTED_PROVIDER=$(node -e "try{console.log(require('/app/appsettings.json').Agent.HostedProvider===true?'true':'false')}catch{console.log('false')}" 2>/dev/null || echo "false")
-HOSTED_KEY_ENV=$(node -e "try{const v=require('/app/appsettings.json').Agent.HostedProviderKeyEnv;console.log(typeof v==='string'?v:'')}catch{console.log('')}" 2>/dev/null || echo "")
-HOSTED_KEY_FILE=/run/phleet-hosted-key
-
-# Claude local model mode (#340 D3). Any non-empty Agent.AnthropicBaseUrl counts, whitespace-only
-# included: that is a fault the agent's startup gate rejects, so here it fails closed (no credentials
-# copied) rather than open. Only a flag is printed, never the URL.
-CLAUDE_LOCAL_MODEL=$(node -e "try{const v=require('/app/appsettings.json').Agent.AnthropicBaseUrl;console.log(v!==undefined&&v!==null&&String(v)!==''?'true':'false')}catch{console.log('false')}" 2>/dev/null || echo "false")
-
+# this script holds no prefix list of its own. When set, the key moves from the shell variable above
+# into a 0400 file that the agent reads once and deletes, so PID 1 never carries it.
 if [ "$HOSTED_PROVIDER" = "true" ]; then
     # Never print the value — only the variable name.
     if ! [[ "$HOSTED_KEY_ENV" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
         echo "ERROR: hosted provider enabled but Agent.HostedProviderKeyEnv is missing or invalid." >&2
         exit 1
     fi
-    _HOSTED_KEY_VALUE="${!HOSTED_KEY_ENV:-}"
+    case " $_RESERVED_NAMES " in
+        *" $HOSTED_KEY_ENV "*)
+            _HOSTED_STASH="_RESERVED_VALUE_${HOSTED_KEY_ENV}"
+            _HOSTED_KEY_VALUE="${!_HOSTED_STASH:-}"
+            ;;
+        *)
+            # Not a reserved name: the orchestrator and this image disagree about the registry. The
+            # agent's own parity check refuses to start; the value is handed over as it always was.
+            _HOSTED_KEY_VALUE="${!HOSTED_KEY_ENV:-}"
+            ;;
+    esac
     _HOSTED_KEY_TRIMMED="$(printf '%s' "$_HOSTED_KEY_VALUE" | tr -d '[:space:]')"
-    if [ -z "$_HOSTED_KEY_TRIMMED" ] || [ "$_HOSTED_KEY_TRIMMED" = "<secret>" ]; then
-        echo "ERROR: ${HOSTED_KEY_ENV} is unset, blank or '<secret>'. Put the key in .env, attach ${HOSTED_KEY_ENV} as an Env Ref, then reprovision." >&2
+    if [ -z "$_HOSTED_KEY_TRIMMED" ] || [ "$_HOSTED_KEY_TRIMMED" = "$HOSTED_KEY_MISSING" ]; then
+        echo "ERROR: ${HOSTED_KEY_ENV} is unset, blank or '${HOSTED_KEY_MISSING}'. Put the key in .env, attach ${HOSTED_KEY_ENV} as an Env Ref, then reprovision." >&2
         exit 1
     fi
     if ! ( umask 077 && rm -f "$HOSTED_KEY_FILE" && printf '%s' "$_HOSTED_KEY_VALUE" > "$HOSTED_KEY_FILE" && chmod 0400 "$HOSTED_KEY_FILE" ); then
@@ -32,21 +84,17 @@ if [ "$HOSTED_PROVIDER" = "true" ]; then
         echo "ERROR: could not write the ${HOSTED_KEY_ENV} key file ${HOSTED_KEY_FILE}." >&2
         exit 1
     fi
-    unset _HOSTED_KEY_VALUE _HOSTED_KEY_TRIMMED
+    unset _HOSTED_KEY_VALUE _HOSTED_KEY_TRIMMED _HOSTED_STASH
 fi
 
-# Unconditionally, for every agent and provider: these names are reserved for hosted routing and
-# must not reach PID 1 or anything it starts. A non-hosted agent that carries one loses it here.
-# The list must equal HostedModelProviders.KeyEnvVars; EntrypointReservedKeysTests reads the line
-# directly below the marker, so keep it one line and in this exact form.
-# phleet:reserved-key-names
-for _HOSTED_VAR in ZAI_CODING_PLAN_API_KEY; do
-    if [ -n "${!_HOSTED_VAR:-}" ] && [ "$_HOSTED_VAR" != "$HOSTED_KEY_ENV" ]; then
+for _HOSTED_VAR in $_RESERVED_NAMES; do
+    _HOSTED_STASH="_RESERVED_VALUE_${_HOSTED_VAR}"
+    if [ -n "${!_HOSTED_STASH:-}" ] && [ "$_HOSTED_VAR" != "$HOSTED_KEY_ENV" ]; then
         echo "NOTE: unsetting ${_HOSTED_VAR}; it is reserved for hosted-provider routing and this agent does not use it." >&2
     fi
-    unset "$_HOSTED_VAR"
+    unset "$_HOSTED_STASH"
 done
-unset _HOSTED_VAR
+unset _HOSTED_VAR _HOSTED_STASH _RESERVED_NAMES
 
 # Secret placeholders. When this agent holds a bound secret, the orchestrator mounts the fleet-secrets
 # CA here and points each bound host at fleet-secrets in /etc/hosts. Trust the CA before anything
@@ -105,93 +153,13 @@ if [ "$PROVIDER" = "gemini" ]; then
     # hangs indefinitely in headless mode (no human present to approve).
     export GEMINI_CLI_TRUST_WORKSPACE=true
 
-    # Translate /workspace/.mcp.json → ~/.gemini/settings.json (mcpServers block).
-    # The gemini CLI reads MCP server config exclusively from ~/.gemini/settings.json.
-    # It does NOT auto-discover fleet's /workspace/.mcp.json. Without this step gemini
-    # agents cannot call any MCP tools (memory, temporal, orchestrator, playwright, etc.).
-    # stdio-transport servers are skipped; only HTTP/SSE is supported by the gemini CLI.
-    MCP_CONFIG="/workspace/.mcp.json"
-    GEMINI_SETTINGS="${HOME}/.gemini/settings.json"
-    mkdir -p "${HOME}/.gemini"
-    if [ -f "${MCP_CONFIG}" ]; then
-        python3 - "${MCP_CONFIG}" "${GEMINI_SETTINGS}" <<'PYEOF'
-import json, sys, os
-
-mcp_path, settings_path = sys.argv[1], sys.argv[2]
-with open(mcp_path) as f:
-    mcp = json.load(f)
-with open('/app/appsettings.json') as f:
-    appsettings = json.load(f)
-mcp_header_support = appsettings.get("Agent", {}).get("McpHeaderSupport") is True
-
-servers = mcp.get("mcpServers", {})
-gemini_servers = {}
-
-for name, cfg in servers.items():
-    url = cfg.get("url", "")
-    headers = cfg.get("headers")
-    # False until a pinned-CLI tools/list proof flips ContainerProvisioningService.McpHeaderSupport.
-    # Fail closed: do not turn an authenticated server into a header-less one.
-    if headers and not mcp_header_support:
-        print(f"WARN: skipping MCP server '{name}' (headers unsupported by pinned gemini CLI)", file=sys.stderr)
-        continue
-    # Gemini CLI mcpServers schema infers transport from the URL. Do NOT include
-    # "transport" or "type" keys; the CLI
-    # rejects unknown fields with "Unrecognized key(s) in object" and drops the server.
-    if url:
-        # Only the new stateless files server uses streamable HTTP explicitly.
-        # `url` selects the legacy SSE transport in the pinned Gemini CLI.
-        gemini_servers[name] = {"httpUrl" if name == "fleet-journal-files" else "url": url}
-        if headers:
-            gemini_servers[name]["headers"] = headers
-    else:
-        print(f"WARN: skipping MCP server '{name}' (no URL — stdio transport not supported by gemini CLI)", file=sys.stderr)
-
-# Merge into existing settings.json (preserves other settings such as theme).
-existing = {}
-if os.path.exists(settings_path):
-    try:
-        with open(settings_path) as f:
-            existing = json.load(f)
-    except Exception:
-        pass
-
-existing["mcpServers"] = gemini_servers
-
-# Force OAuth-personal auth selection. Without this key the CLI prints
-# "Please set an Auth method in your /root/.gemini/settings.json or specify
-#  one of the following environment variables: GEMINI_API_KEY, ..."
-# even when oauth_creds.json is present — it has the credentials but no
-# instruction to use them. Schema verified against host-side settings.json
-# created by `gemini auth login` interactively (v0.40.1).
-existing.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "oauth-personal"
-
-with open(settings_path, "w") as f:
-    json.dump(existing, f, indent=2)
-print(f"Gemini MCP: wrote {len(gemini_servers)} server(s) to {settings_path}")
-PYEOF
-        if [ $? -ne 0 ]; then
-            echo "WARN: Failed to write ${GEMINI_SETTINGS} — gemini agent will start without MCP tools" >&2
-        fi
-    else
-        echo "WARN: ${MCP_CONFIG} not found; gemini agent will start without MCP tools" >&2
-        # Even without MCP we must seed the OAuth auth selector — otherwise the CLI
-        # falls through to "no Auth method configured" and refuses to run.
-        python3 - "${GEMINI_SETTINGS}" <<'PYEOF'
-import json, os, sys
-settings_path = sys.argv[1]
-existing = {}
-if os.path.exists(settings_path):
-    try:
-        with open(settings_path) as f:
-            existing = json.load(f)
-    except Exception:
-        pass
-existing.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "oauth-personal"
-with open(settings_path, "w") as f:
-    json.dump(existing, f, indent=2)
-PYEOF
-    fi
+    # ~/.gemini/settings.json: /workspace/.mcp.json translated into the CLI's mcpServers block and
+    # the OAuth auth selector, merged into whatever the file already holds. The CLI reads MCP
+    # servers only from there and does not discover .mcp.json, so without this step a gemini agent
+    # has no MCP tools (memory, temporal, orchestrator, playwright, ...). stdio servers are skipped:
+    # the CLI speaks HTTP/SSE only. Without .mcp.json only the auth selector is written. A file that
+    # cannot be written is a warning; the agent starts without MCP tools.
+    fleet_prepare config || echo "WARN: gemini settings.json not written: prepare exited non-zero" >&2
 
 elif [ "$PROVIDER" = "codex" ]; then
     if [ "$HOSTED_PROVIDER" = "true" ]; then
@@ -206,66 +174,20 @@ elif [ "$PROVIDER" = "codex" ]; then
     # Codex app-server threads are process-lifetime state only in phleet. Clear any stale
     # persisted sessions on cold start so a reprovision cannot accidentally inherit old rollout state.
     rm -rf /root/.codex/sessions/* 2>/dev/null || true
-    # Generate ~/.codex/config.toml (#460): the orchestrator-generated root settings first, then one
+    # ~/.codex/config.toml (#460): the orchestrator-generated root settings first, then one
     # [mcp_servers.<name>] table per URL server with its enabled_tools whitelist. Root keys and their
     # [analytics]/[history] tables must come before any [mcp_servers.*] table — a key written after a
     # table header belongs to that table. A missing, unreadable or directory /app/codex-root.toml
     # (provisioning mounts it read-only for Codex agents) prints one WARN and the MCP tables are still
     # written, so the agent never loses its MCP tools; the CLI then uses its built-in root defaults.
     # Written even without .mcp.json, so a stale file from an earlier start never survives.
-    MCP_JSON="/workspace/.mcp.json"
     mkdir -p /root/.codex
-    node -e "
-const fs = require('fs');
-try {
-    let root = '';
-    try {
-        if (fs.statSync('/app/codex-root.toml').isDirectory()) throw new Error('is a directory');
-        root = fs.readFileSync('/app/codex-root.toml', 'utf8');
-    } catch (e) {
-        console.error('WARN: codex-root.toml unavailable: ' + (e.code || e.message));
-    }
-    let toml = '';
-    if (fs.existsSync('$MCP_JSON')) {
-        const appsettings = JSON.parse(fs.readFileSync('/app/appsettings.json', 'utf8'));
-        const allowedTools = (appsettings.Agent && appsettings.Agent.AllowedTools) || [];
-        const mcpHeaderSupport = appsettings.Agent && appsettings.Agent.McpHeaderSupport === true;
-        const mcpCfg = JSON.parse(fs.readFileSync('$MCP_JSON', 'utf8'));
-        const servers = mcpCfg.mcpServers || {};
-        for (const [name, s] of Object.entries(servers)) {
-            if (!s.url) continue;
-            // False until a pinned-CLI tools/list proof flips ContainerProvisioningService.McpHeaderSupport.
-            // Fail closed: do not turn an authenticated server into a header-less one.
-            if (s.headers && Object.keys(s.headers).length > 0 && !mcpHeaderSupport) {
-                console.error('WARN: skipping MCP server \'' + name + '\' (headers unsupported by pinned codex CLI)');
-                continue;
-            }
-            const prefix = 'mcp__' + name + '__';
-            const enabled = allowedTools
-                .filter(t => t.startsWith(prefix))
-                .map(t => t.slice(prefix.length));
-            toml += '[mcp_servers.' + name + ']\n';
-            toml += 'url = \"' + s.url + '\"\n';
-            if (s.headers && Object.keys(s.headers).length > 0) {
-                const pairs = Object.entries(s.headers)
-                    .map(([k, v]) => JSON.stringify(k) + ' = ' + JSON.stringify(String(v)));
-                toml += 'http_headers = { ' + pairs.join(', ') + ' }\n';
-            }
-            if (enabled.length > 0) {
-                toml += 'enabled_tools = [' + enabled.map(t => '\"' + t + '\"').join(', ') + ']\n';
-            }
-            toml += '\n';
-        }
-    }
-    fs.writeFileSync('/root/.codex/config.toml', root && toml ? root + '\n' + toml : root + toml);
-} catch (e) {
-    console.error('WARN: codex config.toml not written: ' + e.message);
-}
-" || echo "WARN: codex config.toml not written: node exited non-zero" >&2
+    fleet_prepare config || echo "WARN: codex config.toml not written: prepare exited non-zero" >&2
 elif [ "$PROVIDER" != "claude" ]; then
-    # PV1 (#386): an unknown provider fails closed. It used to fall through to the Claude branch
-    # below and receive Claude credentials in a container where the model drives a shell.
-    echo "ERROR: Unknown provider '${PROVIDER}'; use claude, codex or gemini." >&2
+    # PV1 (#386): an unknown provider fails closed. `prepare facts` refuses one before this point;
+    # this is the branch's own default, so a name this script has no case for never falls through
+    # to the Claude branch below and its credentials.
+    echo "ERROR: Unknown provider '${PROVIDER}'; this image has no credential handling for it." >&2
     exit 1
 elif [ "$CLAUDE_LOCAL_MODEL" = "true" ]; then
     # A local-model agent holds no Claude OAuth credential (#340 D3). /root/.claude persists in the
@@ -276,7 +198,7 @@ elif [ "$CLAUDE_LOCAL_MODEL" = "true" ]; then
         exit 1
     fi
 else
-    # Provider claude (or empty). Claude auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)
+    # Provider claude. Claude auth — always overwrite from host mount (source of truth, kept fresh by AuthTokenRefreshWorkflow)
     if [ -f /root/.claude-host.json ]; then
         cp /root/.claude-host.json /root/.claude.json
     fi
@@ -293,7 +215,7 @@ git config --global safe.directory '*'
 # GitHub App auth (opt-in: only runs if GITHUB_APP_ID / GITHUB_APP_ID_OVERRIDE + PEM available)
 # Prefer GITHUB_APP_PEM_OVERRIDE over GITHUB_APP_PEM so per-agent override takes effect at startup.
 _GITHUB_PEM_B64="${GITHUB_APP_PEM_OVERRIDE:-${GITHUB_APP_PEM:-}}"
-if [[ "${GH_TOKEN:-}" =~ ^fleet_placeholder_[A-Za-z0-9_-]{43}$ ]]; then
+if [ "$GH_TOKEN_PLACEHOLDER" = "true" ]; then
     # The App key is a bound secret: this container holds a placeholder, not a key or a token.
     # fleet-secrets mints installation tokens outside and swaps one in on the way to GitHub.
     /app/gh-auth.sh --placeholder
@@ -301,7 +223,7 @@ elif [ -n "${_GITHUB_PEM_B64:-}" ]; then
     echo "$_GITHUB_PEM_B64" | base64 -d > /tmp/github-app-key.pem
     chmod 600 /tmp/github-app-key.pem
 fi
-if [[ "${GH_TOKEN:-}" =~ ^fleet_placeholder_[A-Za-z0-9_-]{43}$ ]]; then
+if [ "$GH_TOKEN_PLACEHOLDER" = "true" ]; then
     :
 elif [ -n "${GITHUB_APP_ID_OVERRIDE:-${GITHUB_APP_ID:-}}" ] && [ -f /tmp/github-app-key.pem ]; then
     /app/gh-auth.sh

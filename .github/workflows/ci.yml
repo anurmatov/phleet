@@ -41,8 +41,23 @@ jobs:
 
       # #460 AC-U6: the codex branch writes codex-root.toml first, then byte-identical MCP tables,
       # parsed with tomllib; a missing, unreadable or directory root file still keeps the MCP tables.
+      # The branch writes through the agent built above (`dotnet Fleet.Agent.dll prepare config`).
       - name: Entrypoint codex config.toml
         run: bash tests/entrypoint-codex/run.sh
+
+      # The Qdrant release check setup.sh and upgrade.sh make before they recreate the stack: the
+      # decision as a function, and upgrade.sh with Docker simulated (an exported
+      # FLEET_QDRANT_VERSION must not replace the one saved in .env).
+      - name: Qdrant release check
+        run: bash scripts/test-qdrant-upgrade.sh
+
+      # entrypoint.sh reads appsettings.json only through the agent binary. This runs the original
+      # script (inline Node and Python, kept as tests/entrypoint-prepare/entrypoint.legacy.sh) beside
+      # the current one on every fixture and requires the same provider, flags and byte-identical
+      # files; then that an unreadable configuration stops the script, and that no call to the
+      # binary can see a hosted-provider key.
+      - name: Entrypoint prepare (golden comparison, fail closed, key isolation)
+        run: bash tests/entrypoint-prepare/run.sh
 
       - name: Acceptance plan validators and public placeholders
         run: python3 -m unittest discover tests/scripts
@@ -110,6 +125,11 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # The two hook rules (rules-of-hooks, exhaustive-deps) plus the recommended sets; zero
+      # warnings allowed, so a new one fails here instead of accumulating.
+      - name: Lint
+        run: npm run lint
 
       - name: Test
         run: npm test
@@ -736,6 +756,38 @@ jobs:
       - name: Clean up
         if: always()
         run: docker image rm -f fleet:comms-ci || true
+
+  # The images no other job builds. `dotnet build` on a full checkout cannot see a Dockerfile that
+  # no longer builds: each one copies a few named files into its own build tree, and a base image or
+  # a shared build file (Directory.Build.props, Directory.Packages.props) it forgot to copy fails
+  # only there. Comms, the agent and fleet-secrets are built by the jobs around this one.
+  #
+  # Build only. fleet-memory is built without its ONNX model (scripts/download-onnx-model.sh), which
+  # the Dockerfile copies from a directory that holds a placeholder in a clean checkout.
+  service-images:
+    name: Service image build (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: orchestrator
+            dockerfile: src/Fleet.Orchestrator/Dockerfile
+          - image: temporal-bridge
+            dockerfile: Dockerfile.temporal
+          - image: memory
+            dockerfile: src/Fleet.Memory/Dockerfile
+          - image: telegram
+            dockerfile: src/Fleet.Telegram/Dockerfile
+          - image: bridge
+            dockerfile: src/Fleet.Bridge/Dockerfile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -f "${{ matrix.dockerfile }}" -t "fleet:${{ matrix.image }}-ci" .
 
   agent-image:
     name: Agent image build

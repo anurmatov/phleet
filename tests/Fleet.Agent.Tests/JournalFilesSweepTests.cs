@@ -8,7 +8,7 @@ public sealed class JournalFilesSweepTests
     [Fact]
     public async Task StartupAndHourlySweepExpireFilesAndOrdinarySweeperNeverRecurses()
     {
-        var root = Path.Combine(Path.GetTempPath(), "files-sweep-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(TestTemp.Root, "files-sweep-" + Guid.NewGuid().ToString("N"));
         var clock = new Clock(); var files = new JournalFileStore(root, clock);
         using var sweep = new JournalFilesSweepService(files, NullLogger<JournalFilesSweepService>.Instance, clock);
         try

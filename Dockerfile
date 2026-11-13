@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+# Build settings and package versions shared by every project; restore needs both.
+COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Agent/Fleet.Agent.csproj src/Fleet.Agent/
 RUN dotnet restore src/Fleet.Agent/Fleet.Agent.csproj
 COPY src/ src/
@@ -98,4 +100,9 @@ RUN test -f /opt/fleet/acceptance_plan.py && python3 /opt/fleet/acceptance_plan.
 COPY gh-auth.sh /app/gh-auth.sh
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/gh-auth.sh
+# entrypoint.sh reads the agent's configuration through the binary's one-shot mode, never itself.
+# Fail the build if that mode is missing or cannot read the baked appsettings.json, which names no
+# provider and so must come back as claude.
+RUN dotnet Fleet.Agent.dll prepare facts | grep -qx 'PROVIDER=claude' || \
+    (echo "ERROR: 'dotnet Fleet.Agent.dll prepare facts' did not report the baked configuration" && exit 1)
 ENTRYPOINT ["/app/entrypoint.sh"]

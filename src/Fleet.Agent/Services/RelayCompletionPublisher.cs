@@ -31,6 +31,17 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
     private static readonly Regex TaskFailedMarkerRegex =
         new(@"^\[TASK_FAILED:\s*([^\]]+)\]\s*", RegexOptions.Compiled);
 
+    /// <summary>
+    /// Waits between attempts to publish one completion. The first attempt is immediate, so a
+    /// completion is tried <c>Length + 1</c> times over about three quarters of a minute: long
+    /// enough for the broker connection to recover from a drop (it retries every 5 s), short enough
+    /// that a completion never outlives its workflow step by much. A seam so a test does not wait.
+    /// </summary>
+    internal TimeSpan[] RetryDelays { get; init; } =
+    [
+        TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30),
+    ];
+
     private readonly TaskManager _taskManager;
     private readonly GroupRelayService _relay;
     private readonly RelayCompletionCounter _counter;
@@ -95,16 +106,16 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
                         CompletionKind.Incomplete => $"[status: incomplete]\n{result}",
                         _ => result,
                     };
-                    await _relay.PublishToAgentAsync("bridge", chatId, bridgeResult,
-                        type: RelayMessageType.BridgeResponse, correlationId: correlationId, taskId: taskId);
-                    _counter.Published(nameof(RelayMessageType.BridgeResponse));
+                    if (await PublishWithRetryAsync("bridge", chatId, bridgeResult,
+                            RelayMessageType.BridgeResponse, correlationId, taskId))
+                        _counter.Published(nameof(RelayMessageType.BridgeResponse));
                 }
                 else if (relaySender is not null)
                 {
                     var type = isPartial ? RelayMessageType.PartialResponse : RelayMessageType.Response;
                     var text = taskId is not null ? FormatTaskResponse(result, isPartial, kind) : result;
-                    await _relay.PublishToAgentAsync(relaySender, chatId, text, type: type, taskId: taskId);
-                    _counter.Published(type.ToString());
+                    if (await PublishWithRetryAsync(relaySender, chatId, text, type, correlationId: null, taskId))
+                        _counter.Published(type.ToString());
                 }
             }
             catch (Exception ex)
@@ -117,6 +128,33 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
                     relaySender, correlationId is not null, taskId is not null);
             }
         });
+    }
+
+    /// <summary>
+    /// Publishes one completion, trying again when the broker did not take it. The caller of a
+    /// delegated task is waiting on exactly this message; published once and lost, it left a
+    /// workflow step to run out its whole timeout over a connection blip of a few seconds.
+    /// </summary>
+    private async Task<bool> PublishWithRetryAsync(string target, long chatId, string text, string type,
+        string? correlationId, string? taskId)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            if (await _relay.TryPublishToAgentAsync(target, chatId, text, type: type, correlationId: correlationId, taskId: taskId))
+                return true;
+
+            // A relay with no broker configured will not have one in thirty seconds either.
+            if (!_relay.IsEnabled || attempt >= RetryDelays.Length)
+            {
+                // Never payload text, for the reason given in the catch above.
+                _logger.LogError(
+                    "Relay completion was not published after {Attempts} attempts and is lost (target={Target}, type={Type}, hasCorrelationId={HasCorrelation}, hasTaskId={HasTaskId})",
+                    attempt + 1, target, type, correlationId is not null, taskId is not null);
+                return false;
+            }
+
+            await Task.Delay(RetryDelays[attempt]);
+        }
     }
 
     private static string FormatTaskResponse(string result, bool isPartial, CompletionKind kind)

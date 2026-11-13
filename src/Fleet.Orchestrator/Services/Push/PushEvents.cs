@@ -33,6 +33,11 @@ public sealed class OperatorStops
 /// yesterday. The cost is stated rather than hidden: something that happened while the orchestrator
 /// was down is not announced.
 /// </para>
+/// <para>
+/// The same holds for a Temporal namespace: its first observation reports nothing. A namespace that
+/// was unreachable when the orchestrator started is first seen later, and every gate already
+/// waiting in it then is as old as the ones a restart finds.
+/// </para>
 /// <para>Not thread-safe; one service calls it from one loop.</para>
 /// </remarks>
 public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops stops)
@@ -45,14 +50,28 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
     // Agent name → the key of the "down" notification sent for it, while it stays down.
     private readonly Dictionary<string, string> _downKeys = new(StringComparer.OrdinalIgnoreCase);
     private bool _seeded;
+    // The namespaces an earlier observation covered, for gates and for failures.
+    private readonly HashSet<string> _gateNamespaces = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _failureNamespaces = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <param name="gateNamespaces">
+    /// The namespaces <paramref name="running"/> covers, or null when the caller does not track
+    /// that and every namespace counts as covered from the first observation.
+    /// </param>
+    /// <param name="failureNamespaces">The same for <paramref name="recentlyFailed"/>.</param>
     public IReadOnlyList<PushMessage> Observe(
         IReadOnlyCollection<WorkflowSummary> running,
         IReadOnlyCollection<WorkflowSummary> recentlyFailed,
         IReadOnlyCollection<AgentState> agents,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        IReadOnlyCollection<string>? gateNamespaces = null,
+        IReadOnlyCollection<string>? failureNamespaces = null)
     {
         var messages = new List<PushMessage>();
+        // News only from a namespace seen before: what is found in one on its first observation
+        // was already true.
+        bool GateIsNews(string ns) => _seeded && (gateNamespaces is null || _gateNamespaces.Contains(ns));
+        bool FailureIsNews(string ns) => _seeded && (failureNamespaces is null || _failureNamespaces.Contains(ns));
 
         // Gates. The set is replaced, not grown: a run that leaves a gate and comes back to it is
         // a new wait, and is announced again.
@@ -63,10 +82,11 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
             {
                 var key = string.Join('\u001f', "gate", run.Namespace, run.WorkflowId, run.RunId, signal.Name, run.Phase, run.GateRef ?? "");
                 gates.Add(key);
-                if (_seeded && !_gates.Contains(key)) messages.Add(PushMessages.GateWaiting(run, signal, key));
+                if (GateIsNews(run.Namespace) && !_gates.Contains(key)) messages.Add(PushMessages.GateWaiting(run, signal, key));
             }
         }
         _gates = gates;
+        if (gateNamespaces is not null) _gateNamespaces.UnionWith(gateNamespaces);
 
         // Failures. Only a run that failed or timed out: one that was cancelled or terminated was
         // stopped by someone, who already knows.
@@ -76,11 +96,12 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
             if (run.Status is not ("Failed" or "TimedOut")) continue;
             var key = string.Join('\u001f', "run", run.Namespace, run.WorkflowId, run.RunId);
             failures.Add(key);
-            if (_seeded && !_failures.Contains(key)) messages.Add(PushMessages.RunFailed(run, key));
+            if (FailureIsNews(run.Namespace) && !_failures.Contains(key)) messages.Add(PushMessages.RunFailed(run, key));
         }
         // Kept while the orchestrator still lists the run as recently failed, which bounds the set
         // to the query's window.
         _failures = failures;
+        if (failureNamespaces is not null) _failureNamespaces.UnionWith(failureNamespaces);
 
         // Agents.
         var listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

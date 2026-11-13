@@ -200,7 +200,7 @@ public sealed class JournalSendToolsTests
     public async Task SharedGate_BlocksBothToolsBeforeHttpAndCancellationReleasesWaiters()
     {
         using var rig = new Rig(); using var http = new HttpClient(rig.Handler) { BaseAddress = new("http://journal.test") };
-        var root = Path.Combine(Path.GetTempPath(), "send-gate-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(TestTemp.Root, "send-gate-" + Guid.NewGuid().ToString("N"));
         try
         {
             var fetch = new JournalFilesTools(new(http, "ingest", readToken: "read"), rig.Binding, new(root), new(), NullLogger<JournalFilesTools>.Instance, gate: rig.Gate);
@@ -248,7 +248,7 @@ public sealed class JournalSendToolsTests
     {
         using var rig = new Rig(); rig.Handler.FileId = false; rig.Handler.BlockContent = true;
         using var http = new HttpClient(rig.Handler) { BaseAddress = new("http://journal.test") };
-        var root = Path.Combine(Path.GetTempPath(), "gate-content-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(TestTemp.Root, "gate-content-" + Guid.NewGuid().ToString("N"));
         try
         {
             var fetch = new JournalFilesTools(new(http, "ingest", readToken: "read"), rig.Binding, new(root), new(), NullLogger<JournalFilesTools>.Instance, gate: rig.Gate);

@@ -14,7 +14,7 @@ namespace Fleet.Agent.Tests;
 
 public sealed class JournalFilesListenerTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "journal-listener-" + Guid.NewGuid().ToString("N"));
+    private readonly string _root = Path.Combine(TestTemp.Root, "journal-listener-" + Guid.NewGuid().ToString("N"));
 
     [Fact]
     public async Task SendTool_RealHttpCallsSameCrossAndDeniedUseParentInstance()
@@ -47,7 +47,7 @@ public sealed class JournalFilesListenerTests : IDisposable
         using var http = new HttpClient { BaseAddress = new("http://journal.test") };
         var client = new JournalHttpClient(http, "ingest", readToken: "read");
         using var binding = new TurnBindingPublisher(client, NullLogger<TurnBindingPublisher>.Instance);
-        var tools = new JournalFilesTools(client, binding, new JournalFileStore(Path.GetTempPath()), new JournalFilesCounter(), NullLogger<JournalFilesTools>.Instance);
+        var tools = new JournalFilesTools(client, binding, new JournalFileStore(TestTemp.Root), new JournalFilesCounter(), NullLogger<JournalFilesTools>.Instance);
         await using var listener = new JournalFilesListener(tools, NullLoggerFactory.Instance);
         await listener.StartAsync(default); Assert.True(listener.Ready);
         using var loopback = new HttpClient { BaseAddress = new("http://127.0.0.1:8091") };

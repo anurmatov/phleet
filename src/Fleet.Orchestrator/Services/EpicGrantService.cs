@@ -830,7 +830,7 @@ public sealed partial class EpicGrantService(
 
     /// <summary>The configured CTO agent, read per call, or null when blank.</summary>
     private string? ConfiguredCto =>
-        configuration["FLEET_CTO_AGENT"] is { } cto && !string.IsNullOrWhiteSpace(cto) ? cto.Trim() : null;
+        CtoAgentSetting.Resolve(configuration);
 
     // ── Read ─────────────────────────────────────────────────────────────────
 

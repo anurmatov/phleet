@@ -155,6 +155,9 @@ public static class AgentHostRegistration
         if (DescribeClaudeLocalModelFault(agent, fileExists ?? File.Exists) is { } localFault)
             Fail(localFault);
 
+        if (TurnStallTimeout.DescribeFault(agent.TurnStallTimeoutMinutes) is { } stallFault)
+            Fail(stallFault);
+
         // Inspect configured files even without a capture registration. Faults name keys,
         // never credential values.
         if ((services.GetService<IConfiguration>()?.GetSection(JournalOptions.Section).Get<JournalOptions>()

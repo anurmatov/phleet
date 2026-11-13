@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react'
-import { apiFetch } from '../utils'
+import { apiGet } from '../utils'
 
 interface MemoryIdCacheContextValue {
   /** Full UUIDs of all known memories. Empty set on load failure. */
@@ -18,9 +18,7 @@ export function MemoryIdCacheProvider({ children }: { children: ReactNode }) {
 
   const load = useCallback(async (attempt = 0) => {
     try {
-      const resp = await apiFetch('/api/memory/ids')
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const list: string[] = await resp.json()
+      const list = await apiGet<string[]>('/api/memory/ids')
       setIds(new Set(list))
     } catch {
       if (attempt === 0) {

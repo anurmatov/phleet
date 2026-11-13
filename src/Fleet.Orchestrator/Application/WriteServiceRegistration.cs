@@ -29,6 +29,7 @@ public static class WriteServiceRegistration
         services.TryAddSingleton<AgentAllowlist>();
         services.TryAddSingleton<AgentProjectAccessWriter>();
         services.TryAddSingleton<InstructionWriter>();
+        services.TryAddSingleton<WorkflowDefinitionWriter>();
         return services;
     }
 }

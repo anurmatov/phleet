@@ -16,6 +16,9 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 # a service on an address they did not configure, with .env saying otherwise.
 # Unset them here: .env is the record of the decision.
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY
+# Likewise the host address of the ports that take no credential: a stale export of 0.0.0.0 would
+# publish Temporal, fleet-memory and fleet-bridge to the network with .env saying loopback.
+unset FLEET_INTERNAL_BIND_ADDRESS
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS

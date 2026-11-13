@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Fleet.Agent.Configuration;
 using Fleet.Journal.Client;
 using Fleet.Shared;
@@ -23,7 +22,7 @@ namespace Fleet.Agent.Services;
 /// </summary>
 public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposable
 {
-    private const string OrchestratorExchange = "fleet.orchestrator";
+    private const string OrchestratorExchange = OrchestratorBroker.Exchange;
     private const int HeartbeatIntervalSeconds = 30;
 
     private readonly AgentOptions _agentConfig;
@@ -98,7 +97,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             _logger.LogInformation("OrchestratorHeartbeatService connected to {Exchange}", OrchestratorExchange);
 
             // Registration message — announce once on startup
-            await PublishAsync("registration", ct);
+            await PublishAsync(OrchestratorBroker.Registration, ct);
 
             // Periodic heartbeat timer
             _heartbeatTimer = new Timer(
@@ -128,7 +127,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
     {
         try
         {
-            await PublishAsync("heartbeat", CancellationToken.None);
+            await PublishAsync(OrchestratorBroker.Heartbeat, CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -167,7 +166,7 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
                 Summary: t.Summary))
             .ToArray();
 
-        var message = new OrchestratorMessage(
+        var message = new AgentHeartbeat(
             AgentName: shortName,
             Status: status,
             Timestamp: DateTimeOffset.UtcNow,
@@ -183,14 +182,18 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             QueuedMessages: queuedMessages,
             BackgroundTasks: backgroundTasks.Length > 0 ? backgroundTasks : null,
             TelegramConnected: _connectionState.TelegramConnected,
-            Journal: JournalHeartbeat.From(_journal?.Snapshot(), _turnBindings?.BindingFailed == true),
+            Journal: JournalFrom(_journal?.Snapshot(), _turnBindings?.BindingFailed == true),
             PriorityQueuedCount: queueSnapshot.Count(q => q.Priority == Models.TaskPriority.PrimaryHuman),
             PlanSha256: _harness?.Plan?.PlanSha256);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
-        var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent, Expiration = "60000" };
+        var props = new BasicProperties
+        {
+            DeliveryMode = DeliveryModes.Persistent,
+            Expiration = OrchestratorBroker.HeartbeatExpirationMilliseconds,
+        };
 
-        var routingKey = $"{messageType}.{shortName}";
+        var routingKey = OrchestratorBroker.AgentKey(messageType, shortName);
         await _channel.BasicPublishAsync(
             OrchestratorExchange,
             routingKey: routingKey,
@@ -218,56 +221,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             await _connection.CloseAsync();
     }
 
-    /// <summary>Wire-format message compatible with Fleet.Orchestrator.Models.AgentHeartbeat.</summary>
-    private sealed record OrchestratorMessage(
-        string AgentName,
-        string Status,
-        DateTimeOffset Timestamp,
-        string? CurrentTask,
-        string? CurrentTaskId,
-        string? Version,
-        string? ContainerName,
-        string Role,
-        string Model,
-        List<string> Projects,
-        long UptimeSeconds,
-        int QueuedCount = 0,
-        QueuedMessageInfo[]? QueuedMessages = null,
-        BackgroundTaskSummary[]? BackgroundTasks = null,
-        bool? TelegramConnected = null,  // null = legacy agent; false = headless; true = connected
-        // Absent, not null, when the journal is off: an agent without an ingest token publishes
-        // exactly the heartbeat it published before #377.
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        JournalHeartbeat? Journal = null,
-        int PriorityQueuedCount = 0,
-        // #460: the harness plan this agent started with, on registration and every heartbeat.
-        // Absent for gemini, which has no plan, so its heartbeat is unchanged.
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        string? PlanSha256 = null
-    );
-
-    /// <summary>The conversation journal on this agent (#377). Counts and ages only.</summary>
-    private sealed record JournalHeartbeat(
-        [property: JsonPropertyName("enabled")] bool Enabled,
-        [property: JsonPropertyName("spoolDepth")] int SpoolDepth,
-        [property: JsonPropertyName("oldestAgeSeconds")] long OldestAgeSeconds,
-        [property: JsonPropertyName("dropped")] long Dropped,
-        [property: JsonPropertyName("dead")] int Dead,
-        // 1 while the listener refuses the token, 0 otherwise.
-        [property: JsonPropertyName("authFailed")] int AuthFailed,
-        [property: JsonPropertyName("bindingFailed")] int BindingFailed)
-    {
-        public static JournalHeartbeat? From(JournalHeartbeatSnapshot? s, bool bindingFailed) => s is null
-            ? null
-            : new(s.Enabled, s.SpoolDepth, s.OldestAgeSeconds, s.Dropped, s.Dead, s.AuthFailed ? 1 : 0, bindingFailed ? 1 : 0);
-    }
-
-    private sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt, bool Priority);
-
-    private sealed record BackgroundTaskSummary(
-        string TaskId,
-        string Description,
-        string TaskType,
-        int ElapsedSeconds,
-        string? Summary);
+    /// <summary>The journal block of a heartbeat, or null when the journal is off.</summary>
+    private static JournalHeartbeat? JournalFrom(JournalHeartbeatSnapshot? s, bool bindingFailed) => s is null
+        ? null
+        : new(s.Enabled, s.SpoolDepth, s.OldestAgeSeconds, s.Dropped, s.Dead, s.AuthFailed ? 1 : 0, bindingFailed ? 1 : 0);
 }

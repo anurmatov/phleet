@@ -20,9 +20,9 @@ namespace Fleet.Orchestrator.Services;
 /// <summary>The three gates an epic grant may decide, by canonical (lowercase) signal name.</summary>
 public static class EpicGrantGates
 {
-    public const string DesignApproval = "design-approval";
-    public const string MergeApproval = "merge-approval";
-    public const string DocReview = "doc-review";
+    public const string DesignApproval = GateSignal.DesignApproval;
+    public const string MergeApproval = GateSignal.MergeApproval;
+    public const string DocReview = GateSignal.DocReview;
 
     public static readonly IReadOnlyList<string> All = [DesignApproval, MergeApproval, DocReview];
 
@@ -272,17 +272,6 @@ public sealed class TemporalEpicGrantClient(TemporalClientRegistry registry) : I
 }
 
 // ─── API shapes (JSON camelCase through the minimal-API defaults) ─────────────
-
-/// <summary>The bridge's forward body for <c>POST /api/epic-grants/{id}/decisions</c>.</summary>
-public sealed record EpicGrantDecisionRequest(
-    string? Namespace,
-    string? WorkflowId,
-    string? Gate,
-    string? Decision,
-    string? VisitId,
-    string? ArtifactRef,
-    string? Evidence,
-    string? Caller);
 
 /// <summary>The outcome of one decision request.</summary>
 public sealed record EpicGrantDecisionResult(string Result, string? Reason, long? DecisionId)

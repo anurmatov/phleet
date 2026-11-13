@@ -66,7 +66,7 @@ public interface IDelegationRelay
 /// </summary>
 public sealed class DelegationRelay : IDelegationRelay
 {
-    private const string BridgeSender = "temporal-bridge";
+    private const string BridgeSender = RelaySender.TemporalBridge;
 
     private readonly RabbitMqOptions _rabbitConfig;
     private readonly TemporalBridgeOptions _bridgeConfig;
@@ -220,7 +220,7 @@ public sealed class DelegationRelay : IDelegationRelay
     }
 
     /// <summary>The name of the query parameter that carries the execution id on a cancel.</summary>
-    public const string ExecutionIdParameter = "executionId";
+    public const string ExecutionIdParameter = TaskCancel.ExecutionIdParameter;
 
     /// <summary>
     /// What the agent did with a cancel that named an execution, for the log: <c>cancelled</c>,
@@ -237,7 +237,7 @@ public sealed class DelegationRelay : IDelegationRelay
         {
             using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             if (body.RootElement.ValueKind == JsonValueKind.Object
-                && body.RootElement.TryGetProperty("executionId", out var echoed)
+                && body.RootElement.TryGetProperty(TaskCancel.ExecutionIdParameter, out var echoed)
                 && echoed.ValueKind == JsonValueKind.String
                 && string.Equals(echoed.GetString(), executionId, StringComparison.Ordinal)
                 && body.RootElement.TryGetProperty("outcome", out var said)
@@ -258,7 +258,7 @@ public sealed class DelegationRelay : IDelegationRelay
         else
             _logger.LogInformation(
                 "Cancel for agent {Agent}, taskId={TaskId}, execution {ExecutionId}: {Outcome}",
-                agentName, taskId, executionId, outcome is "cancelled" or "not_found" or "other_execution" or "no_execution_id" ? outcome : "unrecognised");
+                agentName, taskId, executionId, outcome is TaskCancel.Outcome.Cancelled or TaskCancel.Outcome.NotFound or TaskCancel.Outcome.OtherExecution or TaskCancel.Outcome.NoExecutionId ? outcome : "unrecognised");
     }
 
     private async Task PublishAsync(
@@ -287,7 +287,7 @@ public sealed class DelegationRelay : IDelegationRelay
             Repo: repo,
             ExecutionId: executionId);
 
-        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+        var body = RelayWire.Serialize(message, RelayShape.Delegation);
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
         var routingKey = agentName.ToLowerInvariant();
 

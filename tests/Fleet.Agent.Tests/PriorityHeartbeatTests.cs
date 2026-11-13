@@ -10,9 +10,8 @@ public sealed class PriorityHeartbeatTests
     [Fact]
     public void QueuePreviewSerializesPriorityWithoutIdentifiers()
     {
-        var type = typeof(OrchestratorHeartbeatService).GetNestedType("QueuedMessageInfo", BindingFlags.NonPublic)!;
-        var record = Activator.CreateInstance(type, "synthetic", "usermessage", DateTimeOffset.UnixEpoch, true)!;
-        var json = JsonSerializer.SerializeToElement(record, type);
+        var record = new QueuedMessageInfo("synthetic", "usermessage", DateTimeOffset.UnixEpoch, true);
+        var json = JsonSerializer.SerializeToElement(record);
         Assert.True(json.GetProperty("Priority").GetBoolean());
         Assert.False(json.TryGetProperty("ChatId", out _));
         Assert.False(json.TryGetProperty("TelegramMessageId", out _));
@@ -56,15 +55,14 @@ public sealed class PriorityHeartbeatTests
     [InlineData(1)]
     public void JournalBindingFailureIsOneFixedFlag(int failed)
     {
-        var type = typeof(OrchestratorHeartbeatService).GetNestedType("JournalHeartbeat", BindingFlags.NonPublic)!;
-        var record = Activator.CreateInstance(type, true, 0, 0L, 0L, 0, 0, failed)!;
-        Assert.Equal(failed, JsonSerializer.SerializeToElement(record, type).GetProperty("bindingFailed").GetInt32());
+        var record = new JournalHeartbeat(true, 0, 0L, 0L, 0, 0, failed);
+        Assert.Equal(failed, JsonSerializer.SerializeToElement(record).GetProperty("bindingFailed").GetInt32());
     }
 
     [Fact]
     public void LegacyHeartbeatDefaultsRemainRoutineAndHealthy()
     {
-        var type = typeof(OrchestratorHeartbeatService).GetNestedType("OrchestratorMessage", BindingFlags.NonPublic)!;
+        var type = typeof(AgentHeartbeat);
         Assert.NotNull(type.GetProperty("PriorityQueuedCount"));
         var journal = type.GetProperty("Journal")!;
         Assert.Equal(System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,

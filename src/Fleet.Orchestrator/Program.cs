@@ -1436,191 +1436,8 @@ app.MapGet("/api/agent-templates/{name}", (string name) =>
     });
 });
 
-// ── Agent Project Access (memory ACL) ────────────────────────────────────────
-// Manages which memory projects each agent can read.
-// Mutations require bearer auth; GET is open (same pattern as other GET /api/agents/* endpoints).
-
-app.MapGet("/api/agents/{name}/project-access", async (string name, IServiceScopeFactory scopeFactory) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-    var rows = await db.AgentProjectAccess
-        .Where(x => x.AgentName == name.ToLowerInvariant())
-        .Select(x => x.Project)
-        .ToListAsync();
-    return Results.Ok(new { agent = name.ToLowerInvariant(), projects = rows });
-});
-
-app.MapPut("/api/agents/{name}/project-access", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
-{
-    ProjectAccessPutRequest? body;
-    try { body = await request.ReadFromJsonAsync<ProjectAccessPutRequest>(ct); }
-    catch { return Results.BadRequest(new { error = "invalid_json" }); }
-    if (body is null) return Results.BadRequest(new { error = "empty_payload" });
-
-    var projects = body.Projects ?? [];
-    var validationError = ValidateProjectList(projects);
-    if (validationError is not null) return Results.BadRequest(new { error = validationError });
-
-    var agentName = name.ToLowerInvariant();
-    var normalized = projects.Select(p => p.Trim().ToLowerInvariant()).Distinct().ToList();
-
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var existing = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).ToListAsync(ct);
-    db.AgentProjectAccess.RemoveRange(existing);
-    // An explicit full-list PUT is an operator grant, so every row it writes is manual and the
-    // assignment hook will not later revoke it.
-    db.AgentProjectAccess.AddRange(normalized.Select(p => new AgentProjectAccess
-    {
-        AgentName = agentName,
-        Project = p,
-        Source = AgentProjectAccessSource.Manual,
-    }));
-    await db.SaveChangesAsync(ct);
-
-    if (!await configService.TryPublishAclChangedAsync(ct))
-        return LiveDelivery.NotDelivered(LiveDelivery.AccessNotDelivered($"the project access of agent '{agentName}'"));
-    return Results.Ok(new { agent = agentName, projects = normalized });
-});
-
-app.MapPost("/api/agents/{name}/project-access", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
-{
-    ProjectAccessPostRequest? body;
-    try { body = await request.ReadFromJsonAsync<ProjectAccessPostRequest>(ct); }
-    catch { return Results.BadRequest(new { error = "invalid_json" }); }
-    if (body is null) return Results.BadRequest(new { error = "empty_payload" });
-
-    var project = body.Project?.Trim().ToLowerInvariant() ?? "";
-    if (string.IsNullOrEmpty(project)) return Results.BadRequest(new { error = "project must not be empty" });
-
-    var agentName = name.ToLowerInvariant();
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var alreadyExists = await db.AgentProjectAccess.AnyAsync(x => x.AgentName == agentName && x.Project == project, ct);
-    if (!alreadyExists)
-    {
-        db.AgentProjectAccess.Add(new AgentProjectAccess
-        {
-            AgentName = agentName,
-            Project = project,
-            Source = AgentProjectAccessSource.Manual,
-        });
-        await db.SaveChangesAsync(ct);
-        if (!await configService.TryPublishAclChangedAsync(ct))
-            return LiveDelivery.NotDelivered(LiveDelivery.AccessNotDelivered($"access to project '{project}' for agent '{agentName}'"));
-    }
-
-    var rows = await db.AgentProjectAccess.Where(x => x.AgentName == agentName).Select(x => x.Project).ToListAsync(ct);
-    return Results.Ok(new { agent = agentName, projects = rows });
-});
-
-app.MapDelete("/api/agents/{name}/project-access/{project}", async (string name, string project, IServiceScopeFactory scopeFactory, ConfigService configService, CancellationToken ct) =>
-{
-    var agentName = name.ToLowerInvariant();
-    var projectNorm = project.Trim().ToLowerInvariant();
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var row = await db.AgentProjectAccess.FirstOrDefaultAsync(x => x.AgentName == agentName && x.Project == projectNorm, ct);
-    if (row is null) return Results.NotFound(new { error = $"No project-access entry '{projectNorm}' for agent '{agentName}'" });
-
-    db.AgentProjectAccess.Remove(row);
-    await db.SaveChangesAsync(ct);
-    if (!await configService.TryPublishAclChangedAsync(ct))
-        return LiveDelivery.NotDelivered(LiveDelivery.AccessNotDelivered($"the removal of project '{projectNorm}' from agent '{agentName}'"));
-    return Results.NoContent();
-});
-
-// REST: telegram user add/remove — called by dashboard Save to apply diffs with live allowlist update.
-// These mirror manage_agent_telegram_users / manage_agent_telegram_groups MCP tools.
-app.MapPost("/api/agents/{name}/telegram-users", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-    var body = await request.ReadFromJsonAsync<TelegramUserRequest>(ct);
-    if (body is null) return Results.BadRequest(new { error = "Invalid request body" });
-
-    var agent = await db.Agents.Include(a => a.TelegramUsers).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    if (agent.TelegramUsers.Any(u => u.UserId == body.UserId))
-        return Results.Ok(new { message = $"User {body.UserId} already allowed" });
-
-    agent.TelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = body.UserId });
-    await db.SaveChangesAsync(ct);
-    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-            addedUsers: [new Fleet.Orchestrator.Services.AddedUserInfo { UserId = body.UserId }],
-            removedUserIds: [], addedGroupIds: [], removedGroupIds: [], ct: ct))
-        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"user {body.UserId}", name));
-    return Results.Ok(new { message = $"Added user {body.UserId} to agent '{name}'" });
-});
-
-app.MapDelete("/api/agents/{name}/telegram-users/{userId}", async (string name, long userId, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, SetupService setupService, CancellationToken ct) =>
-{
-    // Guard: refuse to remove the installer's own ID — prevents operator self-lockout.
-    var ownerId = setupService.GetTelegramUserId();
-    if (ownerId.HasValue && ownerId.Value == userId)
-        return Results.BadRequest(new { error = $"Cannot remove the owner's Telegram user ID ({userId}) from the allowlist." });
-
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var agent = await db.Agents.Include(a => a.TelegramUsers).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    var existing = agent.TelegramUsers.FirstOrDefault(u => u.UserId == userId);
-    if (existing is null) return Results.Ok(new { message = $"User {userId} not in allowlist — no-op" });
-
-    db.AgentTelegramUsers.Remove(existing);
-    await db.SaveChangesAsync(ct);
-    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-            addedUsers: [], removedUserIds: [userId], addedGroupIds: [], removedGroupIds: [], ct: ct))
-        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"the removal of user {userId}", name));
-    return Results.Ok(new { message = $"Removed user {userId} from agent '{name}'" });
-});
-
-app.MapPost("/api/agents/{name}/telegram-groups", async (string name, HttpRequest request, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-    var body = await request.ReadFromJsonAsync<TelegramGroupRequest>(ct);
-    if (body is null) return Results.BadRequest(new { error = "Invalid request body" });
-
-    var agent = await db.Agents.Include(a => a.TelegramGroups).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    if (agent.TelegramGroups.Any(g => g.GroupId == body.GroupId))
-        return Results.Ok(new { message = $"Group {body.GroupId} already allowed" });
-
-    agent.TelegramGroups.Add(new AgentTelegramGroup { AgentId = agent.Id, GroupId = body.GroupId });
-    await db.SaveChangesAsync(ct);
-    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-            addedUsers: [], removedUserIds: [], addedGroupIds: [body.GroupId], removedGroupIds: [], ct: ct))
-        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"group {body.GroupId}", name));
-    return Results.Ok(new { message = $"Added group {body.GroupId} to agent '{name}'" });
-});
-
-app.MapDelete("/api/agents/{name}/telegram-groups/{groupId}", async (string name, long groupId, IServiceScopeFactory scopeFactory, AgentConfigPublisherService publisher, CancellationToken ct) =>
-{
-    await using var scope = scopeFactory.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-    var agent = await db.Agents.Include(a => a.TelegramGroups).FirstOrDefaultAsync(a => a.Name == name, ct);
-    if (agent is null) return Results.NotFound(new { error = $"Agent '{name}' not found" });
-
-    var existing = agent.TelegramGroups.FirstOrDefault(g => g.GroupId == groupId);
-    if (existing is null) return Results.Ok(new { message = $"Group {groupId} not in allowlist — no-op" });
-
-    db.AgentTelegramGroups.Remove(existing);
-    await db.SaveChangesAsync(ct);
-    if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-            addedUsers: [], removedUserIds: [], addedGroupIds: [], removedGroupIds: [groupId], ct: ct))
-        return LiveDelivery.NotDelivered(LiveDelivery.AllowlistNotDelivered($"the removal of group {groupId}", name));
-    return Results.Ok(new { message = $"Removed group {groupId} from agent '{name}'" });
-});
+// Telegram allowlist and memory project access of one agent — Endpoints/AgentAccessEndpoints.cs
+app.MapAgentAccessEndpoints();
 
 // GET /internal/agent-project-access — Docker-network-only, no auth (mirrors /internal/* pattern from PR #83).
 // Returns the full ACL map consumed by fleet-memory's AclCacheService.
@@ -1634,16 +1451,6 @@ app.MapGet("/internal/agent-project-access", async (IServiceScopeFactory scopeFa
         .ToDictionary(g => g.Key, g => g.Select(r => r.Project).ToList());
     return Results.Ok(new { acl });
 });
-
-static string? ValidateProjectList(List<string>? projects)
-{
-    if (projects is null) return null;
-    foreach (var p in projects)
-    {
-        if (string.IsNullOrWhiteSpace(p)) return "project entries must not be empty or whitespace";
-    }
-    return null;
-}
 
 // ── Memory API (proxied from fleet-memory /internal/*) ───────────────────────
 // All endpoints require bearer-token auth (checked inline since GETs are normally exempt).
@@ -1731,12 +1538,6 @@ record WorkflowDefinitionRequest
 }
 
 record ToggleActiveRequest(bool IsActive);
-
-record ProjectAccessPutRequest(List<string>? Projects);
-record ProjectAccessPostRequest(string? Project);
-record TelegramUserRequest(long UserId);
-record TelegramGroupRequest(long GroupId);
-
 
 record McpEndpointEntry(string McpName, string Url, string TransportType);
 record InstructionAssignmentEntry(string InstructionName, int LoadOrder);

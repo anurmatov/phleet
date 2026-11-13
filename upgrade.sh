@@ -19,7 +19,7 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
-unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED
+unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED FLEET_DURABLE_DELEGATION_ENABLED
 # Push notifications: likewise. A key exported in a shell must never stand in for the one in .env.
 unset FLEET_PUSH_ENABLED FLEET_PUSH_APNS_KEY_BASE64 FLEET_PUSH_APNS_KEY_ID FLEET_PUSH_APNS_TEAM_ID FLEET_PUSH_APNS_TOPIC
 # Secret placeholders (fleet-secrets): likewise, .env decides.
@@ -109,6 +109,7 @@ add_missing_env_var FLEET_EPIC_GRANTS_MAX_DAYS 14
 add_missing_env_var FLEET_EPIC_GRANTS_DENIED_REPOS ""
 add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
+add_missing_env_var FLEET_DURABLE_DELEGATION_ENABLED false
 add_missing_env_var FLEET_PUSH_ENABLED false
 # Secret placeholders: added off when missing, never changed when present.
 add_missing_env_var FLEET_SECRETS_ENABLED false

@@ -20,6 +20,13 @@ public sealed class FileWatcherService(
     private readonly ConcurrentDictionary<string, DateTimeOffset> _debounce = new();
     private readonly ConcurrentDictionary<string, DateTime> _knownFiles = new();
     private static readonly TimeSpan DebounceInterval = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan RetryTick = TimeSpan.FromSeconds(1);
+
+    // Files whose index entry could not be written or removed. See PendingIndexWork: they are
+    // retried with backoff until the index agrees with the disk, so an outage of the vector store
+    // or the embedder no longer leaves a memory unsearchable until the next restart.
+    private readonly PendingIndexWork _pendingIndex = new(
+        memoryService.IndexFileAsync, memoryService.RemoveFromIndexAsync, TimeProvider.System, logger);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -55,6 +62,10 @@ public sealed class FileWatcherService(
 
         // Start polling loop for Docker volume mount changes
         _ = Task.Run(() => PollForChangesAsync(stoppingToken), stoppingToken);
+
+        // Retry what could not be indexed. Its own loop: the polling interval is tens of seconds and
+        // says nothing about when the index is back.
+        _ = Task.Run(() => RetryPendingIndexAsync(stoppingToken), stoppingToken);
 
         // Process change events
         await foreach (var change in _channel.Reader.ReadAllAsync(stoppingToken))
@@ -102,7 +113,12 @@ public sealed class FileWatcherService(
             catch (Exception ex)
             {
                 indexFailures++;
-                logger.LogWarning(ex, "Failed to index {Path} during full scan", doc.FilePath);
+                logger.LogWarning(ex, "Failed to index {Path} during full scan; it will be retried", doc.FilePath);
+                _pendingIndex.Defer(doc.FilePath);
+                // Known to the polling loop as it is now, so the retries are the only thing asking again.
+                var failedInfo = new FileInfo(doc.FilePath);
+                if (failedInfo.Exists)
+                    _knownFiles[doc.FilePath] = failedInfo.LastWriteTimeUtc;
             }
         }
 
@@ -116,7 +132,8 @@ public sealed class FileWatcherService(
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Failed to remove orphan {Path}", orphan);
+                logger.LogWarning(ex, "Failed to remove orphan {Path}; it will be retried", orphan);
+                _pendingIndex.Defer(orphan);
             }
         }
 
@@ -165,19 +182,19 @@ public sealed class FileWatcherService(
 
                     if (_knownFiles.TryGetValue(filePath, out var tracked))
                     {
-                        if (lastWrite != tracked)
+                        // The file is recorded as seen only once its event is queued. With the
+                        // queue full the next pass finds it again, instead of never.
+                        if (lastWrite != tracked && _channel.Writer.TryWrite(new FileChangeEvent(filePath, FileChangeType.Modified)))
                         {
                             // Modified
                             _knownFiles[filePath] = lastWrite;
-                            _channel.Writer.TryWrite(new FileChangeEvent(filePath, FileChangeType.Modified));
                             modified++;
                         }
                     }
-                    else
+                    else if (_channel.Writer.TryWrite(new FileChangeEvent(filePath, FileChangeType.Created)))
                     {
                         // New file
                         _knownFiles[filePath] = lastWrite;
-                        _channel.Writer.TryWrite(new FileChangeEvent(filePath, FileChangeType.Created));
                         created++;
                     }
                 }
@@ -185,10 +202,9 @@ public sealed class FileWatcherService(
                 // Detect deleted files
                 foreach (var tracked in _knownFiles.Keys)
                 {
-                    if (!currentFiles.Contains(tracked))
+                    if (!currentFiles.Contains(tracked) && _channel.Writer.TryWrite(new FileChangeEvent(tracked, FileChangeType.Deleted)))
                     {
                         _knownFiles.TryRemove(tracked, out _);
-                        _channel.Writer.TryWrite(new FileChangeEvent(tracked, FileChangeType.Deleted));
                         deleted++;
                     }
                 }
@@ -226,41 +242,47 @@ public sealed class FileWatcherService(
         _channel.Writer.TryWrite(new FileChangeEvent(filePath, changeType));
     }
 
+    private async Task RetryPendingIndexAsync(CancellationToken ct)
+    {
+        using var tick = new PeriodicTimer(RetryTick);
+        try
+        {
+            while (await tick.WaitForNextTickAsync(ct))
+            {
+                try
+                {
+                    await _pendingIndex.RetryDueAsync(ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Index retry pass failed");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     private async Task ProcessChangeAsync(FileChangeEvent change, CancellationToken ct)
     {
         // Additional debounce: wait a bit then check the latest timestamp
         await Task.Delay(DebounceInterval, ct);
 
-        switch (change.ChangeType)
-        {
-            case FileChangeType.Created:
-            case FileChangeType.Modified:
-                logger.LogInformation("File {Type}: {Path}", change.ChangeType, change.FilePath);
-                try
-                {
-                    await memoryService.IndexFileAsync(change.FilePath, ct);
-                }
-                catch (InvalidDataException ex)
-                {
-                    logger.LogError(ex, "Corrupt memory file skipped during watcher event: {Path}", change.FilePath);
-                    // Update known files so the polling loop does not re-enqueue this corrupt file on every cycle.
-                    var corruptInfo = new FileInfo(change.FilePath);
-                    if (corruptInfo.Exists)
-                        _knownFiles[change.FilePath] = corruptInfo.LastWriteTimeUtc;
-                    break;
-                }
-                // Update known files snapshot
-                var fileInfo = new FileInfo(change.FilePath);
-                if (fileInfo.Exists)
-                    _knownFiles[change.FilePath] = fileInfo.LastWriteTimeUtc;
-                break;
+        logger.LogInformation("File {Type}: {Path}", change.ChangeType, change.FilePath);
 
-            case FileChangeType.Deleted:
-                logger.LogInformation("File deleted: {Path}", change.FilePath);
-                await memoryService.RemoveFromIndexAsync(change.FilePath, ct);
-                _knownFiles.TryRemove(change.FilePath, out _);
-                break;
-        }
+        // The disk decides what the index should hold, not the event: a file that exists is indexed
+        // and one that is gone is removed. A failure of the index or the embedder is not thrown here;
+        // the path waits in _pendingIndex and is retried until it goes through.
+        await _pendingIndex.ApplyAsync(change.FilePath, ct);
+
+        // Whatever the outcome, the polling loop must not report this state of the file again: a
+        // deferred path is retried by _pendingIndex, and a corrupt file is not helped by asking again.
+        var fileInfo = new FileInfo(change.FilePath);
+        if (fileInfo.Exists)
+            _knownFiles[change.FilePath] = fileInfo.LastWriteTimeUtc;
+        else
+            _knownFiles.TryRemove(change.FilePath, out _);
     }
 
     private record FileChangeEvent(string FilePath, FileChangeType ChangeType);

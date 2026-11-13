@@ -26,6 +26,8 @@ public sealed class InjectionOutcomeCounter
     public const string SteerRefusedOtherHuman = "steer_refused_other_human";
     /// <summary>An answer produced only by a steering copy was dropped, never delivered.</summary>
     public const string SteerAnswerDiscarded = "steer_answer_discarded";
+    /// <summary>A generic recovered event had no trusted original owner for first-party chat.</summary>
+    public const string UnownedClientRecoverySuppressed = "unowned_client_recovery_suppressed";
 
     private readonly ConcurrentDictionary<(string provider, string outcome), long> _counts = new();
 

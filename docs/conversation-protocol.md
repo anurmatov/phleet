@@ -142,6 +142,26 @@ ordinary dispatch, exactly as it is for the existing chat channel. When Claude r
 message as a turn of its own (it arrived as the model was finishing its answer), that answer is
 emitted as `turn.recovered_answer` in the host turn, before the host turn's `turn.final` (#369).
 
+### First-party recovery ownership (#533)
+
+For the trusted `client` channel, generic provider `recovered_answer` progress has no trusted
+original conversation/submission owner and is suppressed before result accumulation, sink/journal
+output or client events, including any recovered `FinalResult`.
+Provider `user`/`notification`/`open` segment tags, mixed tags and absent metadata do not establish
+ownership; suppressed text is neither logged nor rerouted as a notice or workflow callback.
+Each suppressed event increments the existing injection outcome counter's fixed
+`unowned_client_recovery_suppressed` outcome once, not a delivery-success counter.
+
+Owned current-turn finals and same-host answers from `ReadInjectedTurnAnswersAsync` remain supported,
+including `turn.recovered_answer` from that scoped path.
+Ordinary injection, final-answer/cap gates, Inbox continuation, queued coalescing, input/media and
+legitimate merged submission ids are unchanged for both `submission.create` and `submission.steer`.
+
+Injection/coalescing may produce one combined reply and terminal, not an acknowledgment per message;
+accepted input is not replayed to manufacture another reply.
+Attributed late recovery or a stronger per-message reply guarantee needs a separately approved
+ownership contract; this guard does not isolate shared model context or change non-client recovery.
+
 ---
 
 ## Worked examples

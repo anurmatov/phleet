@@ -293,8 +293,8 @@ instruction permits sharing. See `docs/comms-journal.md` and
 
 ## Telegram Image Handling
 
-- **Image-only messages** (no caption): `AgentTransport` passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.
-- **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `AgentTransport` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
+- **Image-only messages** (no caption): the Telegram transport (`TelegramMessageIntake`) passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.
+- **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `TelegramMessageIntake` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
 - **Size limits**: individual photos exceeding `MaxImageBytes` (default: 10 MB) are skipped with a Telegram reply warning. Groups exceeding `MaxImagesPerGroup` (default: 10) drop extra photos with a warning.
 - **ClaudeExecutor**: forwards all images as separate content blocks in the multi-modal Claude CLI JSON payload.
 - **CodexExecutor**: forwards images that have a persisted `FilePath` as `{type:"localImage",path}` entries in the app-server v2 `UserInput[]` of `turn/start`. Images without a `FilePath` (persistence disabled, size limit exceeded, or file swept before dispatch) are skipped with a per-batch warning. PDFs remain hint-only (`[document attachment: path]`).
@@ -434,7 +434,7 @@ startup, so a change needs a recreate. Writes always succeed; REST adds `size`, 
 values are in the README.
 
 `Agent:TurnStallTimeoutMinutes` (agent, default 180, `0` = off, 1–10080; out of range exits 1 at startup) limits how long a
-running turn may go without one executor event, on every provider. It is a limit on silence, never a deadline: `TaskManager`
+running turn may go without one executor event, on every provider. It is a limit on silence, never a deadline: `TurnRun`
 restarts it on each event, and when it runs out cancels the executor read, so the provider process is stopped and the turn
 fails with a fixed message. The orchestrator does not write it; until it does, set `Agent__TurnStallTimeoutMinutes` through an
 Env Ref. MUST NOT lower the default without rechecking the silent cases listed in `TurnStallTimeout`.

@@ -144,7 +144,7 @@ public sealed class MessageRouter
                     task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
                 else
                     task = _groupBehavior.BuildDmTask(msg.ChatId, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
-                _ = _taskManager.StartTask(msg.ChatId, task, displayText, isSessionTask: false,
+                _taskManager.StartTaskDetached(msg.ChatId, task, displayText, isSessionTask: false,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
                     documents: msg.Documents.Count > 0 ? msg.Documents : null,
                     userId: msg.UserId, priority: PrimaryHumanClassifier.Classify(msg, _telegramConfig, _allowlist),
@@ -196,7 +196,7 @@ public sealed class MessageRouter
 
         // When busy, StartTask enqueues the message and notifies the user automatically.
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
-        _ = _taskManager.StartTask(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
+        _taskManager.StartTaskDetached(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
             images: msg.Images.Count > 0 ? msg.Images : null,
             documents: msg.Documents.Count > 0 ? msg.Documents : null,
             userId: msg.UserId, priority: PrimaryHumanClassifier.Classify(msg, _telegramConfig, _allowlist),

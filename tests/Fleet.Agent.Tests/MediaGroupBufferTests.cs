@@ -32,6 +32,48 @@ public class MediaGroupBufferTests
     private static MessageImage MakeImage(byte seed = 1) =>
         new(new byte[] { seed }, "image/jpeg");
 
+    // ── a flush that throws ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task DebouncedFlushThatThrows_IsLoggedWithTheGroupAndNotTheCaption()
+    {
+        // The debounced flush runs on a task nobody awaits. When routing the album throws, the
+        // album is gone; this is the only record that it ever arrived.
+        var logger = new CapturingLogger<MediaGroupBufferTests>();
+        var buffer = new MediaGroupBuffer(maxTotalMs: 10_000, logger);
+        var template = MakeTemplate(chatId: 42) with { Text = "CAPTION-NOT-FOR-LOGS", StrippedText = "CAPTION-NOT-FOR-LOGS" };
+
+        await buffer.AddPhotoAsync("42:album-7", MakeImage(), template,
+            _ => throw new InvalidOperationException("routing failed"));
+
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (logger.Entries.Count == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Error, entry.Level);
+        Assert.Contains("Media group flush failed and the album was dropped", entry.Message);
+        Assert.Contains("group=42:album-7", entry.Message);
+        Assert.Contains("images=1", entry.Message);
+        Assert.DoesNotContain("CAPTION-NOT-FOR-LOGS", entry.Message);
+    }
+
+    [Fact]
+    public async Task CappedAddWhoseFlushThrows_IsLoggedToo()
+    {
+        var logger = new CapturingLogger<MediaGroupBufferTests>();
+        var buffer = new MediaGroupBuffer(maxTotalMs: 10_000, logger);
+
+        Assert.True(await buffer.TryAddPhotoWithCapAsync("42:album-8", MakeImage(), MakeTemplate(chatId: 42), maxImages: 10,
+            _ => throw new InvalidOperationException("routing failed")));
+
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (logger.Entries.Count == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        Assert.Contains("group=42:album-8", Assert.Single(logger.Entries).Message);
+    }
+
     // ── basic flush ──────────────────────────────────────────────────────────
 
     [Fact]

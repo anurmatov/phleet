@@ -12,8 +12,6 @@ import type {
   CreateForm,
   AgentConfig,
   ConfigEdits,
-  InstructionSummary,
-  InstructionDetail,
   ProjectContextSummary,
   ProjectContextDetail,
   WsStatus,
@@ -45,6 +43,7 @@ import { DEFAULT_CREATE_FORM, createAgentBody, createFormFromConfig } from './ag
 import { parseViewHash } from './activeViews'
 import { reconcileAgents } from './agentList'
 import { KeyedTimers, afterClose } from './reconnect'
+import { useInstructions } from './hooks/useInstructions'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -187,27 +186,13 @@ export default function App() {
   const [reprovisionAllState, setReprovisionAllState] = useState<ReprovisionAllState>('idle')
   const [reprovisionAllMsg, setReprovisionAllMsg] = useState('')
 
-  const [instructions, setInstructions] = useState<InstructionSummary[]>([])
   const [outputStyles, setOutputStyles] = useState<OutputStyleSummary[]>([])
-  const [instructionsLoading, setInstructionsLoading] = useState(false)
-  const [expandedInstruction, setExpandedInstruction] = useState<string | null>(null)
-  const [instructionDetail, setInstructionDetail] = useState<Record<string, InstructionDetail>>({})
-  const [instructionDetailLoading, setInstructionDetailLoading] = useState<Record<string, boolean>>({})
-  const [instructionEdits, setInstructionEdits] = useState<Record<string, string>>({})
-  const [instructionReason, setInstructionReason] = useState<Record<string, string>>({})
-  const [instructionSaveState, setInstructionSaveState] = useState<Record<string, 'idle' | 'saving' | 'success' | 'error'>>({})
-  const [instructionSaveMsg, setInstructionSaveMsg] = useState<Record<string, string>>({})
-  const [instrToggleConfirm, setInstrToggleConfirm] = useState<Record<string, boolean>>({})
-  const [instrToggleState, setInstrToggleState] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [instrToggleMsg, setInstrToggleMsg] = useState<Record<string, string>>({})
-  const [instrShowNew, setInstrShowNew] = useState(false)
-  const [instrNewForm, setInstrNewForm] = useState({ name: '', content: '', reason: '' })
-  const [instrNewState, setInstrNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
-  const [instrNewMsg, setInstrNewMsg] = useState('')
+  const instr = useInstructions(timers)
+  const instructions = instr.items
+  const loadInstructions = instr.reload
   // #346: the active soft limits (null until loaded, or when the policy route is unavailable) and
   // the last write's size warning per row.
   const [promptSizeLimits, setPromptSizeLimits] = useState<PromptSizeLimits | null>(null)
-  const [instrSizeWarnings, setInstrSizeWarnings] = useState<Record<string, string>>({})
   const [ctxSizeWarnings, setCtxSizeWarnings] = useState<Record<string, string>>({})
 
   // Project contexts
@@ -229,11 +214,6 @@ export default function App() {
   const [ctxNewForm, setCtxNewForm] = useState({ name: '', content: '' })
   const [ctxNewState, setCtxNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
   const [ctxNewMsg, setCtxNewMsg] = useState('')
-  const [selectedVersion, setSelectedVersion] = useState<Record<string, number | null>>({})
-  const [rollbackConfirm, setRollbackConfirm] = useState<Record<string, boolean>>({})
-  const [deployConfirm, setDeployConfirm] = useState<Record<string, boolean>>({})
-  const [deployState, setDeployState] = useState<Record<string, 'idle' | 'deploying' | 'success' | 'error'>>({})
-  const [deployMsg, setDeployMsg] = useState<Record<string, string>>({})
 
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
   // On failure the banner keeps what it last knew (nothing, on a first load).
@@ -466,14 +446,6 @@ export default function App() {
       .finally(() => setCompletedLoading(false))
   }
 
-  function loadInstructions() {
-    setInstructionsLoading(true)
-    apiGet<InstructionSummary[]>('/api/instructions')
-      .then((list: InstructionSummary[]) => setInstructions(list))
-      .catch(() => {})
-      .finally(() => setInstructionsLoading(false))
-  }
-
   // Populates the output-style select and the sidenav count. On failure the list stays empty and
   // the select still offers "none", so a styled agent can always be switched back off.
   function loadOutputStyles() {
@@ -539,7 +511,7 @@ export default function App() {
     fetchCompleted()
 
     loadSetupStatus()
-  }, [refreshAgents])
+  }, [refreshAgents, loadInstructions])
 
   useEffect(() => {
     unmounted.current = false
@@ -977,139 +949,6 @@ export default function App() {
       setConfigSaveMsg(andReprovision ? 'Saved & reprovisioning…' : 'Saved')
       setTimeout(() => setConfigSaveState('idle'), 4000)
     })()
-  }
-
-  function loadInstructionDetail(name: string) {
-    setInstructionDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiGet<InstructionDetail>(`/api/instructions/${encodeURIComponent(name)}`)
-      .then((detail: InstructionDetail) => {
-        setInstructionDetail(prev => ({ ...prev, [name]: detail }))
-        const current = detail.versions.find(v => v.versionNumber === detail.currentVersion)
-        if (current) setInstructionEdits(prev => ({ ...prev, [name]: current.content }))
-      })
-      .catch(() => { setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: 'Failed to load' })) })
-      .finally(() => setInstructionDetailLoading(prev => ({ ...prev, [name]: false })))
-  }
-
-  function toggleInstruction(name: string) {
-    if (expandedInstruction === name) { setExpandedInstruction(null); return }
-    setExpandedInstruction(name)
-    if (!instructionDetail[name]) loadInstructionDetail(name)
-  }
-
-  function saveInstruction(name: string) {
-    const content = instructionEdits[name]
-    if (!content?.trim()) return
-    const reason = instructionReason[name]?.trim() || undefined
-    setInstructionSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiSend<SizedWrite>(`/api/instructions/${encodeURIComponent(name)}/versions`, 'POST', { content, reason })
-      .then(res => {
-        applySizeWarning(setInstrSizeWarnings, name, res?.size)
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setInstructionSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
-        setInstructionReason(prev => ({ ...prev, [name]: '' }))
-        loadInstructionDetail(name)
-        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function rollbackInstruction(name: string, targetVersion: number) {
-    setInstructionSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiSend<SizedWrite>(`/api/instructions/${encodeURIComponent(name)}/rollback/${targetVersion}`, 'POST')
-      .then(res => {
-        applySizeWarning(setInstrSizeWarnings, name, res?.size)
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setInstructionSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
-        setSelectedVersion(prev => ({ ...prev, [name]: null }))
-        loadInstructionDetail(name)
-        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setInstructionSaveState(prev => ({ ...prev, [name]: 'error' })); setInstructionSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setInstructionSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function handleRollbackClick(e: React.MouseEvent, instrName: string, versionNumber: number, saveState: ConfigSaveState) {
-    e.stopPropagation()
-    if (saveState === 'saving') return
-    const key = `${instrName}:${versionNumber}`
-    if (rollbackConfirm[key]) {
-      setRollbackConfirm(prev => ({ ...prev, [key]: false }))
-      rollbackInstruction(instrName, versionNumber)
-    } else {
-      setRollbackConfirm(prev => ({ ...prev, [key]: true }))
-      timers.after(`instr-rollback:${key}`, 5000, () => setRollbackConfirm(prev => prev[key] ? { ...prev, [key]: false } : prev))
-    }
-  }
-
-  function handleDeployClick(e: React.MouseEvent, instrName: string, versionNumber: number, agentName: string) {
-    e.stopPropagation()
-    const deployKey = `${instrName}:${versionNumber}:${agentName}`
-    if (deployState[deployKey] === 'deploying') return
-    if (deployConfirm[deployKey]) {
-      setDeployConfirm(prev => ({ ...prev, [deployKey]: false }))
-      setDeployState(prev => ({ ...prev, [deployKey]: 'deploying' }))
-      apiSend(`/api/agents/${encodeURIComponent(agentName)}/restart-with-version`, 'POST', { instructionName: instrName, versionNumber })
-        .then(() => { setDeployState(prev => ({ ...prev, [deployKey]: 'success' })); setDeployMsg(prev => ({ ...prev, [deployKey]: `Deployed to ${agentName}` })) })
-        .catch((e: unknown) => { setDeployState(prev => ({ ...prev, [deployKey]: 'error' })); setDeployMsg(prev => ({ ...prev, [deployKey]: errorMessage(e) })) })
-        .finally(() => setTimeout(() => setDeployState(prev => ({ ...prev, [deployKey]: 'idle' })), 4000))
-    } else {
-      setDeployConfirm(prev => ({ ...prev, [deployKey]: true }))
-      timers.after(`deploy:${deployKey}`, 5000, () => setDeployConfirm(prev => prev[deployKey] ? { ...prev, [deployKey]: false } : prev))
-    }
-  }
-
-  function handleInstrToggleConfirmClick(name: string) {
-    setInstrToggleConfirm(prev => ({ ...prev, [name]: true }))
-    timers.after(`instr-toggle:${name}`, 5000, () => setInstrToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
-  }
-
-  function toggleInstrActive(name: string, isActive: boolean) {
-    setInstrToggleConfirm(prev => ({ ...prev, [name]: false }))
-    setInstrToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiSend(`/api/instructions/${encodeURIComponent(name)}/toggle-active`, 'POST', { isActive })
-      .then(() => {
-        setInstrToggleState(prev => ({ ...prev, [name]: 'success' }))
-        setInstrToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstrToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setInstrToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setInstrToggleMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setInstrToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function createInstruction() {
-    const name = instrNewForm.name
-    setInstrNewState('saving')
-    apiSend<SizedWrite>('/api/instructions', 'POST', {
-        name: instrNewForm.name,
-        content: instrNewForm.content,
-        reason: instrNewForm.reason || undefined,
-      })
-      .then(res => {
-        applySizeWarning(setInstrSizeWarnings, name, res?.size)
-        setInstrNewState('success')
-        setInstrNewMsg('Created')
-        setInstrShowNew(false)
-        setInstrNewForm({ name: '', content: '', reason: '' })
-        apiGet<InstructionSummary[]>('/api/instructions').then((list: InstructionSummary[]) => setInstructions(list)).catch(() => {})
-        setTimeout(() => setInstrNewState('idle'), 3000)
-      })
-      .catch((err: unknown) => {
-        setInstrNewState('error')
-        setInstrNewMsg(errorMessage(err))
-        setTimeout(() => setInstrNewState('idle'), 5000)
-      })
   }
 
   // ─── Project Context handlers ───────────────────────────────────────────────
@@ -1777,42 +1616,8 @@ export default function App() {
 
         {activeView === 'instructions' && (
           <InstructionsView
-            instructions={instructions}
-            instructionsLoading={instructionsLoading}
-            expandedInstruction={expandedInstruction}
-            instructionDetail={instructionDetail}
-            instructionDetailLoading={instructionDetailLoading}
-            instructionEdits={instructionEdits}
-            instructionReason={instructionReason}
-            instructionSaveState={instructionSaveState as Record<string, ConfigSaveState>}
-            instructionSaveMsg={instructionSaveMsg}
-            selectedVersion={selectedVersion}
-            rollbackConfirm={rollbackConfirm}
-            deployConfirm={deployConfirm}
-            deployState={deployState}
-            deployMsg={deployMsg}
-            instrToggleConfirm={instrToggleConfirm}
-            instrToggleState={instrToggleState}
-            instrToggleMsg={instrToggleMsg}
-            showNewForm={instrShowNew}
-            newForm={instrNewForm}
-            newFormState={instrNewState}
-            newFormMsg={instrNewMsg}
-            onToggleInstruction={toggleInstruction}
-            onSetEdits={(name, content) => setInstructionEdits(prev => ({ ...prev, [name]: content }))}
-            onSetReason={(name, reason) => setInstructionReason(prev => ({ ...prev, [name]: reason }))}
-            onSave={saveInstruction}
-            onSelectVersion={(name, version) => setSelectedVersion(prev => ({ ...prev, [name]: prev[name] === version ? null : version }))}
-            onRollbackClick={handleRollbackClick}
-            onDeployClick={handleDeployClick}
-            onToggleActive={toggleInstrActive}
-            onToggleConfirmClick={handleInstrToggleConfirmClick}
-            onShowNewForm={setInstrShowNew}
-            onNewFormChange={(field, value) => setInstrNewForm(prev => ({ ...prev, [field]: value }))}
-            onNewFormSubmit={createInstruction}
-            onRefresh={loadInstructions}
+            state={instr}
             sizeLimit={promptSizeLimits ? promptSizeLimits.instruction.limitBytes : undefined}
-            sizeWarnings={instrSizeWarnings}
           />
         )}
 

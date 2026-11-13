@@ -1,9 +1,5 @@
 import { useState } from 'react'
-import type {
-  InstructionSummary,
-  InstructionDetail,
-  ConfigSaveState,
-} from '../types'
+import type { InstructionsState } from '../hooks/useInstructions'
 import { computeDiff } from '../utils'
 import FieldHint from './FieldHint'
 import SizeMeter from './SizeMeter'
@@ -12,84 +8,50 @@ import { sizeCell, type MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
 
 interface InstructionsViewProps {
-  instructions: InstructionSummary[]
-  instructionsLoading: boolean
-  expandedInstruction: string | null
-  instructionDetail: Record<string, InstructionDetail>
-  instructionDetailLoading: Record<string, boolean>
-  instructionEdits: Record<string, string>
-  instructionReason: Record<string, string>
-  instructionSaveState: Record<string, ConfigSaveState>
-  instructionSaveMsg: Record<string, string>
-  selectedVersion: Record<string, number | null>
-  rollbackConfirm: Record<string, boolean>
-  deployConfirm: Record<string, boolean>
-  deployState: Record<string, 'idle' | 'deploying' | 'success' | 'error'>
-  deployMsg: Record<string, string>
-  instrToggleConfirm: Record<string, boolean>
-  instrToggleState: Record<string, 'idle' | 'pending' | 'success' | 'error'>
-  instrToggleMsg: Record<string, string>
-  showNewForm: boolean
-  newForm: { name: string; content: string; reason: string }
-  newFormState: 'idle' | 'saving' | 'success' | 'error'
-  newFormMsg: string
-  onToggleInstruction: (name: string) => void
-  onSetEdits: (name: string, content: string) => void
-  onSetReason: (name: string, reason: string) => void
-  onSave: (name: string) => void
-  onSelectVersion: (name: string, version: number | null) => void
-  onRollbackClick: (e: React.MouseEvent, name: string, version: number, saveState: ConfigSaveState) => void
-  onDeployClick: (e: React.MouseEvent, name: string, version: number, agentName: string) => void
-  onToggleActive: (name: string, isActive: boolean) => void
-  onToggleConfirmClick: (name: string) => void
-  onShowNewForm: (show: boolean) => void
-  onNewFormChange: (field: string, value: string) => void
-  onNewFormSubmit: () => void
-  onRefresh: () => void
+  /** The page's state and requests (hooks/useInstructions.ts). */
+  state: InstructionsState
   /** #346 — the instruction soft limit from GET /api/prompt-size-policy; undefined when unavailable. */
   sizeLimit: MeterLimit
-  /** #346 — the last write's size warning per row; cleared by a later write with none. */
-  sizeWarnings: Record<string, string>
 }
 
-export default function InstructionsView({
-  instructions,
-  instructionsLoading,
-  expandedInstruction,
-  instructionDetail,
-  instructionDetailLoading,
-  instructionEdits,
-  instructionReason,
-  instructionSaveState,
-  instructionSaveMsg,
-  selectedVersion,
-  rollbackConfirm,
-  deployConfirm,
-  deployState,
-  deployMsg,
-  instrToggleConfirm,
-  instrToggleState,
-  instrToggleMsg,
-  showNewForm,
-  newForm,
-  newFormState,
-  newFormMsg,
-  onToggleInstruction,
-  onSetEdits,
-  onSetReason,
-  onSave,
-  onSelectVersion,
-  onRollbackClick,
-  onDeployClick,
-  onToggleActive,
-  onToggleConfirmClick,
-  onShowNewForm,
-  onNewFormChange,
-  onNewFormSubmit,
-  onRefresh,
-  sizeLimit,
-  sizeWarnings,
-}: InstructionsViewProps) {
+export default function InstructionsView({ state, sizeLimit }: InstructionsViewProps) {
+  const {
+    items: instructions,
+    loading: instructionsLoading,
+    expanded: expandedInstruction,
+    detail: instructionDetail,
+    detailLoading: instructionDetailLoading,
+    edits: instructionEdits,
+    reasons: instructionReason,
+    saveState: instructionSaveState,
+    saveMsg: instructionSaveMsg,
+    selectedVersion,
+    rollbackConfirm,
+    deployConfirm,
+    deployState,
+    deployMsg,
+    toggleConfirm: instrToggleConfirm,
+    toggleState: instrToggleState,
+    toggleMsg: instrToggleMsg,
+    showNew: showNewForm,
+    newForm,
+    newState: newFormState,
+    newMsg: newFormMsg,
+    toggleExpanded: onToggleInstruction,
+    setEdit: onSetEdits,
+    setReason: onSetReason,
+    save: onSave,
+    selectVersion: onSelectVersion,
+    rollbackClick: onRollbackClick,
+    deployClick: onDeployClick,
+    toggleActive: onToggleActive,
+    toggleConfirmClick: onToggleConfirmClick,
+    setShowNew: onShowNewForm,
+    changeNewForm: onNewFormChange,
+    create: onNewFormSubmit,
+    reload: onRefresh,
+    sizeWarnings,
+  } = state
   const [showArchived, setShowArchived] = useState(false)
 
   const activeInstructions = instructions.filter(i => i.isActive)

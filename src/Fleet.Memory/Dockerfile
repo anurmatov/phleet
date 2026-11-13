@@ -1,11 +1,13 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0-preview AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+# Build settings and package versions shared by every project; restore needs both.
+COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Memory/Fleet.Memory.csproj src/Fleet.Memory/
 RUN dotnet restore src/Fleet.Memory/Fleet.Memory.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Memory/Fleet.Memory.csproj -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*

@@ -223,3 +223,9 @@ internal sealed record AgentConfigUpdateRequest(
         Instructions = Instructions?.Select(i => new InstructionAssignment(i.InstructionName, i.LoadOrder)).ToList(),
     };
 }
+
+/// <summary>One MCP endpoint, as the config PUT and the create POST both take it.</summary>
+internal sealed record McpEndpointEntry(string McpName, string Url, string TransportType);
+
+/// <summary>One instruction assignment, as the config PUT takes it.</summary>
+internal sealed record InstructionAssignmentEntry(string InstructionName, int LoadOrder);

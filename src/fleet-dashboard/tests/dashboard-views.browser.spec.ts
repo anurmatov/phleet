@@ -420,6 +420,31 @@ test('agents view: its workflow rows confirm on the second click', async ({ page
   expect(restart[0].query).toBe('?runId=run-wf-build-2&terminateExisting=true')
 })
 
+test('dialogs are announced as dialogs, take focus, and close on Escape', async ({ page }) => {
+  await open(page, 'agents')
+  await page.getByRole('button', { name: '+ New Agent' }).click()
+  const create = page.getByRole('dialog', { name: 'New Agent' })
+  await expect(create).toBeVisible()
+  await expect(create).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(create).toHaveCount(0)
+
+  await wfRow(page, 'BuildWorkflow').locator('.wf-type').click()
+  const history = page.getByRole('dialog', { name: 'Workflow history' })
+  await expect(history.locator('.wf-ev')).toHaveCount(2)
+  await page.keyboard.press('Escape')
+  await expect(history).toHaveCount(0)
+
+  const alpha = agentRow(page, 'alpha')
+  await overflow(alpha).click()
+  await alpha.locator('.agent-row-overflow').getByRole('button', { name: 'edit config' }).click()
+  const config = page.getByRole('dialog', { name: 'Config — alpha' })
+  await expect(config).toBeVisible()
+  // A click on the backdrop still closes it, as before.
+  await page.locator('.config-modal-overlay').click({ position: { x: 5, y: 5 } })
+  await expect(config).toHaveCount(0)
+})
+
 // ── Instructions and project contexts: the same versioned editor ────────────────────────────────
 
 const VERSIONED = [

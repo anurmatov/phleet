@@ -7,6 +7,7 @@ import { createFormLocalEdits } from '../agentCreate'
 import ModelSelector from './ModelSelector'
 import LocalModelFields from './LocalModelFields'
 import FieldHint from './FieldHint'
+import Modal from './Modal'
 import InstructionPicker from './InstructionPicker'
 
 interface CreateAgentModalProps {
@@ -36,8 +37,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
   const isLocal = hasLocalMode && createForm.localMode
 
   return (
-    <div className="config-modal-overlay" onClick={onClose}>
-      <div className="config-modal create-agent-modal" onClick={e => e.stopPropagation()}>
+    <Modal label="New Agent" overlayClassName="config-modal-overlay" className="config-modal create-agent-modal" onClose={onClose}>
         <div className="config-modal-header">
           <span className="config-modal-title">New Agent</span>
           <button className="config-modal-close" onClick={onClose}>✕ close</button>
@@ -158,7 +158,6 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

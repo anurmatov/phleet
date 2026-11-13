@@ -322,7 +322,15 @@ public class TaskManagerMidTurnInjectionTests
         var sink = Substitute.For<IMessageSink>();
         var manager = BuildManager(executor, sink, counter);
         var completed = new ConcurrentQueue<string?>();
-        manager.OnTaskCompleted += (_, _, _, _, _, correlationId, _, _) => completed.Enqueue(correlationId);
+        // A turn's completion is raised after its executor call returns, so "the fourth turn has
+        // started" says nothing about its callback. The assertions below wait for the callbacks.
+        var relayAndBridgeCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        manager.OnTaskCompleted += (_, _, _, _, _, correlationId, _, _) =>
+        {
+            completed.Enqueue(correlationId);
+            if (completed.Contains("relay-1") && completed.Contains("bridge-1"))
+                relayAndBridgeCompleted.TrySetResult();
+        };
 
         var idle = WaitForIdle(manager, 1);
         _ = manager.StartTask(1, "chat1 running", "chat1 running", isSessionTask: true);
@@ -343,6 +351,7 @@ public class TaskManagerMidTurnInjectionTests
         executor.ReleaseAllTurns();
         await idle;
         await executor.WaitForExecuteCountAsync(4);
+        await relayAndBridgeCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Contains("relay-1", completed);
         Assert.Contains("bridge-1", completed);

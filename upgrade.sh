@@ -19,6 +19,10 @@ unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY
 # Likewise the host address of the ports that take no credential: a stale export of 0.0.0.0 would
 # publish Temporal, fleet-memory and fleet-bridge to the network with .env saying loopback.
 unset FLEET_INTERNAL_BIND_ADDRESS
+# And the Qdrant release. An operator stepping up one minor at a time saves the intermediate release
+# in .env; an exported FLEET_QDRANT_VERSION left over from an earlier step would start a different
+# one, and Qdrant storage does not survive a skipped minor.
+unset FLEET_QDRANT_VERSION
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
@@ -44,6 +48,7 @@ unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACK
       FLEET_COMMS_MEDIA_STORE FLEET_COMMS_SEAWEEDFS_SIGNING_KEY
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+source "$SCRIPT_DIR/scripts/lib/qdrant-upgrade.sh"
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -153,6 +158,18 @@ case "$MEDIA_STORE" in
     fi
     ;;
 esac
+
+# Qdrant, like the MinIO check above: before anything is stopped, while the old container can still
+# be read. The compose file pins a release and FLEET_QDRANT_VERSION in .env may name another; either
+# way the release the next start WOULD run is checked against the one this host runs now. Setting
+# the variable is not a way past this.
+QDRANT_TARGET=$(qdrant_target_version "$ENV_FILE" "$COMPOSE_EXAMPLE")
+QDRANT_SEEN=$(qdrant_observe "$COMPOSE_PROJECT")
+if ! QDRANT_DECISION=$(qdrant_upgrade_decision "$QDRANT_SEEN" "$QDRANT_TARGET"); then
+  fail "Qdrant: this upgrade is refused ($QDRANT_DECISION)."
+  qdrant_refusal_message "$QDRANT_DECISION" "$QDRANT_SEEN" "$QDRANT_TARGET" "$COMPOSE_PROJECT"
+  exit 1
+fi
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
@@ -339,6 +356,13 @@ else
       exit 1
     }
   fi
+fi
+
+# Said once per upgrade until the operator records a choice: these four used to be reachable from
+# other machines.
+if [[ -z "$(read_env_var "$ENV_FILE" "FLEET_INTERNAL_BIND_ADDRESS")" ]]; then
+  warn "Ports 7233, 8080, 3100 and 3300 (Temporal, its UI, fleet-memory, fleet-bridge) are published on 127.0.0.1 only."
+  warn "  From another machine use an SSH tunnel, or set FLEET_INTERNAL_BIND_ADDRESS in .env: docs/upgrading/internal-ports-loopback.md"
 fi
 
 echo

@@ -26,12 +26,13 @@ at `<host>:3300`. On the host itself, `http://localhost:8080` works as before.
 Not changed: the dashboard (3700), the orchestrator (3600) and fleet-playwright (3200) stay
 published on every interface.
 
-### Reaching the Temporal UI from another machine
+### Reaching one of them from another machine
 
-Prefer a tunnel, which leaves the port closed to the network:
+Prefer a tunnel, which leaves the port closed to the network and opens only the one you need:
 
 ```bash
-ssh -L 8080:127.0.0.1:8080 <user>@<host>   # then open http://localhost:8080
+ssh -L 8080:127.0.0.1:8080 <user>@<host>   # Temporal UI: then open http://localhost:8080
+ssh -L 3300:127.0.0.1:3300 <user>@<host>   # fleet-bridge: point the MCP client at localhost:3300
 ```
 
 A dashboard built with `VITE_TEMPORAL_UI_URL` links to that address from the browser, so the link
@@ -45,9 +46,11 @@ Add this to `fleet/.env` and recreate the stack:
 FLEET_INTERNAL_BIND_ADDRESS=0.0.0.0   # or the address of one interface
 ```
 
-One value moves all four ports. Do this only on a network where every machine is trusted: the
+One value moves all four ports: there is no per-service setting, so opening fleet-bridge this way
+opens Temporal and fleet-memory too. Do this only on a network where every machine is trusted: the
 services still take no credential. `setup.sh` and `upgrade.sh` ignore a value exported in the
-shell, so `.env` is the only place that decides it.
+shell, so `.env` is the only place that decides it. `upgrade.sh` reminds you of this until `.env`
+records a choice.
 
 To confirm what the running stack publishes:
 
@@ -71,24 +74,53 @@ never moved. Each is now pinned to the release its floating tag resolved to when
 an anonymous pull of every tag. A host that still holds the images keeps running them under the
 unpinned name, and a pinned tag would be an image it cannot fetch.
 
-### ⚠️ Qdrant: check the running release before you upgrade
+### ⚠️ Qdrant: the release you run decides what you may start
 
-A pin moves a host to the pinned release on the next start, in whichever direction that is.
+A pin moves a host to the pinned release on the next start, in whichever direction that is. Qdrant
+supports moving one minor release at a time and never backwards, so compare the **full** release
+you run with the one the next start would run (the pin, or `FLEET_QDRANT_VERSION` in `fleet/.env`):
 
 ```bash
 docker inspect qdrant --format '{{ index .Config.Labels "org.opencontainers.image.version" }}'
 ```
 
-- **The same minor as the pin, or one below it** (v1.19.x or v1.20.x): nothing to do.
-- **Older**: Qdrant supports upgrading one minor version at a time. Set `FLEET_QDRANT_VERSION` in
-  `fleet/.env` to the release you run, upgrade Fleet, then raise it one minor at a time (v1.18.x,
-  v1.19.x, …), recreating `qdrant` at each step, until it matches the pin; then remove the key.
-- **Newer than the pin**: do not downgrade. Set `FLEET_QDRANT_VERSION` to the release you run and
-  keep it until the pin passes it.
+| You run | Next start would run v1.20.0 | What to do |
+|---|---|---|
+| v1.20.0, or any v1.19.x | allowed | Nothing |
+| v1.20.1 or later, v1.21.x, … | refused: it would downgrade | Set `FLEET_QDRANT_VERSION` to the release you run and keep it until the pin passes it |
+| v1.18.x or older | refused: it skips a minor | Step up, below |
+
+The same rule holds for any target: the release you run must be the target's minor at the same or
+an older patch, or exactly one minor below it.
+
+**Stepping up**, from v1.17.x as the example: set `FLEET_QDRANT_VERSION=v1.18.<latest patch>` in
+`fleet/.env` and run `./upgrade.sh`; then `v1.19.<latest patch>` and run it again; then remove the
+key and run it once more to reach the pin.
+
+`upgrade.sh` enforces this before it stops anything, and `setup.sh` before it starts anything. Both
+read the release from the existing `qdrant` container and refuse a move the table does not allow.
+Setting `FLEET_QDRANT_VERSION` is not a way past the check: it changes the target, and the target
+is what is checked. Both scripts take the value from `fleet/.env` only and ignore one exported in
+the shell, so a leftover `export` cannot replace the step you saved. Two cases cannot be decided
+and are refused as well:
+
+- a `qdrant` container whose image carries no release label;
+- Qdrant storage (the `fleet_qdrant_data` volume) with no `qdrant` container to read.
+
+In both, start the container on the release that wrote the storage, or drop the index as described
+next. A host with neither a container nor the volume is a fresh install and is not checked.
 
 Qdrant holds an index, not the memories. The memory files under `fleet/memories` are the source of
-truth and fleet-memory indexes all of them again on every start. If Qdrant will not start on its old
-storage, stop the stack, remove the `qdrant_data` volume (`fleet_qdrant_data` under the project
-name `setup.sh` uses) and start again; the index is rebuilt.
+truth and fleet-memory indexes all of them again on every start. To drop the index, stop the stack,
+remove the `qdrant` container and the `fleet_qdrant_data` volume, and start again; the index is
+rebuilt.
 
-Kokoro keeps no state, and the two dashboard images are build inputs. They need no step.
+### Kokoro TTS: a version change
+
+A host that pulled an older `latest` (v0.9.x, for example) moves to v0.10.0 on its next start.
+Kokoro keeps no state, so there is nothing to migrate, but the agents' voice replies call its
+`/v1/audio/speech` route and that route was **not** exercised against v0.10.0 for this change.
+Request one voice reply after upgrading. A failed synthesis is logged by the agent as
+`TTS synthesis failed` and the text reply is still delivered.
+
+The two dashboard images are build inputs and need no step.

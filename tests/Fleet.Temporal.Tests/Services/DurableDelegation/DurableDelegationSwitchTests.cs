@@ -190,7 +190,7 @@ public sealed class DurableDelegationSwitchTests
     public async Task SwitchedOn_AReplyForADurableDelegationCompletesIt_WithTheParsedStatus()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf/task-1"), default);
+        await h.StartAsync(DurableHarness.Start("wf/task-1"));
         var registry = new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance);
         var listener = Listener(registry, h.Service);
 
@@ -206,10 +206,11 @@ public sealed class DurableDelegationSwitchTests
     public async Task SwitchedOn_APartialResponseIsContinued_AndTheMessageIsSettled()
     {
         using var h = new DurableHarness();
-        await h.Service.StartDelegationAsync(DurableHarness.Start("wf/task-1"), default);
+        await h.StartAsync(DurableHarness.Start("wf/task-1"));
         var listener = Listener(new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance), h.Service);
 
         Assert.True(await listener.TryRouteReplyAsync(Reply("wf/task-1", "half of it", RelayMessageType.PartialResponse)));
+        await h.SettleAsync();
 
         Assert.Empty(h.Gateway.Completed);
         Assert.Equal("wf/task-1/incomplete-retry-1", h.Relay.Published[1].TaskId);

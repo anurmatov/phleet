@@ -72,6 +72,8 @@ public sealed class PendingDelegationStore
                 }
 
                 if (string.IsNullOrEmpty(record.CurrentTaskId)) record.CurrentTaskId = record.TaskId;
+                // A cancel that was sent was asked for, whichever version wrote the record.
+                if (record.CancelSent) record.CancelRequested = true;
                 _records[record.TaskId] = record;
             }
 

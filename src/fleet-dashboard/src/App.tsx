@@ -23,8 +23,6 @@ import type {
   ConfigSaveState,
   ActiveView,
   ReprovisionAllState,
-  WorkflowDefinitionSummary,
-  WorkflowDefinitionDetail,
   WorkflowTypeInfo,
   ScheduleSummary,
   OutputStyleSummary,
@@ -44,6 +42,7 @@ import { reconcileAgents } from './agentList'
 import { KeyedTimers, afterClose } from './reconnect'
 import { useInstructions } from './hooks/useInstructions'
 import { useVersionedResource } from './hooks/useVersionedResource'
+import { useWorkflowDefinitions } from './hooks/useWorkflowDefinitions'
 import AppHeader from './components/AppHeader'
 import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
@@ -266,32 +265,9 @@ export default function App() {
   }, [activeView])
   const [navOpen, setNavOpen] = useState(false)
 
-  // Visual editor state: undefined=closed, null=new definition, string=editing named def
-  const [wfEditorDef, setWfEditorDef] = useState<string | null | undefined>(undefined)
-
-  // Workflow Definitions state
-  const [wfDefs, setWfDefs] = useState<WorkflowDefinitionSummary[]>([])
-  const [wfDefsLoading, setWfDefsLoading] = useState(false)
-  const [wfDefsLoaded, setWfDefsLoaded] = useState(false)
-  const [expandedWfDef, setExpandedWfDef] = useState<string | null>(null)
-  const [wfDefDetails, setWfDefDetails] = useState<Record<string, WorkflowDefinitionDetail>>({})
-  const [wfDefDetailLoading, setWfDefDetailLoading] = useState<Record<string, boolean>>({})
-  const [wfDefEdits, setWfDefEdits] = useState<Record<string, string>>({})
-  const [wfDefReasons, setWfDefReasons] = useState<Record<string, string>>({})
-  const [wfDefSaveState, setWfDefSaveState] = useState<Record<string, ConfigSaveState>>({})
-  const [wfDefSaveMsg, setWfDefSaveMsg] = useState<Record<string, string>>({})
-  const [wfDefSelectedVersion, setWfDefSelectedVersion] = useState<Record<string, number | null>>({})
-  const [wfDefRollbackConfirm, setWfDefRollbackConfirm] = useState<Record<string, string | null>>({})
-  const [wfDefToggleConfirm, setWfDefToggleConfirm] = useState<Record<string, boolean>>({})
-  const [wfDefToggleState, setWfDefToggleState] = useState<Record<string, 'idle' | 'pending' | 'success' | 'error'>>({})
-  const [wfDefToggleMsg, setWfDefToggleMsg] = useState<Record<string, string>>({})
-  const [wfDefNsFilter, setWfDefNsFilter] = useState('all')
-  const [wfDefSearch, setWfDefSearch] = useState('')
-  const [wfDefShowNew, setWfDefShowNew] = useState(false)
-  const [wfDefNewForm, setWfDefNewForm] = useState({ name: '', namespace: '', taskQueue: '', description: '', definition: '' })
-  const [wfDefNewState, setWfDefNewState] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
-  const [wfDefNewMsg, setWfDefNewMsg] = useState('')
-
+  const wfDefs = useWorkflowDefinitions(timers)
+  const loadWfDefs = wfDefs.load
+  const wfDefsLoaded = wfDefs.loaded
 
   // Schedules state
   const [schedules, setSchedules] = useState<ScheduleSummary[]>([])
@@ -905,126 +881,6 @@ export default function App() {
     })()
   }
 
-  // ─── Workflow Definitions handlers ────────────────────────────────────────
-
-  function loadWfDefs() {
-    setWfDefsLoading(true)
-    apiGet<WorkflowDefinitionSummary[]>('/api/workflow-definitions?includeInactive=true')
-      .then((list: WorkflowDefinitionSummary[]) => { setWfDefs(list); setWfDefsLoaded(true) })
-      .catch(() => {})
-      .finally(() => setWfDefsLoading(false))
-  }
-
-  function loadWfDefDetail(name: string) {
-    setWfDefDetailLoading(prev => ({ ...prev, [name]: true }))
-    apiGet<WorkflowDefinitionDetail>(`/api/workflow-definitions/${encodeURIComponent(name)}`)
-      .then((detail: WorkflowDefinitionDetail) => {
-        setWfDefDetails(prev => ({ ...prev, [name]: detail }))
-        setWfDefEdits(prev => ({ ...prev, [name]: detail.definition }))
-      })
-      .catch(() => {})
-      .finally(() => setWfDefDetailLoading(prev => ({ ...prev, [name]: false })))
-  }
-
-  function toggleWfDefExpand(name: string) {
-    setExpandedWfDef(prev => prev === name ? null : name)
-    if (expandedWfDef !== name && !wfDefDetails[name]) loadWfDefDetail(name)
-  }
-
-  function saveWfDef(name: string) {
-    const content = wfDefEdits[name]
-    const reason = wfDefReasons[name]?.trim() || undefined
-    setWfDefSaveState(prev => ({ ...prev, [name]: 'saving' }))
-    apiSend(`/api/workflow-definitions/${encodeURIComponent(name)}`, 'PUT', { definition: content, reason })
-      .then(() => {
-        setWfDefSaveState(prev => ({ ...prev, [name]: 'success' }))
-        setWfDefSaveMsg(prev => ({ ...prev, [name]: 'Saved' }))
-        loadWfDefDetail(name)
-        loadWfDefs()
-        setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setWfDefSaveState(prev => ({ ...prev, [name]: 'error' }))
-        setWfDefSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function handleWfDefRollback(name: string, targetVersion: number) {
-    const key = `${name}:${targetVersion}`
-    if (wfDefRollbackConfirm[name] === key) {
-      // Confirmed — execute rollback
-      setWfDefRollbackConfirm(prev => ({ ...prev, [name]: null }))
-      const verDef = wfDefDetails[name]?.versions.find(v => v.version === targetVersion)?.definition
-      if (!verDef) return
-      const reason = `Rollback to v${targetVersion}`
-      setWfDefSaveState(prev => ({ ...prev, [name]: 'saving' }))
-      apiSend(`/api/workflow-definitions/${encodeURIComponent(name)}`, 'PUT', { definition: verDef, reason })
-        .then(() => {
-          setWfDefSaveState(prev => ({ ...prev, [name]: 'success' }))
-          setWfDefSaveMsg(prev => ({ ...prev, [name]: `Rolled back to v${targetVersion}` }))
-          setWfDefSelectedVersion(prev => ({ ...prev, [name]: null }))
-          loadWfDefDetail(name)
-          loadWfDefs()
-          setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-        })
-        .catch((err: unknown) => {
-          setWfDefSaveState(prev => ({ ...prev, [name]: 'error' }))
-          setWfDefSaveMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-          setTimeout(() => setWfDefSaveState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-        })
-    } else {
-      setWfDefRollbackConfirm(prev => ({ ...prev, [name]: key }))
-      timers.after(`wfdef-rollback:${name}`, 5000, () => setWfDefRollbackConfirm(prev => prev[name] === key ? { ...prev, [name]: null } : prev))
-    }
-  }
-
-  function handleWfDefToggleConfirmClick(name: string) {
-    setWfDefToggleConfirm(prev => ({ ...prev, [name]: true }))
-    timers.after(`wfdef-toggle:${name}`, 5000, () => setWfDefToggleConfirm(prev => prev[name] ? { ...prev, [name]: false } : prev))
-  }
-
-  function toggleWfDefActive(name: string, isActive: boolean) {
-    setWfDefToggleConfirm(prev => ({ ...prev, [name]: false }))
-    setWfDefToggleState(prev => ({ ...prev, [name]: 'pending' }))
-    apiSend(`/api/workflow-definitions/${encodeURIComponent(name)}/toggle-active`, 'POST', { isActive })
-      .then(() => {
-        setWfDefToggleState(prev => ({ ...prev, [name]: 'success' }))
-        setWfDefToggleMsg(prev => ({ ...prev, [name]: isActive ? 'Enabled' : 'Disabled' }))
-        loadWfDefs()
-        setTimeout(() => setWfDefToggleState(prev => ({ ...prev, [name]: 'idle' })), 3000)
-      })
-      .catch((err: unknown) => {
-        setWfDefToggleState(prev => ({ ...prev, [name]: 'error' }))
-        setWfDefToggleMsg(prev => ({ ...prev, [name]: errorMessage(err) }))
-        setTimeout(() => setWfDefToggleState(prev => ({ ...prev, [name]: 'idle' })), 5000)
-      })
-  }
-
-  function createWfDef() {
-    setWfDefNewState('saving')
-    apiSend('/api/workflow-definitions', 'POST', {
-        name: wfDefNewForm.name,
-        namespace: wfDefNewForm.namespace,
-        taskQueue: wfDefNewForm.taskQueue,
-        definition: wfDefNewForm.definition,
-        description: wfDefNewForm.description || undefined,
-      })
-      .then(() => {
-        setWfDefNewState('success')
-        setWfDefNewMsg('Created')
-        setWfDefShowNew(false)
-        setWfDefNewForm({ name: '', namespace: '', taskQueue: '', description: '', definition: '' })
-        loadWfDefs()
-        setTimeout(() => setWfDefNewState('idle'), 3000)
-      })
-      .catch((err: unknown) => {
-        setWfDefNewState('error')
-        setWfDefNewMsg(errorMessage(err))
-        setTimeout(() => setWfDefNewState('idle'), 5000)
-      })
-  }
-
   function wfKey(wf: WorkflowSummary): string { return `${wf.namespace}/${wf.workflowId}` }
 
   async function handleWfClick(wf: WorkflowSummary) {
@@ -1297,7 +1153,7 @@ export default function App() {
         instructionCount={instructions.length}
         projectContextCount={projectContexts.length}
         outputStyleCount={outputStyles.length}
-        wfDefinitionCount={wfDefs.length}
+        wfDefinitionCount={wfDefs.definitions.length}
         namespaceCount={apiNamespaces.length}
         unreadAlertCount={unreadAlerts.length}
         reprovisionAllState={reprovisionAllState}
@@ -1466,45 +1322,7 @@ export default function App() {
         )}
 
         {activeView === 'wf-definitions' && (
-          <WorkflowDefinitionsView
-            definitions={wfDefs}
-            loading={wfDefsLoading}
-            namespaces={apiNamespaces}
-            expandedDef={expandedWfDef}
-            defDetails={wfDefDetails}
-            defDetailLoading={wfDefDetailLoading}
-            defEdits={wfDefEdits}
-            defReasons={wfDefReasons}
-            defSaveState={wfDefSaveState}
-            defSaveMsg={wfDefSaveMsg}
-            defSelectedVersion={wfDefSelectedVersion}
-            defRollbackConfirm={wfDefRollbackConfirm}
-            defToggleConfirm={wfDefToggleConfirm}
-            defToggleState={wfDefToggleState}
-            defToggleMsg={wfDefToggleMsg}
-            nsFilter={wfDefNsFilter}
-            searchQuery={wfDefSearch}
-            showNewForm={wfDefShowNew}
-            newForm={wfDefNewForm}
-            newFormState={wfDefNewState}
-            newFormMsg={wfDefNewMsg}
-            onToggleExpand={toggleWfDefExpand}
-            onSetEdit={(name, value) => setWfDefEdits(prev => ({ ...prev, [name]: value }))}
-            onSetReason={(name, value) => setWfDefReasons(prev => ({ ...prev, [name]: value }))}
-            onSave={saveWfDef}
-            onSelectVersion={(name, ver) => setWfDefSelectedVersion(prev => ({ ...prev, [name]: ver }))}
-            onRollbackClick={handleWfDefRollback}
-            onToggleActive={toggleWfDefActive}
-            onToggleConfirmClick={handleWfDefToggleConfirmClick}
-            onNsFilter={setWfDefNsFilter}
-            onSearch={setWfDefSearch}
-            onShowNewForm={setWfDefShowNew}
-            onNewFormChange={(field, value) => setWfDefNewForm(prev => ({ ...prev, [field]: value }))}
-            onNewFormSubmit={createWfDef}
-            onEditVisual={name => setWfEditorDef(name)}
-            onNewVisual={() => setWfEditorDef(null)}
-            onRefresh={loadWfDefs}
-          />
+          <WorkflowDefinitionsView state={wfDefs} namespaces={apiNamespaces} />
         )}
 
         {activeView === 'schedules' && (
@@ -1563,12 +1381,12 @@ export default function App() {
       </main>
 
       {/* Visual Workflow Editor overlay */}
-      {wfEditorDef !== undefined && (
+      {wfDefs.editorDef !== undefined && (
         <div className="wfe-overlay">
           <WorkflowDefinitionEditor
-            defName={wfEditorDef}
-            onBack={() => setWfEditorDef(undefined)}
-            onSaved={() => { setWfEditorDef(undefined); loadWfDefs() }}
+            defName={wfDefs.editorDef}
+            onBack={wfDefs.closeEditor}
+            onSaved={() => { wfDefs.closeEditor(); loadWfDefs() }}
             workflowTypes={workflowTypes}
             namespaces={apiNamespaces}
           />

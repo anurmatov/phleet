@@ -1,9 +1,5 @@
 import { useState, useRef } from 'react'
-import type {
-  WorkflowDefinitionSummary,
-  WorkflowDefinitionDetail,
-  ConfigSaveState,
-} from '../types'
+import type { WorkflowDefinitionsState } from '../hooks/useWorkflowDefinitions'
 import { computeDiff, relativeTime } from '../utils'
 import FieldHint from './FieldHint'
 
@@ -113,54 +109,47 @@ function validateStep(step: Record<string, unknown>, errors: ValidationError[], 
 }
 
 interface WorkflowDefinitionsViewProps {
-  definitions: WorkflowDefinitionSummary[]
-  loading: boolean
+  /** The page's state and requests (hooks/useWorkflowDefinitions.ts). */
+  state: WorkflowDefinitionsState
   namespaces: string[]
-  expandedDef: string | null
-  defDetails: Record<string, WorkflowDefinitionDetail>
-  defDetailLoading: Record<string, boolean>
-  defEdits: Record<string, string>
-  defReasons: Record<string, string>
-  defSaveState: Record<string, ConfigSaveState>
-  defSaveMsg: Record<string, string>
-  defSelectedVersion: Record<string, number | null>
-  defRollbackConfirm: Record<string, string | null>
-  defToggleConfirm: Record<string, boolean>
-  defToggleState: Record<string, 'idle' | 'pending' | 'success' | 'error'>
-  defToggleMsg: Record<string, string>
-  nsFilter: string
-  searchQuery: string
-  showNewForm: boolean
-  newForm: { name: string; namespace: string; taskQueue: string; description: string; definition: string }
-  newFormState: 'idle' | 'saving' | 'success' | 'error'
-  newFormMsg: string
-  onToggleExpand: (name: string) => void
-  onSetEdit: (name: string, value: string) => void
-  onSetReason: (name: string, value: string) => void
-  onSave: (name: string) => void
-  onSelectVersion: (name: string, ver: number | null) => void
-  onRollbackClick: (name: string, ver: number) => void
-  onToggleActive: (name: string, isActive: boolean) => void
-  onToggleConfirmClick: (name: string) => void
-  onNsFilter: (ns: string) => void
-  onSearch: (q: string) => void
-  onShowNewForm: (show: boolean) => void
-  onNewFormChange: (field: string, value: string) => void
-  onNewFormSubmit: () => void
-  onEditVisual?: (name: string) => void
-  onNewVisual?: () => void
-  onRefresh: () => void
 }
 
-export default function WorkflowDefinitionsView({
-  definitions, loading, namespaces, expandedDef, defDetails, defDetailLoading,
-  defEdits, defReasons, defSaveState, defSaveMsg,
-  defSelectedVersion, defRollbackConfirm, defToggleConfirm, defToggleState, defToggleMsg,
-  nsFilter, searchQuery, showNewForm, newForm, newFormState, newFormMsg,
-  onToggleExpand, onSetEdit, onSetReason, onSave, onSelectVersion, onRollbackClick,
-  onToggleActive, onToggleConfirmClick, onNsFilter, onSearch, onShowNewForm, onNewFormChange, onNewFormSubmit,
-  onEditVisual, onNewVisual, onRefresh,
-}: WorkflowDefinitionsViewProps) {
+export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowDefinitionsViewProps) {
+  const {
+    definitions, loading,
+    expanded: expandedDef,
+    details: defDetails,
+    detailLoading: defDetailLoading,
+    edits: defEdits,
+    reasons: defReasons,
+    saveState: defSaveState,
+    saveMsg: defSaveMsg,
+    selectedVersion: defSelectedVersion,
+    rollbackConfirm: defRollbackConfirm,
+    toggleConfirm: defToggleConfirm,
+    toggleState: defToggleState,
+    toggleMsg: defToggleMsg,
+    nsFilter,
+    search: searchQuery,
+    showNew: showNewForm,
+    newForm,
+    newState: newFormState,
+    newMsg: newFormMsg,
+    toggleExpand: onToggleExpand,
+    setEdit: onSetEdit,
+    setReason: onSetReason,
+    save: onSave,
+    selectVersion: onSelectVersion,
+    rollbackClick: onRollbackClick,
+    toggleActive: onToggleActive,
+    toggleConfirmClick: onToggleConfirmClick,
+    setNsFilter: onNsFilter,
+    setSearch: onSearch,
+    setShowNew: onShowNewForm,
+    changeNewForm: onNewFormChange,
+    create: onNewFormSubmit,
+    load: onRefresh,
+  } = state
   const [validatedEdits, setValidatedEdits] = useState<Record<string, string>>({})
   const validationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [debouncedNewFormDef, setDebouncedNewFormDef] = useState('')
@@ -187,9 +176,7 @@ export default function WorkflowDefinitionsView({
         </h1>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="completed-refresh-btn" onClick={onRefresh} disabled={loading} title="Refresh definitions">↻</button>
-          {onNewVisual && (
-            <button className="view-page-action wfe-visual-btn" onClick={onNewVisual}>+ Visual Editor</button>
-          )}
+          <button className="view-page-action wfe-visual-btn" onClick={() => state.openEditor(null)}>+ Visual Editor</button>
           <button className="view-page-action" onClick={() => onShowNewForm(!showNewForm)}>
             {showNewForm ? 'Cancel' : '+ New JSON'}
           </button>
@@ -367,9 +354,7 @@ export default function WorkflowDefinitionsView({
                   <span className="instr-total">{relativeTime(def.updatedAt)}</span>
                 </span>
                 <div className="wfd-row-actions" onClick={e => e.stopPropagation()}>
-                  {onEditVisual && (
-                    <button className="wfe-visual-btn wfe-row-edit-btn" onClick={() => onEditVisual(def.name)}>✎ Edit</button>
-                  )}
+                  <button className="wfe-visual-btn wfe-row-edit-btn" onClick={() => state.openEditor(def.name)}>✎ Edit</button>
                   {toggleState === 'idle' || toggleState === 'pending' ? (
                     <button
                       className={`wfd-toggle-btn${toggleConfirming ? ' confirming' : ''}`}

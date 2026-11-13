@@ -100,15 +100,19 @@ key and run it once more to reach the pin.
 `upgrade.sh` enforces this before it stops anything, and `setup.sh` before it starts anything. Both
 read the release from the existing `qdrant` container and refuse a move the table does not allow.
 Setting `FLEET_QDRANT_VERSION` is not a way past the check: it changes the target, and the target
-is what is checked. Both scripts take the value from `fleet/.env` only and ignore one exported in
-the shell, so a leftover `export` cannot replace the step you saved. Two cases cannot be decided
-and are refused as well:
+is what is checked. The scripts do not read the key themselves. They ask Compose which image the
+start would run (`docker compose … config`, with the same definition, `.env` and profiles), so the
+check and the start cannot disagree however `.env` spells the key: written twice, indented, or
+with `export`. Both scripts also drop a value exported in the shell, so a leftover `export` cannot
+replace the step you saved. Three cases cannot be decided and are refused as well:
 
 - a `qdrant` container whose image carries no release label;
-- Qdrant storage (the `fleet_qdrant_data` volume) with no `qdrant` container to read.
+- Qdrant storage (the `fleet_qdrant_data` volume) with no `qdrant` container to read;
+- Compose not naming the release it would start, on a host that has either of the above.
 
-In both, start the container on the release that wrote the storage, or drop the index as described
-next. A host with neither a container nor the volume is a fresh install and is not checked.
+In the first two, start the container on the release that wrote the storage, or drop the index as
+described next. A host with neither a container nor the volume is a fresh install and is not
+blocked.
 
 Qdrant holds an index, not the memories. The memory files under `fleet/memories` are the source of
 truth and fleet-memory indexes all of them again on every start. To drop the index, stop the stack,

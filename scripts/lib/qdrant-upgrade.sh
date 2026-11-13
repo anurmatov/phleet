@@ -6,41 +6,34 @@
 # any other move while the old container is still there to read. See
 # docs/upgrading/internal-ports-loopback.md.
 
-# The release the compose file falls back to: the default inside
-# `image: qdrant/qdrant:${FLEET_QDRANT_VERSION:-vX.Y.Z}`. The compose file is the only place the pin
-# is written. Prints nothing when the line is not there.
-qdrant_default_version() {
-  local line
-  while IFS= read -r line || [[ -n "$line" ]]; do
+# The release the next start will run, ASKED OF COMPOSE rather than worked out here.
+#
+# Compose decides which image runs: it reads the env file its own way (the last of two assignments
+# wins, a leading blank or an `export` prefix is accepted, quotes and comments are stripped) and
+# applies the compose file's default. A second reading of .env in this script would agree with it
+# only for the simple cases, and the check below would then approve one release while Compose
+# started another. So the caller passes exactly the directory, project, compose file and profile
+# arguments it is about to give `docker compose ... up`, and this prints the tag of the qdrant
+# image that command resolves. `config` starts nothing.
+#
+# Prints nothing when Compose cannot be asked, fails, or does not name exactly one
+# `qdrant/qdrant:<tag>` image (a digest reference included). The decision treats that as unknown.
+qdrant_target_version() { # <directory to run in> <compose-project> <compose-file> [profile args...]
+  local directory="$1" project="$2" file="$3" images line found="" count=0
+  shift 3
+  images=$(cd "$directory" 2>/dev/null \
+    && docker compose -p "$project" -f "$file" --env-file .env "$@" config --images qdrant 2>/dev/null) \
+    || return 0
+  while IFS= read -r line; do
+    line=${line%$'\r'}
     case "$line" in
-      *'image: qdrant/qdrant:${FLEET_QDRANT_VERSION:-'*'}'*)
-        line=${line#*'${FLEET_QDRANT_VERSION:-'}
-        printf '%s' "${line%%\}*}"
-        return 0
+      qdrant/qdrant:*)
+        [[ "$line" == "$found" ]] || { found=$line; count=$((count + 1)); }
         ;;
     esac
-  done < "$1"
-}
-
-# The release the next start will run: FLEET_QDRANT_VERSION from the env FILE, never the invoking
-# shell, else the compose default. Blanks and one pair of quotes are dropped, as Compose drops them.
-qdrant_target_version() { # <env-file> <compose-file>
-  local line value=""
-  if [[ -f "$1" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      case "$line" in FLEET_QDRANT_VERSION=*) value=${line#*=}; break ;; esac
-    done < "$1"
-  fi
-  value=${value%$'\r'}
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  if [[ ${#value} -ge 2 ]]; then
-    case "$value" in
-      \"*\"|\'*\') value=${value:1:${#value}-2} ;;
-    esac
-  fi
-  [[ -n "$value" ]] || value=$(qdrant_default_version "$2")
-  printf '%s' "$value"
+  done <<< "$images"
+  [[ "$count" -eq 1 ]] || return 0
+  printf '%s' "${found#qdrant/qdrant:}"
 }
 
 # What this host runs now. Prints one of:
@@ -70,13 +63,20 @@ _qdrant_version_numbers() {
 # Prints one word and returns 0 only for the two that may proceed:
 #   ok          the running release is the target, an older patch of its minor, or one minor below
 #   fresh       nothing to move
+#   no_target   Compose did not say which release it would run, and this host has Qdrant state
 #   bad_target  the target is not a full release (vX.Y.Z)
 #   unreadable  a container exists and its release cannot be read
 #   volume      storage exists and no container says which release wrote it
 #   too_old     more than one minor below the target, or another major
 #   newer       newer than the target, by a patch or more: starting the target would downgrade
+# An unknown target follows the rule for the other undecidable cases: a fresh host is not blocked,
+# a host with a container or storage is refused.
 qdrant_upgrade_decision() {
   local observed="$1" target="$2" running t r
+  if [[ -z "$target" ]]; then
+    if [[ "$observed" == fresh ]]; then printf 'fresh'; return 0; fi
+    printf 'no_target'; return 1
+  fi
   t=$(_qdrant_version_numbers "$target") || { printf 'bad_target'; return 1; }
   case "$observed" in
     fresh) printf 'fresh'; return 0 ;;
@@ -106,8 +106,14 @@ qdrant_refusal_message() {
   local decision="$1" running="${2#container}" target="$3" project="$4"
   running=${running# }
   case "$decision" in
+    no_target)
+      echo "This host has a Qdrant container or storage, and 'docker compose config' did not say which"
+      echo "Qdrant release the next start would run, so the move cannot be checked."
+      echo "Run it yourself to see why:  docker compose -p $project -f fleet/docker-compose.yml config --images qdrant"
+      ;;
     bad_target)
-      echo "FLEET_QDRANT_VERSION in .env is '$target'. It must name one release, such as v1.19.2."
+      echo "The next start would run qdrant/qdrant:$target, which is not one full release."
+      echo "FLEET_QDRANT_VERSION in .env must name one release, such as v1.19.2."
       ;;
     too_old)
       echo "Qdrant on this host is $running and the next start would run $target."

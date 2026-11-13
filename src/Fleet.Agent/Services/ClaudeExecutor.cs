@@ -223,26 +223,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 // reader via the channel rather than directly from stdout.
                 var needsRetry = false;
 
-                while (!ct.IsCancellationRequested)
+                await foreach (var read in ReadTurnEventsAsync(
+                    _eventChannel!.Reader, endQuietlyOnCancel: true, killOnCancel: true, ct))
                 {
-                    ClaudeStreamEvent? evt;
-                    try
-                    {
-                        evt = await _eventChannel!.Reader.ReadAsync(ct);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // Task cancelled — kill process so it doesn't continue mid-response
-                        await KillProcessAsync();
-                        throw;
-                    }
-                    catch (ChannelClosedException)
-                    {
-                        // Channel closed = background reader exited = process died mid-response
-                        evt = null;
-                    }
-
-                    if (evt is null)
+                    if (read.ProcessExited)
                     {
                         // Process died mid-response
                         if (attempt < 2)
@@ -264,13 +248,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         yield break;
                     }
 
-                    // System events were already processed for side effects (background task
-                    // tracking) by the background reader; calling ParseProgress again is safe
-                    // because all mutations are idempotent (ConcurrentDictionary set/remove).
-                    // We still call it here to get the AgentProgress value for yielding.
-
-                    var isCurrentTurnResult = IsCurrentTurnResult(evt);
-                    var progress = ParseProgress(evt);
+                    var evt = read.Event!;
+                    var isCurrentTurnResult = read.IsCurrentTurnResult;
+                    var progress = read.Progress!;
 
                     // Detect max-turns exhaustion: NumTurns == MaxTurns means
                     // Claude used all allocated turns and may have stopped mid-task
@@ -311,17 +291,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         }
 
                         _messageCount++;
-                        var stats = ParseStats(evt);
-                        if (stats is not null)
-                        {
-                            yield return new AgentProgress
-                            {
-                                IsSignificant = false,
-                                Summary = "Execution stats",
-                                EventType = "stats",
-                                Stats = stats,
-                            };
-                        }
+                        if (BuildStatsProgress(evt) is { } stats)
+                            yield return stats;
                         yield break;
                     }
                 }
@@ -378,28 +349,17 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 _logger.LogInformation("Injected message started its own Claude turn; reading its answer");
                 _currentTurnAssistantText = null;
 
-                while (true)
+                await foreach (var read in ReadTurnEventsAsync(
+                    reader, endQuietlyOnCancel: false, killOnCancel: true, ct))
                 {
-                    ClaudeStreamEvent evt;
-                    try
-                    {
-                        evt = await reader.ReadAsync(ct);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        await KillProcessAsync();
-                        throw;
-                    }
-                    catch (ChannelClosedException)
-                    {
+                    if (read.ProcessExited)
                         yield break;
-                    }
 
-                    var isCurrentTurnResult = IsCurrentTurnResult(evt);
-                    var progress = ParseProgress(evt);
+                    var evt = read.Event!;
+                    var progress = read.Progress!;
                     if (evt.Type != "result")
                         continue;
-                    if (!isCurrentTurnResult)
+                    if (!read.IsCurrentTurnResult)
                         break; // e.g. a background task-notification turn: not an answer; wait for the next start
 
                     remaining--;
@@ -422,6 +382,80 @@ public sealed class ClaudeExecutor : IAgentExecutor
             _sendLock.Release();
         }
     }
+
+    /// <summary>
+    /// One step of a turn read: the event, whether it is the current turn's own result, and its
+    /// parsed progress. The default value means the channel completed.
+    /// </summary>
+    private readonly record struct TurnEvent(ClaudeStreamEvent? Event, bool IsCurrentTurnResult, AgentProgress? Progress)
+    {
+        /// <summary>The channel completed: the background reader exited, so the process is gone.</summary>
+        public bool ProcessExited => Event is null;
+    }
+
+    /// <summary>
+    /// The one read loop behind a task turn (<see cref="ExecuteAsync"/>), an injected turn
+    /// (<see cref="ReadInjectedTurnAnswersAsync"/>) and a raw command (<see cref="SendCommandAsync"/>).
+    /// Reads the next event from the channel, classifies and parses it, and hands it to the caller,
+    /// which decides what to yield and when the turn is over (it stops by leaving its loop).
+    /// </summary>
+    /// <remarks>
+    /// <para>System events were already processed for side effects (background task tracking) by the
+    /// background reader; calling ParseProgress again is safe because all mutations are idempotent
+    /// (ConcurrentDictionary set/remove). It is called here for every event, in the order
+    /// classify-then-parse, to get the AgentProgress value and to move the final-answer gate.</para>
+    /// <para>A completed channel yields one <see cref="TurnEvent.ProcessExited"/> step and ends.</para>
+    /// <para><paramref name="endQuietlyOnCancel"/>: a token already cancelled between two events ends
+    /// the loop without reading and without throwing. Off, the read itself observes the token.</para>
+    /// <para><paramref name="killOnCancel"/>: a read that is cancelled kills the process before the
+    /// cancellation propagates, so it does not continue mid-response and a half-read turn cannot
+    /// answer the next message.</para>
+    /// </remarks>
+    private async IAsyncEnumerable<TurnEvent> ReadTurnEventsAsync(
+        ChannelReader<ClaudeStreamEvent> reader, bool endQuietlyOnCancel, bool killOnCancel,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        while (!endQuietlyOnCancel || !ct.IsCancellationRequested)
+        {
+            ClaudeStreamEvent? evt;
+            try
+            {
+                evt = await reader.ReadAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                if (killOnCancel)
+                    await KillProcessAsync();
+                throw;
+            }
+            catch (ChannelClosedException)
+            {
+                evt = null;
+            }
+
+            if (evt is null)
+            {
+                yield return default;
+                yield break;
+            }
+
+            var isCurrentTurnResult = IsCurrentTurnResult(evt);
+            var progress = ParseProgress(evt);
+            yield return new TurnEvent(evt, isCurrentTurnResult, progress);
+        }
+    }
+
+    /// <summary>The per-turn stats of a result event as a progress value, or null when it carries none.</summary>
+    private AgentProgress? BuildStatsProgress(ClaudeStreamEvent resultEvent) =>
+        ParseStats(resultEvent) is { } stats
+            ? new AgentProgress
+            {
+                IsSignificant = false,
+                Summary = "Execution stats",
+                EventType = "stats",
+                Stats = stats,
+            }
+            : null;
 
     /// <summary>
     /// Waits, bounded by <see cref="InjectedTurnStartWait"/>, for the next turn's
@@ -606,10 +640,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         await _sendLock.WaitAsync();
         try
         {
-            await KillProcessAsync();
-            _messageCount = 0;
-            _previousCumulativeStats = null;
-            _lastSessionId = null;
+            await StopAndForgetSessionAsync();
         }
         finally
         {
@@ -623,13 +654,19 @@ public sealed class ClaudeExecutor : IAgentExecutor
             return false;
         try
         {
-            await KillProcessAsync();
-            _messageCount = 0;
-            _previousCumulativeStats = null;
-            _lastSessionId = null;
+            await StopAndForgetSessionAsync();
             return true;
         }
         finally { _sendLock.Release(); }
+    }
+
+    /// <summary>Kills the process and drops the session, so the next start is fresh. Send lock held.</summary>
+    private async Task StopAndForgetSessionAsync()
+    {
+        await KillProcessAsync();
+        _messageCount = 0;
+        _previousCumulativeStats = null;
+        _lastSessionId = null;
     }
 
     public void RequestRestart()
@@ -1215,36 +1252,20 @@ public sealed class ClaudeExecutor : IAgentExecutor
             });
             await WriteStdinLineAsync(message, ct);
 
-            // Read response events until "result" — via the channel, not _stdout directly.
-            while (!ct.IsCancellationRequested)
+            // Read response events until "result" — via the channel, not stdout directly.
+            await foreach (var read in ReadTurnEventsAsync(
+                _eventChannel!.Reader, endQuietlyOnCancel: true, killOnCancel: false, ct))
             {
-                ClaudeStreamEvent? evt;
-                try
-                {
-                    evt = await _eventChannel!.Reader.ReadAsync(ct);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (ChannelClosedException) { break; } // process died
+                if (read.ProcessExited)
+                    break; // process died
 
-                var isCurrentTurnResult = IsCurrentTurnResult(evt);
-                var progress = ParseProgress(evt);
+                yield return read.Progress!;
 
-                yield return progress;
-
-                if (isCurrentTurnResult)
+                if (read.IsCurrentTurnResult)
                 {
                     _messageCount++;
-                    var stats = ParseStats(evt);
-                    if (stats is not null)
-                    {
-                        yield return new AgentProgress
-                        {
-                            IsSignificant = false,
-                            Summary = "Execution stats",
-                            EventType = "stats",
-                            Stats = stats,
-                        };
-                    }
+                    if (BuildStatsProgress(read.Event!) is { } stats)
+                        yield return stats;
                     yield break;
                 }
             }

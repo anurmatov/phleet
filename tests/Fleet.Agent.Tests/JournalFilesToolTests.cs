@@ -15,7 +15,7 @@ namespace Fleet.Agent.Tests;
 
 public sealed class JournalFilesToolTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "journal-tools-" + Guid.NewGuid().ToString("N"));
+    private readonly string _root = Path.Combine(TestTemp.Root, "journal-tools-" + Guid.NewGuid().ToString("N"));
     [Fact]
     public async Task InvalidAndUnboundRequestsNeverCallComms()
     {

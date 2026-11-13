@@ -209,9 +209,15 @@ public class PushEndpointsTests : IAsyncLifetime
     [InlineData("missing")]
     [InlineData("malformed")]
     [InlineData("wrong-curve")]
-    [InlineData("other-256-bit-curve")]
     [InlineData("public-only")]
-    public async Task AKeyTheSenderCannotUse_KeepsTheNotifierOff_AndTheRouteSaysSo(string kind)
+    public Task AKeyTheSenderCannotUse_KeepsTheNotifierOff_AndTheRouteSaysSo(string kind) => AssertAnUnusableKeyKeepsPushOff(kind);
+
+    // The same check for a 256-bit curve that is not P-256. Its own test because macOS cannot hold
+    // such a key at all (see the attribute); the kinds above run on every platform.
+    [NeedsBrainpoolFact]
+    public Task AKeyOnAnother256BitCurve_KeepsTheNotifierOff_AndTheRouteSaysSo() => AssertAnUnusableKeyKeepsPushOff("other-256-bit-curve");
+
+    private async Task AssertAnUnusableKeyKeepsPushOff(string kind)
     {
         await DisposeAsync();
         _key = kind switch

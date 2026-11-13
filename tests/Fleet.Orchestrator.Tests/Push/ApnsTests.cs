@@ -118,7 +118,7 @@ public class ApnsTests
         Assert.Throws<FormatException>(() => ApnsProviderToken.ImportKey(base64));
     }
 
-    [Fact]
+    [NeedsBrainpoolFact]
     public void AnotherCurveOfTheSameSize_IsRefused()
     {
         // 256 bits but not P-256: it imports, and Apple refuses every token it signs.

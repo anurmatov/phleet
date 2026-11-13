@@ -233,6 +233,14 @@ dotnet test
 dotnet test --logger "console;verbosity=normal"
 ```
 
+On macOS a few tests are skipped, each with its reason: the `memory_stats` directory scan is Linux-only by design, and two push-key tests need a curve Apple's cryptography does not have. CI runs them. To run them from a Mac, or to loop a timing-sensitive test on the platform CI uses, run the suite in a Linux container (needs Docker):
+
+```bash
+scripts/test-linux.sh                              # the solution, with CI's filter
+scripts/test-linux.sh tests/Fleet.Memory.Tests     # one project
+FLEET_TEST_CPUS=1 scripts/test-linux.sh tests/Fleet.Comms.Tests --filter "FullyQualifiedName~JournalAttachment"
+```
+
 ## Configuration
 
 Agent config is database-driven (MySQL via EF Core). On first run, the orchestrator seeds from `seed.json`.

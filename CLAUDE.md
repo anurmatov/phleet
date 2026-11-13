@@ -19,6 +19,30 @@ The orchestrator manages agent lifecycle (create, provision, reprovision, stop) 
 
 Workflows are orchestrated via Temporal. The temporal bridge connects Temporal workers to agent containers via RabbitMQ.
 
+### What services send each other: `Fleet.Contracts`
+
+Everything one service puts on the broker or sends over HTTP for another is declared once, in
+`src/Fleet.Contracts` (no package, no project reference): `RelayMessage` and `RelayMessageType`,
+`AgentHeartbeat`, the allowlist and access-request payloads, `ConfigChangedEvent`,
+`TokenUpdatePayload`, `EpicGrantDecisionRequest`, the gate names (`GateSignal`, `CeoGateSignals`),
+the exchange, queue and routing-key names (`RelayBroker`, `OrchestratorBroker`,
+`ConversationBroker`) and the journal token format (`JournalTokens`). MUST NOT declare one of these
+again in a service. Each producer writes the `RelayMessage` fields it has always written
+(`RelayShape`: the orchestrator and the token broadcast five, fleet-bridge seven, an agent nine, a
+delegation all ten), and every consumer reads any of them.
+
+`tests/fixtures/wire/` holds the exact bytes of each pair. The producer's test compares what its
+production code writes with the file; the consumer's test, in another test project, reads the same
+file through its own handler. Services are deployed one at a time and agents are reprovisioned
+after them, so every pair runs with one old end for a while. MUST NOT rename a field, add a
+required one, reorder them or change whether a null is written: a changed sample is a wire change.
+`FLEET_WIRE_GOLDEN_RECORD=1` records a shape changed on purpose.
+
+`Fleet.Shared` has no package and no project reference either (`SharedDependencyTests`): the
+secret forwarder and the chat service reference it. The Telegram formatters are in
+`Fleet.Shared.Telegram` and the RabbitMQ helper and `PeerConfigClient` in `Fleet.Shared.Messaging`;
+both keep the `Fleet.Shared` namespace.
+
 ### Container start: `entrypoint.sh` and `prepare`
 
 `entrypoint.sh` does only what must happen in the shell before the agent exists: the hosted-key

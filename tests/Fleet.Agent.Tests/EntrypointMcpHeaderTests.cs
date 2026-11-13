@@ -1,158 +1,83 @@
-using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
-using Fleet.Agent.Tests.Harness;
+using Fleet.Agent.Prepare;
 
 namespace Fleet.Agent.Tests;
 
-/// <summary>Runs the header translation programs embedded in entrypoint.sh against temp files.</summary>
+/// <summary>
+/// The header translation in the provider CLI configuration <c>entrypoint.sh</c> has the agent
+/// binary write (<see cref="CodexConfigToml"/>, <see cref="GeminiSettingsJson"/>): a server that
+/// carries headers is written with them when the pinned CLI sends headers, and left out otherwise.
+/// It is never written without them.
+/// </summary>
 public sealed class EntrypointMcpHeaderTests
 {
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Gemini_copies_headers_only_when_supported(bool supported)
+    public void Gemini_copies_headers_only_when_supported(bool supported)
     {
-        using var temp = new TempDirectory();
-        var script = ExtractBetween(
-            File.ReadAllText(RepoPaths.Resolve("entrypoint.sh")),
-            "python3 - \"${MCP_CONFIG}\" \"${GEMINI_SETTINGS}\" <<'PYEOF'\n",
-            "\nPYEOF");
-        var appsettings = temp.Write("appsettings.json", Appsettings(supported));
-        script = script.Replace("'/app/appsettings.json'", "sys.argv[3]", StringComparison.Ordinal);
-        var scriptPath = temp.Write("translate.py", script);
-        var mcp = temp.Write("mcp.json", McpJson());
-        var output = Path.Combine(temp.Path, "settings.json");
+        var warnings = new List<string>();
 
-        var result = await RunAsync("python3", [scriptPath, mcp, output, appsettings]);
+        var result = GeminiSettingsJson.WithMcpServers(Utf8(McpJson), existingSettings: null, supported, warnings.Add);
 
-        Assert.Equal(0, result.ExitCode);
-        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(output));
+        using var doc = JsonDocument.Parse(result.Text);
         var servers = doc.RootElement.GetProperty("mcpServers");
         if (supported)
+        {
             Assert.Equal("Bearer secret", servers.GetProperty("journal").GetProperty("headers").GetProperty("Authorization").GetString());
+            Assert.Empty(warnings);
+        }
         else
         {
             Assert.False(servers.TryGetProperty("journal", out _));
-            Assert.Contains("WARN: skipping MCP server 'journal'", result.Error);
+            Assert.Equal(["WARN: skipping MCP server 'journal' (headers unsupported by pinned gemini CLI)"], warnings);
         }
     }
 
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Codex_writes_http_headers_only_when_supported(bool supported)
+    public void Codex_writes_http_headers_only_when_supported(bool supported)
     {
-        using var temp = new TempDirectory();
-        var script = ExtractBetween(
-            File.ReadAllText(RepoPaths.Resolve("entrypoint.sh")), CodexNodeStart, CodexNodeEnd);
-        var appsettings = temp.Write("appsettings.json", Appsettings(supported));
-        var mcp = temp.Write("mcp.json", McpJson());
-        var output = Path.Combine(temp.Path, "config.toml");
-        script = script
-            .Replace("/app/appsettings.json", appsettings, StringComparison.Ordinal)
-            .Replace("$MCP_JSON", mcp, StringComparison.Ordinal)
-            .Replace("/root/.codex/config.toml", output, StringComparison.Ordinal)
-            .Replace(CodexRootToml, Path.Combine(temp.Path, "absent-codex-root.toml"), StringComparison.Ordinal);
-        var scriptPath = temp.Write("translate.js", script);
+        var warnings = new List<string>();
 
-        var result = await RunAsync("node", [scriptPath]);
+        var toml = CodexConfigToml.Build(rootToml: "", Utf8(McpJson), allowedTools: [], supported, warnings.Add);
 
-        Assert.Equal(0, result.ExitCode);
-        var toml = File.Exists(output) ? await File.ReadAllTextAsync(output) : "";
         if (supported)
+        {
             Assert.Contains("http_headers = { \"Authorization\" = \"Bearer secret\" }", toml);
+            Assert.Empty(warnings);
+        }
         else
         {
             Assert.DoesNotContain("[mcp_servers.journal]", toml);
-            Assert.Contains("WARN: skipping MCP server 'journal'", result.Error);
+            Assert.Equal(["WARN: skipping MCP server 'journal' (headers unsupported by pinned codex CLI)"], warnings);
         }
     }
 
     [Fact]
-    public async Task FilesServerIsHeaderlessAndCodexToolIsEnabled()
+    public void FilesServerIsHeaderlessAndCodexToolIsEnabled()
     {
-        using var temp = new TempDirectory();
-        var entrypoint = File.ReadAllText(RepoPaths.Resolve("entrypoint.sh"));
-        var mcp = temp.Write("mcp.json", "{\"mcpServers\":{\"fleet-journal-files\":{\"url\":\"http://127.0.0.1:8091/journal-files/v1/mcp\"}}}");
-        var settings = temp.Write("appsettings.json", "{\"Agent\":{\"McpHeaderSupport\":false,\"AllowedTools\":[\"mcp__fleet-journal-files__fetch_attachment\"]}}");
-        var python = ExtractBetween(entrypoint, "python3 - \"${MCP_CONFIG}\" \"${GEMINI_SETTINGS}\" <<'PYEOF'\n", "\nPYEOF")
-            .Replace("'/app/appsettings.json'", "sys.argv[3]", StringComparison.Ordinal);
-        var gemini = Path.Combine(temp.Path, "gemini.json");
-        Assert.Equal(0, (await RunAsync("python3", [temp.Write("translate.py", python), mcp, gemini, settings])).ExitCode);
-        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(gemini));
+        var mcp = Utf8("{\"mcpServers\":{\"fleet-journal-files\":{\"url\":\"http://127.0.0.1:8091/journal-files/v1/mcp\"}}}");
+
+        var gemini = GeminiSettingsJson.WithMcpServers(mcp, existingSettings: null, mcpHeaderSupport: false, _ => { });
+        using var json = JsonDocument.Parse(gemini.Text);
         var server = json.RootElement.GetProperty("mcpServers").GetProperty("fleet-journal-files");
         Assert.Equal("http://127.0.0.1:8091/journal-files/v1/mcp", server.GetProperty("httpUrl").GetString());
+        Assert.False(server.TryGetProperty("url", out _));
         Assert.False(server.TryGetProperty("headers", out _));
-        var toml = Path.Combine(temp.Path, "config.toml");
-        var node = ExtractBetween(entrypoint, CodexNodeStart, CodexNodeEnd)
-            .Replace("/app/appsettings.json", settings, StringComparison.Ordinal).Replace("$MCP_JSON", mcp, StringComparison.Ordinal)
-            .Replace("/root/.codex/config.toml", toml, StringComparison.Ordinal)
-            .Replace(CodexRootToml, Path.Combine(temp.Path, "absent-codex-root.toml"), StringComparison.Ordinal);
-        Assert.Equal(0, (await RunAsync("node", [temp.Write("translate.js", node)])).ExitCode);
-        var text = await File.ReadAllTextAsync(toml); Assert.Contains("enabled_tools = [\"fetch_attachment\"]", text);
-        Assert.Contains("url = \"http://127.0.0.1:8091/journal-files/v1/mcp\"", text);
-        Assert.DoesNotContain("http_headers", text);
+
+        var toml = CodexConfigToml.Build(
+            rootToml: "", mcp, ["mcp__fleet-journal-files__fetch_attachment"], mcpHeaderSupport: false, _ => { });
+        Assert.Contains("enabled_tools = [\"fetch_attachment\"]", toml);
+        Assert.Contains("url = \"http://127.0.0.1:8091/journal-files/v1/mcp\"", toml);
+        Assert.DoesNotContain("http_headers", toml);
     }
 
-    // The codex branch's config.toml program (#460: it also reads the generated root file, pointed
-    // at a missing path here so only the MCP tables are written; tests/entrypoint-codex covers both).
-    private const string CodexNodeStart = "    node -e \"\n";
-    private const string CodexNodeEnd = "\n\" || echo \"WARN: codex config.toml not written";
-    private const string CodexRootToml = "/app/codex-root.toml";
-
-    private static string Appsettings(bool supported) => JsonSerializer.Serialize(new
-    {
-        Agent = new { McpHeaderSupport = supported, AllowedTools = Array.Empty<string>() },
-    });
-
-    private static string McpJson() => """
+    private const string McpJson = """
         {"mcpServers":{"journal":{"url":"http://journal/mcp","headers":{"Authorization":"Bearer secret"}}}}
         """;
 
-    private static string ExtractBetween(string source, string startMarker, string endMarker)
-    {
-        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
-        Assert.True(start >= 0, $"missing start marker: {startMarker}");
-        start += startMarker.Length;
-        var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
-        Assert.True(end >= 0, $"missing end marker: {endMarker}");
-        return source[start..end];
-    }
-
-    private static async Task<ProcessResult> RunAsync(string fileName, IEnumerable<string> args)
-    {
-        var start = new ProcessStartInfo(fileName)
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        foreach (var arg in args) start.ArgumentList.Add(arg);
-        using var process = Process.Start(start)!;
-        var output = await process.StandardOutput.ReadToEndAsync();
-        var error = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return new ProcessResult(process.ExitCode, output, error);
-    }
-
-    private sealed record ProcessResult(int ExitCode, string Output, string Error);
-
-    private sealed class TempDirectory : IDisposable
-    {
-        public string Path { get; } = System.IO.Path.Combine(
-            System.IO.Path.GetTempPath(), $"entrypoint-headers-{Guid.NewGuid():N}");
-
-        public TempDirectory() => Directory.CreateDirectory(Path);
-
-        public string Write(string name, string content)
-        {
-            var path = System.IO.Path.Combine(Path, name);
-            File.WriteAllText(path, content);
-            return path;
-        }
-
-        public void Dispose()
-        {
-            try { Directory.Delete(Path, recursive: true); } catch { }
-        }
-    }
+    private static byte[] Utf8(string text) => Encoding.UTF8.GetBytes(text);
 }

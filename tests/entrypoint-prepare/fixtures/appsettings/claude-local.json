@@ -1,0 +1,20 @@
+{
+  "Agent": {
+    "Name": "example-local",
+    "ContainerName": "fleet-example-local",
+    "Role": "developer",
+    "Model": "qwen3-coder:30b",
+    "Provider": "claude",
+    "Projects": [],
+    "AllowedTools": ["mcp__alpha__memory_get"],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ShortName": "local",
+    "Effort": "low",
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": "http://inference.example:11434",
+    "InstructionOrder": ["_base"]
+  }
+}

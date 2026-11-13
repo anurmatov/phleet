@@ -93,12 +93,15 @@ cancelled with it.
 Codex runs a root shell for the model, so a key in any environment block is one `env` call away from
 the transcript. The key therefore never reaches a child process:
 
-1. `entrypoint.sh` reads the two orchestrator fields. It keeps no prefix list of its own. For a hosted
-   agent it writes the named variable's value to `/run/phleet-hosted-key` (mode `0400`, `umask 077`).
-2. It then **unconditionally, on every agent and provider**, unsets `ZAI_CODING_PLAN_API_KEY` before
-   `exec dotnet`. PID 1 never has it. The name is reserved for hosted routing: a non-hosted agent that
-   carries it loses it, and the entrypoint prints one line naming it. The list sits on the line under
-   `# phleet:reserved-key-names`; a test keeps it equal to the registry.
+1. `entrypoint.sh` first **unconditionally, on every agent and provider**, unsets
+   `ZAI_CODING_PLAN_API_KEY`, before it starts any process; the value waits in a shell variable that
+   is never exported. PID 1 never has it. The name is reserved for hosted routing: a non-hosted agent
+   that carries it loses it, and the entrypoint prints one line naming it. The list sits on the line
+   under `# phleet:reserved-key-names`; a test keeps it equal to the registry.
+2. It then asks the agent binary for the two orchestrator fields (`dotnet Fleet.Agent.dll prepare
+   facts`, which by then cannot see the key). It keeps no prefix list of its own. For a hosted agent
+   it writes the held value to `/run/phleet-hosted-key` (mode `0400`, `umask 077`) and drops the
+   variable. `tests/entrypoint-prepare/run.sh` records what each such call can see.
 3. At startup the agent reads the key file once, deletes it, and keeps the value in memory.
 4. `CodexExecutor` also removes the name from codex's start environment, for every model.
 5. A hosted agent holds no OpenAI credential. It gets no `.codex-credentials.json` bind,

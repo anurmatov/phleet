@@ -41,8 +41,9 @@ overwrite keys already in `thread/start` `config` (hosted-provider keys, `model_
 `codex-root.toml` holds the root key first, then the `[analytics]` and `[history]` tables: a key
 written after a table header would belong to that table. Provisioning writes it to
 `.generated/codex-root.toml` before the container is created and mounts it read-only at
-**`/app/codex-root.toml`**, for Codex agents only. `entrypoint.sh` reads that path and writes it first
-into `~/.codex/config.toml`, then the `[mcp_servers.*]` tables.
+**`/app/codex-root.toml`**, for Codex agents only. At container start `entrypoint.sh` calls the agent
+binary's `prepare config`, which reads that path and writes it first into `~/.codex/config.toml`, then
+the `[mcp_servers.*]` tables.
 
 ## Claude Code
 
@@ -208,14 +209,15 @@ container env (Claude local) or `Agent.ContextWindow` (Codex local), and the bou
 |---|---|
 | `ClaudeExecutor` | appends `ClaudeArgs` last in `BuildArgs`; sets `ClaudeEnv` on the claude child only (local mode first removes the OAuth token and thinking overrides, then today's local entries, then the defaults) |
 | `CodexExecutor` | merges `CodexThreadConfig` into `thread/start` `config` after the hosted-provider keys and `model_context_window`, never overwriting a key already there |
-| `entrypoint.sh` | writes `/app/codex-root.toml` first into `~/.codex/config.toml`, then today's `[mcp_servers.*]` tables byte for byte; written even without `.mcp.json` |
+| `entrypoint.sh` → `prepare config` (`CodexConfigToml`) | writes `/app/codex-root.toml` first into `~/.codex/config.toml`, then today's `[mcp_servers.*]` tables byte for byte; written even without `.mcp.json` |
 | heartbeat and registration | `PlanSha256` on every message; absent for gemini |
 
-`entrypoint.sh` failure paths: a missing, unreadable or directory `/app/codex-root.toml` prints
+Failure paths of that step: a missing, unreadable or directory `/app/codex-root.toml` prints
 `WARN: codex-root.toml unavailable: <reason>` and the MCP tables are still written (the CLI uses its
 built-in root defaults); a failure to build or write the file prints
-`WARN: codex config.toml not written: <reason>`. `tests/entrypoint-codex/run.sh` covers each case and
-parses every result with Python's `tomllib`.
+`WARN: codex config.toml not written: <reason>`. Neither stops the container.
+`tests/entrypoint-codex/run.sh` covers each case and parses every result with Python's `tomllib`;
+`tests/entrypoint-prepare/run.sh` compares the file with what the script's former inline Node wrote.
 
 ## Dashboard
 

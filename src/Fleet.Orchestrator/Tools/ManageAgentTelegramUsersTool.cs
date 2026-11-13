@@ -41,9 +41,10 @@ public sealed class ManageAgentTelegramUsersTool(
 
                 agent.TelegramUsers.Add(new AgentTelegramUser { AgentId = agent.Id, UserId = user_id });
                 await db.SaveChangesAsync();
-                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                    addedUsers: [new AddedUserInfo { UserId = user_id, Username = username, FirstName = first_name }],
-                    removedUserIds: [], addedGroupIds: [], removedGroupIds: []);
+                if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                        addedUsers: [new AddedUserInfo { UserId = user_id, Username = username, FirstName = first_name }],
+                        removedUserIds: [], addedGroupIds: [], removedGroupIds: []))
+                    return LiveDelivery.AllowlistNotDelivered($"Telegram user {user_id}", agent_name);
                 return $"Added Telegram user {user_id} to agent '{agent_name}'.";
             }
 
@@ -55,9 +56,10 @@ public sealed class ManageAgentTelegramUsersTool(
 
                 db.AgentTelegramUsers.Remove(existing);
                 await db.SaveChangesAsync();
-                await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
-                    addedUsers: [], removedUserIds: [user_id],
-                    addedGroupIds: [], removedGroupIds: []);
+                if (!await publisher.PublishAllowlistUpdateAsync(agent.ShortName,
+                        addedUsers: [], removedUserIds: [user_id],
+                        addedGroupIds: [], removedGroupIds: []))
+                    return LiveDelivery.AllowlistNotDelivered($"the removal of Telegram user {user_id}", agent_name);
                 return $"Removed Telegram user {user_id} from agent '{agent_name}'.";
             }
 

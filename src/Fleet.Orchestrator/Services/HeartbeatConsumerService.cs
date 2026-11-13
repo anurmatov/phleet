@@ -156,7 +156,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                 return;
             }
 
-            var ctoAgent = _configuration["FLEET_CTO_AGENT"];
+            var ctoAgent = CtoAgentSetting.Resolve(_configuration);
             if (string.IsNullOrWhiteSpace(ctoAgent))
             {
                 _logger.LogError(

@@ -57,8 +57,10 @@ public sealed class PushNotifierService(
         {
             try
             {
-                var failed = await RecentlyFailedAsync(ct);
-                await PassAsync(detector, delivery, workflows.GetAll(), failed, agents.GetAll(), time.GetUtcNow(), ct, replies);
+                var (failed, failureNamespaces) = await RecentlyFailedAsync(ct);
+                var (running, gateNamespaces) = workflows.Snapshot();
+                await PassAsync(detector, delivery, running, failed, agents.GetAll(), time.GetUtcNow(), ct, replies,
+                    gateNamespaces, failureNamespaces);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -80,19 +82,20 @@ public sealed class PushNotifierService(
         PushEventDetector detector, PushDelivery delivery,
         IReadOnlyCollection<WorkflowSummary> running, IReadOnlyCollection<WorkflowSummary> recentlyFailed,
         IReadOnlyCollection<AgentState> agents, DateTimeOffset now, CancellationToken ct,
-        ChatReplyPushes? replies = null)
+        ChatReplyPushes? replies = null,
+        IReadOnlyCollection<string>? gateNamespaces = null, IReadOnlyCollection<string>? failureNamespaces = null)
     {
-        var messages = detector.Observe(running, recentlyFailed, agents, now);
+        var messages = detector.Observe(running, recentlyFailed, agents, now, gateNamespaces, failureNamespaces);
         if (replies is not null) messages = [.. messages, .. replies.Take()];
 
         await delivery.DeliverAsync(messages,
             key => detector.IsCurrent(key) || replies?.IsCurrent(key) == true, ct);
     }
 
-    private async Task<IReadOnlyCollection<WorkflowSummary>> RecentlyFailedAsync(CancellationToken ct)
+    private async Task<(IReadOnlyCollection<WorkflowSummary> Runs, IReadOnlyCollection<string> Namespaces)> RecentlyFailedAsync(CancellationToken ct)
     {
-        if (!temporal.IsConfigured) return [];
-        try { return await temporal.ListRecentFailuresAsync(FailureWindow, ct); }
+        if (!temporal.IsConfigured) return ([], []);
+        try { return await temporal.ListRecentFailuresByNamespaceAsync(FailureWindow, ct); }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // Returning an empty list here would make the detector forget what it had seen and

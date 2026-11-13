@@ -134,6 +134,36 @@ public class TaskManagerAdmissionGateTests
     }
 
     [Fact]
+    public async Task MessageDuringAnExecutorTurnTheQueueDidNotStart_IsNotInjectedIntoIt()
+    {
+        // The warmup ping and /run go straight to the executor. While one runs, the executor's
+        // live turn is not the registered one, so an injection would land in the wrong turn.
+        var executor = new HeldExecutor { InjectionResult = MidTurnInjectionResult.Injected };
+        var manager = BuildManager(executor);
+
+        _ = manager.StartTask(1, "running", "running", isSessionTask: true);
+        await executor.WaitForExecuteCountAsync(1);
+
+        using (manager.BeginExecutorSideUse())
+        {
+            Assert.Equal(TaskDispatchOutcome.Queued,
+                await manager.StartTask(1, "during the ping", "during the ping", isSessionTask: true));
+            Assert.Empty(executor.InjectedTasks);
+        }
+
+        // Once it is over, a message joins the running turn again.
+        Assert.Equal(TaskDispatchOutcome.Injected,
+            await manager.StartTask(1, "after the ping", "after the ping", isSessionTask: true));
+        Assert.Contains("after the ping", Assert.Single(executor.InjectedTasks));
+
+        // And the one that waited gets its own turn when the running one ends.
+        executor.ReleaseAllTurns();
+        await executor.WaitForExecuteCountAsync(2);
+        Assert.Contains("during the ping", executor.ExecutedTasks[1]);
+        await WaitUntilAsync(() => !manager.HasRunningTasks(1));
+    }
+
+    [Fact]
     public async Task CancelWhileAnInjectionIsRecorded_PublishesTheCancelWithoutFaulting()
     {
         // The cancel path reads the turn's merged submission ids while a mid-turn delivery may be
@@ -278,9 +308,11 @@ public class TaskManagerAdmissionGateTests
     {
         private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ConcurrentQueue<string> _executed = new();
+        private readonly ConcurrentQueue<string> _injected = new();
 
         public MidTurnInjectionResult InjectionResult { get; init; } = MidTurnInjectionResult.Unsupported;
         public IReadOnlyList<string> ExecutedTasks => _executed.ToList();
+        public IReadOnlyList<string> InjectedTasks => _injected.ToList();
         public string? LastSessionId => "session";
         public DateTimeOffset LastActivity => DateTimeOffset.UtcNow;
         public bool IsProcessWarm => true;
@@ -300,7 +332,11 @@ public class TaskManagerAdmissionGateTests
             string task,
             IReadOnlyList<MessageImage>? images = null,
             IReadOnlyList<MessageDocument>? documents = null,
-            CancellationToken ct = default) => Task.FromResult(InjectionResult);
+            CancellationToken ct = default)
+        {
+            if (InjectionResult.Status == MidTurnInjectionStatus.Injected) _injected.Enqueue(task);
+            return Task.FromResult(InjectionResult);
+        }
 
         public void ReleaseAllTurns() => _release.TrySetResult();
         public Task StopProcessAsync() => Task.CompletedTask;

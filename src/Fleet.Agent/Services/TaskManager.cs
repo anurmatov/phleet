@@ -50,6 +50,39 @@ public sealed class TaskManager
     /// </summary>
     private int _dispatchReservations;
 
+    /// <summary>
+    /// Executor turns in flight that this manager did not start: the warmup ping and a
+    /// <c>/run</c> command. They go straight to the executor, whose own lock keeps them from
+    /// overlapping a task's turn, so a registered turn may still be waiting for that lock while
+    /// one of them runs. A mid-turn injection made then would be written into the ping or the
+    /// command, and its answer would come out there, where nobody delivers it.
+    /// </summary>
+    private int _executorSideUses;
+
+    internal bool ExecutorBusyElsewhere => Volatile.Read(ref _executorSideUses) > 0;
+
+    /// <summary>
+    /// Marks an executor turn started outside this manager, for as long as the returned handle is
+    /// held. While any is held, messages for a running turn are not injected into it; they wait
+    /// for its end like any message that could not be injected.
+    /// </summary>
+    public IDisposable BeginExecutorSideUse()
+    {
+        Interlocked.Increment(ref _executorSideUses);
+        return new ExecutorSideUse(this);
+    }
+
+    private sealed class ExecutorSideUse(TaskManager owner) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                Interlocked.Decrement(ref owner._executorSideUses);
+        }
+    }
+
     // user-level index: userId → list of (chatId, taskId) for cross-chat cancel
     private readonly ConcurrentDictionary<long, List<(long ChatId, int TaskId)>> _userTasks = new();
 
@@ -1612,6 +1645,7 @@ public sealed class TaskManager
             if (running.Closed) outcome = "closed";
             else if (running.SteeringOwner is { } owner && owner != (chatId, userId)) outcome = "refused_other_human";
             else if (running.SteerCount >= MaxMidTurnInjectionsPerTurn) outcome = "cap";
+            else if (ExecutorBusyElsewhere) outcome = "executor_busy_elsewhere";
             else
             {
                 var attachments = (images?.Count ?? 0) + (documents?.Count ?? 0);
@@ -1692,6 +1726,16 @@ public sealed class TaskManager
             if (running.InjectionCount >= MaxMidTurnInjectionsPerTurn)
             {
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+                return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: false);
+            }
+
+            if (ExecutorBusyElsewhere)
+            {
+                // The executor's live turn may be the warmup ping or a /run command, not this one.
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+                _logger.LogInformation(
+                    "Mid-turn injection skipped for chat {ChatId}: the executor is running a turn started outside the task queue; queued for turn-end delivery",
+                    chatId);
                 return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: false);
             }
 

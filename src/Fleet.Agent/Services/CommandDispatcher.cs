@@ -131,6 +131,8 @@ public sealed class CommandDispatcher
         string? lastResult = null;
         Models.ExecutionStats? stats = null;
 
+        // A command is an executor turn the task queue did not start; see BeginExecutorSideUse.
+        using var sideUse = _taskManager.BeginExecutorSideUse();
         await foreach (var progress in _executor.SendCommandAsync(command))
         {
             if (progress.FinalResult is not null)

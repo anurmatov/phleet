@@ -417,6 +417,56 @@ notify. Notices carry identity, status and a fixed cause category, never failure
 strings. There is no recovery automation. Bridge `GET /workflow-failures` shows the records. See
 `docs/workflow-failure-notifier.md`.
 
+## Durable delegation
+
+Off by default (`FLEET_DURABLE_DELEGATION_ENABLED=false` → bridge `DurableDelegation__Enabled`;
+fresh setup writes it, upgrade adds it only when missing). Off, `DelegateToAgentActivity` waits for
+the agent inside one activity execution and a bridge restart fails every delegation in flight. On,
+the activity writes a record to `DurableDelegation__StateFile` (same mounted directory as the
+failure notifier), publishes the directive and throws `CompleteAsyncException`;
+`DurableDelegationService` then does from the record what the wait loop did (heartbeat every
+`TickSeconds`, re-send every 5 minutes, budget → `TimeoutException`, incomplete-answer
+continuations, cancel to the agent) and `TemporalRelayListener` completes the activity by its task
+token when the reply arrives. Workflow commands are unchanged, so nothing is patched and recorded
+histories replay. `DelegationRelay` is a deliberate second copy of the activity's publish, cancel
+and timeout-report code so the switch-off path is untouched; `DelegationRelayParityTests` keeps the
+two byte-identical. The pass (`TickAsync`) talks to Temporal only; every relay send (directive,
+cancel, timeout notice) goes out on a separate lane that reads what a record owes and writes back
+what was sent. At most 4 relay calls are unfinished at once (the first directive an activity
+publishes itself is one of them, and is owed to the lane when there is no room) and one per record; a call past its
+time is told to stop and still counts until it has ended; nothing is queued, so what is not sent
+stays owed in the record. A retried step reuses its task id, so each record has an `ExecutionId`
+(minted once, persisted): it is on every directive (optional `ExecutionId` on the relay message)
+and every cancel (optional `?executionId=` on the orchestrator's and the agent's cancel routes;
+`AgentTaskCancel` forwards it), and the agent's `TaskManager.CancelBridgeExecutionAsync` stops a
+task only when the id it keeps with the task-id reservation is equal. That cancel and admission
+are both decided under `_admissionGate`: a cancel that finds the task id reserved and nothing
+queued or running marks the reservation, and the directive then stops at the gate instead of being
+admitted (MUST NOT answer `not_found` while the reservation exists). A cancel without an id is
+matched by task id as before, and the in-process path sends none. Answers are fenced the same way:
+`RelayCompletionPublisher` reads the task's id while its completion is raised and writes it on the
+answer, and `TryHandleReplyAsync` accepts an answer for a record that has an id only when the ids
+are equal (another id, or none: acked, logged, nothing changed). ⚠️ So every agent image must be
+upgraded BEFORE `FLEET_DURABLE_DELEGATION_ENABLED=true`: an older agent's answers name no execution
+and its delegations end by timeout. `DurableDelegation__RequireAnswerExecutionId=false` (default
+`true`) accepts id-less answers by task id and reopens the stale-answer hole for older agents. For an agent or orchestrator from
+before the id the bridge still orders its sends: no directive while a cancel for the same task id
+is owed, unfinished, or ended without a 2xx less than 30 s ago (`Fenced`, `PriorCancels`,
+`PublishNotBefore`). The service is registered before
+the peer-config bootstrap on purpose: heartbeats start with the host, relay sends wait for
+`IDelegationRelay.Ready` (`FleetWorkflowConfig.PeerConfigLoaded` and a non-empty escalation target).
+
+MUST NOT: await a relay send from a pass or a reply (ten 10 s cancels once put another activity's
+heartbeat past its 90 s timeout); publish a directive ahead of a cancel for the same task id, or
+give a place to a new call while the old one has not ended; send the `/cancel all` broadcast for a
+record that has an execution id, mint a new id for a record that has one or was loaded without one,
+or write the field when it is empty (the in-process path's bytes must not change); log or return an instruction, an answer or a task token (the state file is the only place
+they are kept, mode 0600; `GET /pending-delegations` is identifiers, counters and times); raise
+`MaximumAttempts` on a delegate (a retry re-publishes and the agent redoes the work); overwrite a
+state file that cannot be read (it is moved aside). An outage longer than the activity's
+`HeartbeatTimeout` (90 s consensus, 2 min UWE and `notify_cto`) still loses the delegation, and so
+does the one restart that turns the switch on or off. See `docs/durable-delegation.md`.
+
 ## Configuration
 
 Agent config is DB-driven (MySQL via EF Core). On first run, the orchestrator seeds from `seed.json`.

@@ -93,6 +93,12 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
         long chatId, string result, string? relaySender, TaskSource source, bool isPartial,
         string? correlationId, string? taskId, CompletionKind kind)
     {
+        // Read here, on the thread that raises the completion: the task still holds its task id,
+        // so this is its own execution id. By the time the publish below runs, a later attempt
+        // may hold the same task id. Every answer for a task comes through here (final, partial,
+        // failed, incomplete, idle), so every one of them names the execution it is from.
+        var executionId = taskId is null ? null : _taskManager.ExecutionIdOf(taskId);
+
         _ = Task.Run(async () =>
         {
             try
@@ -107,14 +113,14 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
                         _ => result,
                     };
                     if (await PublishWithRetryAsync("bridge", chatId, bridgeResult,
-                            RelayMessageType.BridgeResponse, correlationId, taskId))
+                            RelayMessageType.BridgeResponse, correlationId, taskId, executionId))
                         _counter.Published(nameof(RelayMessageType.BridgeResponse));
                 }
                 else if (relaySender is not null)
                 {
                     var type = isPartial ? RelayMessageType.PartialResponse : RelayMessageType.Response;
                     var text = taskId is not null ? FormatTaskResponse(result, isPartial, kind) : result;
-                    if (await PublishWithRetryAsync(relaySender, chatId, text, type, correlationId: null, taskId))
+                    if (await PublishWithRetryAsync(relaySender, chatId, text, type, correlationId: null, taskId, executionId))
                         _counter.Published(type.ToString());
                 }
             }
@@ -136,11 +142,11 @@ public sealed class RelayCompletionPublisher : IHostedService, IDisposable
     /// workflow step to run out its whole timeout over a connection blip of a few seconds.
     /// </summary>
     private async Task<bool> PublishWithRetryAsync(string target, long chatId, string text, string type,
-        string? correlationId, string? taskId)
+        string? correlationId, string? taskId, string? executionId)
     {
         for (var attempt = 0; ; attempt++)
         {
-            if (await _relay.TryPublishToAgentAsync(target, chatId, text, type: type, correlationId: correlationId, taskId: taskId))
+            if (await _relay.TryPublishToAgentAsync(target, chatId, text, type: type, correlationId: correlationId, taskId: taskId, executionId: executionId))
                 return true;
 
             // A relay with no broker configured will not have one in thirty seconds either.

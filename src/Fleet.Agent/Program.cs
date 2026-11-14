@@ -116,10 +116,16 @@ if (!isCliMode)
         return Results.Ok(new { message = "All tasks cancelled and queue cleared" });
     });
 
-    app.MapPost("/cancel/{**taskId}", async (string taskId, IServiceProvider sp) =>
+    // `executionId` (optional, query) comes with a durable workflow delegation's cancel. With it
+    // the cancel applies only to the task whose directive carried the same id; without it the
+    // cancel is matched by task id, as it always was.
+    app.MapPost("/cancel/{**taskId}", async (string taskId, string? executionId, IServiceProvider sp) =>
     {
         var taskManager = sp.GetRequiredService<TaskManager>();
         var decoded = Uri.UnescapeDataString(taskId);
+        if (!string.IsNullOrEmpty(executionId))
+            return Results.Ok(Fleet.Agent.Models.BridgeCancelAnswer.From(
+                decoded, executionId, await taskManager.CancelBridgeExecutionAsync(decoded, executionId)));
         var cancelled = await taskManager.CancelByBridgeTaskIdAsync(decoded);
         return Results.Ok(new { cancelled, taskId = decoded });
     });

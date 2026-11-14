@@ -1,6 +1,6 @@
 # Upgrade notes
 
-Read the note that applies before upgrading an existing installation. Day-to-day upgrading is `./upgrade.sh`, described in the [README](../../README.md#upgrade-after-pulling-new-code).
+Read the note that applies before upgrading an existing installation. Day-to-day upgrading is `./upgrade.sh`, described in the [setup guide](../setup.md#upgrade-after-pulling-new-code).
 
 ## Loopback ports and the Qdrant pin
 

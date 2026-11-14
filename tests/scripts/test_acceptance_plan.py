@@ -120,6 +120,52 @@ class CiTests(unittest.TestCase):
         for checks,statuses,want in cases:
             self.assertEqual(want,module.ci_rollup(checks,statuses)[0])
 
+    def test_rollup_detail_says_why_a_result_is_pending(self):
+        success = dict(name='test',id=2,status='completed',conclusion='success')
+        cases = [([],[],('pending',[],'none_reported')),
+                 ([dict(success,conclusion='skipped')],[],('pending',[],'none_reported')),
+                 ([dict(success,status='in_progress',conclusion=None)],[],('pending',[],'running')),
+                 ([dict(success,status='queued',conclusion=None)],[],('pending',[],'running')),
+                 ([success],[dict(context='lint',id=1,state='pending')],('pending',[],'running')),
+                 ([dict(success,conclusion='mystery')],[],('pending',[],'unexpected_terminal')),
+                 ([success],[dict(context='lint',id=1,state='mystery')],('pending',[],'unexpected_terminal')),
+                 # A running check beside an unexpected terminal one is still running.
+                 ([dict(success,conclusion='mystery'),dict(name='slow',id=3,status='in_progress',conclusion=None)],[],
+                  ('pending',[],'running')),
+                 ([success],[],('success',[],'none')),
+                 ([dict(success,conclusion='failure')],[],('failure',['test'],'none')),
+                 # A failure wins over a check that is still running, and has no pending detail.
+                 ([dict(success,conclusion='failure'),dict(name='slow',id=3,status='in_progress',conclusion=None)],[],
+                  ('failure',['test'],'none'))]
+        for checks,statuses,want in cases:
+            self.assertEqual(want,module.ci_rollup_detail(checks,statuses))
+            self.assertEqual(want[:2],module.ci_rollup(checks,statuses))
+
+    def test_cli_rollup_prints_three_lines_and_keeps_the_first_two(self):
+        import subprocess,sys
+        script=str(Path(__file__).resolve().parents[2]/'scripts/acceptance_plan.py')
+        success = dict(name='test',id=2,status='completed',conclusion='success')
+        cases = [([],[],['CI: pending','CI_FAILING: none','CI_DETAIL: none_reported']),
+                 ([dict(success,status='in_progress',conclusion=None)],[],['CI: pending','CI_FAILING: none','CI_DETAIL: running']),
+                 ([dict(success,conclusion='mystery')],[],['CI: pending','CI_FAILING: none','CI_DETAIL: unexpected_terminal']),
+                 ([success],[],['CI: success','CI_FAILING: none','CI_DETAIL: none']),
+                 ([dict(success,conclusion='failure')],[dict(context='lint',id=1,state='error')],
+                  ['CI: failure','CI_FAILING: lint, test','CI_DETAIL: none'])]
+        with tempfile.TemporaryDirectory() as d:
+            checks_file,statuses_file=Path(d)/'checks.json',Path(d)/'statuses.json'
+            for checks,statuses,want in cases:
+                checks_file.write_text(json.dumps(checks));statuses_file.write_text(json.dumps(statuses))
+                result=subprocess.run([sys.executable,script,'ci-rollup','--checks-file',str(checks_file),
+                                       '--statuses-file',str(statuses_file)],text=True,capture_output=True)
+                self.assertEqual(0,result.returncode)
+                self.assertEqual(want,result.stdout.splitlines())
+            # An unreadable page is a validation failure with no token lines, never an empty success.
+            statuses_file.write_text('not json')
+            result=subprocess.run([sys.executable,script,'ci-rollup','--checks-file',str(checks_file),
+                                   '--statuses-file',str(statuses_file)],text=True,capture_output=True)
+            self.assertNotEqual(0,result.returncode)
+            self.assertEqual('',result.stdout)
+
     def test_change_class(self):
         self.assertEqual('doc_only',module.change_class(['docs/x.md','README.md','CHANGELOG.md']))
         for path in ['src/Fleet.Orchestrator/projects/x/context.md','projects/x/context.md',

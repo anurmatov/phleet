@@ -191,7 +191,8 @@ const history = [
 ]
 
 /** What a GET answers: the fixed routes above, then the ones with a name in the path. */
-export function answer(path: string): unknown {
+export function answer(path: string, override?: Record<string, unknown>): unknown {
+  if (override && path in override) return override[path]
   if (path in routes) return routes[path]
   let m = path.match(/^\/api\/agents\/([^/]+)\/(history|config|project-access)$/)
   if (m) {
@@ -208,6 +209,8 @@ export function answer(path: string): unknown {
     return item && { name: item.name, currentVersion: item.currentVersion, versions: versionsOf(item.name, item.currentVersion) }
   }
   if (/^\/api\/workflows\/[^/]+\/history\//.test(path)) return history
+  m = path.match(/^\/api\/memory\/([^/]+)$/)
+  if (m) return { ...memoryDoc, id: m[1] }
   if (/\/effective-harness$/.test(path)) return undefined
   return []
 }
@@ -232,4 +235,16 @@ export const scenes = [
   { name: 'confirm-bar', hash: 'workflows' },
   { name: 'new-schedule', hash: 'schedules' },
   { name: 'more-sheet', hash: 'agents' },
-] as const
+  { name: 'visual-editor', hash: 'wf-definitions' },
+  { name: 'memory-open', hash: 'memory' },
+  { name: 'chat-open', hash: 'chat' },
+  { name: 'sign-in', hash: 'agents', override: { '/api/auth/session': { authRequired: true, signedIn: false } } },
+  { name: 'first-run', hash: 'agents', override: {
+    '/api/agents': [], '/api/workflows': [],
+    '/api/setup/status': { telegram: { configured: false, groupChatEnabled: false }, gitHub: { configured: false } },
+    '/api/agent-templates': [
+      { name: 'co-cto', displayName: 'Co-CTO', description: 'Plans the work, reviews it and provisions specialists.', defaultModel: 'claude-opus-5-5', toolCount: 24, mcpCount: 5 },
+      { name: 'developer', displayName: 'Developer', description: 'Implements issues as pull requests.', defaultModel: 'claude-sonnet-5-5', toolCount: 18, mcpCount: 3 },
+      { name: 'reviewer', displayName: 'Reviewer', description: 'Reads a change and says what is wrong with it.', defaultModel: 'claude-sonnet-5-5', toolCount: 12, mcpCount: 2 },
+    ] } },
+] as const satisfies readonly { name: string; hash: string; override?: Record<string, unknown> }[]

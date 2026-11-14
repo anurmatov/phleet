@@ -11,7 +11,7 @@ import { answer, pages, scenes } from './tourFixtures'
 const out = process.env.TOUR_DIR ?? path.join('test-results', 'tour')
 const theme = process.env.TOUR_THEME === 'dark' ? '-dark' : ''
 
-async function open(page: Page, hash: string) {
+async function open(page: Page, hash: string, override?: Record<string, unknown>) {
   await page.route('**/*', route => {
     const host = new URL(route.request().url()).hostname
     return host === '127.0.0.1' || host === 'localhost' ? route.continue() : route.abort()
@@ -22,12 +22,12 @@ async function open(page: Page, hash: string) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url())
     if (route.request().method() !== 'GET') { await route.fulfill({ json: {} }); return }
-    const body = answer(url.pathname)
+    const body = answer(url.pathname, override)
     if (body === undefined) await route.fulfill({ status: 404, json: {} })
     else await route.fulfill({ json: body })
   })
   await page.goto('/#' + hash)
-  await expect(page.locator('.app-layout')).toBeVisible()
+  await expect(page.locator('.app-layout, .signin-shell')).toBeVisible()
 }
 
 async function settle(page: Page) {
@@ -108,17 +108,34 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
   'confirm-bar': async page => { await page.getByRole('button', { name: 'Approve merge' }).click() },
   'new-schedule': async page => { await page.getByRole('button', { name: /new schedule/i }).click() },
   'more-sheet': async (page, phone) => { if (phone) await page.locator('.tabbar-item').last().click() },
+  'visual-editor': async page => {
+    await page.getByRole('button', { name: 'Visual editor' }).click()
+    await expect(page.locator('.wfe-overlay')).toBeVisible()
+  },
+  'memory-open': async page => {
+    // The tree opens as far as it was left; press only what is still closed.
+    const memory = page.locator('.memory-tree-mem').first()
+    if (await memory.count() === 0) await page.locator('.memory-tree-project-btn').first().click()
+    if (await memory.count() === 0) await page.locator('.memory-tree-type-btn').first().click()
+    await memory.click()
+  },
+  'chat-open': async (page, phone) => {
+    if (phone) await page.locator('.chat-agent-select').selectOption({ index: 1 })
+    else await page.locator('.chat-agent').first().click()
+  },
+  'sign-in': async () => {},
+  'first-run': async () => {},
 }
 
 for (const scene of scenes) {
   test(`scene: ${scene.name}`, async ({ page }, info) => {
     const phone = info.project.name === 'phone'
-    await open(page, scene.hash)
+    await open(page, scene.hash, 'override' in scene ? scene.override : undefined)
     await settle(page)
     await reach[scene.name](page, phone)
     await page.waitForTimeout(350)
     // A dialog is seen as the screen shows it; an opened row as the page now reads.
-    const overlay = await page.locator('[role="dialog"], .log-fullscreen-overlay, .sidenav-open, .signal-modal').count()
+    const overlay = await page.locator('[role="dialog"], .log-fullscreen-overlay, .sidenav-open, .signal-modal, .wfe-overlay').count()
     await picture(page, `${info.project.name}${theme}-scene-${scene.name}`, overlay === 0)
     await notWider(page)
   })

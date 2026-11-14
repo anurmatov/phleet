@@ -556,7 +556,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
         {/* Telegram card */}
         {!telegramOk ? (
           <div className="setup-card setup-card--pending">
-            <div className="setup-card-icon">✈</div>
+            <div className="setup-card-icon"><Icon name="chat" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">Connect Telegram</div>
               <div className="setup-card-desc">Add your bot token so agents can receive and send messages.</div>
@@ -567,7 +567,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
           </div>
         ) : (
           <div className="setup-card setup-card--done">
-            <div className="setup-card-icon">✓</div>
+            <div className="setup-card-icon"><Icon name="check" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">Telegram connected</div>
             </div>
@@ -580,7 +580,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
         {/* GitHub card */}
         {!githubOk ? (
           <div className="setup-card setup-card--pending">
-            <div className="setup-card-icon">⌥</div>
+            <div className="setup-card-icon"><Icon name="workflows" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">Connect GitHub App</div>
               <div className="setup-card-desc">Add your GitHub App credentials so agents can push code and open PRs.</div>
@@ -591,7 +591,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
           </div>
         ) : (
           <div className="setup-card setup-card--done">
-            <div className="setup-card-icon">✓</div>
+            <div className="setup-card-icon"><Icon name="check" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">GitHub connected</div>
             </div>
@@ -604,14 +604,14 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
         {/* First agent nudge + template grid */}
         {agentCount === 0 && (
           <div className="setup-card setup-card--info setup-card--templates">
-            <div className="setup-card-body" style={{ width: '100%' }}>
+            <div className="setup-card-body">
               <div className="setup-card-title">Provision your first agent</div>
               <div className="setup-card-desc">Start with a co-cto — your strategic AI partner. It can provision specialists (dev, ops, pm, etc.) on demand.</div>
 
               {/* Telegram hard prereq banner */}
               {!telegramOk && (
                 <div className="setup-prereq-banner setup-prereq-banner--amber">
-                  <span>⚠&nbsp; Connect Telegram first to provision agents — agents need Telegram to receive commands.</span>
+                  <span>Connect Telegram first to provision agents — agents need Telegram to receive commands.</span>
                   <button
                     className="setup-prereq-link"
                     onClick={() => setTelegramOpen(true)}
@@ -638,7 +638,6 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
                       className={`template-card${!telegramOk ? ' template-card--disabled' : ''}`}
                       onClick={() => telegramOk && onNewAgentFromTemplate(t.name)}
                       disabled={!telegramOk}
-                      style={!telegramOk ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
                     >
                       <div className="template-card-name">{t.displayName}</div>
                       <div className="template-card-desc">{t.description}</div>

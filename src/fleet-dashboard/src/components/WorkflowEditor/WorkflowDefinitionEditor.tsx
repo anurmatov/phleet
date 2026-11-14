@@ -125,7 +125,7 @@ export default function WorkflowDefinitionEditor({ defName, onBack, onSaved, wor
   if (loadError) return (
     <div className="wfe-editor">
       <div className="wfe-topbar">
-        <button className="wfe-back-btn" onClick={onBack}>← Definitions</button>
+        <button className="wfe-back-btn" onClick={onBack}><Icon name="chevronLeft" size={16} />Definitions</button>
       </div>
       <div className="wfe-load-error">
         <span className="wfe-load-error-icon">✕</span>
@@ -138,7 +138,7 @@ export default function WorkflowDefinitionEditor({ defName, onBack, onSaved, wor
     <div className="wfe-editor">
       {/* Top bar */}
       <div className="wfe-topbar">
-        <button className="wfe-back-btn" onClick={onBack}>← Definitions</button>
+        <button className="wfe-back-btn" onClick={onBack}><Icon name="chevronLeft" size={16} />Definitions</button>
         <div className="wfe-topbar-meta">
           {isNew ? (
             <input

@@ -14,9 +14,9 @@ Phleet runs Claude, Codex or Gemini agents as Docker containers on your own mach
 - **Shared memory.** Every agent can search and store a common semantic memory.
 
 <p align="center">
-  <img src=".github/assets/phleet-dashboard.jpg" alt="Phleet dashboard — agents and active workflows" width="900">
+  <img src=".github/assets/phleet-dashboard.png" alt="Phleet dashboard: the agents and what each is doing, and the running workflows with the ones waiting for a decision" width="900">
   <br>
-  <em>The fleet dashboard — live agent status, model assignment, and in-flight Temporal workflows.</em>
+  <em>The dashboard: every agent and what it is doing, and the workflows waiting for you.</em>
 </p>
 
 ## What you do with it

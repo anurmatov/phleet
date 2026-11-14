@@ -94,7 +94,109 @@ public static class WorkflowDefinitionValidator
                 }
             }
         }
+
+        ValidateNoRedelivery(root, workflowTypeName, ignoringAncestor: null, isNotifyStep: false);
     }
+
+    /// <summary>
+    /// <c>noRedelivery</c> is a promise about one directive: the bridge attempts to publish it at
+    /// most once, and a cancellation at the step is never swallowed. A definition that asks for
+    /// the promise where the engine cannot keep it is refused here, with the step named:
+    ///
+    /// <list type="bullet">
+    /// <item><c>delegate_with_escalation</c>: an escalation <c>retry</c> runs the step again, with
+    /// the same or a replaced instruction.</item>
+    /// <item>a wait's <c>notifyStep</c>: it is sent again on every reminder, and the wait handles
+    /// its failures itself.</item>
+    /// <item>continuation retries left on: an incomplete answer would be continued with a second
+    /// directive. Both fields have to say so, because both default to on.</item>
+    /// <item>any ancestor with <c>ignoreFailure</c>: the step's own flag is not allowed to swallow
+    /// a cancellation, and an ancestor's would swallow it one level up.</item>
+    /// </list>
+    ///
+    /// Walked with the ancestors in hand, which <see cref="Walk"/> does not keep.
+    /// </summary>
+    private static void ValidateNoRedelivery(
+        StepDefinition? step, string workflowTypeName, StepDefinition? ignoringAncestor, bool isNotifyStep)
+    {
+        if (step is null) return;
+
+        if (step is DelegateStep { NoRedelivery: true } once)
+        {
+            var label = once.Name ?? once.Target;
+            var prefix = $"Workflow definition '{workflowTypeName}' is invalid: delegate step '{label}' sets 'noRedelivery'";
+
+            if (once is DelegateWithEscalationStep)
+            {
+                throw new InvalidOperationException(
+                    $"{prefix} on a delegate_with_escalation. An escalation 'retry' sends the step's " +
+                    "directive again, so noRedelivery is allowed only on a plain delegate step.");
+            }
+
+            if (isNotifyStep)
+            {
+                throw new InvalidOperationException(
+                    $"{prefix} as the notifyStep of a wait_for_signal. A notifyStep is sent again on every " +
+                    "reminder, so noRedelivery is allowed only on a plain delegate step.");
+            }
+
+            if (once.RetryOnIncomplete || once.MaxIncompleteRetries != 0)
+            {
+                throw new InvalidOperationException(
+                    $"{prefix} but leaves continuation retries on (retryOnIncomplete: " +
+                    $"{(once.RetryOnIncomplete ? "true" : "false")}, maxIncompleteRetries: {once.MaxIncompleteRetries}). " +
+                    "A continuation is a second directive, so noRedelivery requires " +
+                    "\"retryOnIncomplete\": false and \"maxIncompleteRetries\": 0.");
+            }
+
+            if (ignoringAncestor is not null)
+            {
+                throw new InvalidOperationException(
+                    $"{prefix} under {StepTypeName(ignoringAncestor)} step '{ignoringAncestor.Name ?? "(unnamed)"}', " +
+                    "which sets 'ignoreFailure'. A cancellation at a noRedelivery step must end the run, and " +
+                    "an ancestor's ignoreFailure would swallow it. Remove ignoreFailure from every step above it.");
+            }
+        }
+
+        // The nearest one is the one named: it is the first that would swallow.
+        var above = step.IgnoreFailure ? step : ignoringAncestor;
+
+        switch (step)
+        {
+            case SequenceStep s:
+                foreach (var child in s.Steps) ValidateNoRedelivery(child, workflowTypeName, above, false);
+                break;
+
+            case ParallelStep s:
+                foreach (var child in s.Steps ?? []) ValidateNoRedelivery(child, workflowTypeName, above, false);
+                ValidateNoRedelivery(s.Step, workflowTypeName, above, false);
+                break;
+
+            case LoopStep s:
+                foreach (var child in s.Steps) ValidateNoRedelivery(child, workflowTypeName, above, false);
+                break;
+
+            case BranchStep s:
+                foreach (var (_, child) in s.Cases) ValidateNoRedelivery(child, workflowTypeName, above, false);
+                ValidateNoRedelivery(s.Default, workflowTypeName, above, false);
+                break;
+
+            case WaitForSignalStep s:
+                ValidateNoRedelivery(s.NotifyStep, workflowTypeName, above, isNotifyStep: true);
+                break;
+        }
+    }
+
+    /// <summary>The JSON <c>type</c> of a step that can hold others, for a message.</summary>
+    private static string StepTypeName(StepDefinition step) => step switch
+    {
+        SequenceStep => "sequence",
+        ParallelStep => "parallel",
+        LoopStep => "loop",
+        BranchStep => "branch",
+        WaitForSignalStep => "wait_for_signal",
+        _ => "enclosing",
+    };
 
     /// <summary>
     /// #436 — <c>visitVar</c> and <c>delegatedGuard</c>. The guard is what stops a stale or
@@ -217,9 +319,10 @@ public static class WorkflowDefinitionValidator
     /// Depth-first walk over every step in the tree, including the steps nested inside composite
     /// steps and the notify step of a wait.
     ///
-    /// New composite step types must be added here. A step type that holds children and is not
-    /// listed simply hides them from validation — silently, which is why the list is exhaustive
-    /// rather than best-effort.
+    /// New composite step types must be added here, and to <see cref="ValidateNoRedelivery"/>,
+    /// which walks the same tree with the ancestors in hand. A step type that holds children and
+    /// is not listed simply hides them from validation — silently, which is why the list is
+    /// exhaustive rather than best-effort.
     /// </summary>
     public static IEnumerable<StepDefinition> Walk(StepDefinition? step)
     {

@@ -21,7 +21,7 @@ namespace Fleet.Orchestrator.Endpoints;
 /// </summary>
 public static class AgentTaskCancel
 {
-    public const string ExecutionIdParameter = "executionId";
+    public const string ExecutionIdParameter = TaskCancel.ExecutionIdParameter;
 
     /// <summary>How long the agent is given. The bridge's hold on an unanswered cancel is sized from this.</summary>
     public static readonly TimeSpan AgentTimeout = TimeSpan.FromSeconds(10);

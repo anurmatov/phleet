@@ -210,7 +210,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
             CommandExchange, ExchangeType.Direct, durable: true, autoDelete: false, cancellationToken: ct);
         await _channel.QueueDeclareAsync(
             QueueName, durable: true, exclusive: false, autoDelete: false,
-            arguments: new Dictionary<string, object?> { ["x-queue-type"] = "quorum" },
+            arguments: ConversationBroker.CommandQueueArguments(),
             cancellationToken: ct);
         await _channel.QueueBindAsync(QueueName, CommandExchange, routingKey: _agentName, cancellationToken: ct);
 
@@ -221,12 +221,13 @@ public sealed class ConversationSouthConsumer : BackgroundService
     }
 
     /// <summary>
-    /// The per-agent inbound queue and the exchange it is bound to. The same literals as the chat
-    /// service's <c>ConversationBroker</c>, which this assembly may not reference (#303 MUST NOT 14).
+    /// The per-agent inbound queue and the exchange it is bound to: the one definition the chat
+    /// service declares them from too. It lives in <c>Fleet.Contracts</c> because this assembly may
+    /// not reference the chat service's (#303 MUST NOT 14).
     /// </summary>
-    private string QueueName => $"fleet.conversations.inbound.{_agentName}";
+    private string QueueName => ConversationBroker.CommandQueue(_agentName);
 
-    private const string CommandExchange = "fleet.conversations";
+    private const string CommandExchange = ConversationBroker.CommandExchange;
 
     // ── one delivery ─────────────────────────────────────────────────────────
 
@@ -956,6 +957,11 @@ public sealed class ConversationSouthConsumer : BackgroundService
     {
         _owned.TryRemove(owned.SubmissionId, out _);
         _attempts.TryRemove(owned.AttemptId, out _);
+
+        // The conversation's per-submission bookkeeping ends with the delivery. A conversation
+        // lives as long as the process, so what it kept for every submission it ever saw only grew.
+        if (_conversations.TryGetValue(owned.ConversationId, out var state))
+            state.Release(owned.SubmissionId, owned.AttemptId);
     }
 
     internal ConversationState Conversation(string conversationId) =>
@@ -1067,10 +1073,23 @@ internal sealed class ConversationState(string conversationId)
     /// <summary>The conversation's single in-order sender (D10).</summary>
     public SemaphoreSlim Sender { get; } = new(1, 1);
 
+    /// <summary>
+    /// How many submissions whose delivery is finished a conversation still remembers as started.
+    /// </summary>
+    /// <remarks>
+    /// A <c>turn.started</c> can arrive after its own terminal (see
+    /// <see cref="ConversationSouthConsumer"/>'s commit path), and it is recognised, and counted,
+    /// by this memory. The two travel through in-process queues a few events apart, so the last
+    /// few dozen submissions cover it. One that arrives later still sends nothing: its delivery is
+    /// no longer owned, and the start is not transmitted for a delivery this process does not own.
+    /// </remarks>
+    internal const int RememberedFinishedSubmissions = 64;
+
     private readonly object _lock = new();
     private readonly List<string> _queued = [];
     private readonly HashSet<string> _stoppedAttempts = new(StringComparer.Ordinal);
     private readonly HashSet<string> _startedSubmissions = new(StringComparer.Ordinal);
+    private readonly Queue<string> _finishedStarts = new();
     private RunningTurn? _turn;
     private long _runtimeKey;
     private Task? _drain;
@@ -1148,7 +1167,8 @@ internal sealed class ConversationState(string conversationId)
     /// <remarks>
     /// Never cleared by <see cref="EndTurn"/>: the question a late <c>turn.started</c> asks is "has
     /// this submission's turn ever been started", not "is a turn running now", and those differ for
-    /// exactly the ordering this exists to survive.
+    /// exactly the ordering this exists to survive. It is forgotten only some time after the
+    /// submission's delivery is finished; see <see cref="Release"/>.
     /// </remarks>
     public bool TurnStarted(string submissionId)
     {
@@ -1173,6 +1193,35 @@ internal sealed class ConversationState(string conversationId)
             _turn = null;
             return merged;
         }
+    }
+
+    /// <summary>
+    /// The submission's delivery is finished: committed, or completed without a turn. Its attempt
+    /// can stop no more appends, so that entry goes now. A started submission stays remembered as
+    /// started until <see cref="RememberedFinishedSubmissions"/> later ones have finished too.
+    /// </summary>
+    /// <remarks>
+    /// Only a FINISHED submission is ever forgotten. Forgetting one whose turn is still running
+    /// would let a duplicate <c>turn.started</c> through, and a second <c>/turns:start</c> abandons
+    /// the merged children of a running turn.
+    /// </remarks>
+    public void Release(string submissionId, string attemptId)
+    {
+        lock (_lock)
+        {
+            _stoppedAttempts.Remove(attemptId);
+            if (!_startedSubmissions.Contains(submissionId)) return;
+
+            _finishedStarts.Enqueue(submissionId);
+            while (_finishedStarts.Count > RememberedFinishedSubmissions)
+                _startedSubmissions.Remove(_finishedStarts.Dequeue());
+        }
+    }
+
+    /// <summary>How many submissions are remembered as started, and how many attempts as stopped. Test seam.</summary>
+    internal (int StartedSubmissions, int StoppedAttempts) TrackedForTesting
+    {
+        get { lock (_lock) return (_startedSubmissions.Count, _stoppedAttempts.Count); }
     }
 
     public void StopAppends(string attemptId)

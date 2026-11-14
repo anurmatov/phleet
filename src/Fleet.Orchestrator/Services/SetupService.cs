@@ -1,6 +1,7 @@
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Text;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -47,7 +48,7 @@ public sealed class SetupService : Fleet.Orchestrator.Application.ITelegramSetup
         _scopeFactory = scopeFactory;
         _logger = logger;
         _credentialsReader = credentialsReader;
-        _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
+        _envFilePath = ProvisioningOptions.From(config).EnvFilePath;
     }
 
     // ── Status ────────────────────────────────────────────────────────────────

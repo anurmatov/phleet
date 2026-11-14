@@ -569,9 +569,8 @@ public sealed class BridgeExecutionCancelTests
             {"ChatId":7,"Sender":"temporal-bridge","Text":"do the task","Timestamp":"2026-11-14T00:00:00+00:00",
              "Type":"directive","CorrelationId":null,"TaskId":"wf-1/review","WorkflowId":null,"SignalName":null,"Repo":null}
             """;
-        var type = typeof(GroupRelayService).GetNestedType("RelayMessage", BindingFlags.NonPublic)!;
-        string? ExecutionIdOf(string json) =>
-            (string?)type.GetProperty("ExecutionId")!.GetValue(JsonSerializer.Deserialize(json, type));
+        // The call the agent's relay makes on every delivery.
+        string? ExecutionIdOf(string json) => RelayWire.Deserialize(json)!.ExecutionId;
 
         Assert.Equal("execution-1", ExecutionIdOf(withId));
         Assert.Null(ExecutionIdOf(without));
@@ -595,12 +594,11 @@ public sealed class BridgeExecutionCancelTests
     [Fact]
     public void AMessageWithoutAnExecutionId_IsTheBytesItAlwaysWas()
     {
-        var type = typeof(GroupRelayService).GetNestedType("RelayMessage", BindingFlags.NonPublic)!;
-        var message = JsonSerializer.Deserialize(
-            """{"ChatId":7,"Sender":"test","Text":"an answer","Timestamp":"2026-11-14T00:00:00+00:00","Type":"response","TaskId":"wf-1/review"}""",
-            type)!;
+        var message = RelayWire.Deserialize(
+            """{"ChatId":7,"Sender":"test","Text":"an answer","Timestamp":"2026-11-14T00:00:00+00:00","Type":"response","TaskId":"wf-1/review"}""")!;
 
-        var json = JsonSerializer.Serialize(message, type);
+        // What the agent's relay writes for everything it publishes.
+        var json = System.Text.Encoding.UTF8.GetString(RelayWire.Serialize(message, RelayShape.Agent));
 
         Assert.DoesNotContain("ExecutionId", json);
         Assert.Equal(

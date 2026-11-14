@@ -31,7 +31,7 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
 
     // fleet.group is the direct exchange agents bind their individual queues to.
     // Each agent queue has a binding with routing key = agentShortName.ToLowerInvariant().
-    private const string AgentDirectExchange = "fleet.group";
+    private const string AgentDirectExchange = RelayBroker.Exchange;
 
     public AgentConfigPublisherService(
         IOptions<RabbitMqOptions> rabbitConfig,
@@ -66,28 +66,23 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
 
         try
         {
-            var payload = new
+            var payload = new ConfigUpdateMessage
             {
-                schema_version = 1,
-                target_agent   = agentShortName,
-                added_users       = addedUsers,
-                removed_user_ids  = removedUserIds,
-                added_group_ids   = addedGroupIds,
-                removed_group_ids = removedGroupIds,
+                TargetAgent = agentShortName,
+                AddedUsers = addedUsers,
+                RemovedUserIds = removedUserIds,
+                AddedGroupIds = addedGroupIds,
+                RemovedGroupIds = removedGroupIds,
             };
 
-            // Wrap in the RelayMessage envelope that GroupRelayService.OnRelayMessageReceived
-            // expects: {ChatId, Sender, Text, Timestamp, Type}.
-            var envelope = new
-            {
-                ChatId    = 0L,
-                Sender    = "orchestrator",
-                Text      = JsonSerializer.Serialize(payload),
-                Timestamp = DateTimeOffset.UtcNow,
-                Type      = "config.update",
-            };
+            var envelope = new RelayMessage(
+                ChatId: 0,
+                Sender: RelaySender.Orchestrator,
+                Text: JsonSerializer.Serialize(payload),
+                Timestamp: DateTimeOffset.UtcNow,
+                Type: RelayMessageType.ConfigUpdate);
 
-            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope));
+            var body = RelayWire.Serialize(envelope, RelayShape.Envelope);
             var routingKey = agentShortName.ToLowerInvariant();
 
             if (Send is not null)
@@ -133,7 +128,7 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
     public async Task PublishDirectiveToAgentAsync(
         string agentShortName,
         string text,
-        string type = "directive",
+        string type = RelayMessageType.Directive,
         CancellationToken ct = default)
     {
         if (!IsEnabled) return;
@@ -143,16 +138,14 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
             await EnsureInitializedAsync(ct);
             if (_channel is null) return;
 
-            var envelope = new
-            {
-                ChatId    = 0L,
-                Sender    = "orchestrator",
-                Text      = text,
-                Timestamp = DateTimeOffset.UtcNow,
-                Type      = type,
-            };
+            var envelope = new RelayMessage(
+                ChatId: 0,
+                Sender: RelaySender.Orchestrator,
+                Text: text,
+                Timestamp: DateTimeOffset.UtcNow,
+                Type: type);
 
-            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope));
+            var body = RelayWire.Serialize(envelope, RelayShape.Envelope);
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
             var routingKey = agentShortName.ToLowerInvariant();
 
@@ -213,21 +206,4 @@ public sealed class AgentConfigPublisherService : IAsyncDisposable
         if (_connection is not null)
             await _connection.CloseAsync();
     }
-}
-
-/// <summary>
-/// Per-user info carried in a config.update message so the receiving agent can
-/// include the username/first_name in the welcome DM without a Telegram lookup.
-/// Must match the shape of Fleet.Agent.Models.AddedUserInfo (JSON property names).
-/// </summary>
-public sealed class AddedUserInfo
-{
-    [System.Text.Json.Serialization.JsonPropertyName("user_id")]
-    public long UserId { get; init; }
-
-    [System.Text.Json.Serialization.JsonPropertyName("username")]
-    public string? Username { get; init; }
-
-    [System.Text.Json.Serialization.JsonPropertyName("first_name")]
-    public string? FirstName { get; init; }
 }

@@ -13,19 +13,28 @@ public class RelayRepoFieldTests
     [Fact]
     public void A_relay_message_carrying_Repo_deserializes_as_a_normal_directive()
     {
-        // The shape Fleet.Temporal's RelayMessage serializes to with default options.
+        // What the temporal bridge writes for a delegation: every field, Repo included.
         const string json = """
             {"ChatId":0,"Sender":"temporal-bridge","Text":"do the task","Timestamp":"2026-09-25T00:00:00+00:00",
              "Type":"directive","CorrelationId":"c1","TaskId":null,"WorkflowId":"wf-1","SignalName":null,"Repo":"org/app"}
             """;
-        var type = typeof(GroupRelayService).GetNestedType("RelayMessage", BindingFlags.NonPublic)!;
-
         // The same call OnRelayMessageReceived makes.
-        var message = JsonSerializer.Deserialize(json, type)!;
+        var message = RelayWire.Deserialize(json)!;
 
-        Assert.Equal("do the task", type.GetProperty("Text")!.GetValue(message));
-        Assert.Equal("directive", type.GetProperty("Type")!.GetValue(message));
-        Assert.Equal("wf-1", type.GetProperty("WorkflowId")!.GetValue(message));
-        Assert.Null(type.GetProperty("Repo"));
+        Assert.Equal("do the task", message.Text);
+        Assert.Equal("directive", message.Type);
+        Assert.Equal("wf-1", message.WorkflowId);
+
+        // The record is the one the bridge writes, so it has the field. What the agent hands on to
+        // its handlers does not: chat id, sender, text, type, correlation id, task id, workflow id,
+        // signal name and execution id, and no repo, so nothing downstream of the relay can route
+        // by it.
+        var handler = typeof(GroupRelayService).GetEvent(nameof(GroupRelayService.MessageReceived))!
+            .EventHandlerType!.GetMethod("Invoke")!;
+        Assert.Equal(
+            [typeof(long), typeof(string), typeof(string), typeof(string), typeof(string), typeof(string),
+             typeof(string), typeof(string), typeof(string)],
+            handler.GetParameters().Select(p => p.ParameterType));
+        Assert.Null(message.ExecutionId);
     }
 }

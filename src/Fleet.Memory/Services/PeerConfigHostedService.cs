@@ -42,7 +42,7 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
 
         try
         {
-            var exchange = Environment.GetEnvironmentVariable("RABBITMQ_EXCHANGE") ?? "fleet.orchestrator";
+            var exchange = Environment.GetEnvironmentVariable("RABBITMQ_EXCHANGE") ?? OrchestratorBroker.Exchange;
 
             var factory = new ConnectionFactory
             {
@@ -64,7 +64,7 @@ public sealed class PeerConfigHostedService : IHostedService, IAsyncDisposable
             await _channel.QueueDeclareAsync(queueName, durable: false, exclusive: true,
                 autoDelete: true, cancellationToken: cancellationToken);
 
-            await _channel.QueueBindAsync(queueName, exchange, routingKey: "config.changed",
+            await _channel.QueueBindAsync(queueName, exchange, routingKey: OrchestratorBroker.ConfigChanged,
                 cancellationToken: cancellationToken);
 
             var consumer = new AsyncEventingBasicConsumer(_channel);

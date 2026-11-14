@@ -31,7 +31,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// Access requests are published here so the orchestrator — which knows FLEET_CTO_AGENT — can forward them.
     /// Agent containers must not know who the CTO is.
     /// </summary>
-    private const string OrchestratorExchange = "fleet.orchestrator";
+    private const string OrchestratorExchange = OrchestratorBroker.Exchange;
 
     // Written from whichever pool thread publishes, read by status reporting.
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastPublishTime = new();
@@ -216,7 +216,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
             // Declare a named queue for this agent, bound with routing key = lowercased short name
             var shortName = _agentConfig.ShortName.ToLowerInvariant();
-            var queueName = $"fleet.agent.{shortName}";
+            var queueName = RelayBroker.AgentQueue(shortName);
 
             await consumeChannel.QueueDeclareAsync(
                 queue: queueName, durable: true, exclusive: false, autoDelete: false,
@@ -237,9 +237,9 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             {
                 // Also bind to fleet.relay fanout so agents receive broadcast token updates
                 await consumeChannel.ExchangeDeclareAsync(
-                    "fleet.relay", ExchangeType.Fanout, durable: true, autoDelete: false,
+                    RelayBroker.TokenBroadcastExchange, ExchangeType.Fanout, durable: true, autoDelete: false,
                     cancellationToken: ct);
-                await consumeChannel.QueueBindAsync(queueName, "fleet.relay", routingKey: "",
+                await consumeChannel.QueueBindAsync(queueName, RelayBroker.TokenBroadcastExchange, routingKey: "",
                     cancellationToken: ct);
             }
 
@@ -311,9 +311,9 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await using var channel = await _connection!.CreateChannelAsync(cancellationToken: ct);
             // Declared first so the unbind cannot 404 on a broker that has never seen the exchange.
             await channel.ExchangeDeclareAsync(
-                "fleet.relay", ExchangeType.Fanout, durable: true, autoDelete: false,
+                RelayBroker.TokenBroadcastExchange, ExchangeType.Fanout, durable: true, autoDelete: false,
                 cancellationToken: ct);
-            await channel.QueueUnbindAsync(queueName, "fleet.relay", routingKey: "",
+            await channel.QueueUnbindAsync(queueName, RelayBroker.TokenBroadcastExchange, routingKey: "",
                 cancellationToken: ct);
             await channel.CloseAsync(ct);
 
@@ -363,8 +363,8 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         {
             var routingKey = targetAgent.ToLowerInvariant();
             var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName,
-                string.IsNullOrEmpty(executionId) ? null : executionId);
-            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+                ExecutionId: string.IsNullOrEmpty(executionId) ? null : executionId);
+            var body = RelayWire.Serialize(message, RelayShape.Agent);
 
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
             await _publishChannel.BasicPublishAsync(
@@ -388,7 +388,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
-            var message = JsonSerializer.Deserialize<RelayMessage>(json);
+            var message = RelayWire.Deserialize(json);
 
             if (message is null)
                 return Task.CompletedTask;
@@ -425,7 +425,8 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
         try
         {
-            var routingKey = $"access-request.{_agentConfig.ShortName.ToLowerInvariant()}";
+            var routingKey = OrchestratorBroker.AgentKey(
+                OrchestratorBroker.AccessRequest, _agentConfig.ShortName.ToLowerInvariant());
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
             await _publishChannel.BasicPublishAsync(
@@ -447,7 +448,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// </summary>
     public Task PublishWorkflowSignalAsync(string workflowId, string signalName, string payload)
         => PublishToAgentAsync(
-            targetAgent: "temporal-bridge",
+            targetAgent: RelayBroker.TemporalBridgeKey,
             chatId: 0,
             text: payload,
             type: RelayMessageType.WorkflowSignal,
@@ -466,12 +467,4 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         if (_connection is not null)
             await _connection.CloseAsync();
     }
-
-    // ExecutionId is read from a directive and written only on the answer to a task that has
-    // one, so everything else the agent publishes is the same bytes as before.
-    private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
-        string Type = RelayMessageType.Directive, string? CorrelationId = null, string? TaskId = null,
-        string? WorkflowId = null, string? SignalName = null,
-        [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-        string? ExecutionId = null);
 }

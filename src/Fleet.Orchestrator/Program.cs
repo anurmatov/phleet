@@ -415,7 +415,9 @@ app.MapPost("/api/agents/{name}/cancel_bg/{taskId}", async (string name, string 
 // REST: cancel a specific foreground task on an agent by proxying to the agent's HTTP /cancel/{taskId} endpoint.
 // Targets only the task with the given bridge taskId, leaving all other tasks unaffected.
 // Uses container-name routing — see /cancel above for rationale.
-app.MapPost("/api/agents/{name}/cancel/{**taskId}", async (string name, string taskId, IServiceScopeFactory scopeFactory, IHttpClientFactory httpClientFactory, ContainerProvisioningService provisioning) =>
+// `executionId` (optional, query) is set by the temporal bridge for a durable delegation and is
+// passed on to the agent: see Endpoints/AgentTaskCancel.cs.
+app.MapPost("/api/agents/{name}/cancel/{**taskId}", async (string name, string taskId, string? executionId, IServiceScopeFactory scopeFactory, IHttpClientFactory httpClientFactory, ContainerProvisioningService provisioning) =>
 {
     using var scope = scopeFactory.CreateScope();
     var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
@@ -427,21 +429,8 @@ app.MapPost("/api/agents/{name}/cancel/{**taskId}", async (string name, string t
         return Results.NotFound(new { error = $"Agent '{name}' not found" });
 
     var decodedTaskId = Uri.UnescapeDataString(taskId);
-    var agentUrl = $"{provisioning.GetAgentBaseUrl(agent)}/cancel/{Uri.EscapeDataString(decodedTaskId)}";
-
-    try
-    {
-        var client = httpClientFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(10);
-        var response = await client.PostAsync(agentUrl, null);
-        return response.IsSuccessStatusCode
-            ? Results.Ok(new { message = $"Cancel requested for task '{decodedTaskId}' on agent '{name}'" })
-            : Results.Problem($"Agent returned {(int)response.StatusCode} — cancel may have failed");
-    }
-    catch (Exception ex)
-    {
-        return Results.Problem($"Failed to reach agent '{name}' at {agentUrl}: {ex.Message}");
-    }
+    return await AgentTaskCancel.ForwardAsync(
+        httpClientFactory.CreateClient(), provisioning.GetAgentBaseUrl(agent), name, decodedTaskId, executionId);
 });
 
 // REST: create a new agent — Endpoints/AgentCreateEndpoints.cs

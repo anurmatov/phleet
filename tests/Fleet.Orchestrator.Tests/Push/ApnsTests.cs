@@ -215,6 +215,56 @@ public class ApnsTests
     }
 
     [Fact]
+    public async Task ACount_RidesOnANotification_WithoutChangingWhatItSays()
+    {
+        var (client, handler, _) = NewClient(_ => Answer(HttpStatusCode.OK));
+
+        await client.SendAsync(DeviceToken, Message with { Badge = 2 }, CancellationToken.None);
+
+        var (request, body) = Assert.Single(handler.Seen);
+        using var payload = JsonDocument.Parse(body);
+        var aps = payload.RootElement.GetProperty("aps");
+        Assert.Equal(2, aps.GetProperty("badge").GetInt32());
+        Assert.Equal("Merge approval waiting", aps.GetProperty("alert").GetProperty("title").GetString());
+        Assert.Equal("default", aps.GetProperty("sound").GetString());
+        Assert.Equal("10", Assert.Single(request.Headers.GetValues("apns-priority")));
+    }
+
+    [Fact]
+    public async Task ANotificationWithNoCount_LeavesTheIconAlone()
+    {
+        var (client, handler, _) = NewClient(_ => Answer(HttpStatusCode.OK));
+
+        await client.SendAsync(DeviceToken, Message, CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.Seen).Body);
+        Assert.False(payload.RootElement.GetProperty("aps").TryGetProperty("badge", out _));
+    }
+
+    [Fact]
+    public async Task ACountAlone_ShowsNothing_MakesNoSound_AndDoesNotWakeThePhone()
+    {
+        var (client, handler, _) = NewClient(_ => Answer(HttpStatusCode.OK));
+
+        await client.SendAsync(DeviceToken, PushMessages.BadgeOnly(0), CancellationToken.None);
+
+        var (request, body) = Assert.Single(handler.Seen);
+        using var payload = JsonDocument.Parse(body);
+        Assert.Equal(["badge"], payload.RootElement.GetProperty("aps").EnumerateObject().Select(p => p.Name));
+        Assert.Equal(0, payload.RootElement.GetProperty("aps").GetProperty("badge").GetInt32());
+        Assert.Equal("alert", Assert.Single(request.Headers.GetValues("apns-push-type")));
+        Assert.Equal("5", Assert.Single(request.Headers.GetValues("apns-priority")));
+    }
+
+    [Fact]
+    public void EveryCount_CollapsesIntoTheNewest()
+    {
+        // A phone that was out of reach is handed one count, the latest, never two out of order.
+        Assert.Equal(PushMessages.BadgeOnly(0).CollapseId, PushMessages.BadgeOnly(5).CollapseId);
+        Assert.NotEqual(PushMessages.BadgeOnly(0).CollapseId, Message.CollapseId);
+    }
+
+    [Fact]
     public async Task TheSameEvent_AlwaysCollapsesTheSameWay_AndADifferentOneDoesNot()
     {
         Assert.Equal(Message.CollapseId, (Message with { Title = "worded differently" }).CollapseId);

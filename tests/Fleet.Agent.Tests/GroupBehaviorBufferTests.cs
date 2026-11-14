@@ -19,7 +19,10 @@ public class GroupBehaviorBufferTests
         {
             Name = "test-agent",
             Role = "test",
-            WorkDir = Path.GetTempPath(),
+            // Its own directory: the buffer is persisted under WorkDir and capped at 50 entries,
+            // so in the shared temp directory OnRelayMessage_Response_DoesBuffer found the entries
+            // of every earlier run and failed from the 51st run on a machine.
+            WorkDir = Path.Combine(Path.GetTempPath(), "group-behavior-buffer-" + Guid.NewGuid().ToString("N")),
             GroupDebounceSeconds = 30,
             ShortName = "test"
         });

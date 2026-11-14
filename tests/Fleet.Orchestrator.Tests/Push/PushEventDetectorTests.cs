@@ -311,6 +311,88 @@ public class PushEventDetectorTests
         }
     }
 
+    // ── The count on the app's icon ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public void TheCount_IsOneForEachSignalARunIsWaitingFor()
+    {
+        var (detector, _) = NewDetector();
+
+        Observe(detector, running: [Run(), Run("pr-43", runId: "run-9"), Run("pr-44", phase: "implementation")]);
+
+        Assert.Equal(2, detector.WaitingCount);
+    }
+
+    [Fact]
+    public void TheCountAtStartUp_IsRecorded_NotSent()
+    {
+        var (detector, _) = NewDetector();
+        Observe(detector, running: [Run()]);
+
+        Assert.Null(detector.TakeBadgeChange(carriedByAnother: false));
+        Assert.Null(detector.TakeBadgeChange(carriedByAnother: false));
+    }
+
+    [Fact]
+    public void ACountThatDropped_GoesOutAlone_Once()
+    {
+        var (detector, _) = NewDetector();
+        Observe(detector, running: [Run()]);
+        detector.TakeBadgeChange(carriedByAnother: false);
+
+        // Answered from the dashboard: nothing announces a gate that stopped waiting.
+        Assert.Empty(Observe(detector, running: [Run(phase: "implementation")]));
+        var badge = detector.TakeBadgeChange(carriedByAnother: false);
+
+        Assert.NotNull(badge);
+        Assert.True(badge.IsBadgeOnly);
+        Assert.Equal(0, badge.Badge);
+        Assert.True(detector.IsCurrent(badge.Key));
+        Assert.Null(detector.TakeBadgeChange(carriedByAnother: false));
+    }
+
+    [Fact]
+    public void ACountAnotherNotificationCarries_IsNotSentTwice()
+    {
+        var (detector, _) = NewDetector();
+        Observe(detector);
+        detector.TakeBadgeChange(carriedByAnother: false);
+
+        Assert.Single(Observe(detector, running: [Run()]));
+
+        // The gate's own notification carries the new count.
+        Assert.Null(detector.TakeBadgeChange(carriedByAnother: true));
+        Assert.Null(detector.TakeBadgeChange(carriedByAnother: false));
+    }
+
+    [Fact]
+    public void ACountThatHasSinceChanged_IsNoLongerCurrent()
+    {
+        var (detector, _) = NewDetector();
+        Observe(detector, running: [Run(), Run("pr-43", runId: "run-9")]);
+        detector.TakeBadgeChange(carriedByAnother: false);
+        Observe(detector, running: [Run()]);
+        var one = detector.TakeBadgeChange(carriedByAnother: false);
+        Assert.NotNull(one);
+
+        Observe(detector);
+
+        Assert.False(detector.IsCurrent(one.Key));
+        Assert.True(detector.IsCurrent(PushMessages.BadgeKey(0)));
+    }
+
+    [Fact]
+    public void ACountAlone_SaysNothing_AndNamesNothing()
+    {
+        using var doc = JsonDocument.Parse(PushMessages.BadgeOnly(3).ToPayload());
+
+        var aps = doc.RootElement.GetProperty("aps");
+        Assert.Equal(["badge"], aps.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(3, aps.GetProperty("badge").GetInt32());
+        Assert.Equal(["kind"], doc.RootElement.GetProperty("phleet").EnumerateObject().Select(p => p.Name));
+        Assert.Equal("badge", doc.RootElement.GetProperty("phleet").GetProperty("kind").GetString());
+    }
+
     [Fact]
     public void ARunWithNoRepository_IsDescribedByItsIdentifier()
     {

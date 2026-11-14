@@ -64,7 +64,9 @@ public sealed partial class ApnsClient(HttpClient http, IOptions<PushOptions> op
         request.Headers.TryAddWithoutValidation("authorization", "bearer " + token.Current(time.GetUtcNow()));
         request.Headers.TryAddWithoutValidation("apns-topic", o.ApnsTopic.Trim());
         request.Headers.TryAddWithoutValidation("apns-push-type", "alert");
-        request.Headers.TryAddWithoutValidation("apns-priority", "10");
+        // A count on the icon is not worth waking a phone for; everything else is something a
+        // person asked to be told about now.
+        request.Headers.TryAddWithoutValidation("apns-priority", message.IsBadgeOnly ? "5" : "10");
         // An hour: a decision that has waited an hour for the phone to come back is stale news.
         request.Headers.TryAddWithoutValidation("apns-expiration", time.GetUtcNow().AddHours(1).ToUnixTimeSeconds().ToString());
         request.Headers.TryAddWithoutValidation("apns-collapse-id", message.CollapseId);
@@ -109,28 +111,48 @@ public sealed partial class ApnsClient(HttpClient http, IOptions<PushOptions> op
 /// <summary>
 /// One notification: what the person reads, and what the app needs to open the right screen.
 /// </summary>
-/// <param name="Kind"><c>gate</c>, <c>run</c> or <c>agent</c>.</param>
+/// <param name="Kind"><c>gate</c>, <c>run</c>, <c>agent</c> or <c>chat</c>; <c>badge</c> for a count and nothing else.</param>
 /// <param name="Title">One short line.</param>
 /// <param name="Body">What it is about: a repository and number, or an agent's name. Never task text.</param>
 /// <param name="Target">Identifiers the app routes on. Never a secret.</param>
 /// <param name="Key">Identifies the event, so a repeat replaces rather than stacks.</param>
-public sealed record PushMessage(string Kind, string Title, string Body, IReadOnlyDictionary<string, string> Target, string Key)
+/// <param name="Badge">
+/// How many runs are waiting for a person, for the app's icon. Null leaves the icon as it is. Set
+/// when the notification is sent, not when it is made, so a notification sent again carries the
+/// count as it is then.
+/// </param>
+public sealed record PushMessage(
+    string Kind, string Title, string Body, IReadOnlyDictionary<string, string> Target, string Key, int? Badge = null)
 {
+    /// <summary>The kind of a notification that only sets the count on the app's icon.</summary>
+    public const string BadgeKind = "badge";
+
+    /// <summary>Shows nothing and makes no sound: it corrects the number on the icon.</summary>
+    public bool IsBadgeOnly => Kind == BadgeKind;
+
     /// <summary>At most 64 bytes, as Apple requires, and stable for the same event.</summary>
+    /// <remarks>
+    /// Every count shares one identifier, so a phone that was out of reach is handed only the
+    /// newest: two counts delivered in the wrong order would leave the older one on the icon.
+    /// </remarks>
     public string CollapseId =>
-        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Key)))[..40].ToLowerInvariant();
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(IsBadgeOnly ? BadgeKind : Key)))[..40].ToLowerInvariant();
 
     public byte[] ToPayload()
     {
+        var aps = new Dictionary<string, object>();
+        if (!IsBadgeOnly)
+        {
+            aps["alert"] = new Dictionary<string, string> { ["title"] = Title, ["body"] = Body };
+            aps["sound"] = "default";
+            aps["thread-id"] = Kind;
+        }
+        if (Badge is { } badge) aps["badge"] = Math.Max(badge, 0);
+
         var phleet = new Dictionary<string, string>(Target) { ["kind"] = Kind };
         return JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object>
         {
-            ["aps"] = new Dictionary<string, object>
-            {
-                ["alert"] = new Dictionary<string, string> { ["title"] = Title, ["body"] = Body },
-                ["sound"] = "default",
-                ["thread-id"] = Kind,
-            },
+            ["aps"] = aps,
             ["phleet"] = phleet,
         });
     }

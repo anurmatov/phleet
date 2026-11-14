@@ -74,9 +74,10 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     /// <summary>
     /// Fired when a message from another agent is received via the relay.
-    /// Parameters: chatId, sender, text, type, correlationId, taskId, workflowId, signalName.
+    /// Parameters: chatId, sender, text, type, correlationId, taskId, workflowId, signalName,
+    /// executionId (set only on a directive from a durable workflow delegation).
     /// </summary>
-    public event Action<long, string, string, string, string?, string?, string?, string?>? MessageReceived;
+    public event Action<long, string, string, string, string?, string?, string?, string?, string?>? MessageReceived;
 
     public GroupRelayService(
         IOptions<AgentOptions> agentConfig,
@@ -339,9 +340,14 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// <see cref="PublishToAgentAsync"/> for a caller that needs to know: true only when the
     /// message was handed to the broker. Never throws.
     /// </summary>
+    /// <param name="executionId">
+    /// Set on the answer to a task whose directive carried one, so the caller can tell this
+    /// attempt's answer from an earlier attempt's under the same task id. Nothing is written when
+    /// it is null.
+    /// </param>
     public async Task<bool> TryPublishToAgentAsync(string targetAgent, long chatId, string text,
         string type = RelayMessageType.Directive, string? correlationId = null, string? taskId = null,
-        string? workflowId = null, string? signalName = null)
+        string? workflowId = null, string? signalName = null, string? executionId = null)
     {
         if (_publishChannel is null || !_initialized)
         {
@@ -356,7 +362,8 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         try
         {
             var routingKey = targetAgent.ToLowerInvariant();
-            var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName);
+            var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName,
+                string.IsNullOrEmpty(executionId) ? null : executionId);
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
 
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
@@ -393,7 +400,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             _logger.LogInformation("Relay received from {Sender} (type={Type}, chat={ChatId}): {Text}",
                 message.Sender, message.Type, message.ChatId, TruncateForLog(message.Text));
 
-            MessageReceived?.Invoke(message.ChatId, message.Sender, message.Text, message.Type, message.CorrelationId, message.TaskId, message.WorkflowId, message.SignalName);
+            MessageReceived?.Invoke(message.ChatId, message.Sender, message.Text, message.Type, message.CorrelationId, message.TaskId, message.WorkflowId, message.SignalName, message.ExecutionId);
         }
         catch (Exception ex)
         {
@@ -460,7 +467,11 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await _connection.CloseAsync();
     }
 
+    // ExecutionId is read from a directive and written only on the answer to a task that has
+    // one, so everything else the agent publishes is the same bytes as before.
     private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
         string Type = RelayMessageType.Directive, string? CorrelationId = null, string? TaskId = null,
-        string? WorkflowId = null, string? SignalName = null);
+        string? WorkflowId = null, string? SignalName = null,
+        [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        string? ExecutionId = null);
 }

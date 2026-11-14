@@ -298,9 +298,13 @@ public class PushEndpointsTests : IAsyncLifetime
     {
         public List<(string Token, string Kind)> Sent { get; } = [];
 
+        /// <summary>The count each send carried, alongside <see cref="Sent"/>.</summary>
+        public List<int?> Badges { get; } = [];
+
         public Task<ApnsResult> SendAsync(string deviceToken, PushMessage message, CancellationToken ct)
         {
             Sent.Add((deviceToken, message.Kind));
+            Badges.Add(message.Badge);
             return Task.FromResult(answer(deviceToken));
         }
     }
@@ -416,11 +420,83 @@ public class PushEndpointsTests : IAsyncLifetime
         await passes.RunAsync(GateRun());
         Assert.Single(apns.Sent);
 
-        // The gate was decided while Apple was down: the phone is not told about it now.
+        // The gate was decided while Apple was down: the phone is not told about it now. What
+        // goes out instead is the count, which is no longer one.
         await passes.RunAsync(GateRun(phase: "implementation"));
 
-        Assert.Single(apns.Sent);
+        Assert.Equal([(TokenA, "gate"), (TokenA, "badge")], apns.Sent);
+        Assert.Equal([1, 0], apns.Badges);
+        Assert.Equal(1, passes.Delivery.Owed);
+    }
+
+    // ── The count on the app's icon ──────────────────────────────────────────────────────────
+
+    private static WorkflowSummary SecondGateRun() =>
+        new("pr-43", "run-9", "UwePrImplementationWorkflow", "fleet", "fleet", "Running", DateTimeOffset.UtcNow.AddHours(-1),
+            PrNumber: 43, Repo: "example/project", Phase: "merge-approval", GateRef: "gate-b");
+
+    [Fact]
+    public async Task EveryNotification_CarriesTheCount_AsItIsWhenItIsSent()
+    {
+        (await PutAsync("device-0001", new { token = TokenA })).Dispose();
+        var appleDown = true;
+        var apns = new FakeApns(_ => appleDown ? Unavailable : Accepted);
+        var passes = new Passes(NewDelivery(apns));
+        await passes.RunAsync();
+
+        await passes.RunAsync(GateRun());
+        Assert.Equal([1], apns.Badges);
+
+        // A second gate starts waiting before the first notification got through. Sent again, the
+        // first one must carry two, not put one back on the icon.
+        appleDown = false;
+        await passes.RunAsync(GateRun(), SecondGateRun());
+
+        Assert.Equal([(TokenA, "gate"), (TokenA, "gate"), (TokenA, "gate")], apns.Sent);
+        Assert.Equal([1, 2, 2], apns.Badges);
+    }
+
+    [Fact]
+    public async Task AGateAnsweredElsewhere_CorrectsTheCount_WithoutSayingAnything()
+    {
+        (await PutAsync("device-0001", new { token = TokenA })).Dispose();
+        var apns = new FakeApns(_ => Accepted);
+        var passes = new Passes(NewDelivery(apns));
+        await passes.RunAsync();
+        await passes.RunAsync(GateRun(), SecondGateRun());
+        Assert.Equal([2, 2], apns.Badges);
+
+        // One gate is decided from the dashboard. Nothing announces that, so the count goes alone.
+        await passes.RunAsync(GateRun());
+        Assert.Equal((TokenA, "badge"), apns.Sent[^1]);
+        Assert.Equal(1, apns.Badges[^1]);
+
+        // Told once: the same count is not sent again on the next pass.
+        await passes.RunAsync(GateRun());
+        Assert.Equal(3, apns.Sent.Count);
+    }
+
+    [Fact]
+    public async Task ACountThatChangedAgain_IsNotSentLate()
+    {
+        (await PutAsync("device-0001", new { token = TokenA })).Dispose();
+        var appleDown = false;
+        var apns = new FakeApns(_ => appleDown ? Unavailable : Accepted);
+        var passes = new Passes(NewDelivery(apns));
+        await passes.RunAsync();
+        await passes.RunAsync(GateRun(), SecondGateRun());
+
+        // Down to one while Apple is unreachable, then to none: the "one" that never got through
+        // is dropped, and only "none" is sent once Apple answers.
+        appleDown = true;
+        await passes.RunAsync(GateRun());
+        await passes.RunAsync();
+        appleDown = false;
+        await passes.RunAsync();
+
+        Assert.Equal(0, apns.Badges[^1]);
         Assert.Equal(0, passes.Delivery.Owed);
+        Assert.DoesNotContain(1, apns.Badges.Skip(4));
     }
 
     [Fact]

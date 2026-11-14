@@ -1540,7 +1540,6 @@
               "ci_unavailable_reads": "0",
               "ci_silent_reads": "0",
               "review_hold_passes": "0",
-              "merge_hold_passes": "0",
               "merge_issued_seq": "none",
               "merge_ready_command": ""
             }
@@ -3810,7 +3809,7 @@
                         "name": "notify_stalled",
                         "type": "delegate",
                         "target": "{{config.CtoAgent}}",
-                        "instruction": "Technical stall, for you only. Do not notify the primary human and do not ask anyone for a decision: this state has no button and reads no signal.\nPR {{vars.pr_url}}, head {{vars.H}}, reason {{vars.stall_reason}}. Reads at this head that were not success: pending {{vars.ci_pending_reads}}, unavailable {{vars.ci_unavailable_reads}}, silent {{vars.ci_silent_reads}}; last CI detail {{vars.ci_detail | default: 'none'}}; merge hold reason {{vars.hold_reason | default: 'none'}}.\nThe run reads CI again at 180, 360, 540 and 720 minutes and resumes by itself on success. After the fourth read without success it ends as a timeout and the PR stays open. A human can only cancel the run.\nIf you see a concrete authority, risk, cost or scope question here, raise it through your normal channel. Otherwise do nothing. No code, branch, PR or workflow change.",
+                        "instruction": "Technical stall, for you only. Do not notify the primary human and do not ask anyone for a decision: this state has no button and reads no signal.\nPR {{vars.pr_url}}, head {{vars.H}}, reason {{vars.stall_reason}}. Reads at this head that were not success: pending {{vars.ci_pending_reads}}, unavailable {{vars.ci_unavailable_reads}}, silent {{vars.ci_silent_reads}}; last CI detail {{vars.ci_detail | default: 'none'}}; merge hold reason {{vars.hold_reason | default: 'none'}}.\nThe run reads again at 180, 360, 540 and 720 minutes and goes on by itself when a read is clear: CI at this head for ci_timeout, and for merge_held the re-pin and the merge preflight. After the fourth read that is not clear it ends as a timeout and the PR stays open. A human can only cancel the run.\nIf you see a concrete authority, risk, cost or scope question here, raise it through your normal channel. Otherwise do nothing. No code, branch, PR or workflow change.",
                         "timeoutMinutes": 5,
                         "outputVar": "notify_stalled",
                         "ignoreFailure": true,
@@ -3835,57 +3834,483 @@
                             "seconds": 10800
                           },
                           {
-                            "name": "clear_ci_probe",
-                            "type": "set_variable",
-                            "vars": {
-                              "probe_report": ""
-                            }
-                          },
-                          {
-                            "name": "ci_probe",
-                            "type": "delegate",
-                            "target": "{{config.CtoAgent}}",
-                            "instruction": "Read-only CI probe for {{input.Repo}}, PR {{vars.pr_url}}; if URL absent, find the unique PR on {{input.BranchName}}. The workflow expects head {{vars.H}}.\nRead the actual gh headRefOid, then EVERY page of check-runs and commit statuses at that actual head, and run /opt/fleet/acceptance_plan.py ci-rollup on the complete arrays. Zero results is pending. If any GitHub read fails or a page is missing, report CI_READ: error and CI: pending; never report success from a partial read. Report the actual head even when it differs from the expected one.\nThis turn reads CI and nothing else: no diff, no issue text, no review, no comment, no re-run of a check, no push, no merge, no other change.\nReturn exactly these token lines: HEAD_OID: <40 hex>, CI_READ: ok|error, CI: success|pending|failure, CI_FAILING: <names|none>, CI_DETAIL: running|none_reported|unexpected_terminal|none. The CI, CI_FAILING and CI_DETAIL lines are the ci-rollup output, verbatim.",
-                            "timeoutMinutes": 15,
-                            "outputVar": "probe_report",
-                            "ignoreFailure": true,
-                            "retryOnIncomplete": false,
-                            "maxIncompleteRetries": 0
-                          },
-                          {
-                            "name": "ci_probe_fields",
-                            "type": "set_variable",
-                            "vars": {
-                              "probe_head": "{{vars.probe_report | extract: '(?m)^HEAD_OID: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
-                              "ci_line": "{{vars.probe_report | extract: '(?m)^CI: (success|pending|failure)\\r?$' | default: 'none'}}",
-                              "ci_read": "{{vars.probe_report | extract: '(?m)^CI_READ: (ok|error)\\r?$' | default: 'none'}}",
-                              "ci_failing": "{{vars.probe_report | extract: '(?m)^CI_FAILING: ([^\\r\\n]+)\\r?$' | default: 'unknown'}}",
-                              "ci_detail": "{{vars.probe_report | extract: '(?m)^CI_DETAIL: (running|none_reported|unexpected_terminal|none)\\r?$' | default: 'none'}}"
-                            }
-                          },
-                          {
-                            "name": "ci_read_classify",
-                            "type": "sequence",
-                            "steps": [
-                              {
-                                "name": "ci_read_head_pair",
-                                "type": "set_variable",
-                                "vars": {
-                                  "pair": "{{vars.probe_head}}={{vars.H}}"
-                                }
-                              },
-                              {
-                                "name": "ci_read_head_equal",
-                                "type": "branch",
-                                "on": "{{vars.pair | extract: '^([0-9a-f]{40})=\\1$'}}",
-                                "cases": {
-                                  "": {
-                                    "name": "ci_read_head_known",
+                            "name": "stalled_read_kind",
+                            "type": "branch",
+                            "on": "{{vars.stall_resume}}",
+                            "cases": {
+                              "MERGE": {
+                                "name": "stalled_merge_read",
+                                "type": "sequence",
+                                "steps": [
+                                  {
+                                    "name": "merge_repin_check",
+                                    "type": "sequence",
+                                    "steps": [
+                                      {
+                                        "name": "clear_pin_report",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "pin_report": ""
+                                        }
+                                      },
+                                      {
+                                        "name": "pin_after_approval",
+                                        "type": "delegate",
+                                        "target": "{{config.CtoAgent}}",
+                                        "instruction": "REQUIRE_ACCEPTANCE: {{vars.acceptance_mode}}\nIn off mode read only the actual gh headRefOid, EVERY page of check-runs and commit statuses for ci-rollup (zero/error is pending), and diff paths for change-class (deny list wins). Return HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS only. CI_READ is ok when every check-run and status page was read and error when any GitHub read failed; CI is then pending. Skip issue-body hashing, design lookup, plan, receipts, prior rounds, owner and capability-map checks. Ignore all acceptance tokens even if present. Do not run acceptance work. The instructions below apply only in required mode.\n\nRead-only PIN for {{input.Repo}}, issue {{input.IssueNumber}}, PR {{vars.pr_url}}; if URL absent, find the unique PR on {{input.BranchName}}. Use /opt/fleet/acceptance_plan.py and actual gh headRefOid. Collect EVERY page of check-runs and commit statuses at that exact head for ci-rollup; zero/error is pending, never success. Read diff paths for change-class (deny list wins). Fetch the exact issue body bytes; run body-sha without adding a newline. On first PIN find approval evidence ONLY with temporal_list_workflows limit:100 and query WorkflowType=\"UweDesignWorkflow\" AND Repo=\"{{input.Repo}}\" AND IssueNumber={{input.IssueNumber}} AND ExecutionStatus=\"Completed\" AND ReviewRef=\"<BODY_SHA256>\". Newest startTime first, call temporal_get_workflow_result for each row with workflow_id=<row.workflowId>, run_id=<row.runId>; save returned text verbatim and run acceptance_plan.py design-result --issue {{input.IssueNumber}} --workflow-id <row.workflowId> --run-id <row.runId> --result-file <file>. Only DESIGN_MATCH: yes counts. Every error, null, bare/old bridge result or mismatch means --design-match no in plan-evidence and PLAN_APPROVAL:none. Never fetch a result without run_id or follow a continued run. Hash canonical fenced Acceptance plan JSON, run plan-check. Compare against the in-run approved hash {{vars.approved_plan_sha256}}; no new run inherits an in-run approval. Read all receipt/comment pages, prior-rounds with PriorFixRounds={{input.PriorFixRounds | default: 'absent'}} / PriorBatchRounds={{input.PriorBatchRounds | default: 'absent'}}, prior-clean for EVERY earlier attempt of this run, and harness-evidence at the current head; malformed/error harness evidence is unknown. Validate owner enabled/running, not implementer/reviewer, all capabilities and existing prerequisites with access-check. Resolve an explicit 40-hex private-map commit, not an agent-image value: <capability map, see docs/pr-acceptance.md>. Record commit/hash and resolved SshTargets; missing map makes host access invalid, non-host items still evaluate. No grants, prerequisites, configuration, tools, instructions, definitions, production changes or deployments.\nReturn exactly these token lines: PR, HEAD_OID, IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS, PLAN, PLAN_SHA256, MAX_DURATION, WAIT_SECONDS, PRE_STAGES, POST_STAGES, OWNER, PRIOR_RECEIPTS, PRIOR_ATTEMPTS_CLEAN, PRIOR_ROUNDS, PRIOR_LAST_HEAD, MAP_COMMIT, MAP_SHA256, SSH_TARGETS, PINNED_AT, BODY_SHA256, PLAN_APPROVAL, APPROVED_PLAN_SHA256, ACCEPTANCE_ISO, HARNESS_RETRY_SPENT. Tokens and meanings are those in docs/pr-acceptance.md; missing evidence is never ok.\nPlan source: use the fenced issue-body plan. If that plan is absent and this run already has approved_plan_sha256={{vars.approved_plan_sha256}} from a bound CEO plan gate, read every comment page and select only the plan comment whose canonical JSON hash equals that exact approved hash; validate it and report PLAN_APPROVAL: gate. Never use an unapproved comment or inherit an earlier run gate. If a present body plan differs, report plan_changed rather than hiding it behind an old comment. The plan gate approves its displayed hash, not a subsequent read.",
+                                        "timeoutMinutes": 15,
+                                        "outputVar": "pin_report",
+                                        "ignoreFailure": true,
+                                        "retryOnIncomplete": false,
+                                        "maxIncompleteRetries": 0
+                                      },
+                                      {
+                                        "name": "pin_fields_mode",
+                                        "type": "branch",
+                                        "on": "{{vars.acceptance_mode}}",
+                                        "cases": {
+                                          "required": {
+                                            "name": "pin_fields",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "head_oid": "{{vars.pin_report | extract: '(?m)^HEAD_OID: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+                                              "ci": "{{vars.pin_report | extract: '(?m)^CI: (success|pending|failure)\\r?$' | default: 'pending'}}",
+                                              "change_class": "{{vars.pin_report | extract: '(?m)^CHANGE_CLASS: (doc_only|code)\\r?$' | default: 'code'}}",
+                                              "plan": "{{vars.pin_report | extract: '(?m)^PLAN: (ok|missing|invalid|exceeds|changed)\\r?$' | default: 'invalid'}}",
+                                              "plan_sha": "{{vars.pin_report | extract: '(?m)^PLAN_SHA256: ([0-9a-f]{64})\\r?$' | default: 'none'}}",
+                                              "max_duration": "{{vars.pin_report | extract: '(?m)^MAX_DURATION: (3600|7200|14400|21600)\\r?$' | default: 'none'}}",
+                                              "wait_seconds": "{{vars.pin_report | extract: '(?m)^WAIT_SECONDS: (0|60|300|900|1800|3660|7260|14460)\\r?$' | default: 'none'}}",
+                                              "post_stages": "{{vars.pin_report | extract: '(?m)^POST_STAGES: ([0-4])\\r?$' | default: 'none'}}",
+                                              "owner": "{{vars.pin_report | extract: '(?m)^OWNER: ([^\\r\\n]+)\\r?$' | default: 'invalid'}}",
+                                              "prior_receipts": "{{vars.pin_report | extract: '(?m)^PRIOR_RECEIPTS: (yes|no)\\r?$' | default: 'yes'}}",
+                                              "prior_clean": "{{vars.pin_report | extract: '(?m)^PRIOR_ATTEMPTS_CLEAN: (yes|no)\\r?$' | default: 'no'}}",
+                                              "prior_rounds": "{{vars.pin_report | extract: '(?m)^PRIOR_ROUNDS: (ok|invalid)\\r?$' | default: 'invalid'}}",
+                                              "prior_head": "{{vars.pin_report | extract: '(?m)^PRIOR_LAST_HEAD: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+                                              "plan_approval": "{{vars.pin_report | extract: '(?m)^PLAN_APPROVAL: (design|gate|none)\\r?$' | default: 'none'}}",
+                                              "acceptance_iso": "{{vars.pin_report | extract: '(?m)^ACCEPTANCE_ISO: (isolated|production)\\r?$' | default: 'production'}}",
+                                              "harness_spent": "{{vars.pin_report | extract: '(?m)^HARNESS_RETRY_SPENT: (yes|no|unknown)\\r?$' | default: 'unknown'}}",
+                                              "map_commit": "{{vars.pin_report | extract: '(?m)^MAP_COMMIT: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+                                              "map_sha": "{{vars.pin_report | extract: '(?m)^MAP_SHA256: ([0-9a-f]{64})\\r?$' | default: 'none'}}",
+                                              "ssh_targets": "{{vars.pin_report | extract: '(?m)^SSH_TARGETS: ([^\\r\\n]+)\\r?$' | default: 'none'}}",
+                                              "pinned_at": "{{vars.pin_report | extract: '(?m)^PINNED_AT: ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z)\\r?$' | default: 'none'}}"
+                                            }
+                                          }
+                                        },
+                                        "default": {
+                                          "name": "off_pin_fields",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "head_oid": "{{vars.pin_report | extract: '(?m)^HEAD_OID: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+                                            "ci": "{{vars.pin_report | extract: '(?m)^CI: (success|pending|failure)\\r?$' | default: 'pending'}}",
+                                            "change_class": "{{vars.pin_report | extract: '(?m)^CHANGE_CLASS: (doc_only|code)\\r?$' | default: 'code'}}"
+                                          }
+                                        }
+                                      },
+                                      {
+                                        "name": "pin_ci_read_fields",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "ci_line": "{{vars.pin_report | extract: '(?m)^CI: (success|pending|failure)\\r?$' | default: 'none'}}",
+                                          "ci_read": "{{vars.pin_report | extract: '(?m)^CI_READ: (ok|error)\\r?$' | default: 'ok'}}",
+                                          "ci_failing": "{{vars.pin_report | extract: '(?m)^CI_FAILING: ([^\\r\\n]+)\\r?$' | default: 'unknown'}}",
+                                          "ci_detail": "{{vars.pin_report | extract: '(?m)^CI_DETAIL: (running|none_reported|unexpected_terminal|none)\\r?$' | default: 'none'}}"
+                                        }
+                                      },
+                                      {
+                                        "name": "pin_ci_read_error",
+                                        "type": "branch",
+                                        "on": "{{vars.ci_read}}",
+                                        "cases": {
+                                          "error": {
+                                            "name": "pin_ci_read_error_is_pending",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "ci": "pending"
+                                            }
+                                          }
+                                        }
+                                      },
+                                      {
+                                        "name": "ci_read_classify",
+                                        "type": "sequence",
+                                        "steps": [
+                                          {
+                                            "name": "ci_read_head_pair",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "pair": "{{vars.head_oid}}={{vars.H}}"
+                                            }
+                                          },
+                                          {
+                                            "name": "ci_read_head_equal",
+                                            "type": "branch",
+                                            "on": "{{vars.pair | extract: '^([0-9a-f]{40})=\\1$'}}",
+                                            "cases": {
+                                              "": {
+                                                "name": "ci_read_head_known",
+                                                "type": "branch",
+                                                "on": "{{vars.head_oid}}",
+                                                "cases": {
+                                                  "none": {
+                                                    "name": "ci_read_headless",
+                                                    "type": "branch",
+                                                    "on": "{{vars.ci_read}}",
+                                                    "cases": {
+                                                      "error": {
+                                                        "name": "ci_read_unavailable",
+                                                        "type": "set_variable",
+                                                        "vars": {
+                                                          "ci_evidence": "unavailable"
+                                                        }
+                                                      }
+                                                    },
+                                                    "default": {
+                                                      "name": "ci_read_silent",
+                                                      "type": "set_variable",
+                                                      "vars": {
+                                                        "ci_evidence": "silent"
+                                                      }
+                                                    }
+                                                  }
+                                                },
+                                                "default": {
+                                                  "name": "ci_read_moved",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "ci_evidence": "moved"
+                                                  }
+                                                }
+                                              }
+                                            },
+                                            "default": {
+                                              "name": "ci_read_state",
+                                              "type": "branch",
+                                              "on": "{{vars.ci_read}}",
+                                              "cases": {
+                                                "error": {
+                                                  "name": "ci_read_unavailable",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "ci_evidence": "unavailable"
+                                                  }
+                                                },
+                                                "ok": {
+                                                  "name": "ci_read_result",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "ci_evidence": "{{vars.ci_line | extract: '^(success|failure|pending)$' | default: 'silent'}}"
+                                                  }
+                                                }
+                                              },
+                                              "default": {
+                                                "name": "ci_read_silent",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "ci_evidence": "silent"
+                                                }
+                                              }
+                                            }
+                                          },
+                                          {
+                                            "name": "ci_read_epoch_pair",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "pair": "{{vars.ci_reads_head}}={{vars.H}}"
+                                            }
+                                          },
+                                          {
+                                            "name": "ci_read_epoch",
+                                            "type": "branch",
+                                            "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
+                                            "cases": {
+                                              "": {
+                                                "name": "ci_read_epoch_reset",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "ci_reads_head": "{{vars.H}}",
+                                                  "ci_pending_reads": "0",
+                                                  "ci_unavailable_reads": "0",
+                                                  "ci_silent_reads": "0",
+                                                  "review_hold_passes": "0"
+                                                }
+                                              }
+                                            }
+                                          },
+                                          {
+                                            "name": "ci_read_count",
+                                            "type": "branch",
+                                            "on": "{{vars.ci_evidence}}",
+                                            "cases": {
+                                              "pending": {
+                                                "name": "count_pending_read",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "ci_pending_reads": "{{vars.ci_pending_reads | add: 1}}"
+                                                }
+                                              },
+                                              "unavailable": {
+                                                "name": "count_unavailable_read",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "ci_unavailable_reads": "{{vars.ci_unavailable_reads | add: 1}}"
+                                                }
+                                              },
+                                              "silent": {
+                                                "name": "count_silent_read",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "ci_silent_reads": "{{vars.ci_silent_reads | add: 1}}"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "name": "merge_repin_route",
+                                        "type": "branch",
+                                        "on": "{{vars.ci_evidence}}",
+                                        "cases": {
+                                          "success": {
+                                            "name": "merge_preflight_check",
+                                            "type": "sequence",
+                                            "steps": [
+                                              {
+                                                "name": "clear_merge_preflight",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "preflight_report": ""
+                                                }
+                                              },
+                                              {
+                                                "name": "merge_preflight",
+                                                "type": "delegate",
+                                                "target": "{{config.CtoAgent}}",
+                                                "instruction": "Read-only merge preflight for {{vars.pr_url}} in repo {{input.Repo}}, pinned head {{vars.review_ref}}. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergeStateStatus,mergeable,isDraft,headRefOid\n\nThis turn only reads. Nothing here marks the PR ready, merges it, pushes, comments, approves, re-runs a check or changes anything; the merge command is a separate later turn.\nAnswer held only for an obstacle that exists now and that waiting can clear: required checks still pending (checks_pending), a merge queue or an ordering rule you have to wait for (queue), a closed merge window or freeze (window_closed), or another named obstacle (other). A draft PR is not an obstacle: report it in IS_DRAFT. Otherwise answer clear.\nReturn exactly these token lines: MERGE_PREFLIGHT: clear|held, HOLD_REASON: checks_pending|queue|window_closed|other|none, IS_DRAFT: true|false, then one line of evidence.",
+                                                "timeoutMinutes": 10,
+                                                "outputVar": "preflight_report",
+                                                "ignoreFailure": true,
+                                                "retryOnIncomplete": false,
+                                                "maxIncompleteRetries": 0
+                                              },
+                                              {
+                                                "name": "merge_preflight_fields",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "preflight": "{{vars.preflight_report | extract: '(?m)^MERGE_PREFLIGHT: (clear|held)\\r?$' | default: 'held'}}",
+                                                  "hold_reason": "{{vars.preflight_report | extract: '(?m)^HOLD_REASON: (checks_pending|queue|window_closed|other)\\r?$' | default: 'other'}}",
+                                                  "pr_is_draft": "{{vars.preflight_report | extract: '(?m)^IS_DRAFT: (true|false)\\r?$' | default: 'unknown'}}"
+                                                }
+                                              },
+                                              {
+                                                "name": "merge_preflight_answer",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "preflight_answer": "{{vars.preflight}}/{{vars.pr_is_draft}}"
+                                                }
+                                              },
+                                              {
+                                                "name": "merge_preflight_result",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "merge_ready": "{{vars.preflight_answer | extract: '^(clear)/(?:true|false)$' | default: 'held'}}"
+                                                }
+                                              },
+                                              {
+                                                "name": "merge_ready_command",
+                                                "type": "branch",
+                                                "on": "{{vars.pr_is_draft}}",
+                                                "cases": {
+                                                  "true": {
+                                                    "name": "merge_ready_first",
+                                                    "type": "set_variable",
+                                                    "vars": {
+                                                      "merge_ready_command": "gh pr ready {{vars.pr_url}} --repo {{input.Repo}}\n"
+                                                    }
+                                                  }
+                                                },
+                                                "default": {
+                                                  "name": "merge_ready_not_needed",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "merge_ready_command": ""
+                                                  }
+                                                }
+                                              }
+                                            ]
+                                          },
+                                          "failure": {
+                                            "name": "merge_repin_failure",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "merge_ready": "failure"
+                                            }
+                                          },
+                                          "moved": {
+                                            "name": "merge_repin_moved",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "merge_ready": "moved"
+                                            }
+                                          }
+                                        },
+                                        "default": {
+                                          "name": "merge_repin_not_success",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "merge_ready": "held",
+                                            "hold_reason": "checks_pending"
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  },
+                                  {
+                                    "name": "stalled_merge_route",
                                     "type": "branch",
-                                    "on": "{{vars.probe_head}}",
+                                    "on": "{{vars.merge_ready}}",
                                     "cases": {
-                                      "none": {
-                                        "name": "ci_read_headless",
+                                      "clear": {
+                                        "name": "stalled_merge_clear",
+                                        "type": "sequence",
+                                        "steps": [
+                                          {
+                                            "name": "stalled_success",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "stall_outcome": "resume"
+                                            }
+                                          },
+                                          {
+                                            "type": "break"
+                                          }
+                                        ]
+                                      },
+                                      "failure": {
+                                        "name": "stalled_merge_red",
+                                        "type": "sequence",
+                                        "steps": [
+                                          {
+                                            "name": "stalled_failure",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "stall_outcome": "failure",
+                                              "stall_report": "{{vars.pin_report}}"
+                                            }
+                                          },
+                                          {
+                                            "type": "break"
+                                          }
+                                        ]
+                                      },
+                                      "moved": {
+                                        "name": "stalled_merge_head_moved",
+                                        "type": "sequence",
+                                        "steps": [
+                                          {
+                                            "name": "stalled_moved",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "stall_outcome": "moved"
+                                            }
+                                          },
+                                          {
+                                            "type": "break"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "default": {
+                              "name": "stalled_ci_read",
+                              "type": "sequence",
+                              "steps": [
+                                {
+                                  "name": "clear_ci_probe",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "probe_report": ""
+                                  }
+                                },
+                                {
+                                  "name": "ci_probe",
+                                  "type": "delegate",
+                                  "target": "{{config.CtoAgent}}",
+                                  "instruction": "Read-only CI probe for {{input.Repo}}, PR {{vars.pr_url}}; if URL absent, find the unique PR on {{input.BranchName}}. The workflow expects head {{vars.H}}.\nRead the actual gh headRefOid, then EVERY page of check-runs and commit statuses at that actual head, and run /opt/fleet/acceptance_plan.py ci-rollup on the complete arrays. Zero results is pending. If any GitHub read fails or a page is missing, report CI_READ: error and CI: pending; never report success from a partial read. Report the actual head even when it differs from the expected one.\nThis turn reads CI and nothing else: no diff, no issue text, no review, no comment, no re-run of a check, no push, no merge, no other change.\nReturn exactly these token lines: HEAD_OID: <40 hex>, CI_READ: ok|error, CI: success|pending|failure, CI_FAILING: <names|none>, CI_DETAIL: running|none_reported|unexpected_terminal|none. The CI, CI_FAILING and CI_DETAIL lines are the ci-rollup output, verbatim.",
+                                  "timeoutMinutes": 15,
+                                  "outputVar": "probe_report",
+                                  "ignoreFailure": true,
+                                  "retryOnIncomplete": false,
+                                  "maxIncompleteRetries": 0
+                                },
+                                {
+                                  "name": "ci_probe_fields",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "probe_head": "{{vars.probe_report | extract: '(?m)^HEAD_OID: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+                                    "ci_line": "{{vars.probe_report | extract: '(?m)^CI: (success|pending|failure)\\r?$' | default: 'none'}}",
+                                    "ci_read": "{{vars.probe_report | extract: '(?m)^CI_READ: (ok|error)\\r?$' | default: 'none'}}",
+                                    "ci_failing": "{{vars.probe_report | extract: '(?m)^CI_FAILING: ([^\\r\\n]+)\\r?$' | default: 'unknown'}}",
+                                    "ci_detail": "{{vars.probe_report | extract: '(?m)^CI_DETAIL: (running|none_reported|unexpected_terminal|none)\\r?$' | default: 'none'}}"
+                                  }
+                                },
+                                {
+                                  "name": "ci_read_classify",
+                                  "type": "sequence",
+                                  "steps": [
+                                    {
+                                      "name": "ci_read_head_pair",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "pair": "{{vars.probe_head}}={{vars.H}}"
+                                      }
+                                    },
+                                    {
+                                      "name": "ci_read_head_equal",
+                                      "type": "branch",
+                                      "on": "{{vars.pair | extract: '^([0-9a-f]{40})=\\1$'}}",
+                                      "cases": {
+                                        "": {
+                                          "name": "ci_read_head_known",
+                                          "type": "branch",
+                                          "on": "{{vars.probe_head}}",
+                                          "cases": {
+                                            "none": {
+                                              "name": "ci_read_headless",
+                                              "type": "branch",
+                                              "on": "{{vars.ci_read}}",
+                                              "cases": {
+                                                "error": {
+                                                  "name": "ci_read_unavailable",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "ci_evidence": "unavailable"
+                                                  }
+                                                }
+                                              },
+                                              "default": {
+                                                "name": "ci_read_silent",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "ci_evidence": "silent"
+                                                }
+                                              }
+                                            }
+                                          },
+                                          "default": {
+                                            "name": "ci_read_moved",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "ci_evidence": "moved"
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "default": {
+                                        "name": "ci_read_state",
                                         "type": "branch",
                                         "on": "{{vars.ci_read}}",
                                         "cases": {
@@ -3894,6 +4319,13 @@
                                             "type": "set_variable",
                                             "vars": {
                                               "ci_evidence": "unavailable"
+                                            }
+                                          },
+                                          "ok": {
+                                            "name": "ci_read_result",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "ci_evidence": "{{vars.ci_line | extract: '^(success|failure|pending)$' | default: 'silent'}}"
                                             }
                                           }
                                         },
@@ -3906,152 +4338,118 @@
                                         }
                                       }
                                     },
-                                    "default": {
-                                      "name": "ci_read_moved",
+                                    {
+                                      "name": "ci_read_epoch_pair",
                                       "type": "set_variable",
                                       "vars": {
-                                        "ci_evidence": "moved"
-                                      }
-                                    }
-                                  }
-                                },
-                                "default": {
-                                  "name": "ci_read_state",
-                                  "type": "branch",
-                                  "on": "{{vars.ci_read}}",
-                                  "cases": {
-                                    "error": {
-                                      "name": "ci_read_unavailable",
-                                      "type": "set_variable",
-                                      "vars": {
-                                        "ci_evidence": "unavailable"
+                                        "pair": "{{vars.ci_reads_head}}={{vars.H}}"
                                       }
                                     },
-                                    "ok": {
-                                      "name": "ci_read_result",
-                                      "type": "set_variable",
-                                      "vars": {
-                                        "ci_evidence": "{{vars.ci_line | extract: '^(success|failure|pending)$' | default: 'silent'}}"
+                                    {
+                                      "name": "ci_read_epoch",
+                                      "type": "branch",
+                                      "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
+                                      "cases": {
+                                        "": {
+                                          "name": "ci_read_epoch_reset",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "ci_reads_head": "{{vars.H}}",
+                                            "ci_pending_reads": "0",
+                                            "ci_unavailable_reads": "0",
+                                            "ci_silent_reads": "0",
+                                            "review_hold_passes": "0"
+                                          }
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "name": "ci_read_count",
+                                      "type": "branch",
+                                      "on": "{{vars.ci_evidence}}",
+                                      "cases": {
+                                        "pending": {
+                                          "name": "count_pending_read",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "ci_pending_reads": "{{vars.ci_pending_reads | add: 1}}"
+                                          }
+                                        },
+                                        "unavailable": {
+                                          "name": "count_unavailable_read",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "ci_unavailable_reads": "{{vars.ci_unavailable_reads | add: 1}}"
+                                          }
+                                        },
+                                        "silent": {
+                                          "name": "count_silent_read",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "ci_silent_reads": "{{vars.ci_silent_reads | add: 1}}"
+                                          }
+                                        }
                                       }
                                     }
-                                  },
-                                  "default": {
-                                    "name": "ci_read_silent",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "ci_evidence": "silent"
+                                  ]
+                                },
+                                {
+                                  "name": "stalled_read_route",
+                                  "type": "branch",
+                                  "on": "{{vars.ci_evidence}}",
+                                  "cases": {
+                                    "success": {
+                                      "name": "stalled_green",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "stalled_success",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "stall_outcome": "resume"
+                                          }
+                                        },
+                                        {
+                                          "type": "break"
+                                        }
+                                      ]
+                                    },
+                                    "failure": {
+                                      "name": "stalled_red",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "stalled_failure",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "stall_outcome": "failure",
+                                            "stall_report": "{{vars.probe_report}}"
+                                          }
+                                        },
+                                        {
+                                          "type": "break"
+                                        }
+                                      ]
+                                    },
+                                    "moved": {
+                                      "name": "stalled_head_moved",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "stalled_moved",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "stall_outcome": "moved"
+                                          }
+                                        },
+                                        {
+                                          "type": "break"
+                                        }
+                                      ]
                                     }
                                   }
                                 }
-                              },
-                              {
-                                "name": "ci_read_epoch_pair",
-                                "type": "set_variable",
-                                "vars": {
-                                  "pair": "{{vars.ci_reads_head}}={{vars.H}}"
-                                }
-                              },
-                              {
-                                "name": "ci_read_epoch",
-                                "type": "branch",
-                                "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
-                                "cases": {
-                                  "": {
-                                    "name": "ci_read_epoch_reset",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "ci_reads_head": "{{vars.H}}",
-                                      "ci_pending_reads": "0",
-                                      "ci_unavailable_reads": "0",
-                                      "ci_silent_reads": "0",
-                                      "review_hold_passes": "0"
-                                    }
-                                  }
-                                }
-                              },
-                              {
-                                "name": "ci_read_count",
-                                "type": "branch",
-                                "on": "{{vars.ci_evidence}}",
-                                "cases": {
-                                  "pending": {
-                                    "name": "count_pending_read",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "ci_pending_reads": "{{vars.ci_pending_reads | add: 1}}"
-                                    }
-                                  },
-                                  "unavailable": {
-                                    "name": "count_unavailable_read",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "ci_unavailable_reads": "{{vars.ci_unavailable_reads | add: 1}}"
-                                    }
-                                  },
-                                  "silent": {
-                                    "name": "count_silent_read",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "ci_silent_reads": "{{vars.ci_silent_reads | add: 1}}"
-                                    }
-                                  }
-                                }
-                              }
-                            ]
-                          },
-                          {
-                            "name": "stalled_read_route",
-                            "type": "branch",
-                            "on": "{{vars.ci_evidence}}",
-                            "cases": {
-                              "success": {
-                                "name": "stalled_green",
-                                "type": "sequence",
-                                "steps": [
-                                  {
-                                    "name": "stalled_success",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "stall_outcome": "resume"
-                                    }
-                                  },
-                                  {
-                                    "type": "break"
-                                  }
-                                ]
-                              },
-                              "failure": {
-                                "name": "stalled_red",
-                                "type": "sequence",
-                                "steps": [
-                                  {
-                                    "name": "stalled_failure",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "stall_outcome": "failure"
-                                    }
-                                  },
-                                  {
-                                    "type": "break"
-                                  }
-                                ]
-                              },
-                              "moved": {
-                                "name": "stalled_head_moved",
-                                "type": "sequence",
-                                "steps": [
-                                  {
-                                    "name": "stalled_moved",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "stall_outcome": "moved"
-                                    }
-                                  },
-                                  {
-                                    "type": "break"
-                                  }
-                                ]
-                              }
+                              ]
                             }
                           }
                         ]
@@ -4080,12 +4478,12 @@
                                   "state": "PIN"
                                 }
                               },
-                              "MERGE_HOLD": {
-                                "name": "stalled_resume_merge_hold",
+                              "MERGE": {
+                                "name": "stalled_resume_merge",
                                 "type": "sequence",
                                 "steps": [
                                   {
-                                    "name": "restore_merge_hold_record",
+                                    "name": "restore_merge_record",
                                     "type": "set_attribute",
                                     "required": true,
                                     "attributes": {
@@ -4094,12 +4492,10 @@
                                     }
                                   },
                                   {
-                                    "name": "route_MERGE_HOLD",
+                                    "name": "route_MERGE",
                                     "type": "set_variable",
                                     "vars": {
-                                      "state": "MERGE_HOLD",
-                                      "merge_hold_mode": "check",
-                                      "merge_hold_phase": "set"
+                                      "state": "MERGE"
                                     }
                                   }
                                 ]
@@ -4117,7 +4513,7 @@
                             "vars": {
                               "state": "IMPLEMENT",
                               "feedback_kind": "consensus",
-                              "feedback": "CI failed at head {{vars.H}}. Failing checks: {{vars.ci_failing}}.\n\n{{vars.probe_report}}"
+                              "feedback": "CI failed at head {{vars.H}}. Failing checks: {{vars.ci_failing}}.\n\n{{vars.stall_report}}"
                             }
                           },
                           "moved": {
@@ -7232,8 +7628,7 @@
                                     "vars": {
                                       "state": "MERGE_HOLD",
                                       "merge_hold_mode": "check",
-                                      "merge_hold_phase": "",
-                                      "merge_hold_passes": "0"
+                                      "merge_hold_phase": ""
                                     }
                                   }
                                 },
@@ -7634,36 +8029,6 @@
                               "name": "merge_hold_wait",
                               "type": "sequence",
                               "steps": [
-                                {
-                                  "name": "merge_hold_budget",
-                                  "type": "branch",
-                                  "on": "{{vars.merge_hold_passes}}",
-                                  "cases": {
-                                    "12": {
-                                      "name": "merge_hold_spent",
-                                      "type": "sequence",
-                                      "steps": [
-                                        {
-                                          "name": "merge_hold_budget_spent",
-                                          "type": "set_variable",
-                                          "vars": {
-                                            "merge_ready": "budget"
-                                          }
-                                        },
-                                        {
-                                          "type": "break"
-                                        }
-                                      ]
-                                    }
-                                  }
-                                },
-                                {
-                                  "name": "merge_hold_count",
-                                  "type": "set_variable",
-                                  "vars": {
-                                    "merge_hold_passes": "{{vars.merge_hold_passes | add: 1}}"
-                                  }
-                                },
                                 {
                                   "name": "merge_hold_phase_once",
                                   "type": "branch",
@@ -8098,7 +8463,7 @@
                               "vars": {
                                 "state": "STALLED",
                                 "stall_reason": "merge_held",
-                                "stall_resume": "MERGE_HOLD"
+                                "stall_resume": "MERGE"
                               }
                             },
                             {

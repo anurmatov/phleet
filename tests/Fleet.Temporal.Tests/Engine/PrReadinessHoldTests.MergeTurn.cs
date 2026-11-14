@@ -296,31 +296,37 @@ public sealed partial class PrReadinessHoldTests
     // ── a merge that stays held ──────────────────────────────────────────────
 
     /// <summary>
-    /// The numbers the runbook states for a merge that stays held while CI stays green, with the
-    /// approval given in the first delivery pass: one hour of hold, then thirty stalls of three
-    /// hours, each with one notice and each followed by one check, until the sixty delivery passes
-    /// are spent. No merge command at any point.
+    /// The numbers the runbook states for a merge that stays held while CI stays green: one hour
+    /// of hold, then one stall of four reads three hours apart, each of them the merge check, one
+    /// notice, no merge command, and the outcome of a gate timeout. Green CI alone resumes nothing,
+    /// so the run does not go round again and the delivery passes are not what ends it.
     /// </summary>
     [Fact]
-    public async Task MergeHeldUnderGreenCi_ThirtyStalls_ThenTheDeliveryPassesRunOut()
+    public async Task MergeHeldUnderGreenCi_OneStallOfFourChecks_ThenTheTimeoutOutcome()
     {
         var script = new Script { Preflight = _ => "held" };
         var run = await RunAsync(script, ApproveFirstVisit, captureWaiter: true, allowFailure: true);
 
-        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 30)), FiredSeconds(run.History));
-        Assert.Equal(30, run.Calls.Count(c => c.Step == "notify_stalled"));
-        Assert.Equal(30, run.Calls.Count(c => c.Step == "ci_probe"));
-        // Thirteen checks in the hold, then one after each stall but the last.
-        Assert.Equal(13 + 29, run.Calls.Count(c => c.Step == "merge_preflight"));
-        Assert.Equal(13 + 29, run.Calls.Count(c => c.Step == "pin_after_approval"));
-        Assert.DoesNotContain(run.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned" or "verify_merge_status");
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 4)), FiredSeconds(run.History));
+        Assert.Single(run.Calls, c => c.Step == "notify_stalled");
+        // At most 12 + 4 re-pins after the one at approval, and as many preflights.
+        Assert.Equal(1 + 12 + 4, run.Calls.Count(c => c.Step == "pin_after_approval"));
+        Assert.Equal(1 + 12 + 4, run.Calls.Count(c => c.Step == "merge_preflight"));
+        Assert.DoesNotContain(run.Calls, c => c.Step is "ci_probe" or "phase4_merge" or "phase4_merge_pinned" or "verify_merge_status" or "notify_merge_failed");
         Assert.Equal(["merge-approval:1"], run.Upserts("GateVisit").Where(v => v.Length > 0));
         Assert.Single(run.ConsensusInputs);
 
-        Assert.Single(run.Calls, c => c.Step == "notify_outer_loop_exhausted");
-        Assert.Equal(WorkflowExecutionStatus.Failed, run.Status);
-        Assert.Equal(SeedReviewLimitTests.DeliveryPassesExhausted, run.FailureMessage);
+        // Stalled to the end: the blocked record, no button phase, and the gate's reference as it was.
+        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled"], Phases(run));
+        Assert.Equal($"v1;head={script.Head};result=blocked;iso=production;block=merge_held;fix=0;batch=0", run.Upserts("Acceptance").Last());
+        Assert.Equal([$"merge:{script.Head}:1"], run.Upserts("GateRef"));
+
+        // TIMEOUT, as a gate that nobody answered: not Failed, not exhausted, the PR left open.
+        Assert.DoesNotContain(run.Calls, c => c.Step == "notify_outer_loop_exhausted");
+        Assert.Null(run.Failure);
+        Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
         Assert.Equal("cancelled", run.WaiterDecision);
+        Assert.Empty(run.ChildStarts("UweDocMaintenanceWorkflow"));
         ValidWrites(run);
     }
 

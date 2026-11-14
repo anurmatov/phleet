@@ -580,11 +580,17 @@ public sealed partial class PrReadinessHoldTests
     [Fact]
     public async Task HoldBound_TwelvePasses_ThenStalled_NotFailed()
     {
-        var script = new Script { Preflight = _ => "held", Probe = _ => "pending" };
+        // CI is green throughout: what holds the merge is the preflight, and it never clears.
+        var script = new Script { Preflight = _ => "held" };
         var run = await RunAsync(script, ApproveFirstVisit, captureWaiter: true);
 
         Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 4)), FiredSeconds(run.History));
-        Assert.Equal(13, run.Calls.Count(c => c.Step == "merge_preflight"));   // the check after approval, then twelve passes
+        // The check after approval, twelve passes, then the stall's four reads, each of them the
+        // same check: a re-pin and a preflight. Green CI alone ends nothing here.
+        Assert.Equal(13 + 4, run.Calls.Count(c => c.Step == "merge_preflight"));
+        Assert.Equal(13 + 4, run.Calls.Count(c => c.Step == "pin_after_approval"));
+        Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
+        Assert.DoesNotContain(run.Calls, c => c.Step == "notify_outer_loop_exhausted");
         Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled"], Phases(run));
         Assert.Equal($"v1;head={script.Head};result=blocked;iso=production;block=merge_held;fix=0;batch=0", run.Upserts("Acceptance").Last());
         Assert.Contains("reason merge_held", Assert.Single(run.Calls, c => c.Step == "notify_stalled").Instruction);
@@ -599,10 +605,13 @@ public sealed partial class PrReadinessHoldTests
     [Fact]
     public async Task MergeHoldStalled_ThenGreen_ChecksAgain_AndMergesOnce()
     {
-        // Thirteen held answers spend the hold; the stall's first read is green and the check after it is clear.
+        // Thirteen held answers spend the hold; the stall's first read is the check again, and it is clear.
         var script = new Script { Preflight = n => n <= 13 ? "held" : "clear" };
         var run = await RunAsync(script, ApproveFirstVisit);
 
+        Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
+        Assert.Equal(["notify_stalled", "pin_after_approval", "merge_preflight", "phase4_merge"],
+            run.Calls.SkipWhile(c => c.Step != "notify_stalled").Select(c => c.Step).Take(4));
         Assert.Equal(12, Timers(run, 300));
         Assert.Equal(1, Timers(run, 10800));
         Assert.Equal(14, run.Calls.Count(c => c.Step == "merge_preflight"));
@@ -613,6 +622,78 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled", "merge-hold"], Phases(run));
         Assert.Equal($"v1;head={script.Head};result=not_required;iso=production;block=none;fix=0;batch=0", run.Upserts("Acceptance").Last());
         ValidWrites(run);
+    }
+
+    [Fact]
+    public async Task MergeHoldStalled_HeldThenClearAtTheSecondRead_OneMergeSamePinnedHead()
+    {
+        // Thirteen held answers in the hold, one more at the stall's first read, clear at its second.
+        var script = new Script { Preflight = n => n <= 14 ? "held" : "clear" };
+        var run = await RunAsync(script, ApproveFirstVisit);
+
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 2)), FiredSeconds(run.History));
+        Assert.Single(run.Calls, c => c.Step == "notify_stalled");
+        Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
+        Assert.Equal(15, run.Calls.Count(c => c.Step == "merge_preflight"));
+        Assert.Equal(15, run.Calls.Count(c => c.Step == "pin_after_approval"));
+        Assert.Equal(["merge-approval:1"], run.Upserts("GateVisit").Where(v => v.Length > 0));
+        Assert.Equal([$"merge:{script.Head}:1"], run.Upserts("GateRef"));
+        Assert.Single(run.ConsensusInputs);
+        Assert.Contains($"--match-head-commit {script.Head}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction);
+        // Stalled while it waited, the gate's record again before the command.
+        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled", "merge-hold"], Phases(run));
+        Assert.Equal($"v1;head={script.Head};result=not_required;iso=production;block=none;fix=0;batch=0", run.Upserts("Acceptance").Last());
+        Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
+        ValidWrites(run);
+    }
+
+    [Fact]
+    public async Task MergeHoldStalled_CiFailureAtAStalledRead_ReturnsToImplementer()
+    {
+        // The hold's thirteen re-pins are green and held by the preflight; the stall's first re-pin is red.
+        var script = new Script { Preflight = n => n <= 13 ? "held" : "clear", Repin = n => n == 14 ? "failure" : "success" };
+        var first = script.Head;
+        var run = await RunAsync(script, async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1");
+            await h.SignalHumanApprovalAsync(handle);
+            await DriveToAsync(handle, h, history => h.LastUpsert(history, "GateVisit") == "merge-approval:2");
+            Assert.DoesNotContain(h.Calls, c => c.Step == "phase4_merge");
+            await h.SignalHumanApprovalAsync(handle);
+        });
+
+        Assert.Equal(1, Timers(run, 10800));
+        Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
+        Assert.Single(run.Calls, c => c.Step == "notify_stalled");
+        var revision = Assert.Single(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal));
+        Assert.Contains($"CI failed at head {first}. Failing checks: build, lint.", revision.Instruction);
+        Assert.Contains("CI: failure", revision.Instruction);
+        Assert.DoesNotContain(run.Calls, c => c.Step == "notify_invalidation");
+        Assert.Equal([first, script.Head], run.ConsensusInputs.Select(i => i.ReviewRef));
+        Assert.Contains($"--match-head-commit {script.Head}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction);
+    }
+
+    [Fact]
+    public async Task MergeHoldStalled_HeadMovesAtAStalledRead_Invalidates_NoMerge()
+    {
+        var script = new Script { Preflight = _ => "held", Repin = n => n == 14 ? "moved" : "success" };
+        var first = script.Head;
+        var run = await RunAsync(script, async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1");
+            await h.SignalHumanApprovalAsync(handle);
+            await DriveToAsync(handle, h, history => h.LastUpsert(history, "GateVisit") == "merge-approval:2");
+            var gateRef = h.LastUpsert(await handle.FetchHistoryAsync(), "GateRef");
+            await handle.SignalAsync("merge-approval", [Json(new { Decision = "rejected", Ref = gateRef })]);
+        });
+
+        Assert.NotEqual(first, script.Head);
+        Assert.Equal(1, Timers(run, 10800));
+        Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
+        Assert.Single(run.Calls, c => c.Step == "notify_stalled");
+        Assert.Single(run.Calls, c => c.Step == "notify_invalidation");
+        Assert.Equal([first, script.Head], run.ConsensusInputs.Select(i => i.ReviewRef));
+        Assert.DoesNotContain(run.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned");
     }
 
     [Fact]
@@ -856,7 +937,11 @@ public sealed partial class PrReadinessHoldTests
     {
         var steps = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).OfType<DelegateStep>().ToList();
 
-        var preflight = Assert.Single(steps, d => d.Name == "merge_preflight");
+        // Two copies of one step: the check in the hold and the same check in the stall after it.
+        var preflights = steps.Where(d => d.Name == "merge_preflight").ToList();
+        Assert.Equal(2, preflights.Count);
+        Assert.Equal(preflights[0], preflights[1]);
+        var preflight = preflights[0];
         Assert.Equal(typeof(DelegateStep), preflight.GetType());
         Assert.True(preflight.IgnoreFailure);
         Assert.False(preflight.RetryOnIncomplete);
@@ -877,8 +962,9 @@ public sealed partial class PrReadinessHoldTests
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(merge.Instruction!, @"\bgh \w+"));
         Assert.DoesNotMatch(@"gh pr (view|checks|status|list)|gh run|gh api|--json|mergeStateStatus|--admin|--auto", merge.Instruction!);
         // The draft step is the workflow's, from the preflight's answer; the turn does not look.
-        var ready = Assert.Single(WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).OfType<SetVariableStep>(), s => s.Name == "merge_ready_first");
-        Assert.Equal("gh pr ready {{vars.pr_url}} --repo {{input.Repo}}\n", ready.Vars["merge_ready_command"]);
+        var ready = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).OfType<SetVariableStep>().Where(s => s.Name == "merge_ready_first").ToList();
+        Assert.Equal(2, ready.Count);
+        Assert.All(ready, r => Assert.Equal("gh pr ready {{vars.pr_url}} --repo {{input.Repo}}\n", r.Vars["merge_ready_command"]));
     }
 
     [Fact]
@@ -921,8 +1007,17 @@ public sealed partial class PrReadinessHoldTests
             .Where(s => Name(s)!.StartsWith("dispatch_", StringComparison.Ordinal))
             .ToDictionary(s => Name(s)!["dispatch_".Length..], s => s.GetProperty("cases").GetProperty(Name(s)!["dispatch_".Length..]));
         string[] Setters(string target) => states.Where(kv => Descendants(kv.Value).Any(s => StateSet(s) == target)).Select(kv => kv.Key).Order().ToArray();
-        Assert.Equal(["MERGE_GATE", "MERGE_HOLD"], Setters("MERGE"));
-        Assert.Equal(["MERGE_GATE", "STALLED"], Setters("MERGE_HOLD"));
+        // MERGE: a delegated approval's re-pin, a clear check in the hold, a clear check in the stall
+        // after it. MERGE_HOLD: the gate only, so a stall never returns to the hold's waiting passes.
+        Assert.Equal(["MERGE_GATE", "MERGE_HOLD", "STALLED"], Setters("MERGE"));
+        Assert.Equal(["MERGE_GATE"], Setters("MERGE_HOLD"));
+        // In the stall the route to the merge turn exists only for a held merge whose check was clear,
+        // and only after the gate's record is back.
+        var resume = Assert.Single(all, s => Name(s) == "stalled_resume_route");
+        Assert.Equal("{{vars.stall_resume}}", resume.GetProperty("on").GetString());
+        Assert.Equal(["restore_merge_record", "route_MERGE"], resume.GetProperty("cases").GetProperty("MERGE").GetProperty("steps").EnumerateArray().Select(Name));
+        Assert.Equal(["MERGE"], Descendants(states["STALLED"]).Where(s => StateSet(s) == "MERGE").Select(_ => "MERGE"));
+        Assert.Equal(["MERGE"], all.Where(s => Type(s) == "set_variable" && s.GetProperty("vars").TryGetProperty("stall_resume", out var to) && to.GetString() is not ("REVIEW" or "PIN")).Select(s => s.GetProperty("vars").GetProperty("stall_resume").GetString()));
         Assert.Equal(["CI_WAIT", "MERGE_HOLD", "REVIEW_HOLD"], Setters("STALLED"));
         Assert.Equal(["INVALIDATED"], Descendants(states["MERGE"]).Select(StateSet).Where(v => v is not null).Distinct());
         // The one templated route (a continue gate's return) names ACCEPT or IMPLEMENT, never a merge state.

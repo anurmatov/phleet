@@ -172,17 +172,18 @@ public sealed class RequireAcceptanceTests
         Assert.Contains(run.Calls, c => c.Instruction.Contains("basis doc_only", StringComparison.Ordinal));
     }
 
-    // Five since the merge hold: PIN, the CI wait, the cleanup wait, a delegated approval's re-pin
-    // and the re-pin a human approval is checked with. All carry the mode and the off contract.
-    // Four share one text and report their CI read; the delegated re-pin keeps the text it shipped
-    // with, because nothing on the grant path changes.
+    // Six since the merge hold: PIN, the CI wait, the cleanup wait, a delegated approval's re-pin,
+    // and the re-pin a human approval is checked with, once in the hold and once in the stall
+    // after it. All carry the mode and the off contract. Five share one text and report their CI
+    // read; the delegated re-pin keeps the text it shipped with, because nothing on the grant
+    // path changes.
     [Fact]
-    public void Pin_AllFiveInstructions_IncludeModeAndOffContract()
+    public void Pin_AllSixInstructions_IncludeModeAndOffContract()
     {
         var steps = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).ToList();
         var pins = steps.OfType<DelegateStep>().Where(s => s.Name is "pin" or "pin_after_approval").ToArray();
-        Assert.Equal(5, pins.Length);
-        Assert.Equal(2, pins.Count(p => p.Name == "pin_after_approval"));
+        Assert.Equal(6, pins.Length);
+        Assert.Equal(3, pins.Count(p => p.Name == "pin_after_approval"));
         Assert.All(pins, p => { Assert.Contains("REQUIRE_ACCEPTANCE: {{vars.acceptance_mode}}", p.Instruction); Assert.Contains("In off mode", p.Instruction); });
 
         var delegated = Assert.IsType<DelegateStep>(Assert.Single(steps.OfType<SequenceStep>(), s => s.Name == "merge_repin").Steps[0]);
@@ -193,8 +194,8 @@ public sealed class RequireAcceptanceTests
         Assert.DoesNotContain("CI_DETAIL", delegated.Instruction);
 
         var reading = pins.Where(p => !ReferenceEquals(p, delegated)).ToArray();
-        Assert.Equal(4, reading.Length);
-        Assert.Single(reading, p => p.Name == "pin_after_approval");
+        Assert.Equal(5, reading.Length);
+        Assert.Equal(2, reading.Count(p => p.Name == "pin_after_approval"));
         Assert.Single(reading.Select(p => p.Instruction).Distinct());
         Assert.All(reading, p =>
         {

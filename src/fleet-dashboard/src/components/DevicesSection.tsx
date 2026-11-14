@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiFetch, heartbeatAge } from '../utils'
 import {
-  emptyPhoneSetupForm, phoneSetupCode, phoneSetupFormProblem, phoneSetupProblemMessage,
+  copyPhoneSetupCode, emptyPhoneSetupForm, phoneSetupCode, phoneSetupFormProblem, phoneSetupProblemMessage,
   DEVICE_NAME_MAX_LENGTH, type PhoneSetupForm,
 } from '../phoneSetup'
 import { qrMatrix } from '../qrMatrix'
@@ -36,6 +36,9 @@ export default function DevicesSection({ onToast }: { onToast?: (message: string
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState<string | null>(null)
+  // Which code a copy was asked for, and whether the browser allowed it. Kept with the code it
+  // was about, so a new code on screen starts as not copied without anything having to reset it.
+  const [copyResult, setCopyResult] = useState<{ code: string; allowed: boolean } | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -63,6 +66,14 @@ export default function DevicesSection({ onToast }: { onToast?: (message: string
     const timer = setTimeout(() => setCode(null), VISIBLE_SECONDS * 1000)
     return () => clearTimeout(timer)
   }, [code])
+
+  const copied = copyResult === null || copyResult.code !== code ? 'no' : copyResult.allowed ? 'yes' : 'refused'
+
+  async function copy() {
+    if (code === null) return
+    const shown = code
+    setCopyResult({ code: shown, allowed: await copyPhoneSetupCode(shown, navigator.clipboard) })
+  }
 
   const matrix = useMemo(() => (code === null ? null : qrMatrix(code)), [code])
 
@@ -233,6 +244,14 @@ export default function DevicesSection({ onToast }: { onToast?: (message: string
               <p style={note} role="status">
                 Scan this with the app. The code connects one phone, once, and stops working after
                 fifteen minutes. It hides itself after two.
+              </p>
+              <button className="cred-action-btn" onClick={() => void copy()}>Copy as text</button>
+              <p style={note} role="status">
+                {copied === 'yes'
+                  ? 'Copied. Paste it in the app with “Paste” on its setup screen. It is the same one-time code as the picture, so treat the clipboard the same way.'
+                  : copied === 'refused'
+                    ? 'This browser did not allow the copy. Scan the picture instead.'
+                    : 'For a phone that cannot scan: copy the same code as text and paste it in the app.'}
               </p>
             </div>
           )}

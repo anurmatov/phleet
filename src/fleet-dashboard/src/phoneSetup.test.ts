@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  copyPhoneSetupCode,
   emptyPhoneSetupForm, normalizeOrigin, phoneSetupCode, phoneSetupFormProblem, phoneSetupProblemMessage,
   type PhoneSetupForm, type PhoneSetupProblem,
 } from './phoneSetup.ts'
@@ -165,4 +166,32 @@ test('the longest code accepted can be drawn, and one byte more is refused', () 
   assert.equal(code.length, QR_MAX_BYTES)
   assert.equal(qrMatrix(code).length, 177, 'version 40, the largest QR code')
   assert.equal(problemOf(form({ accessClientId: 'client-id', accessClientSecret: `${longest}s` })), 'code_too_long')
+})
+
+test('copying puts exactly the code that was drawn on the clipboard', async () => {
+  const written: string[] = []
+  const code = codeOf(form())
+
+  const copied = await copyPhoneSetupCode(code, { writeText: async text => { written.push(text) } })
+
+  assert.equal(copied, true)
+  assert.deepEqual(written, [code])
+})
+
+test('a browser with no clipboard, or one that refuses, is answered with false and not thrown', async () => {
+  const code = codeOf(form())
+
+  assert.equal(await copyPhoneSetupCode(code, undefined), false)
+  assert.equal(await copyPhoneSetupCode(code, null), false)
+  assert.equal(
+    await copyPhoneSetupCode(code, { writeText: async () => { throw new Error('denied') } }),
+    false,
+  )
+})
+
+test('nothing is copied when there is no code on screen', async () => {
+  const written: string[] = []
+
+  assert.equal(await copyPhoneSetupCode('', { writeText: async text => { written.push(text) } }), false)
+  assert.deepEqual(written, [])
 })

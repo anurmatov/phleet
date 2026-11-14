@@ -88,8 +88,12 @@ public sealed class PushNotifierService(
         var messages = detector.Observe(running, recentlyFailed, agents, now, gateNamespaces, failureNamespaces);
         if (replies is not null) messages = [.. messages, .. replies.Take()];
 
+        // Every notification carries how many runs are waiting, for the app's icon. When the count
+        // changed and nothing is going out to carry it, one that shows nothing carries it alone.
+        if (detector.TakeBadgeChange(carriedByAnother: messages.Count > 0) is { } badge) messages = [.. messages, badge];
+
         await delivery.DeliverAsync(messages,
-            key => detector.IsCurrent(key) || replies?.IsCurrent(key) == true, ct);
+            key => detector.IsCurrent(key) || replies?.IsCurrent(key) == true, ct, detector.WaitingCount);
     }
 
     private async Task<(IReadOnlyCollection<WorkflowSummary> Runs, IReadOnlyCollection<string> Namespaces)> RecentlyFailedAsync(CancellationToken ct)
@@ -128,7 +132,12 @@ public sealed class PushDelivery(IServiceScopeFactory scopes, IApnsClient client
     /// <summary>Notifications a device has not accepted yet and will be sent again.</summary>
     public int Owed => _owed.Count;
 
-    public async Task DeliverAsync(IReadOnlyList<PushMessage> messages, Func<string, bool> isCurrent, CancellationToken ct)
+    /// <param name="badge">
+    /// How many runs are waiting now, put on every notification as it is sent. Null sends them
+    /// without a count, which leaves the icon as it is.
+    /// </param>
+    public async Task DeliverAsync(
+        IReadOnlyList<PushMessage> messages, Func<string, bool> isCurrent, CancellationToken ct, int? badge = null)
     {
         foreach (var stale in _owed.Keys.Where(k => !isCurrent(k.Key)).ToList()) _owed.Remove(stale);
         if (messages.Count == 0 && _owed.Count == 0) return;
@@ -168,12 +177,14 @@ public sealed class PushDelivery(IServiceScopeFactory scopes, IApnsClient client
                 _owed.Remove(key);
                 continue;
             }
-            var result = await client.SendAsync(device.Token, message, ct);
+            // The count as it is now, not as it was when the notification was made: one sent again
+            // minutes later must not put an old number back on the icon.
+            var result = await client.SendAsync(device.Token, badge is null ? message : message with { Badge = badge }, ct);
             switch (result.Outcome)
             {
                 case ApnsOutcome.Accepted:
                     _owed.Remove(key);
-                    logger.LogInformation("Push sent: {Kind}", message.Kind);
+                    if (!message.IsBadgeOnly) logger.LogInformation("Push sent: {Kind}", message.Kind);
                     break;
                 case ApnsOutcome.Unregistered:
                     // Apple says this token is finished. Keeping it would mean a failed

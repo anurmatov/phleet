@@ -52,7 +52,7 @@ Primary `(chatId, telegramMessageId)` keys protect queued and running parts. Dup
 
 | Fresh steering-eligible queue notice | `MidTurnDelivery.SendSteeringQueueNoticeAsync` → `IMessageSink.SendTextByOriginAsync`, Human origin, delivered receipt or existing busy text | none (non-journaled notice; disposition remains `queued`) |
 
-These extensions add two sink call sites, for 28 in TaskManager. Client intake cannot classify a submission as primary, and the reserved-key sink guard remains in force.
+These two sends belong to the dispatch layer, now split between `TaskManager` and its helpers. Client intake cannot classify a submission as primary, and the reserved-key sink guard remains in force.
 
 ## Diagnostics
 

@@ -6,6 +6,15 @@ The dashboard proxy resolves the orchestrator per request via Docker DNS (`resol
 
 `seed.example.json` ships with no agents — agents are provisioned via the dashboard (SetupBanner), not seed.json.
 
+When `ConnectionStrings:OrchestratorDb` is non-empty, the orchestrator checks provisioning
+configuration before migration and seeding. A missing or whitespace-only `Provisioning:BaseDir`,
+or an explicitly blank `Provisioning:EnvFilePath`, prints a startup error and exits with code 1.
+`Provisioning__BaseDir` is the Docker host's base directory (`FLEET_BASE_DIR` in Compose).
+`Provisioning__EnvFilePath` is the deployment's `.env` path as seen by the orchestrator.
+Leaving the latter unset uses `/app/deploy/.env`; setting it to an empty value does not use that default.
+`ProvisioningOptions.From` reads configuration at each use rather than capturing it once.
+Without a database connection, this provisioning preflight does not run.
+
 ## Architecture
 
 Each agent is a .NET 10 container that:

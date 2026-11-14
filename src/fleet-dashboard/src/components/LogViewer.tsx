@@ -1,32 +1,25 @@
 import { useRef, useEffect } from 'react'
+import type { LogViewerState } from '../hooks/useLogViewer'
 
 interface LogViewerProps {
   agentName: string
-  logLines: string[]
-  logFilter: 'all' | 'error' | 'warn' | 'info'
-  logPaused: boolean
-  logAutoScroll: boolean
-  onSetFilter: (f: 'all' | 'error' | 'warn' | 'info') => void
-  onTogglePause: () => void
-  onToggleAutoScroll: () => void
-  onClear: () => void
-  onClose: () => void
-  applyLogFilter: (lines: string[]) => string[]
+  /** The stream, its lines and how they are shown (hooks/useLogViewer.ts). */
+  log: LogViewerState
 }
 
-export default function LogViewer({
-  agentName,
-  logLines,
-  logFilter,
-  logPaused,
-  logAutoScroll,
-  onSetFilter,
-  onTogglePause,
-  onToggleAutoScroll,
-  onClear,
-  onClose,
-  applyLogFilter,
-}: LogViewerProps) {
+export default function LogViewer({ agentName, log }: LogViewerProps) {
+  const {
+    lines: logLines,
+    filter: logFilter,
+    paused: logPaused,
+    autoScroll: logAutoScroll,
+    setFilter: onSetFilter,
+    togglePause: onTogglePause,
+    toggleAutoScroll: onToggleAutoScroll,
+    clear: onClear,
+    close: onClose,
+    applyFilter: applyLogFilter,
+  } = log
   const logBottomRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {

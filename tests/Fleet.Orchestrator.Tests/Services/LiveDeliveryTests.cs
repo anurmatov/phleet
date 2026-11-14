@@ -1,3 +1,5 @@
+using Fleet.Orchestrator.Application;
+using Fleet.Orchestrator.Tests.Support;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -132,7 +134,7 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
     public async Task TelegramUsersTool_WhenTheAgentCouldNotBeTold_SaysSaved_NotDelivered(string action, long userId)
     {
         _brokerDown = true;
-        var tool = new ManageAgentTelegramUsersTool(_scopes, Publisher());
+        var tool = Writers.TelegramUsersTool(_scopes, Publisher());
 
         var answer = await tool.ManageAgentTelegramUsersAsync("agent1", action, userId);
 
@@ -151,7 +153,7 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
     public async Task TelegramGroupsTool_WhenTheAgentCouldNotBeTold_SaysSaved_NotDelivered(string action, long groupId)
     {
         _brokerDown = true;
-        var tool = new ManageAgentTelegramGroupsTool(_scopes, Publisher());
+        var tool = Writers.TelegramGroupsTool(_scopes, Publisher());
 
         var answer = await tool.ManageAgentTelegramGroupsAsync("agent1", action, groupId);
 
@@ -164,8 +166,8 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
     [Fact]
     public async Task TheAllowlistTools_WhenTheAgentWasTold_AnswerAsBefore()
     {
-        var users = await new ManageAgentTelegramUsersTool(_scopes, Publisher()).ManageAgentTelegramUsersAsync("agent1", "remove", 111);
-        var groups = await new ManageAgentTelegramGroupsTool(_scopes, Publisher()).ManageAgentTelegramGroupsAsync("agent1", "remove", -100);
+        var users = await Writers.TelegramUsersTool(_scopes, Publisher()).ManageAgentTelegramUsersAsync("agent1", "remove", 111);
+        var groups = await Writers.TelegramGroupsTool(_scopes, Publisher()).ManageAgentTelegramGroupsAsync("agent1", "remove", -100);
 
         Assert.Equal("Removed Telegram user 111 from agent 'agent1'.", users);
         Assert.Equal("Removed Telegram group -100 from agent 'agent1'.", groups);
@@ -181,7 +183,7 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
     public async Task ProjectAccessTool_WhenFleetMemoryCouldNotBeTold_SaysSaved_NotDelivered(string action, string? project)
     {
         _brokerDown = true;
-        var tool = new ManageAgentProjectAccessTool(_scopes, Config());
+        var tool = Writers.ProjectAccessTool(_scopes, Config());
 
         var answer = await tool.ManageAgentProjectAccessAsync("agent1", action, project);
 
@@ -194,7 +196,7 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
     [Fact]
     public async Task ProjectAccessTool_WhenFleetMemoryWasTold_AnswersAsBefore()
     {
-        var answer = await new ManageAgentProjectAccessTool(_scopes, Config()).ManageAgentProjectAccessAsync("agent1", "remove", "alpha");
+        var answer = await Writers.ProjectAccessTool(_scopes, Config()).ManageAgentProjectAccessAsync("agent1", "remove", "alpha");
 
         Assert.Equal("Removed project 'alpha' from agent 'agent1'. Remaining access: (none)", answer);
         Assert.Equal(("config.changed", ConfigService.AclChangedKey), Assert.Single(_sent));
@@ -213,6 +215,7 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
         builder.Services.AddSingleton(sp => new SetupService(
             _config, null!, null!, sp.GetRequiredService<IServiceScopeFactory>(), NullLogger<SetupService>.Instance,
             new EnvFileCredentialsReader(_config, NullLogger<EnvFileCredentialsReader>.Instance)));
+        builder.Services.AddAgentWrites();
         var app = builder.Build();
         app.MapAgentConfigEndpoints();
         await app.StartAsync();
@@ -293,7 +296,9 @@ public sealed class LiveDeliveryTests : IAsyncLifetime
             Assert.False(discarded.IsMatch(text), $"{Path.GetFileName(file)} awaits PublishAllowlistUpdateAsync and ignores whether it was delivered");
             Assert.False(hidden.IsMatch(text), $"{Path.GetFileName(file)} calls PublishAclChangedAsync on ConfigService; use TryPublishAclChangedAsync and report a false");
         }
-        // Four routes in Program.cs, the config PUT, and two actions in each of the two tools.
-        Assert.Equal(9, allowlistCalls);
+        // One per write, now that routes and tools share a writer: the four allowlist changes in
+        // AgentAllowlist and the config update in AgentConfigWriter. It was nine while the four
+        // routes, the config PUT and the two tools each published for themselves.
+        Assert.Equal(5, allowlistCalls);
     }
 }

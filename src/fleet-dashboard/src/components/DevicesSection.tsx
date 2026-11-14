@@ -5,6 +5,7 @@ import {
   DEVICE_NAME_MAX_LENGTH, type PhoneSetupForm,
 } from '../phoneSetup'
 import { qrMatrix } from '../qrMatrix'
+import { useTick } from '../hooks/useTick'
 import { deviceTitle, readDevices, type DeviceRow } from '../session'
 
 const label: React.CSSProperties = { fontSize: 11, color: 'var(--muted)', display: 'block', marginBottom: 2 }
@@ -26,6 +27,8 @@ const CONNECTING_REFRESH_MS = 4000
  * two minutes, because until it is used a photograph of it is a way in.
  */
 export default function DevicesSection({ onToast }: { onToast?: (message: string, ok: boolean) => void }) {
+  // "last seen 3m ago" is relative to now: redraw as the clock moves.
+  useTick()
   const [devices, setDevices] = useState<DeviceRow[] | null>(null)
   const [listError, setListError] = useState('')
   const [form, setForm] = useState<PhoneSetupForm | null>(null)

@@ -361,7 +361,7 @@ run closes `Failed`/`TimedOut`, an agent seen alive is silent past the grace per
 `PushEventDetector` announces each once and nothing on its first pass after start-up. `PushDelivery`
 sends a notification again, in memory, only to a device that did not accept it, while
 `PushEventDetector.IsCurrent` and for at most `MaxAttempts` (10) sends. `OperatorStops`
-(in memory) is set by `POST /api/agents/{name}/stop`, so a requested stop is not "down". Every
+(in memory) is set by `POST /api/agents/{name}/stop` and by `stop_agent`, so a requested stop is not "down". Every
 notification carries the number of waiting gates as `aps.badge`, set at send time; a change nothing
 else carries goes out as a `badge`-kind notification with no alert (`TakeBadgeChange`). Enabled
 with a value missing or a key that cannot sign logs `push_misconfigured` once and is treated as

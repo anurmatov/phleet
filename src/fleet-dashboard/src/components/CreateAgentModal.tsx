@@ -1,42 +1,33 @@
 import { useState } from 'react'
-import type { CreateForm, InstructionSummary } from '../types'
+import type { InstructionSummary } from '../types'
+import type { CreateAgentState } from '../hooks/useCreateAgent'
 import { PROVIDER_OPTIONS } from '../constants'
 import { isLocalHarness, switchProvider } from '../localModel'
 import { createFormLocalEdits } from '../agentCreate'
 import ModelSelector from './ModelSelector'
 import LocalModelFields from './LocalModelFields'
 import FieldHint from './FieldHint'
+import Modal from './Modal'
 import InstructionPicker from './InstructionPicker'
 
 interface CreateAgentModalProps {
-  createForm: CreateForm
-  createState: 'idle' | 'creating' | 'success' | 'error'
-  createMsg: string
+  /** The dialog's form and requests (hooks/useCreateAgent.ts). */
+  create: CreateAgentState
   agentNames: string[]
-  copyFrom: string
-  copyFromLoading: boolean
   allInstructions: InstructionSummary[]
-  templateName?: string
-  onCopyFrom: (name: string) => void
-  onFormChange: (patch: Partial<CreateForm>) => void
-  onSubmit: () => void
-  onClose: () => void
 }
 
-export default function CreateAgentModal({
-  createForm,
-  createState,
-  createMsg,
-  agentNames,
-  copyFrom,
-  copyFromLoading,
-  allInstructions,
-  templateName,
-  onCopyFrom,
-  onFormChange,
-  onSubmit,
-  onClose,
-}: CreateAgentModalProps) {
+export default function CreateAgentModal({ create, agentNames, allInstructions }: CreateAgentModalProps) {
+  const {
+    form: createForm,
+    state: createState,
+    msg: createMsg,
+    copyFrom, copyFromLoading, templateName,
+    copy: onCopyFrom,
+    change: onFormChange,
+    submit: onSubmit,
+    close: onClose,
+  } = create
   const [shortNameTouched, setShortNameTouched] = useState(false)
   const provider = createForm.provider || 'claude'
   // The same local-model rules and fields as the config dialog, so an agent can be created (or
@@ -46,8 +37,7 @@ export default function CreateAgentModal({
   const isLocal = hasLocalMode && createForm.localMode
 
   return (
-    <div className="config-modal-overlay" onClick={onClose}>
-      <div className="config-modal create-agent-modal" onClick={e => e.stopPropagation()}>
+    <Modal label="New Agent" overlayClassName="config-modal-overlay" className="config-modal create-agent-modal" onClose={onClose}>
         <div className="config-modal-header">
           <span className="config-modal-title">New Agent</span>
           <button className="config-modal-close" onClick={onClose}>✕ close</button>
@@ -168,7 +158,6 @@ export default function CreateAgentModal({
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

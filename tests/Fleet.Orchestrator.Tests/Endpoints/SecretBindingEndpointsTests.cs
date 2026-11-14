@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -498,7 +499,7 @@ public class SecretBindingEndpointsTests : IAsyncLifetime
 
     // ── The MCP tool cannot grant a bound secret ──────────────────────────────
 
-    private ManageAgentEnvRefsTool Tool() => new(_app.Services.GetRequiredService<IServiceScopeFactory>());
+    private ManageAgentEnvRefsTool Tool() => Writers.EnvRefsTool(_app.Services.GetRequiredService<IServiceScopeFactory>());
 
     [Theory]
     [InlineData(Key)]

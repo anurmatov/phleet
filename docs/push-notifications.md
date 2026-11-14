@@ -91,7 +91,8 @@ is off. The notification goes out at once rather than on the next 30-second pass
   the app sets its own icon from what it reads.
 - **A run someone cancelled or terminated is not a failure.** Whoever stopped it already knows.
 - **An agent stopped through the API is not "down".** The orchestrator sees a stopped agent and a
-  crashed one the same way, so `POST /api/agents/{name}/stop` records that the stop was asked for,
+  crashed one the same way, so a stop through `POST /api/agents/{name}/stop` or the `stop_agent`
+  tool records that it was asked for,
   and the sender stays quiet until that agent has run again. That record is in memory: after an
   orchestrator restart nothing already down is announced anyway.
 - **Only an agent seen alive can go down.** An agent that was never provisioned, or that this

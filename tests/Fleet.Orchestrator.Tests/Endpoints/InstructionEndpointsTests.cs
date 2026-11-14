@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Application;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -242,6 +243,7 @@ internal sealed class PromptSizeTestHost : IAsyncDisposable
         builder.Services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(connection));
         builder.Services.AddSingleton(policy);
 
+        builder.Services.AddAgentWrites();
         var app = builder.Build();
 
         app.Use(async (context, next) =>

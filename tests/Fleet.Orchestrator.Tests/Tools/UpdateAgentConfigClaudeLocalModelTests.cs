@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Tools;
@@ -32,7 +33,7 @@ public class UpdateAgentConfigClaudeLocalModelTests
     {
         var services = new ServiceCollection();
         services.AddScoped(_ => new OrchestratorDbContext(_options));
-        return new UpdateAgentConfigTool(
+        return Writers.UpdateConfigTool(
             services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(), new NoOpAclChangeNotifier());
     }
 

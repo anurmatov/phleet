@@ -1,16 +1,15 @@
 using System.ComponentModel;
-using System.Text;
-using Fleet.Orchestrator.Data;
-using Fleet.Shared;
-using Fleet.Orchestrator.Helpers;
-using Fleet.Orchestrator.Services;
-using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Application;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
+/// <summary>
+/// The MCP adapter over <see cref="AgentConfigWriter"/>: it maps the tool's parameters to a patch and
+/// renders the outcome. The rules are the writer's, shared with <c>PUT /api/agents/{name}/config</c>.
+/// </summary>
 [McpServerToolType]
-public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAclChangeNotifier aclNotifier)
+public sealed class UpdateAgentConfigTool(AgentConfigWriter writer)
 {
     [McpServerTool(Name = "update_agent_config")]
     [Description("Update agent configuration in the DB. All fields are optional — only provided fields are changed. Does NOT restart the agent; restart separately after updating.")]
@@ -52,327 +51,69 @@ public sealed class UpdateAgentConfigTool(IServiceScopeFactory scopeFactory, IAc
         [Description("Local-model agents only (local_base_url set, claude or codex): the server's context size in tokens (4096-1048576), e.g. its num_ctx or --ctx. Claude gets it as CLAUDE_CODE_MAX_CONTEXT_TOKENS, codex as model_context_window. Ignored for cloud agents. Codex compaction is best-effort: it compacts at 90% of the window, a single message or tool output larger than the space left reaches the server unchecked, and the server's HTTP 400 overflow leaves the thread failing every turn until it is reset (/cancel all, then /reset, or restart the agent). Pass 0 to clear. Omit to keep current. Takes effect on the next reprovision.")] int? context_window = null,
         [Description("Claude and codex only: extra harness settings merged over the mode defaults, one per line (max 4096 chars, 50 lines; blank and # lines ignored). Allowlist only — anything else is refused, naming the line. Codex: key = value for web_search (\"disabled\"/\"cached\"/\"live\", local: \"disabled\" only), features.view_image (bool, local: false only), model_reasoning_summary (\"none\"/\"auto\"/\"concise\"/\"detailed\"), tool_output_token_limit (1000-100000), features.apps, features.remote_plugin, features.skill_mcp_dependency_install, check_for_update_on_startup, analytics.enabled (bool), history.persistence (\"none\"/\"save-all\"). Claude: --tools <names> (the one way to narrow built-in tools: keeps the kept set, the agent's AllowedTools built-ins and these names; without it the agent keeps every built-in), --disallowedTools WebSearch, --disable-slash-commands (no value, any mode: removes the skills list and every slash command, including /compact; pair it with a --tools line that leaves out Workflow, or the plan notes the larger Workflow description), !--exclude-dynamic-system-prompt-sections, MAX_MCP_OUTPUT_TOKENS=<1000-100000>, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0|1. Pass empty string to clear. Omit to keep current. Takes effect on the next reprovision.")] string? harness_extra = null)
     {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-        var agent = await db.Agents
-            .Include(a => a.Tools)
-            .Include(a => a.Projects)
-            .FirstOrDefaultAsync(a => a.Name == agent_name);
-
-        if (agent is null)
-            return $"Agent '{agent_name}' not found in DB.";
-
-        // PV1 (#386): the resulting provider, before any field is applied. An empty provider stays claude.
-        if (AgentProviders.DescribeFault(provider ?? agent.Provider) is { } providerFault)
-            return providerFault;
-
-        // #382 A1: resolved first, so the effort check below sees the resulting local mode.
-        var (baseUrlSent, baseUrl, baseUrlError) = AgentPatchHelpers.ResolveLocalBaseUrl(
-            local_base_url, anthropic_base_url, "local_base_url", "anthropic_base_url");
-        if (baseUrlError is not null)
-            return baseUrlError;
-
-        if (journal_enabled == true && !agent.JournalEnabled &&
-            scope.ServiceProvider.GetRequiredService<JournalTokenService>().DescribeKeyFault() is { } journalFault)
-            return System.Text.Json.JsonSerializer.Serialize(new { error = "journal_not_configured", detail = journalFault });
-
-        var changes = new StringBuilder();
-
-        if (model is not null && model != agent.Model)
+        var outcome = await writer.UpdateAsync(agent_name, new AgentConfigPatch
         {
-            changes.AppendLine($"- model: {agent.Model} → {model}");
-            agent.Model = model;
-        }
+            Model = model,
+            MemoryLimitMb = memory_limit_mb,
+            IsEnabled = is_enabled,
+            Tools = SplitList(tools),
+            Projects = SplitList(projects),
+            Image = image,
+            PermissionMode = permission_mode,
+            MaxTurns = max_turns,
+            WorkDir = work_dir,
+            ProactiveIntervalMinutes = proactive_interval_minutes,
+            GroupListenMode = group_listen_mode,
+            GroupDebounceSeconds = group_debounce_seconds,
+            WarmupTimeoutSeconds = warmup_timeout_seconds,
+            ShortName = short_name,
+            ShowStats = show_stats,
+            PrefixMessages = prefix_messages,
+            FormattingMode = formatting_mode,
+            SuppressToolMessages = suppress_tool_messages,
+            TelegramSendOnly = telegram_send_only,
+            Effort = effort,
+            JsonSchema = json_schema,
+            AgentsJson = agents_json,
+            HostPort = host_port,
+            AutoMemoryEnabled = auto_memory_enabled,
+            JournalEnabled = journal_enabled,
+            Provider = provider,
+            CodexSandboxMode = codex_sandbox_mode,
+            CanReceiveChatRequests = can_receive_chat_requests,
+            RequestReceivedMessage = request_received_message,
+            MountDockerSock = mount_docker_sock,
+            OutputStyle = output_style,
+            LocalBaseUrl = local_base_url,
+            LocalBaseUrlAlias = anthropic_base_url,
+            ContextWindow = context_window,
+            HarnessExtra = harness_extra,
+        }, WriteCaller.Mcp);
 
-        if (memory_limit_mb is not null && memory_limit_mb != agent.MemoryLimitMb)
-        {
-            changes.AppendLine($"- memory_limit_mb: {agent.MemoryLimitMb} → {memory_limit_mb}");
-            agent.MemoryLimitMb = memory_limit_mb.Value;
-        }
-
-        if (is_enabled is not null && is_enabled != agent.IsEnabled)
-        {
-            changes.AppendLine($"- is_enabled: {agent.IsEnabled} → {is_enabled}");
-            agent.IsEnabled = is_enabled.Value;
-        }
-
-        if (image is not null && image != (agent.Image ?? ""))
-        {
-            changes.AppendLine($"- image: {agent.Image ?? "(default)"} → {(image == "" ? "(default)" : image)}");
-            agent.Image = image == "" ? null : image;
-        }
-
-        if (permission_mode is not null && permission_mode != agent.PermissionMode)
-        {
-            changes.AppendLine($"- permission_mode: {agent.PermissionMode} → {permission_mode}");
-            agent.PermissionMode = permission_mode;
-        }
-
-        if (max_turns is not null && max_turns != agent.MaxTurns)
-        {
-            changes.AppendLine($"- max_turns: {agent.MaxTurns} → {max_turns}");
-            agent.MaxTurns = max_turns.Value;
-        }
-
-        if (work_dir is not null && work_dir != agent.WorkDir)
-        {
-            changes.AppendLine($"- work_dir: {agent.WorkDir} → {work_dir}");
-            agent.WorkDir = work_dir;
-        }
-
-        if (proactive_interval_minutes is not null && proactive_interval_minutes != agent.ProactiveIntervalMinutes)
-        {
-            changes.AppendLine($"- proactive_interval_minutes: {agent.ProactiveIntervalMinutes} → {proactive_interval_minutes}");
-            agent.ProactiveIntervalMinutes = proactive_interval_minutes.Value;
-        }
-
-        if (group_listen_mode is not null && group_listen_mode != agent.GroupListenMode)
-        {
-            changes.AppendLine($"- group_listen_mode: {agent.GroupListenMode} → {group_listen_mode}");
-            agent.GroupListenMode = group_listen_mode;
-        }
-
-        if (group_debounce_seconds is not null && group_debounce_seconds != agent.GroupDebounceSeconds)
-        {
-            changes.AppendLine($"- group_debounce_seconds: {agent.GroupDebounceSeconds} → {group_debounce_seconds}");
-            agent.GroupDebounceSeconds = group_debounce_seconds.Value;
-        }
-
-        if (warmup_timeout_seconds is not null && warmup_timeout_seconds != agent.WarmupTimeoutSeconds)
-        {
-            // Rejected, never clamped (#357 MUST NOT): a hidden correction makes live configuration unauditable.
-            if (WarmupTimeout.DescribeFault(warmup_timeout_seconds.Value) is { } warmupFault)
-                return warmupFault;
-            changes.AppendLine($"- warmup_timeout_seconds: {agent.WarmupTimeoutSeconds} → {warmup_timeout_seconds}");
-            agent.WarmupTimeoutSeconds = warmup_timeout_seconds.Value;
-        }
-
-        if (short_name is not null && short_name != agent.ShortName)
-        {
-            changes.AppendLine($"- short_name: {agent.ShortName} → {short_name}");
-            agent.ShortName = short_name;
-        }
-
-        if (show_stats is not null && show_stats != agent.ShowStats)
-        {
-            changes.AppendLine($"- show_stats: {agent.ShowStats} → {show_stats}");
-            agent.ShowStats = show_stats.Value;
-        }
-
-        if (prefix_messages is not null && prefix_messages != agent.PrefixMessages)
-        {
-            changes.AppendLine($"- prefix_messages: {agent.PrefixMessages} → {prefix_messages}");
-            agent.PrefixMessages = prefix_messages.Value;
-        }
-
-        if (formatting_mode is not null && formatting_mode != (byte)agent.FormattingMode)
-        {
-            if (formatting_mode > 2)
-                return $"Invalid formatting_mode {formatting_mode}. Valid values: 0 (PlainText), 1 (LegacyHtml), 2 (Rich).";
-            changes.AppendLine($"- formatting_mode: {(byte)agent.FormattingMode} → {formatting_mode}");
-            agent.FormattingMode = (Fleet.Shared.FormattingMode)formatting_mode.Value;
-        }
-
-        if (suppress_tool_messages is not null && suppress_tool_messages != agent.SuppressToolMessages)
-        {
-            changes.AppendLine($"- suppress_tool_messages: {agent.SuppressToolMessages} → {suppress_tool_messages}");
-            agent.SuppressToolMessages = suppress_tool_messages.Value;
-        }
-
-        if (telegram_send_only is not null && telegram_send_only != agent.TelegramSendOnly)
-        {
-            changes.AppendLine($"- telegram_send_only: {agent.TelegramSendOnly} → {telegram_send_only}");
-            agent.TelegramSendOnly = telegram_send_only.Value;
-        }
-
-        if (effort is not null && effort != (agent.Effort ?? ""))
-        {
-            // #349: the cloud vocabulary check is skipped when the RESULTING agent is in local
-            // mode (resolved provider + resolved base URL) — the shared V7 rule at the finalize
-            // gate decides instead, so `off` is not rejected by the cloud list first.
-            var resultingProvider = provider ?? agent.Provider ?? "claude";
-            var resultingBaseUrl = baseUrlSent ? baseUrl : agent.LocalBaseUrl;
-            var resultingIsLocal = ClaudeLocalModel.IsEnabled(resultingProvider, resultingBaseUrl);
-
-            if (effort != "" && !resultingIsLocal)
+        if (outcome.Fault is { } fault)
+            return fault.Code switch
             {
-                // PV1 (#386): one case per provider; an empty provider is claude. The default
-                // branch is unreachable after the provider check above and refuses rather than
-                // passing an unknown provider's effort through.
-                string? effortError = AgentProviders.Normalize(resultingProvider) switch
-                {
-                    // "off" falls through to the finalize gate so the V8 fault is the one the
-                    // caller sees, not the generic cloud list text (#349).
-                    AgentProviders.Claude => effort != "off" && !new[] { "low", "medium", "high", "xhigh", "max" }.Contains(effort)
-                        ? $"Invalid effort '{effort}' for claude. Valid values: low, medium, high, xhigh, max."
-                        : null,
-                    AgentProviders.Codex => !new[] { "none", "minimal", "low", "medium", "high", "xhigh" }.Contains(effort)
-                        ? $"Invalid effort '{effort}' for codex. Valid values: none, minimal, low, medium, high, xhigh."
-                        : null,
-                    AgentProviders.Gemini
-                        => $"Effort is not supported on gemini agents.",
-                    _ => AgentProviders.UnknownProviderText(resultingProvider),
-                };
-                if (effortError is not null)
-                    return effortError;
-            }
-            changes.AppendLine($"- effort: {agent.Effort ?? "(none)"} → {(effort == "" ? "(none)" : effort)}");
-            agent.Effort = effort == "" ? null : effort;
-        }
+                "agent_not_found" => $"Agent '{agent_name}' not found in DB.",
+                "journal_not_configured" => System.Text.Json.JsonSerializer.Serialize(new { error = fault.Code, detail = fault.Message }),
+                "local_model_invalid" => $"Invalid local model configuration: {fault.Message}",
+                "harness_extra_invalid" => $"Invalid harness_extra: {fault.Message}",
+                "output_style_unknown" => $"{fault.Message} Known styles: "
+                    + (fault.Detail is List<string> { Count: > 0 } known ? string.Join(", ", known) : "(none)"),
+                _ => fault.Message,
+            };
+        if (outcome.NotDelivered is { } notDelivered)
+            return notDelivered;
 
-        if (json_schema is not null && json_schema != (agent.JsonSchema ?? ""))
-        {
-            changes.AppendLine($"- json_schema: {(agent.JsonSchema is null ? "(none)" : "(set)")} → {(json_schema == "" ? "(none)" : "(set)")}");
-            agent.JsonSchema = json_schema == "" ? null : json_schema;
-        }
-
-        if (agents_json is not null && agents_json != (agent.AgentsJson ?? ""))
-        {
-            changes.AppendLine($"- agents_json: {(agent.AgentsJson is null ? "(none)" : "(set)")} → {(agents_json == "" ? "(none)" : "(set)")}");
-            agent.AgentsJson = agents_json == "" ? null : agents_json;
-        }
-
-        if (host_port is not null && host_port != (agent.HostPort ?? 0))
-        {
-            changes.AppendLine($"- host_port: {agent.HostPort?.ToString() ?? "(none)"} → {(host_port == 0 ? "(none)" : host_port.ToString())}");
-            agent.HostPort = host_port == 0 ? null : host_port;
-        }
-
-        if (auto_memory_enabled is not null && auto_memory_enabled != agent.AutoMemoryEnabled)
-        {
-            changes.AppendLine($"- auto_memory_enabled: {agent.AutoMemoryEnabled} → {auto_memory_enabled}");
-            agent.AutoMemoryEnabled = auto_memory_enabled.Value;
-        }
-
-        if (journal_enabled is not null && journal_enabled != agent.JournalEnabled)
-        {
-            changes.AppendLine($"- journal_enabled: {agent.JournalEnabled} → {journal_enabled}");
-            agent.JournalEnabled = journal_enabled.Value;
-        }
-
-        if (provider is not null && provider != agent.Provider)
-        {
-            changes.AppendLine($"- provider: {agent.Provider} → {provider}");
-            agent.Provider = provider;
-        }
-
-        if (codex_sandbox_mode is not null && codex_sandbox_mode != (agent.CodexSandboxMode ?? ""))
-        {
-            var validModes = new[] { "read-only", "workspace-write", "danger-full-access" };
-            if (codex_sandbox_mode != "" && !Array.Exists(validModes, m => m == codex_sandbox_mode))
-                return $"Invalid codex_sandbox_mode '{codex_sandbox_mode}'. Valid values: read-only, workspace-write, danger-full-access.";
-            changes.AppendLine($"- codex_sandbox_mode: {agent.CodexSandboxMode ?? "(none)"} → {(codex_sandbox_mode == "" ? "(none)" : codex_sandbox_mode)}");
-            agent.CodexSandboxMode = codex_sandbox_mode == "" ? null : codex_sandbox_mode;
-        }
-
-        if (tools is not null)
-        {
-            var newTools = tools
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            db.AgentTools.RemoveRange(agent.Tools);
-            agent.Tools = newTools.Select(t => new AgentTool { AgentId = agent.Id, ToolName = t, IsEnabled = true }).ToList();
-            changes.AppendLine($"- tools replaced ({newTools.Count} tools)");
-        }
-
-        if (projects is not null)
-        {
-            var newProjects = projects
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            db.AgentProjects.RemoveRange(agent.Projects);
-            agent.Projects = newProjects.Select(p => new AgentProject { AgentId = agent.Id, ProjectName = p }).ToList();
-            changes.AppendLine($"- projects replaced ({newProjects.Count} projects)");
-        }
-
-        if (can_receive_chat_requests is not null && can_receive_chat_requests != agent.CanReceiveChatRequests)
-        {
-            changes.AppendLine($"- can_receive_chat_requests: {agent.CanReceiveChatRequests} → {can_receive_chat_requests}");
-            agent.CanReceiveChatRequests = can_receive_chat_requests.Value;
-        }
-
-        if (request_received_message is not null && request_received_message != (agent.RequestReceivedMessage ?? ""))
-        {
-            if (request_received_message.Length > 500)
-                return $"request_received_message exceeds the 500-character limit ({request_received_message.Length} chars).";
-            changes.AppendLine($"- request_received_message: {(agent.RequestReceivedMessage is null ? "(default)" : "(set)")} → {(request_received_message == "" ? "(default)" : "(set)")}");
-            agent.RequestReceivedMessage = request_received_message == "" ? null : request_received_message;
-        }
-
-        if (mount_docker_sock is not null && mount_docker_sock != agent.MountDockerSock)
-        {
-            changes.AppendLine($"- mount_docker_sock: {agent.MountDockerSock} → {mount_docker_sock}");
-            agent.MountDockerSock = mount_docker_sock.Value;
-        }
-
-        if (output_style is not null && output_style.Trim() != (agent.OutputStyle ?? ""))
-        {
-            // Checked against output_styles here rather than at provision time: an unresolvable
-            // name makes provisioning refuse outright, and finding that out at the next reprovision
-            // is finding out far from the edit that caused it.
-            var styleName = output_style.Trim();
-            if (styleName.Length > 0 && !await db.OutputStyles.AnyAsync(s => s.Name == styleName))
-            {
-                var known = await db.OutputStyles.Select(s => s.Name).OrderBy(n => n).ToListAsync();
-                return $"Output style '{styleName}' does not exist. Known styles: "
-                     + (known.Count > 0 ? string.Join(", ", known) : "(none)");
-            }
-            changes.AppendLine($"- output_style: {agent.OutputStyle ?? "(none)"} → {(styleName.Length == 0 ? "(none)" : styleName)}");
-            agent.OutputStyle = styleName.Length == 0 ? null : styleName;
-        }
-
-        if (context_window is not null && context_window != (agent.ContextWindow ?? 0))
-        {
-            // #367: 0 clears; anything else must be in range — rejected, never clamped.
-            if (context_window != 0 && ContextWindow.DescribeFault(context_window.Value) is { } windowFault)
-                return windowFault;
-            changes.AppendLine($"- context_window: {agent.ContextWindow?.ToString() ?? "(none)"} → {(context_window == 0 ? "(none)" : context_window.ToString())}");
-            agent.ContextWindow = context_window == 0 ? null : context_window;
-        }
-
-        // #460: "" clears; checked below against the resulting provider and mode.
-        if (harness_extra is not null && harness_extra != (agent.HarnessExtra ?? ""))
-        {
-            changes.AppendLine($"- harness_extra: {(agent.HarnessExtra is null ? "(none)" : "(set)")} → {(harness_extra == "" ? "(none)" : "(set)")}");
-            agent.HarnessExtra = harness_extra == "" ? null : harness_extra;
-        }
-
-        var previousBaseUrl = agent.LocalBaseUrl;
-        if (baseUrlSent)
-            agent.LocalBaseUrl = baseUrl;
-
-        // #340, #382, #386: the agent's resulting state, after every field above is applied. Returning
-        // here skips SaveChanges, so nothing from this request is persisted.
-        if (AgentPatchHelpers.FinalizeLocalModel(agent) is { } localFault)
-            return $"Invalid local model configuration: {localFault}";
-
-        // #460 Part 3b: the allowlist, against the final provider and mode; nothing is saved on a fault.
-        if (AgentPatchHelpers.DescribeHarnessExtraFault(agent) is { } harnessExtraFault)
-            return $"Invalid harness_extra: {harnessExtraFault.Message}";
-
-        if (agent.LocalBaseUrl != previousBaseUrl)
-            changes.AppendLine($"- local_base_url: {previousBaseUrl ?? "(none)"} → {agent.LocalBaseUrl ?? "(none)"}");
-
-        if (changes.Length == 0)
+        var changes = outcome.Value!.Changes;
+        if (changes.Count == 0)
             return $"No changes specified for agent '{agent_name}'.";
-
-        await db.SaveChangesAsync();
-
-        // Project assignment IS the memory-ACL grant. Sync after the save so the hook sees the
-        // committed assignment list, and only when the caller actually touched projects.
-        if (projects is not null)
-        {
-            await AgentProjectAccessSync.SyncAndBroadcastAsync(
-                db, aclNotifier, agent.Name, agent.Projects.Select(p => p.ProjectName));
-        }
 
         // Settings are written into the container when it is provisioned. A restart re-runs the same
         // container with the old ones, so it is not what applies a saved change.
-        return $"Agent '{agent_name}' updated:\n{changes}Note: reprovision the agent for provision-time changes to take effect; a restart does not apply them.";
+        return $"Agent '{agent_name}' updated:\n{string.Concat(changes.Select(c => c + Environment.NewLine))}Note: reprovision the agent for provision-time changes to take effect; a restart does not apply them.";
     }
+
+    /// <summary>A comma-separated list as the tool takes it; null stays "not sent".</summary>
+    private static List<string>? SplitList(string? csv) =>
+        csv?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 }

@@ -3,6 +3,7 @@ import type { WorkflowDefinitionsState } from '../hooks/useWorkflowDefinitions'
 import { useTick } from '../hooks/useTick'
 import { computeDiff, relativeTime } from '../utils'
 import FieldHint from './FieldHint'
+import Icon from './Icon'
 
 const VALID_STEP_TYPES = new Set([
   'sequence', 'parallel', 'loop', 'branch', 'break', 'continue', 'noop',
@@ -178,10 +179,10 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
           )}
         </h1>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="completed-refresh-btn" onClick={onRefresh} disabled={loading} title="Refresh definitions">↻</button>
-          <button className="view-page-action wfe-visual-btn" onClick={() => state.openEditor(null)}>+ Visual Editor</button>
-          <button className="view-page-action" onClick={() => onShowNewForm(!showNewForm)}>
-            {showNewForm ? 'Cancel' : '+ New JSON'}
+          <button className="icon-btn completed-refresh-btn" onClick={onRefresh} disabled={loading} title="Refresh definitions" aria-label="Refresh definitions"><Icon name="refresh" /></button>
+          <button className="btn view-page-action wfe-visual-btn" onClick={() => state.openEditor(null)}><Icon name="workflows" size={16} />Visual editor</button>
+          <button className={`btn view-page-action${showNewForm ? '' : ' btn-primary'}`} onClick={() => onShowNewForm(!showNewForm)}>
+            {showNewForm ? 'Cancel' : <><Icon name="plus" size={16} />New from JSON</>}
           </button>
         </div>
       </div>
@@ -380,7 +381,7 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                     <span className={`config-feedback config-feedback-${toggleState}`}>{toggleMsg}</span>
                   )}
                 </div>
-                <span className="history-toggle">{isOpen ? '▲' : '▼'}</span>
+                <span className={`history-toggle${isOpen ? ' open' : ''}`}><Icon name="chevronDown" size={18} /></span>
               </div>
 
               {isOpen && (

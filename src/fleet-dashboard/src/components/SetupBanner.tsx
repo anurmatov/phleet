@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
 import type { AgentTemplateSummary } from '../types'
+import Icon from './Icon'
 
 // Matches the nested shape returned by SetupStatusDto
 interface SetupStatus {
@@ -123,7 +124,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
       <div className="config-modal" style={{ maxWidth: 480 }} onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">Connect Telegram</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
 
@@ -367,7 +368,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
       <div className="config-modal" style={{ maxWidth: 480 }} onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">Connect GitHub App</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
 
@@ -538,14 +539,10 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
     onConnected()
   }
 
-  // Compact chip row once everything is configured and there are agents
+  // Nothing to set up: say nothing. Credentials has the state of both connections.
   if (bothConfigured && agentCount > 0) {
     return (
       <>
-        <div className="setup-banner setup-banner--compact">
-          <span className="setup-chip setup-chip--ok">✓ Telegram</span>
-          <span className="setup-chip setup-chip--ok">✓ GitHub</span>
-        </div>
         {toasts.map(t => (
           <div key={t.id} className="setup-toast">{t.text}</div>
         ))}

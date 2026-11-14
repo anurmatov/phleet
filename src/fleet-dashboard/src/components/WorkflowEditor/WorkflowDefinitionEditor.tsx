@@ -10,6 +10,7 @@ import JsonPreview from './JsonPreview'
 import StepConfigPanel from './StepConfigPanel'
 import type { StepType } from './editorTypes'
 import type { WorkflowDefinitionDetail, WorkflowTypeInfo } from '../../types'
+import Icon from '../Icon'
 
 interface WorkflowDefinitionEditorProps {
   /** null = new definition */
@@ -294,7 +295,7 @@ function HistoryDrawer({ versions, currentVersion, onClose, onLoad }: HistoryDra
     <div className="wfe-history-drawer">
       <div className="wfe-history-header">
         <span>Version History</span>
-        <button className="wfe-history-close" onClick={onClose}>✕</button>
+        <button className="icon-btn wfe-history-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
       </div>
       {versions.length === 0 && <div className="wfe-history-empty">No previous versions.</div>}
       {versions.map(v => (

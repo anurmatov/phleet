@@ -128,7 +128,7 @@ test('agents: stop needs a second click, start does not', async ({ page }) => {
   const fleet = await open(page, 'agents')
   const alpha = agentRow(page, 'alpha')
   await overflow(alpha).click()
-  await alpha.locator('.agent-row-overflow').getByRole('button', { name: 'stop', exact: true }).click()
+  await alpha.locator('.agent-row-overflow').getByRole('button', { name: 'Stop', exact: true }).click()
   expect(fleet.writes('POST', '/api/agents/alpha/stop')).toHaveLength(0)
   await overflow(alpha).click()
   await alpha.locator('.agent-row-overflow').getByRole('button', { name: 'confirm stop?' }).click()
@@ -137,7 +137,7 @@ test('agents: stop needs a second click, start does not', async ({ page }) => {
 
   const gamma = agentRow(page, 'gamma')
   await overflow(gamma).click()
-  await gamma.locator('.agent-row-overflow').getByRole('button', { name: 'start', exact: true }).click()
+  await gamma.locator('.agent-row-overflow').getByRole('button', { name: 'Start', exact: true }).click()
   await expect(gamma.locator('.row-feedback-success')).toHaveText('Started')
   expect(fleet.writes('POST', '/api/agents/gamma/start')).toHaveLength(1)
 })
@@ -146,7 +146,7 @@ test('agents: delete asks first and the row goes once the server has dropped it'
   const fleet = await open(page, 'agents')
   const alpha = agentRow(page, 'alpha')
   await overflow(alpha).click()
-  await alpha.locator('.agent-row-overflow').getByRole('button', { name: 'delete', exact: true }).click()
+  await alpha.locator('.agent-row-overflow').getByRole('button', { name: 'Delete', exact: true }).click()
   await expect(alpha.locator('.row-confirm')).toContainText('Delete alpha? Container and DB record will be removed.')
   await alpha.locator('.row-confirm-delete-ok').click()
   await expect(alpha).toHaveCount(0)
@@ -231,7 +231,7 @@ test('agents: memory project access is its own write and re-reads the list', asy
 
 test('agents: a new agent can be copied from an existing one', async ({ page }) => {
   const fleet = await open(page, 'agents')
-  await page.getByRole('button', { name: '+ New Agent' }).click()
+  await page.getByRole('button', { name: 'New agent' }).click()
   const dialog = page.locator('.create-agent-modal')
   await expect(dialog.locator('.config-modal-title')).toHaveText('New Agent')
   await dialog.locator('select').first().selectOption('alpha')
@@ -250,7 +250,7 @@ test('agents: a new agent can be copied from an existing one', async ({ page }) 
 
 test('agents: a create with no name is refused in the dialog and nothing is sent', async ({ page }) => {
   const fleet = await open(page, 'agents')
-  await page.getByRole('button', { name: '+ New Agent' }).click()
+  await page.getByRole('button', { name: 'New agent' }).click()
   const dialog = page.locator('.create-agent-modal')
   await dialog.getByRole('button', { name: 'Create', exact: true }).click()
   await expect(dialog.locator('.config-feedback-error')).toBeVisible()
@@ -259,10 +259,10 @@ test('agents: a create with no name is refused in the dialog and nothing is sent
 
 test('agents: reprovision all asks in the sidenav, then says so and raises an alert', async ({ page }) => {
   const fleet = await open(page, 'agents')
-  await page.getByRole('button', { name: '⟳ Reprovision All' }).click()
+  await page.getByRole('button', { name: 'Reprovision all' }).click()
   await page.locator('.sidenav-confirm-no').click()
   expect(fleet.writes('POST', '/api/agents/reprovision-running')).toHaveLength(0)
-  await page.getByRole('button', { name: '⟳ Reprovision All' }).click()
+  await page.getByRole('button', { name: 'Reprovision all' }).click()
   await page.locator('.sidenav-confirm-yes').click()
   await expect(page.locator('.sidenav-action.success')).toHaveText('All agents reprovisioning…')
   await expect(page.locator('.toast')).toContainText('Reprovision all triggered — agents restarting')
@@ -422,7 +422,7 @@ test('agents view: its workflow rows confirm on the second click', async ({ page
 
 test('dialogs are announced as dialogs, take focus, and close on Escape', async ({ page }) => {
   await open(page, 'agents')
-  await page.getByRole('button', { name: '+ New Agent' }).click()
+  await page.getByRole('button', { name: 'New agent' }).click()
   const create = page.getByRole('dialog', { name: 'New Agent' })
   await expect(create).toBeVisible()
   await expect(create).toBeFocused()
@@ -448,9 +448,9 @@ test('dialogs are announced as dialogs, take focus, and close on Escape', async 
 // ── Instructions and project contexts: the same versioned editor ────────────────────────────────
 
 const VERSIONED = [
-  { hash: 'instructions', api: '/api/instructions', name: 'base', current: 'base v2 content', added: '+ New Instruction',
+  { hash: 'instructions', api: '/api/instructions', name: 'base', current: 'base v2 content', added: 'New instruction',
     newName: 'e.g. my-instruction', newContent: 'Instruction content…', other: 'reviewer' },
-  { hash: 'project-contexts', api: '/api/project-contexts', name: 'fleet', current: 'fleet context v2', added: '+ New Project Context',
+  { hash: 'project-contexts', api: '/api/project-contexts', name: 'fleet', current: 'fleet context v2', added: 'New project context',
     newName: 'e.g. my-project', newContent: 'Project context content…', other: 'docs' },
 ] as const
 
@@ -617,7 +617,7 @@ test('wf-definitions: rollback and disable each need a second click', async ({ p
 
 test('wf-definitions: search filters the list, and the count reaches the sidenav once loaded', async ({ page }) => {
   await open(page, 'wf-definitions')
-  await expect(navBadge(page, 'WF Definitions')).toHaveText('1')
+  await expect(navBadge(page, 'Definitions')).toHaveText('1')
   await page.getByPlaceholder('Search definitions…').fill('nothing-like-it')
   await expect(rowByName(page, 'ReviewWorkflow')).toHaveCount(0)
   await page.getByPlaceholder('Search definitions…').fill('review')

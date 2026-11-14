@@ -16,6 +16,7 @@ import InstructionPicker from './InstructionPicker'
 import ProjectAssignmentTable from './ProjectAssignmentTable'
 import EffectiveHarnessView from './EffectiveHarnessView'
 import { CONFIG_SECTIONS, DEFAULT_SECTION, sectionCustomizedCount, visibleFields, type SectionId } from './AgentConfigSections'
+import Icon from './Icon'
 
 interface AgentConfigModalProps {
   agentName: string
@@ -150,7 +151,7 @@ export default function AgentConfigModal({
     <Modal label={`Config — ${agentName}`} overlayClassName="config-modal-overlay" className="config-modal config-modal-sectioned" onClose={onClose}>
         <div className="config-modal-header">
           <span className="config-modal-title">Config — {agentName}</span>
-          <button className="instructions-modal-close" onClick={onClose} title="Close">✕ close</button>
+          <button className="icon-btn instructions-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         {configLoading && <div className="config-modal-body"><div className="config-loading">Loading…</div></div>}
         {!configLoading && configData && configEdits && (

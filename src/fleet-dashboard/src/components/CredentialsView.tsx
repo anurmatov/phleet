@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
 import SecretBindingsSection from './SecretBindingsSection'
 import DevicesSection from './DevicesSection'
+import Icon from './Icon'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ function ConfigEditModal({ editKey, onClose, onSaved }: ConfigEditModalProps) {
       <div className="config-modal" style={{ maxWidth: 480 }} onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">{editKey ? `Edit ${editKey}` : 'Add new key'}</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
           {!editKey && (
@@ -207,7 +208,7 @@ function MountModal({ fileId, fileName, onClose, onMounted }: MountModalProps) {
       <div className="config-modal" style={{ maxWidth: 420 }} onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">Mount "{fileName}"</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
           <div className="config-row">

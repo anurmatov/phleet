@@ -10,7 +10,8 @@
     "lint": "eslint . --max-warnings 0",
     "test": "node --test src/*.test.ts",
     "test:human-input-browser": "playwright test --config playwright.human-input.config.ts",
-    "test:views-browser": "playwright test --config playwright.views.config.ts"
+    "test:views-browser": "playwright test --config playwright.views.config.ts",
+    "test:tour": "playwright test --config playwright.tour.config.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

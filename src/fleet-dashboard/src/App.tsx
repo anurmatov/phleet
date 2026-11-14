@@ -25,8 +25,8 @@ import { useAgentConfig } from './hooks/useAgentConfig'
 import { useCreateAgent } from './hooks/useCreateAgent'
 import { useLogViewer } from './hooks/useLogViewer'
 import AppHeader from './components/AppHeader'
-import AppFooter from './components/AppFooter'
 import Sidenav from './components/Sidenav'
+import TabBar from './components/TabBar'
 import AgentsView from './components/AgentsView'
 import WorkflowsView from './components/WorkflowsView'
 import InstructionsView from './components/InstructionsView'
@@ -347,6 +347,7 @@ export default function App() {
     return { agentByWorkflow, workflowByAgent }
   }, [agents, workflows])
 
+  const attentionCount = workflows.filter(wf => getSignalDefs(wf).length > 0).length
   const unreadAlerts = alerts.filter(a => !a.dismissed)
   const toastAlerts = alerts.filter(a => a.showToast)
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
@@ -360,8 +361,6 @@ export default function App() {
         wsStatus={wsStatus}
         unreadAlertCount={unreadAlerts.length}
         onAlertsClick={() => setActiveView('alerts')}
-        navOpen={navOpen}
-        onHamburgerClick={() => setNavOpen(o => !o)}
         agents={agents}
         workflows={workflows}
         onNavigate={view => setActiveView(view)}
@@ -374,14 +373,16 @@ export default function App() {
           setActiveView(view)
           if (view === 'wf-definitions' && !wfDefs.loaded) wfDefs.load()
         }}
-        agentCount={sorted.length}
-        activeWorkflowCount={workflows.length}
-        attentionWorkflowCount={workflows.filter(wf => getSignalDefs(wf).length > 0).length}
-        instructionCount={instructions.length}
-        projectContextCount={projectContexts.length}
-        outputStyleCount={catalog.outputStyles.length}
-        wfDefinitionCount={wfDefs.definitions.length}
-        namespaceCount={catalog.namespaces.length}
+        counts={{
+          agents: sorted.length,
+          workflows: workflows.length,
+          instructions: instructions.length,
+          'project-contexts': projectContexts.length,
+          'output-styles': catalog.outputStyles.length,
+          'wf-definitions': wfDefs.definitions.length,
+          namespaces: catalog.namespaces.length,
+        }}
+        attentionWorkflowCount={attentionCount}
         unreadAlertCount={unreadAlerts.length}
         reprovisionAllState={agentActions.reprovisionAllState}
         reprovisionAllMsg={agentActions.reprovisionAllMsg}
@@ -389,21 +390,23 @@ export default function App() {
         onReprovisionAllConfirm={agentActions.reprovisionAllConfirm}
         onReprovisionAllCancel={agentActions.reprovisionAllCancel}
         onNewAgent={() => create.open()}
+        wsStatus={wsStatus}
+        lastUpdated={lastUpdated}
         navOpen={navOpen}
         onNavClose={() => setNavOpen(false)}
       />
 
       <main className={`app-main${activeView === 'memory' ? ' app-main--memory' : activeView === 'chat' ? ' app-main--chat' : ''}`}>
         {activeView === 'agents' && (
-          <SetupBanner
-            status={catalog.setupStatus}
-            agentCount={Object.keys(agents).length}
-            onConnected={catalog.loadSetupStatus}
-            onNewAgentFromTemplate={create.openFromTemplate}
-          />
-        )}
-        {activeView === 'agents' && (
           <AgentsView
+            banner={
+              <SetupBanner
+                status={catalog.setupStatus}
+                agentCount={Object.keys(agents).length}
+                onConnected={catalog.loadSetupStatus}
+                onNewAgentFromTemplate={create.openFromTemplate}
+              />
+            }
             sorted={sorted}
             actions={agentActions}
             configAgent={config.agent}
@@ -416,6 +419,7 @@ export default function App() {
             workflowActions={wfActions}
             highlightedEntityId={highlightedEntityId}
             onClearHighlight={onClearHighlight}
+            onNewAgent={() => create.open()}
           />
         )}
 
@@ -521,7 +525,14 @@ export default function App() {
         </div>
       )}
 
-      <AppFooter wsStatus={wsStatus} lastUpdated={lastUpdated} />
+      <TabBar
+        activeView={activeView}
+        onNavigate={view => { setNavOpen(false); setActiveView(view) }}
+        attentionWorkflowCount={attentionCount}
+        unreadAlertCount={unreadAlerts.length}
+        moreOpen={navOpen}
+        onMore={() => setNavOpen(o => !o)}
+      />
 
       {/* Overlay modals */}
       {log.agent && <LogViewer agentName={log.agent} log={log} />}

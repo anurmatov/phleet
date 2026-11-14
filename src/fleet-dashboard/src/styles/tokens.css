@@ -1,0 +1,146 @@
+/* Design tokens: the one place a colour, a size or a radius is decided.
+ *
+ * Two themes. The page follows the system's unless the person chose one (theme.ts sets
+ * `data-theme` on the root element). Every other stylesheet uses these names and never a literal
+ * colour, so a page cannot be right in one theme and unreadable in the other.
+ *
+ * Each status colour comes in three strengths: the colour itself (text, icons, solid fills),
+ * `-soft` (a tinted ground behind text of that colour) and `-line` (a border around it). */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0b0d10;
+  --surface: #13161b;
+  --surface-2: #1a1e25;
+  --surface-3: #242a33;
+  --border: #242932;
+  --border-strong: #353d49;
+  --text: #e8ebf0;
+  --text-2: #a4adba;
+  --text-3: #6d7786;
+
+  --accent: #3ecf8e;
+  --accent-strong: #5fe0a6;
+  --on-accent: #06281a;
+  --danger: #f47067;
+  --warn: #f2b544;
+  --info: #6ea8ff;
+  --purple: #b193ff;
+
+  --scrim: rgba(0, 0, 0, 0.6);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.5);
+  --tint: 16%;
+
+  /* Type. Sizes are few on purpose: body, one step down for secondary text, one more for labels. */
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', system-ui, sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --fs-2xs: 11px;
+  --fs-xs: 12px;
+  --fs-s: 13px;
+  --fs-m: 14px;
+  --fs-l: 15px;
+  --fs-xl: 16px;
+  --fs-2xl: 18px;
+  --fs-3xl: 22px;
+
+  --r-xs: 4px;
+  --r-s: 6px;
+  --r-m: 8px;
+  --r-l: 10px;
+  --r-xl: 14px;
+  --r-pill: 999px;
+
+  /* How tall a thing you press is. 36 with a pointer, 44 with a finger. */
+  --control: 36px;
+  --control-s: 30px;
+
+  --sidebar: 244px;
+  --header: 56px;
+  --tabbar: 0px;
+  --content: 1180px;
+  --gutter: 28px;
+
+  --accent-soft: color-mix(in srgb, var(--accent) var(--tint), var(--surface));
+  --accent-line: color-mix(in srgb, var(--accent) 42%, transparent);
+  --danger-soft: color-mix(in srgb, var(--danger) var(--tint), var(--surface));
+  --danger-line: color-mix(in srgb, var(--danger) 42%, transparent);
+  --warn-soft: color-mix(in srgb, var(--warn) var(--tint), var(--surface));
+  --warn-line: color-mix(in srgb, var(--warn) 42%, transparent);
+  --info-soft: color-mix(in srgb, var(--info) var(--tint), var(--surface));
+  --info-line: color-mix(in srgb, var(--info) 42%, transparent);
+  --purple-soft: color-mix(in srgb, var(--purple) var(--tint), var(--surface));
+  --purple-line: color-mix(in srgb, var(--purple) 42%, transparent);
+  --hover: color-mix(in srgb, var(--text) 6%, transparent);
+  --pressed: color-mix(in srgb, var(--text) 10%, transparent);
+  --focus: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #f2f4f7;
+    --surface-3: #e6e9ee;
+    --border: #e1e5eb;
+    --border-strong: #c9d0da;
+    --text: #151a21;
+    --text-2: #4b5666;
+    --text-3: #7a8494;
+    --accent: #0c8f62;
+    --accent-strong: #0a7a54;
+    --on-accent: #ffffff;
+    --danger: #c7382c;
+    --warn: #a86400;
+    --info: #2563d8;
+    --purple: #7446d8;
+    --scrim: rgba(20, 26, 33, 0.45);
+    --shadow-1: 0 1px 2px rgba(20, 26, 33, 0.08);
+    --shadow-2: 0 10px 30px rgba(20, 26, 33, 0.16);
+    --tint: 11%;
+  }
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+  --surface-3: #e6e9ee;
+  --border: #e1e5eb;
+  --border-strong: #c9d0da;
+  --text: #151a21;
+  --text-2: #4b5666;
+  --text-3: #7a8494;
+  --accent: #0c8f62;
+  --accent-strong: #0a7a54;
+  --on-accent: #ffffff;
+  --danger: #c7382c;
+  --warn: #a86400;
+  --info: #2563d8;
+  --purple: #7446d8;
+  --scrim: rgba(20, 26, 33, 0.45);
+  --shadow-1: 0 1px 2px rgba(20, 26, 33, 0.08);
+  --shadow-2: 0 10px 30px rgba(20, 26, 33, 0.16);
+  --tint: 11%;
+}
+
+/* A finger, not a pointer: everything pressable grows to a size a thumb can hit. */
+@media (pointer: coarse) {
+  :root {
+    --control: 44px;
+    --control-s: 38px;
+  }
+}
+
+/* Below this the sidebar gives way to a bar of tabs along the bottom. */
+@media (max-width: 899px) {
+  :root {
+    --sidebar: 0px;
+    --header: 52px;
+    --tabbar: 58px;
+    --gutter: 16px;
+  }
+}

@@ -1,6 +1,8 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
 import type { WsStatus, AgentState, WorkflowSummary } from '../types'
 import { statusDot } from '../utils'
+import { applyTheme, nextTheme, readTheme, themeLabel, type ThemeChoice } from '../theme'
+import Icon from './Icon'
 
 interface SearchResult {
   type: 'agent' | 'workflow'
@@ -14,8 +16,7 @@ interface AppHeaderProps {
   wsStatus: WsStatus
   unreadAlertCount: number
   onAlertsClick: () => void
-  navOpen: boolean
-  onHamburgerClick: () => void
+  /** The page on screen, as the navigation names it. Shown where the sidebar is not. */
   agents: Record<string, AgentState>
   workflows: WorkflowSummary[]
   onNavigate: (view: 'agents' | 'workflows') => void
@@ -23,9 +24,16 @@ interface AppHeaderProps {
 }
 
 export default function AppHeader({
-  wsStatus, unreadAlertCount, onAlertsClick, navOpen, onHamburgerClick,
+  wsStatus, unreadAlertCount, onAlertsClick,
   agents, workflows, onNavigate, onHighlight,
 }: AppHeaderProps) {
+  const [theme, setTheme] = useState<ThemeChoice>(() => readTheme(window.localStorage))
+  function cycleTheme() {
+    const next = nextTheme(theme)
+    applyTheme(next, document.documentElement, window.localStorage)
+    setTheme(next)
+  }
+
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
   const [mobileExpanded, setMobileExpanded] = useState(false)
@@ -117,10 +125,11 @@ export default function AppHeader({
 
   const searchBox = (
     <div className="header-search-wrap" ref={containerRef}>
+      <Icon name="search" size={16} className="header-search-icon" />
       <input
         ref={inputRef}
         className="header-search-input"
-        placeholder="Search agents & workflows…"
+        placeholder="Search agents and workflows"
         value={query}
         onChange={e => handleInputChange(e.target.value)}
         onFocus={() => { if (query.trim() && query.trim() !== '#') setOpen(true) }}
@@ -145,7 +154,7 @@ export default function AppHeader({
                 </>
               ) : (
                 <>
-                  <span className="hsr-wf-icon">⟳</span>
+                  <span className="hsr-wf-icon"><Icon name="workflows" size={14} /></span>
                   <span className="hsr-label">{r.label}</span>
                   <span className="hsr-sub">{r.sub}</span>
                 </>
@@ -164,42 +173,47 @@ export default function AppHeader({
 
   return (
     <header className="app-header">
-      <span className="app-header-logo">
-        <span className="app-header-dot" />
-        fleet
+      {/* On a phone there is no sidebar to carry the name; each page says its own title. */}
+      <span className="app-header-brand">
+        <span className="brand-mark" aria-hidden="true" />
+        <span className="brand-name">fleet</span>
       </span>
-      <span className={`app-ws-pill app-ws-${wsStatus}`}>{wsStatus}</span>
 
-      {/* Desktop search */}
-      <div className="header-search-desktop">{searchBox}</div>
+      <div className="header-search-desktop">
+        {searchBox}
+        <kbd className="header-search-kbd" aria-hidden="true">⌘K</kbd>
+      </div>
 
       <div className="app-header-right">
-        {/* Mobile search icon */}
-        <button
-          className="header-search-mobile-btn"
-          onClick={() => { setMobileExpanded(e => !e); if (!mobileExpanded) setTimeout(() => inputRef.current?.focus(), 50) }}
-          title="Search (Cmd+K)"
-          aria-label="Search"
-        >⌕</button>
+        {wsStatus !== 'connected' && (
+          <span className={`conn-chip conn-${wsStatus}`} role="status">
+            <span className="conn-dot" aria-hidden="true" />
+            {wsStatus === 'connecting' ? 'Connecting…' : 'Disconnected'}
+          </span>
+        )}
 
         <button
-          className={`app-alerts-btn${unreadAlertCount > 0 ? ' has-alerts' : ''}`}
+          className="icon-btn header-search-mobile-btn"
+          onClick={() => { setMobileExpanded(e => !e); if (!mobileExpanded) setTimeout(() => inputRef.current?.focus(), 50) }}
+          title="Search"
+          aria-label="Search"
+        ><Icon name="search" /></button>
+
+        <button className="icon-btn" onClick={cycleTheme} title={themeLabel(theme)} aria-label={themeLabel(theme)}>
+          <Icon name={theme === 'system' ? 'system' : theme === 'light' ? 'sun' : 'moon'} />
+        </button>
+
+        <button
+          className={`icon-btn app-alerts-btn${unreadAlertCount > 0 ? ' has-alerts' : ''}`}
           onClick={onAlertsClick}
           title={unreadAlertCount > 0 ? `${unreadAlertCount} unread alert${unreadAlertCount > 1 ? 's' : ''}` : 'Alerts'}
+          aria-label={unreadAlertCount > 0 ? `${unreadAlertCount} unread alert${unreadAlertCount > 1 ? 's' : ''}` : 'Alerts'}
         >
-          🔔{unreadAlertCount > 0 && <span className="app-alerts-badge">{unreadAlertCount}</span>}
-        </button>
-        <button
-          className={`app-hamburger${navOpen ? ' active' : ''}`}
-          onClick={onHamburgerClick}
-          title="Toggle navigation"
-          aria-label="Toggle navigation"
-        >
-          ☰
+          <Icon name="alerts" />
+          {unreadAlertCount > 0 && <span className="app-alerts-badge">{unreadAlertCount}</span>}
         </button>
       </div>
 
-      {/* Mobile expanded search overlay */}
       {mobileExpanded && (
         <div className="header-search-mobile-overlay">
           {searchBox}

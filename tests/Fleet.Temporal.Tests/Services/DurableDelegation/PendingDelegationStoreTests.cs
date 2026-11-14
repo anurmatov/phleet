@@ -292,6 +292,112 @@ public sealed class PendingDelegationStoreTests : IDisposable
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(aside));
     }
 
+    // ── a write the caller has to know about ──────────────────────────────────
+
+    /// <summary>Makes every later write fail: a directory stands where the temp file goes.</summary>
+    private void BreakWrites()
+    {
+        Directory.CreateDirectory(StateFile + ".tmp");
+        File.WriteAllText(Path.Combine(StateFile + ".tmp", "in-the-way"), "");
+    }
+
+    /// <summary>
+    /// <see cref="PendingDelegationStore.Save"/> says nothing when the file was not written.
+    /// <see cref="PendingDelegationStore.TrySave"/> is the same write for a caller that must not
+    /// go on without it: true only when there is a file and it now holds what is in memory.
+    /// </summary>
+    [Fact]
+    public void TrySave_IsTrueOnlyWhenTheFileWasWritten()
+    {
+        var store = Store();
+        store.Put(Record());
+        Assert.True(store.TrySave());
+        Assert.True(store.Durable);
+
+        Assert.False(new PendingDelegationStore("  ", NullLogger.Instance).TrySave());
+
+        BreakWrites();
+        Assert.False(store.TrySave());
+        Assert.False(store.Durable);
+
+        // Save makes the same failed write and stays silent, as it always did.
+        store.Save();
+        Assert.False(store.Durable);
+    }
+
+    /// <summary>
+    /// A record is kept only if the file then holds it. When the write fails the store is as it
+    /// was: a record that was being replaced is still the one held, and a new one was never added.
+    /// </summary>
+    [Fact]
+    public void TryPut_KeepsTheRecordOnlyIfTheFileHoldsIt()
+    {
+        var store = Store();
+        Assert.True(store.TryPut(Record("wf-1/a")));
+        var reloaded = Store();
+        reloaded.Load();
+        Assert.Equal(["wf-1/a"], reloaded.TaskIds);
+
+        BreakWrites();
+        var replacement = Record("wf-1/a");
+        replacement.Attempt = 2;
+
+        Assert.False(store.TryPut(replacement));
+        Assert.False(store.TryPut(Record("wf-1/b")));
+
+        Assert.True(store.TryGet("wf-1/a", out var kept));
+        Assert.Equal(1, kept.Attempt);
+        Assert.Equal(["wf-1/a"], store.TaskIds);
+
+        Assert.False(new PendingDelegationStore(null, NullLogger.Instance).TryPut(Record("wf-1/c")));
+    }
+
+    /// <summary>
+    /// The two publish-once fields are in the file only when set, so a record without them is
+    /// the bytes it always was, and they come back on a reload. What is only ever true in memory
+    /// (read from the file by this process; marker write failed) is never written.
+    /// </summary>
+    [Fact]
+    public void ThePublishOnceFields_AreWrittenOnlyWhenSet_AndALoadedRecordIsMarkedRestored()
+    {
+        var store = Store();
+        var plain = Record("wf-1/plain");
+        plain.Restored = true;
+        plain.MarkerWriteFailed = true;
+        store.Put(plain);
+
+        var written = File.ReadAllText(StateFile);
+        Assert.DoesNotContain("PublishOnce", written);
+        Assert.DoesNotContain("PublishAttempted", written);
+        Assert.DoesNotContain("Restored", written);
+        Assert.DoesNotContain("MarkerWriteFailed", written);
+        Assert.DoesNotContain("DirectiveWillNeverBeSent", written);
+
+        var once = Record("wf-1/once");
+        once.PublishOnce = true;
+        store.Put(once);
+        Assert.Contains("\"PublishOnce\": true", File.ReadAllText(StateFile));
+        Assert.DoesNotContain("PublishAttempted", File.ReadAllText(StateFile));
+
+        once.PublishAttempted = true;
+        store.Save();
+        Assert.Contains("\"PublishAttempted\": true", File.ReadAllText(StateFile));
+        Assert.False(once.Restored);
+
+        var reloaded = Store();
+        reloaded.Load();
+        Assert.True(reloaded.TryGet("wf-1/once", out var loadedOnce));
+        Assert.True(loadedOnce.PublishOnce);
+        Assert.True(loadedOnce.PublishAttempted);
+        Assert.True(loadedOnce.Restored);
+        Assert.False(loadedOnce.MarkerWriteFailed);
+
+        Assert.True(reloaded.TryGet("wf-1/plain", out var loadedPlain));
+        Assert.False(loadedPlain.PublishOnce);
+        Assert.False(loadedPlain.PublishAttempted);
+        Assert.False(loadedPlain.MarkerWriteFailed);
+    }
+
     [Fact]
     public void TheDefaultStateFile_IsInTheBridgesMountedStateDirectory() =>
         Assert.Equal("/var/lib/fleet-temporal-bridge/pending-delegations.json", new DurableDelegationOptions().StateFile);

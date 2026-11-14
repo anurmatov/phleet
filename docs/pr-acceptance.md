@@ -41,9 +41,9 @@ doc-only goes directly to MERGE_GATE without acceptance or cleanup children.
 Only unknown-head `owner_unavailable` and `stale_signals` can reach BLOCKED.
 No plan, recovery, owner, harness or child reason can block.
 
-All five PIN instructions carry `REQUIRE_ACCEPTANCE: <off|required>`: PIN, the
-CI wait, the cleanup wait and both post-approval re-pins (one for a delegated
-approval, one for a human approval). In `off`, read only the actual head, every
+All six PIN instructions carry `REQUIRE_ACCEPTANCE: <off|required>`: PIN, the
+CI wait, the cleanup wait, a delegated approval's re-pin, and a human approval's
+re-pin in the merge hold and in the stall after it. In `off`, read only the actual head, every
 CI page and diff paths. Skip body hashing, design lookup, plans, receipts, prior
 rounds, owner and capability-map checks. Ignore missing/malformed acceptance
 tokens. After a delegated approval, unchanged head plus successful CI routes to
@@ -276,7 +276,7 @@ Recover a missing URL from the one branch's PR list, not by opening a duplicate.
 | UNRESOLVED | Report threads only; no push; unresolved threads → IMPLEMENT; none → PIN |
 | PIN | Re-read actual head, all CI pages, immutable plan evidence, owner access, prior receipts and counters |
 | CI_WAIT | Literal 300-second timer, maximum 12; repeat PIN; a reported different head → INVALIDATED; still not success → STALLED(ci_timeout) |
-| STALLED | Owned technical state, no gate and no signal: one coordinator notice, then four 10800-second timers each followed by one probe; success → resume route, failure → IMPLEMENT, head moved → INVALIDATED, fourth read not success → TIMEOUT |
+| STALLED | Owned technical state, no gate and no signal: one coordinator notice, then four 10800-second timers each followed by one read. The read is a probe for `ci_timeout` and the merge check (re-pin, then preflight) for `merge_held`. Clear → resume route (REVIEW, PIN or MERGE), failure → IMPLEMENT, head moved → INVALIDATED, fourth read not clear → TIMEOUT |
 | CLEANUP_WAIT | Literal 1800-second timer, maximum 16; repeat PIN; still dirty → cleanup_pending |
 | ACCEPT | Enforce batch entry guard, update counters, W1, then one awaited exact-head child |
 | CLASSIFY | Code-validated unanimous classification of failed attempt receipts; no synthesizer verdict |
@@ -285,7 +285,7 @@ Recover a missing URL from the one branch's PR list, not by opening a duplicate.
 | BLOCKED | CEO-only acceptance-decision; continue → PIN and full revalidation, stop → STOPPED. Never entered for `ci_timeout` |
 | INVALIDATED | W4 clear; publish sanitized head invalidation; withdraw review ref and fresh delta REVIEW |
 | MERGE_GATE | Required Phase/GateRef/Acceptance write then bound CEO merge wait. Delegated approval → re-pin → MERGE or INVALIDATED; human approval → MERGE_HOLD |
-| MERGE_HOLD | Human approvals only. Re-pin, then a read-only preflight; clear → MERGE, CI failure → IMPLEMENT, head moved → INVALIDATED, anything else → 300-second timer and again, 12 passes per gate visit, then STALLED(merge_held). The approval is kept |
+| MERGE_HOLD | Human approvals only, entered once per gate visit. Re-pin, then a read-only preflight; clear → MERGE, CI failure → IMPLEMENT, head moved → INVALIDATED, anything else → 300-second timer and again, 12 passes, then STALLED(merge_held). The approval is kept |
 | MERGE | Delegated: pinned merge, one read. Human: the merge command once per gate visit, then up to three reads of the actual merged state |
 | STOPPED | PR remains open, sanitized summary, waiter cancelled; no merge |
 | EXHAUSTED | No terminal sentinel after 60 delivery passes; notify, waiter cancelled, no merge |
@@ -315,7 +315,7 @@ starts only after verified merge and retains issue/reviewer/preparation inputs.
 The configured CTO performs a read-only PIN, bounded to 15 minutes, with
 `REQUIRE_ACCEPTANCE` on every PIN and post-approval repin. A delegated
 approval's re-pin is asked for the tokens it was always asked for (no CI_READ,
-no CI_DETAIL); the other four are asked for these. Off-mode PIN emits
+no CI_DETAIL); the other five are asked for these. Off-mode PIN emits
 only HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS. Required-mode PIN emits
 PR, HEAD_OID, IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS, PLAN, PLAN_SHA256,
 MAX_DURATION, WAIT_SECONDS, PRE_STAGES, POST_STAGES, OWNER, PRIOR_RECEIPTS,
@@ -386,7 +386,6 @@ owner_unavailable (pin_failed), never blind progress.
 | harness_retry_head | One durably reserved same-head retry; restart does not restore its availability |
 | ci_pending_reads, ci_unavailable_reads, ci_silent_reads | One per CI read that was pending, unavailable or silent; all three restart when H changes |
 | review_hold_passes | Review-hold passes spent at H, 0–12; restarts only when H changes |
-| merge_hold_passes | Merge-hold passes spent in this gate visit, 0–12; a stall and its resume do not restore them |
 | merge_issued_seq | The merge_gate_seq whose merge command was issued; the command is skipped when it equals the current visit |
 
 First attempt is round zero. At ACCEPT entry, a different head with batch 5
@@ -474,19 +473,27 @@ no reason to hold a verdict and `needs_human_review` is for a human decision.
 
 **STALLED(reason).** Entered from CI_WAIT (`ci_timeout`, resume PIN), from
 REVIEW_HOLD (`ci_timeout`, resume REVIEW) and from MERGE_HOLD (`merge_held`,
-resume the merge check). Entry is one required write of Phase
-`technical-stalled` and Acceptance `result=blocked;block=<reason>`; GateRef is
-not written. One notice goes to the configured CTO and to nobody else: head,
-reason, the three read counters, the last CI detail and hold reason, the times
-of the four reads, and that a concrete authority, risk, cost or scope question
-is the CTO's to raise through its normal channel. Then four 10800-second
-timers (one sleep step in a loop of four), each followed by one probe:
-720 minutes, the timeout of the gate this replaces. The first success takes the
-resume route (a review resumes with a review, never the pause), a failure goes
-to IMPLEMENT, a moved head invalidates, and a fourth read that is not success
-ends the run as TIMEOUT, the outcome of a gate timeout: waiter `cancelled`, PR
-open, run not Failed. No signal is read; a signal of any name changes neither
-the timers nor the outcome. A human can cancel the run.
+resume MERGE). Entry is one required write of Phase `technical-stalled` and
+Acceptance `result=blocked;block=<reason>`; GateRef is not written. One notice
+goes to the configured CTO and to nobody else: head, reason, the three read
+counters, the last CI detail and hold reason, the times of the four reads, and
+that a concrete authority, risk, cost or scope question is the CTO's to raise
+through its normal channel. Then four 10800-second timers (one sleep step in a
+loop of four), each followed by one read: 720 minutes, the timeout of the gate
+this replaces.
+
+What a read is depends on what stalled. For `ci_timeout` it is the probe, and
+green CI at H resumes (a review resumes with a review, never the pause). For
+`merge_held` it is the merge check itself, a re-pin and then the preflight when
+CI is success, because green CI alone says nothing about why the merge was
+held. A clear check restores the gate's Acceptance record under Phase
+`merge-hold` and goes to the merge turn; it does not go back to the hold. In
+both, a failure goes to IMPLEMENT, a moved head invalidates, and a fourth read
+that is not clear ends the run as TIMEOUT, the outcome of a gate timeout:
+waiter `cancelled`, PR open, run not Failed. The phase and the blocked record
+stay as written for as long as the stall waits. No signal is read; a signal of
+any name changes neither the timers nor the outcome. A human can cancel the
+run.
 
 **After a human approval.** MERGE_HOLD first re-pins. Head moved → INVALIDATED.
 `CI: failure` → IMPLEMENT. `CI: success` → preflight. Anything else is held.
@@ -497,32 +504,20 @@ checks_pending|queue|window_closed|other` and `IS_DRAFT: true|false`. An absent,
 failed or unparseable answer is held, never clear. Held writes Phase
 `merge-hold` and repeats timer, re-pin and preflight. The approval is kept
 throughout: one consensus round, one gate visit. When the passes are spent the
-run stalls with `merge_held`; back from the stall it checks once more without
-waiting, and stalls again if still held.
+run stalls with `merge_held`, and the stall's four reads are the same check.
 
-A merge that stays held while CI stays green is bounded by the 60 delivery
-passes, not by the stall's 720 minutes, because every stall's first read is
-green and resumes. With the approval given in the first delivery pass, which is
-the longest case:
+The longest a held merge can take, whatever CI does:
 
 | step | count | time |
 |---|---|---|
 | hold after approval | 12 passes | 60 minutes |
-| stall, resumed by its first read | 30 | 180 minutes each, 5400 minutes |
-| check after a stall (re-pin and preflight, no wait) | 29 | none |
-| total | | 5460 minutes: 91 hours |
+| stall | 4 reads | 720 minutes |
+| total | | 780 minutes: 13 hours |
 
-In those 91 hours the configured CTO gets 30 stall notices, one every three
-hours, and takes 144 turns in all: the 30 notices, 30 probes, 42 re-pins and 42
-preflights. No merge command is issued. The run then ends Failed with
-`delivery_passes_exhausted` and the usual exhaustion notice; the waiter is told
-`cancelled` and the PR stays open. An approval given in delivery pass P leaves
-half of the remaining passes, rounded up, for stalls: (60 − P) / 2. If CI is
-not green at a stall's first read the stall lasts longer: it resumes at its
-second, third or fourth read (360, 540 or 720 minutes), so 30 stalls that each
-resume at the fourth read take 21,660 minutes with the hold, 361 hours; a stall
-whose fourth read is not green ends the run as TIMEOUT instead. The times do
-not include the turns themselves.
+In that time the configured CTO gets one stall notice and makes at most 12 + 4
+re-pins after the one at approval, and as many preflights. No merge command is
+issued. The run then ends as TIMEOUT: waiter `cancelled`, PR open, run not
+Failed. The times do not include the turns themselves.
 
 **Merge turn.** `phase4_merge` is a plain delegate with `noRedelivery`, no
 continuation retries, a status variable and `ignoreFailure`; no step above it
@@ -540,11 +535,15 @@ back to the preflight, the hold or the turn within the same gate visit; a new
 command needs a new review, a new gate visit and a new approval.
 
 A cancelled run sends no merge command. A cancellation that arrives during a
-re-pin or the preflight is swallowed by that step's `ignoreFailure`, leaves no
-answer, counts as held and ends at the hold's timer. At the merge turn the
-engine ends the run itself: a `noRedelivery` step is not entered by a cancelled
-run and its `ignoreFailure` does not swallow a cancellation, so the outcome
-does not depend on the sleep that happens to follow the first unanswered read.
+re-pin, a probe or the preflight is swallowed by that step's `ignoreFailure`,
+leaves no answer and counts as held; the run then ends Canceled at its next
+timer, in the hold or in the stall. A stall's fourth read has no timer after
+it: a cancellation swallowed there ends the run as the TIMEOUT it was one read
+away from, Completed and not Canceled, still with no command. At the merge turn
+the engine ends the run itself: a `noRedelivery` step is not entered by a
+cancelled run and its `ignoreFailure` does not swallow a cancellation, so the
+outcome does not depend on the sleep that happens to follow the first
+unanswered read.
 
 Not covered:
 
@@ -552,7 +551,8 @@ Not covered:
   timer, up to 300 seconds late in a wait or hold and up to three hours late in
   a stall.
 - Each read is still a turn of the configured CTO. A wait costs twelve, a stall
-  four.
+  four, and a stall of a held merge up to eight (a re-pin and a preflight per
+  read).
 - Who owns the change after it merged is not decided here.
 - `noRedelivery` bounds what the bridge sends, not what the agent executes; see
   `docs/durable-delegation.md`.
@@ -565,8 +565,6 @@ Not covered:
   not preceded by a probe.
 - PIN itself is unchanged: a PIN that reports no head still invalidates, and a
   PIN turn that fails still leaves the previous report in place.
-- A merge that stays held with green CI is not ended early: it alternates stall
-  and check for up to 91 hours and 30 notices, as counted above.
 
 ## Child lease, stages and cancellation cleanup
 

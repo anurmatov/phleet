@@ -197,8 +197,10 @@ public class ShippedOutputStyleTests
             RepoRoot(), "src", "fleet-dashboard", "src", "components", "AgentConfigModal.tsx"));
         var constants = File.ReadAllText(System.IO.Path.Combine(
             RepoRoot(), "src", "fleet-dashboard", "src", "constants.ts"));
-        var css = File.ReadAllText(System.IO.Path.Combine(
-            RepoRoot(), "src", "fleet-dashboard", "src", "index.css"));
+        // The dashboard's styles are the files index.css imports, under src/styles.
+        var css = string.Join("\n", Directory
+            .GetFiles(System.IO.Path.Combine(RepoRoot(), "src", "fleet-dashboard", "src", "styles"), "*.css")
+            .Select(File.ReadAllText));
 
         Assert.Contains("Output Style", modal, StringComparison.Ordinal);
         // An explicit "none" option — clearing has to be reachable, not just not-setting.

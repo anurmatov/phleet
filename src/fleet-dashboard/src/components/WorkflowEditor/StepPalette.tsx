@@ -38,7 +38,7 @@ function PaletteItem({ type, onAdd }: { type: StepType; onAdd?: (t: StepType) =>
       onClick={() => onAdd?.(type)}
       title={`Drag to add, or click to append`}
     >
-      <span className="wfe-step-dot" style={{ background: STEP_COLORS[type] ?? '#94a3b8' }} />
+      <span className="wfe-step-dot" style={{ background: STEP_COLORS[type] ?? 'var(--text-3)' }} />
       <span>{type}</span>
     </div>
   )

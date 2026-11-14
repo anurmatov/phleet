@@ -61,7 +61,7 @@ export default function SignInGate({ children }: { children: ReactNode }) {
   return (
     <div className="signin-shell">
       <div className="signin-card">
-        <h1 className="signin-title">Fleet</h1>
+        <h1 className="signin-title"><span className="brand-mark" aria-hidden="true" />fleet</h1>
         {state.status === 'checking' && <p className="signin-note" role="status">Checking sign-in…</p>}
         {state.status === 'unreachable' && (
           <>

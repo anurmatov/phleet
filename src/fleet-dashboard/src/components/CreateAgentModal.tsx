@@ -9,6 +9,7 @@ import LocalModelFields from './LocalModelFields'
 import FieldHint from './FieldHint'
 import Modal from './Modal'
 import InstructionPicker from './InstructionPicker'
+import Icon from './Icon'
 
 interface CreateAgentModalProps {
   /** The dialog's form and requests (hooks/useCreateAgent.ts). */
@@ -40,7 +41,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
     <Modal label="New Agent" overlayClassName="config-modal-overlay" className="config-modal create-agent-modal" onClose={onClose}>
         <div className="config-modal-header">
           <span className="config-modal-title">New Agent</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
           {templateName && (
@@ -66,7 +67,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
           </div>
 
           <div className="config-row">
-            <label className="config-label">Name <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">Name <span style={{ color: 'var(--danger)' }}>*</span></label>
             <FieldHint>Unique identifier used as the container name prefix and DB key. Lowercase, no spaces (e.g. <code>anew</code>).</FieldHint>
             <input
               className="config-input"
@@ -93,7 +94,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
             <input className="config-input" value={createForm.displayName} onChange={e => onFormChange({ displayName: e.target.value })} placeholder="e.g. anew (auto-fills from name)" />
           </div>
           <div className="config-row">
-            <label className="config-label">Role <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">Role <span style={{ color: 'var(--danger)' }}>*</span></label>
             <FieldHint>Maps to an instruction file in the roles directory (e.g. <code>developer</code> loads <code>roles/developer/system.md</code>).</FieldHint>
             <input className="config-input" value={createForm.role} onChange={e => onFormChange({ role: e.target.value })} placeholder="e.g. developer" />
           </div>
@@ -111,7 +112,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
           {!isLocal && (
           <div className="config-row">
             <label className="config-label">
-              Model{provider !== 'codex' && <span style={{ color: 'var(--red)' }}> *</span>}
+              Model{provider !== 'codex' && <span style={{ color: 'var(--danger)' }}> *</span>}
             </label>
             <ModelSelector
               provider={provider}
@@ -137,8 +138,8 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
           )}
           <p className="create-agent-hint">
             {templateName
-              ? <>The container will be <strong>provisioned automatically</strong> after creation. Use <strong>✎ config</strong> to adjust tools and MCP endpoints afterwards.</>
-              : <>After creating, use the <strong>✎ config</strong> button to set up tools, projects, MCP endpoints, and Telegram config. Then click <strong>↻ Provision</strong> on the agent card to start the container.</>
+              ? <>The container will be <strong>provisioned automatically</strong> after creation. Use <strong>Edit config</strong> on its row to adjust tools and MCP endpoints afterwards.</>
+              : <>After creating, use <strong>Edit config</strong> on its row to set up tools, projects, MCP endpoints, and Telegram config. Then press <strong>Reprovision</strong> on the row to start the container.</>
             }
           </p>
 

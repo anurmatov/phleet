@@ -4,6 +4,8 @@ import { useTick } from '../hooks/useTick'
 import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import { temporalUiUrl, heartbeatAge } from '../utils'
 import AgentCard from './AgentCard'
+import Icon from './Icon'
+import { PhaseChip, WorkflowRefs, shortWorkflowId } from './WorkflowBits'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import CommsJournalPanel from './CommsJournalPanel'
 
@@ -24,12 +26,15 @@ interface AgentsViewProps {
   workflowActions: WorkflowActions
   highlightedEntityId: string | null
   onClearHighlight: () => void
+  onNewAgent: () => void
+  /** What is still to be set up, shown under the title while there is anything. */
+  banner?: React.ReactNode
 }
 
 export default function AgentsView({
   sorted, actions, configAgent, logViewer, onViewLogs, onEditConfig,
   workflowByAgent, workflows, agentByWorkflow, workflowActions,
-  highlightedEntityId, onClearHighlight,
+  highlightedEntityId, onClearHighlight, onNewAgent, banner,
 }: AgentsViewProps) {
   const {
     expandedAgent, taskHistory, historyLoading, expandedTasks, copiedContainer,
@@ -65,21 +70,53 @@ export default function AgentsView({
   } = workflowActions
   // Agent uptimes, heartbeat ages and workflow ages are relative to now: redraw as the clock moves.
   useTick()
+  const activeWorkflows = workflows.filter(w =>
+    w.status !== 'Completed' && w.status !== 'Failed' && w.status !== 'Canceled' && w.status !== 'Terminated' && w.status !== 'TimedOut'
+  )
+  // What waits for a person goes first: it is the reason most visits to this page happen.
+  const waiting = activeWorkflows.filter(w => getSignalDefs(w).length > 0)
+  const orderedWorkflows = [...waiting, ...activeWorkflows.filter(w => getSignalDefs(w).length === 0)]
+
+  const working = sorted.filter(a => a.effectiveStatus !== 'dead' && a.currentTask).length
+  const offline = sorted.filter(a => a.effectiveStatus === 'dead').length
+  const stale = sorted.filter(a => a.effectiveStatus === 'stale' && !a.currentTask).length
+  const idle = sorted.length - working - offline - stale
+
+  const header = (
+    <div className="view-page-header">
+      <h1 className="view-page-title">
+        Agents
+        {sorted.length > 0 && <span className="section-count">{sorted.length}</span>}
+      </h1>
+      {sorted.length > 0 && (
+        <div className="fleet-summary" aria-label="Fleet summary">
+          {working > 0 && <span className="pill pill-ok">{working} working</span>}
+          {idle > 0 && <span className="pill">{idle} idle</span>}
+          {stale > 0 && <span className="pill pill-warn">{stale} stale</span>}
+          {offline > 0 && <span className="pill pill-danger">{offline} offline</span>}
+        </div>
+      )}
+      {/* The sidebar carries this on a desktop; a phone has no sidebar on screen. */}
+      <button className="btn btn-primary only-phone" onClick={onNewAgent}>
+        <Icon name="plus" size={16} />New agent
+      </button>
+    </div>
+  )
+
   if (sorted.length === 0) {
     return (
       <div className="view-page">
+        {header}
+        {banner}
         <div className="empty">No agents registered yet. Waiting for heartbeats…</div>
       </div>
     )
   }
 
-  const activeWorkflows = workflows.filter(w =>
-    w.status !== 'Completed' && w.status !== 'Failed' && w.status !== 'Canceled' && w.status !== 'Terminated' && w.status !== 'TimedOut'
-  )
-
   return (
     <div className="view-page">
-      <CommsJournalPanel />
+      {header}
+      {banner}
       {/* ── Agent list ── */}
       <div className="agent-list">
         {sorted.map(agent => (
@@ -134,21 +171,20 @@ export default function AgentsView({
         ))}
       </div>
 
-      {/* ── Active Workflows ── */}
-      <div className="section-header" style={{ marginTop: 28 }}>
-        <span className="section-title">Active Workflows</span>
+      {/* ── Running workflows ── */}
+      <div className="section-header">
+        <span className="section-title">Running workflows</span>
         {activeWorkflows.length > 0 && <span className="section-count">{activeWorkflows.length}</span>}
+        {waiting.length > 0 && <span className="pill pill-warn">{waiting.length} waiting for you</span>}
       </div>
 
       {activeWorkflows.length === 0 ? (
         <div className="wf-empty">No running workflows.</div>
       ) : (
         <div className="wf-table">
-          {activeWorkflows.map(wf => {
+          {orderedWorkflows.map(wf => {
             const url = temporalUiUrl(wf)
-            const shortId = wf.workflowId.length > 40
-              ? wf.workflowId.slice(0, 38) + '…'
-              : wf.workflowId
+            const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)
             const wfMsg = wfActionMsg[wfKey(wf)] ?? ''
             const sigDefs = getSignalDefs(wf)
@@ -158,40 +194,23 @@ export default function AgentsView({
 
             return (
               <div key={`${wf.namespace}/${wf.workflowId}`} className={`wf-row ${wfClass}`}>
-                {wfClass === 'wf-row-signal-waiting' && (
-                  <span className="wf-signal-dot" title="Waiting for signal" />
-                )}
                 <div className="wf-type wf-type-clickable" onClick={() => onWfClick(wf)} title="Click to view execution history">{wf.workflowType}</div>
+                <div className="wf-meta">
+                  <PhaseChip phase={wf.phase} />
+                  <span className="pill wf-ns-badge">{wf.namespace}</span>
+                  {wf.taskQueue && wf.taskQueue !== wf.namespace && <span className="pill wf-queue">{wf.taskQueue}</span>}
+                  {agentByWorkflow[wf.workflowId] && (
+                    <span className="pill pill-info wf-agent-badge" title="Executing agent">
+                      {agentByWorkflow[wf.workflowId]}
+                    </span>
+                  )}
+                  <WorkflowRefs wf={wf} />
+                  <span className="wf-age">{heartbeatAge(wf.startTime)}</span>
+                </div>
                 <div className="wf-id" title={wf.workflowId}>
                   {url
                     ? <a href={url} target="_blank" rel="noreferrer" className="wf-link">{shortId}</a>
                     : shortId}
-                </div>
-                <div className="wf-meta">
-                  <span className="wf-ns-badge">{wf.namespace}</span>
-                  {sigDefs.length > 0 && (
-                    <span className="wf-action-badge" title="This workflow may be awaiting input">action</span>
-                  )}
-                  {wf.taskQueue && wf.taskQueue !== wf.namespace && <span className="wf-queue">{wf.taskQueue}</span>}
-                  {agentByWorkflow[wf.workflowId] && (
-                    <span className="wf-agent-badge" title="Executing agent">
-                      {agentByWorkflow[wf.workflowId]}
-                    </span>
-                  )}
-                  {wf.issueNumber && wf.repo && (
-                    <a href={`https://github.com/${wf.repo}/issues/${wf.issueNumber}`} target="_blank" rel="noreferrer" className="wf-link" title={`GitHub issue #${wf.issueNumber}`}>#{wf.issueNumber}</a>
-                  )}
-                  {wf.prNumber && wf.repo && (
-                    <a href={`https://github.com/${wf.repo}/pull/${wf.prNumber}`} target="_blank" rel="noreferrer" className="wf-link" title={`GitHub PR #${wf.prNumber}`}>PR #{wf.prNumber}</a>
-                  )}
-                  {wf.docPrs && wf.docPrs.split(/\s+/).map(ref => {
-                    const m = ref.match(/^([\w-]+\/[\w-]+)#(\d+)$/)
-                    if (!m) return null
-                    return (
-                      <a key={ref} href={`https://github.com/${m[1]}/pull/${m[2]}`} target="_blank" rel="noreferrer" className="wf-link" title={`Doc PR ${ref}`}>doc #{m[2]}</a>
-                    )
-                  })}
-                  <span className="wf-age">{heartbeatAge(wf.startTime)}</span>
                 </div>
                 <div className="wf-actions">
                   {sigDefs.length > 0 && signalStates[signalKey(wf)] !== 'pending' && signalStates[signalKey(wf)] !== 'success' && signalStates[signalKey(wf)] !== 'error' && (
@@ -206,11 +225,11 @@ export default function AgentsView({
                               return (
                                 <button
                                   key={`${sig.name}-${btn.label}`}
-                                  className={`wf-btn wf-btn-signal wf-btn-signal-prominent${confirming ? ' confirming' : ''}`}
+                                  className={`btn btn-s wf-btn wf-btn-signal ${confirming ? 'btn-danger confirming' : 'btn-primary'}`}
                                   title={confirming ? 'Click again to confirm' : `Send signal: ${sig.name}`}
                                   onClick={() => onSignalClick(wf, sig, btn)}
                                 >
-                                  {confirming ? `confirm ${btn.label.toLowerCase()}?` : btn.label}
+                                  {confirming ? `Confirm ${btn.label.toLowerCase()}?` : btn.label}
                                 </button>
                               )
                             })}
@@ -226,36 +245,36 @@ export default function AgentsView({
                   {(ws === 'idle' || ws === 'confirming-cancel' || ws === 'confirming-restart' || ws === 'confirming-terminate') && (
                     <div className="wf-secondary-actions">
                       <button
-                        className="wf-btn wf-btn-more"
-                        title="More actions"
+                        className={`icon-btn wf-btn-more${menuOpen ? ' active' : ''}`}
+                        title="More actions" aria-label="More actions" aria-expanded={menuOpen}
                         onClick={() => onToggleMenu(k)}
                       >
-                        {menuOpen ? '✕' : '···'}
+                        <Icon name={menuOpen ? 'close' : 'more'} />
                       </button>
                       {menuOpen && (
-                        <div className="wf-more-menu">
+                        <div className="menu wf-more-menu">
                           {(ws === 'idle' || ws === 'confirming-cancel') && (
                             <button
-                              className={`wf-btn wf-btn-cancel${ws === 'confirming-cancel' ? ' confirming' : ''}`}
+                              className={`menu-item${ws === 'confirming-cancel' ? ' menu-item-danger' : ''}`}
                               onClick={() => onWfAction(wf, 'cancel')}
                             >
-                              {ws === 'confirming-cancel' ? 'confirm cancel?' : 'cancel'}
+                              {ws === 'confirming-cancel' ? 'Confirm cancel?' : 'Cancel'}
                             </button>
                           )}
                           {(ws === 'idle' || ws === 'confirming-restart') && (
                             <button
-                              className={`wf-btn wf-btn-restart${ws === 'confirming-restart' ? ' confirming' : ''}`}
+                              className={`menu-item${ws === 'confirming-restart' ? ' menu-item-danger' : ''}`}
                               onClick={() => onWfAction(wf, 'restart')}
                             >
-                              {ws === 'confirming-restart' ? 'confirm restart?' : 'restart'}
+                              {ws === 'confirming-restart' ? 'Confirm restart?' : 'Restart'}
                             </button>
                           )}
                           {(ws === 'idle' || ws === 'confirming-terminate') && (
                             <button
-                              className={`wf-btn wf-btn-terminate${ws === 'confirming-terminate' ? ' confirming' : ''}`}
+                              className={`menu-item${ws === 'confirming-terminate' ? ' menu-item-danger' : ''}`}
                               onClick={() => onWfAction(wf, 'terminate')}
                             >
-                              {ws === 'confirming-terminate' ? 'confirm kill?' : 'kill'}
+                              {ws === 'confirming-terminate' ? 'Confirm kill?' : 'Kill'}
                             </button>
                           )}
                         </div>
@@ -273,6 +292,9 @@ export default function AgentsView({
       )}
 
       <WorkflowHistoryPanel actions={workflowActions} />
+
+      {/* How the message journal is doing: worth a glance now and then, never the first thing. */}
+      <CommsJournalPanel />
     </div>
   )
 }

@@ -286,7 +286,8 @@ alerts appear as toasts (bottom-right, auto-dismiss 8s) and persist in a dismiss
 - namespaces view: read-only overview of Temporal namespaces. shows per-namespace: active workflow count, schedule count, registered workflow types. data aggregated from existing API endpoints. informational only — namespaces are configured on the Temporal server.
 - instructions management view: list all instructions with version info, agent assignments, and active/inactive status. inline create form (name + content + optional reason, name validation). toggle-active for archive/unarchive with 5s confirmation. "Show archived" toggle to reveal inactive instructions at reduced opacity.
 - project contexts management view: list all project contexts with version info, agent assignments, and active/inactive status. inline create form (name + content, name validation). toggle-active for archive/unarchive with 5s confirmation. "Show archived" toggle to reveal inactive contexts at reduced opacity.
-- sidenav organized into sections: Agent Config (Instructions, Project Contexts, Repositories) and Workflows (WF Definitions, Schedules, Namespaces)
+- navigation is grouped: Fleet (Agents, Workflows, Chat), Knowledge (Instructions, Project Contexts, Output Styles, Memory), Automation (Definitions, Schedules, Namespaces, Epic Grants) and Settings (Repositories, Credentials, Alerts). a sidebar on a desktop; on a phone a tab bar (Agents, Workflows, Chat) with the rest under More
+- light and dark themes, following the system unless one is chosen in the header (`fleet.theme` in `localStorage`)
 
 ## orchestrator database
 

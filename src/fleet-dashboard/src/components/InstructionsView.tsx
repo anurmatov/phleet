@@ -6,6 +6,7 @@ import SizeMeter from './SizeMeter'
 import SizeCellView from './SizeCellView'
 import { sizeCell, type MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
+import Icon from './Icon'
 
 interface InstructionsViewProps {
   /** The page's state and requests (hooks/useInstructions.ts). */
@@ -78,9 +79,9 @@ export default function InstructionsView({ state, sizeLimit }: InstructionsViewP
               {showArchived ? 'Hide archived' : `Show archived (${inactiveInstructions.length})`}
             </button>
           )}
-          <button className="completed-refresh-btn" onClick={onRefresh} disabled={instructionsLoading} title="Refresh instructions">↻</button>
-          <button className="view-page-action" onClick={() => onShowNewForm(!showNewForm)}>
-            {showNewForm ? 'Cancel' : '+ New Instruction'}
+          <button className="icon-btn completed-refresh-btn" onClick={onRefresh} disabled={instructionsLoading} title="Refresh instructions" aria-label="Refresh instructions"><Icon name="refresh" /></button>
+          <button className={`btn view-page-action${showNewForm ? '' : ' btn-primary'}`} onClick={() => onShowNewForm(!showNewForm)}>
+            {showNewForm ? 'Cancel' : <><Icon name="plus" size={16} />New instruction</>}
           </button>
         </div>
       </div>
@@ -213,7 +214,7 @@ export default function InstructionsView({ state, sizeLimit }: InstructionsViewP
                     <span className={`config-feedback config-feedback-${toggleState}`}>{toggleMsg}</span>
                   )}
                 </div>
-                <span className="history-toggle">{isOpen ? '▲' : '▼'}</span>
+                <span className={`history-toggle${isOpen ? ' open' : ''}`}><Icon name="chevronDown" size={18} /></span>
               </div>
 
               {isOpen && (

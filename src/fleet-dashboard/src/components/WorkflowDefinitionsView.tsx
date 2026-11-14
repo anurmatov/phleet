@@ -3,6 +3,7 @@ import type { WorkflowDefinitionsState } from '../hooks/useWorkflowDefinitions'
 import { useTick } from '../hooks/useTick'
 import { computeDiff, relativeTime } from '../utils'
 import FieldHint from './FieldHint'
+import Icon from './Icon'
 
 const VALID_STEP_TYPES = new Set([
   'sequence', 'parallel', 'loop', 'branch', 'break', 'continue', 'noop',
@@ -11,18 +12,12 @@ const VALID_STEP_TYPES = new Set([
   'set_variable', 'set_attribute', 'http_request', 'sleep',
 ])
 
-const NS_COLOR_PALETTE = [
-  'var(--accent-blue, #4f6ef7)',
-  '#a78bfa',
-  '#4ade80',
-  '#f59e0b',
-  '#f87171',
-  '#38bdf8',
-]
+// A namespace keeps one colour across the list, taken from the theme so it reads in both.
+const NS_COLOR_PALETTE = ['var(--info)', 'var(--purple)', 'var(--accent)', 'var(--warn)', 'var(--danger)']
 
 function nsColor(namespace: string, namespaces: string[]): string {
   const idx = namespaces.indexOf(namespace)
-  if (idx === -1) return '#94a3b8'
+  if (idx === -1) return 'var(--text-3)'
   return NS_COLOR_PALETTE[idx % NS_COLOR_PALETTE.length]
 }
 
@@ -172,16 +167,16 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
     <div className="view-page">
       <div className="view-page-header">
         <h1 className="view-page-title">
-          WF Definitions
+          Definitions
           {definitions.length > 0 && (
             <span className="section-count">{activeCount} active · {inactiveCount} inactive</span>
           )}
         </h1>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="completed-refresh-btn" onClick={onRefresh} disabled={loading} title="Refresh definitions">↻</button>
-          <button className="view-page-action wfe-visual-btn" onClick={() => state.openEditor(null)}>+ Visual Editor</button>
-          <button className="view-page-action" onClick={() => onShowNewForm(!showNewForm)}>
-            {showNewForm ? 'Cancel' : '+ New JSON'}
+          <button className="icon-btn completed-refresh-btn" onClick={onRefresh} disabled={loading} title="Refresh definitions" aria-label="Refresh definitions"><Icon name="refresh" /></button>
+          <button className="btn view-page-action" onClick={() => state.openEditor(null)}><Icon name="workflows" size={16} />Visual editor</button>
+          <button className={`btn view-page-action${showNewForm ? '' : ' btn-primary'}`} onClick={() => onShowNewForm(!showNewForm)}>
+            {showNewForm ? 'Cancel' : <><Icon name="plus" size={16} />New from JSON</>}
           </button>
         </div>
       </div>
@@ -357,7 +352,7 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                   <span className="instr-total">{relativeTime(def.updatedAt)}</span>
                 </span>
                 <div className="wfd-row-actions" onClick={e => e.stopPropagation()}>
-                  <button className="wfe-visual-btn wfe-row-edit-btn" onClick={() => state.openEditor(def.name)}>✎ Edit</button>
+                  <button className="cred-action-btn wfe-row-edit-btn" onClick={() => state.openEditor(def.name)}>Edit</button>
                   {toggleState === 'idle' || toggleState === 'pending' ? (
                     <button
                       className={`wfd-toggle-btn${toggleConfirming ? ' confirming' : ''}`}
@@ -380,7 +375,7 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                     <span className={`config-feedback config-feedback-${toggleState}`}>{toggleMsg}</span>
                   )}
                 </div>
-                <span className="history-toggle">{isOpen ? '▲' : '▼'}</span>
+                <span className={`history-toggle${isOpen ? ' open' : ''}`}><Icon name="chevronDown" size={18} /></span>
               </div>
 
               {isOpen && (

@@ -6,18 +6,12 @@ import { useTick } from '../hooks/useTick'
 import { temporalUiUrl, heartbeatAge } from '../utils'
 import { PHASE_LABELS } from '../constants'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
+import Icon from './Icon'
+import { PhaseChip, WorkflowRefs, shortWorkflowId } from './WorkflowBits'
 
 type CompletedStatusFilter = 'all' | 'failed' | 'completed' | 'canceled' | 'terminated'
 
 const COMPLETED_FILTER_KEY = 'fleet-dashboard-completed-status-filter'
-
-function PhaseChip({ phase }: { phase: string | null }) {
-  if (!phase) return null
-  const info = PHASE_LABELS[phase]
-  const label = info?.label ?? phase
-  const color = info?.color ?? 'grey'
-  return <span className={`phase-chip phase-${color}`}>{label}</span>
-}
 
 // ── ConfirmBar ────────────────────────────────────────────────────────────────
 
@@ -31,8 +25,8 @@ function ConfirmBar({ pending, onCancel }: { pending: PendingConfirm; onCancel: 
     <div className="confirm-bar">
       <span className="confirm-bar-desc">{pending.description}</span>
       <div className="confirm-bar-actions">
-        <button className="confirm-bar-btn confirm-bar-cancel" onClick={onCancel}>Cancel</button>
-        <button className="confirm-bar-btn confirm-bar-confirm" onClick={() => { pending.onConfirm(); onCancel() }}>Confirm</button>
+        <button className="btn confirm-bar-btn confirm-bar-cancel" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-primary confirm-bar-btn confirm-bar-confirm" onClick={() => { pending.onConfirm(); onCancel() }}>Confirm</button>
       </div>
     </div>
   )
@@ -74,7 +68,7 @@ function SignalButtons({
             {sig.buttons.map(btn => (
               <button
                 key={`${sig.name}-${btn.label}`}
-                className="wf-btn wf-btn-signal wf-btn-signal-prominent"
+                className="btn btn-s btn-primary wf-btn wf-btn-signal"
                 title={`Send signal: ${sig.name}`}
                 onClick={() => onSignalBtnClick(wf, sig, btn)}
               >
@@ -216,38 +210,23 @@ export default function WorkflowsView({
           Workflows
           {workflows.length > 0 && <span className="section-count">{workflows.length}</span>}
         </h1>
-        <div className="wf-header-right">
-          {namespaces.length > 0 && (
-            <div className="ns-filters">
-              <button
-                className={`ns-btn${nsFilter === 'all' ? ' active' : ''}`}
-                onClick={() => onNsFilter('all')}
-              >all</button>
-              {namespaces.map(ns => (
-                <button
-                  key={ns}
-                  className={`ns-btn${nsFilter === ns ? ' active' : ''}`}
-                  onClick={() => onNsFilter(ns)}
-                >{ns}</button>
-              ))}
-            </div>
-          )}
-          <button className="completed-refresh-btn" onClick={onRefreshWorkflows} disabled={workflowsLoading} title="Refresh workflows">↻</button>
-          <button className="wf-start-btn" onClick={onStartWorkflow} title="Start a new workflow">+ Start</button>
-        </div>
+        <button className="icon-btn" onClick={onRefreshWorkflows} disabled={workflowsLoading} title="Refresh workflows" aria-label="Refresh workflows">
+          <Icon name="refresh" />
+        </button>
+        <button className="btn btn-primary wf-start-btn" onClick={onStartWorkflow} title="Start a new workflow">
+          <Icon name="plus" size={16} />Start
+        </button>
       </div>
 
-      {/* ── Needs your attention ── */}
-      <div className="attention-section">
-        <div className="attention-header">
-          Needs your attention
-          {attentionWorkflows.length > 0 && (
-            <span className="attention-count">{attentionWorkflows.length}</span>
-          )}
-        </div>
-        {attentionWorkflows.length === 0 ? (
-          <div className="attention-empty">Nothing needs your attention</div>
-        ) : (
+      {/* ── Needs you ── */}
+      {/* Only when something does. An empty box saying nothing is waiting is one more thing to read. */}
+      {attentionWorkflows.length > 0 && (
+        <div className="attention-section">
+          <div className="section-header attention-header">
+            <Icon name="hand" size={18} />
+            <span className="section-title">Waiting for you</span>
+            <span className="section-count attention-count">{attentionWorkflows.length}</span>
+          </div>
           <div className="attention-cards">
             {attentionWorkflows.map(wf => {
               const sigDefs = getSignalDefs(wf)
@@ -258,20 +237,9 @@ export default function WorkflowsView({
                       {wf.workflowType}
                     </span>
                     <PhaseChip phase={wf.phase} />
-                    <span className="wf-ns-badge">{wf.namespace}</span>
-                    {wf.issueNumber && wf.repo && (
-                      <a href={`https://github.com/${wf.repo}/issues/${wf.issueNumber}`} target="_blank" rel="noreferrer" className="wf-link" title={`GitHub issue #${wf.issueNumber}`}>#{wf.issueNumber}</a>
-                    )}
-                    {wf.prNumber && wf.repo && (
-                      <a href={`https://github.com/${wf.repo}/pull/${wf.prNumber}`} target="_blank" rel="noreferrer" className="wf-link" title={`GitHub PR #${wf.prNumber}`}>PR #{wf.prNumber}</a>
-                    )}
-                    {wf.docPrs && wf.docPrs.split(/\s+/).map(ref => {
-                      const m = ref.match(/^([\w-]+\/[\w-]+)#(\d+)$/)
-                      if (!m) return null
-                      return (
-                        <a key={ref} href={`https://github.com/${m[1]}/pull/${m[2]}`} target="_blank" rel="noreferrer" className="wf-link" title={`Doc PR ${ref}`}>doc #{m[2]}</a>
-                      )
-                    })}
+                    <span className="pill wf-ns-badge">{wf.namespace}</span>
+                    <WorkflowRefs wf={wf} />
+                    <span className="wf-age">{heartbeatAge(wf.startTime)}</span>
                   </div>
                   <div className="attention-card-actions">
                     <SignalButtons
@@ -288,9 +256,22 @@ export default function WorkflowsView({
               )
             })}
           </div>
+        </div>
+      )}
+
+      {/* ── Running ── */}
+      <div className="section-header">
+        <span className="section-title">Running</span>
+        {mainTableWorkflows.length > 0 && <span className="section-count">{mainTableWorkflows.length}</span>}
+        {namespaces.length > 1 && (
+          <div className="seg ns-filters" role="group" aria-label="Namespace">
+            <button className={`seg-btn ns-btn${nsFilter === 'all' ? ' active' : ''}`} onClick={() => onNsFilter('all')}>all</button>
+            {namespaces.map(ns => (
+              <button key={ns} className={`seg-btn ns-btn${nsFilter === ns ? ' active' : ''}`} onClick={() => onNsFilter(ns)}>{ns}</button>
+            ))}
+          </div>
         )}
       </div>
-
       {/* ── Active workflows ── */}
       {mainTableWorkflows.length === 0 ? (
         <div className="wf-empty">
@@ -304,9 +285,7 @@ export default function WorkflowsView({
         <div className="wf-table">
           {mainTableWorkflows.map(wf => {
             const url = temporalUiUrl(wf)
-            const shortId = wf.workflowId.length > 40
-              ? wf.workflowId.slice(0, 38) + '…'
-              : wf.workflowId
+            const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)
             const wfMsg = wfActionMsg[wfKey(wf)] ?? ''
             const sigDefs = getSignalDefs(wf)
@@ -317,80 +296,41 @@ export default function WorkflowsView({
             return (
               <div key={`${wf.namespace}/${wf.workflowId}`} ref={el => setRowRef(wf.workflowId, el)} className={`wf-row ${wfClass}`}>
                 <div className="wf-type wf-type-clickable" onClick={() => onWfClick(wf)} title="Click to view execution history">{wf.workflowType}</div>
+                <div className="wf-meta">
+                  <PhaseChip phase={wf.phase} />
+                  <span className="pill wf-ns-badge">{wf.namespace}</span>
+                  {wf.taskQueue && wf.taskQueue !== wf.namespace && <span className="pill wf-queue">{wf.taskQueue}</span>}
+                  {agentByWorkflow[wf.workflowId] && (
+                    <span className="pill pill-info wf-agent-badge" title="Executing agent">
+                      {agentByWorkflow[wf.workflowId]}
+                    </span>
+                  )}
+                  <WorkflowRefs wf={wf} />
+                  <span className="wf-age">{heartbeatAge(wf.startTime)}</span>
+                </div>
                 <div className="wf-id" title={wf.workflowId}>
                   {url
                     ? <a href={url} target="_blank" rel="noreferrer" className="wf-link">{shortId}</a>
                     : shortId}
                 </div>
-                <div className="wf-meta">
-                  <span className="wf-ns-badge">{wf.namespace}</span>
-                  <PhaseChip phase={wf.phase} />
-                  {wf.taskQueue && wf.taskQueue !== wf.namespace && <span className="wf-queue">{wf.taskQueue}</span>}
-                  {agentByWorkflow[wf.workflowId] && (
-                    <span className="wf-agent-badge" title="Executing agent">
-                      {agentByWorkflow[wf.workflowId]}
-                    </span>
-                  )}
-                  {wf.issueNumber && wf.repo && (
-                    <a href={`https://github.com/${wf.repo}/issues/${wf.issueNumber}`} target="_blank" rel="noreferrer" className="wf-link" title={`GitHub issue #${wf.issueNumber}`}>#{wf.issueNumber}</a>
-                  )}
-                  {wf.prNumber && wf.repo && (
-                    <a href={`https://github.com/${wf.repo}/pull/${wf.prNumber}`} target="_blank" rel="noreferrer" className="wf-link" title={`GitHub PR #${wf.prNumber}`}>PR #{wf.prNumber}</a>
-                  )}
-                  {wf.docPrs && wf.docPrs.split(/\s+/).map(ref => {
-                    const m = ref.match(/^([\w-]+\/[\w-]+)#(\d+)$/)
-                    if (!m) return null
-                    return (
-                      <a key={ref} href={`https://github.com/${m[1]}/pull/${m[2]}`} target="_blank" rel="noreferrer" className="wf-link" title={`Doc PR ${ref}`}>doc #{m[2]}</a>
-                    )
-                  })}
-                  <span className="wf-age">{heartbeatAge(wf.startTime)}</span>
-                </div>
                 <div className="wf-actions">
                   {ws === 'idle' && (
-                    <>
-                      {/* Desktop: dots menu */}
-                      <div className="wf-secondary-actions wf-actions-desktop">
-                        <button
-                          className="wf-btn wf-btn-more"
-                          title="More actions"
-                          onClick={() => onToggleMenu(k)}
-                        >
-                          {menuOpen ? '✕' : '···'}
-                        </button>
-                        {menuOpen && (
-                          <div className="wf-more-menu">
-                            <button
-                              className="wf-btn wf-btn-cancel"
-                              onClick={() => handleWfActionLocal(wf, 'cancel')}
-                            >cancel</button>
-                            <button
-                              className="wf-btn wf-btn-restart"
-                              onClick={() => handleWfActionLocal(wf, 'restart')}
-                            >restart</button>
-                            <button
-                              className="wf-btn wf-btn-terminate"
-                              onClick={() => handleWfActionLocal(wf, 'terminate')}
-                            >kill</button>
-                          </div>
-                        )}
-                      </div>
-                      {/* Mobile: labeled buttons inline */}
-                      <div className="wf-labeled-actions wf-actions-mobile">
-                        <button
-                          className="wf-btn wf-btn-cancel"
-                          onClick={() => handleWfActionLocal(wf, 'cancel')}
-                        >Cancel</button>
-                        <button
-                          className="wf-btn wf-btn-restart"
-                          onClick={() => handleWfActionLocal(wf, 'restart')}
-                        >Restart</button>
-                        <button
-                          className="wf-btn wf-btn-terminate"
-                          onClick={() => handleWfActionLocal(wf, 'terminate')}
-                        >Kill</button>
-                      </div>
-                    </>
+                    <div className="wf-secondary-actions wf-actions-desktop">
+                      <button
+                        className={`icon-btn wf-btn-more${menuOpen ? ' active' : ''}`}
+                        title="More actions" aria-label="More actions" aria-expanded={menuOpen}
+                        onClick={() => onToggleMenu(k)}
+                      >
+                        <Icon name={menuOpen ? 'close' : 'more'} />
+                      </button>
+                      {menuOpen && (
+                        <div className="menu wf-more-menu">
+                          <button className="menu-item" onClick={() => handleWfActionLocal(wf, 'cancel')}><Icon name="cancel" size={16} />Cancel</button>
+                          <button className="menu-item" onClick={() => handleWfActionLocal(wf, 'restart')}><Icon name="restart" size={16} />Restart</button>
+                          <button className="menu-item menu-item-danger" onClick={() => handleWfActionLocal(wf, 'terminate')}><Icon name="stop" size={16} />Kill</button>
+                        </div>
+                      )}
+                    </div>
                   )}
                   {ws === 'pending' && <span className="wf-action-feedback wf-action-pending">…</span>}
                   {ws === 'success' && <span className="wf-action-feedback wf-action-success">{wfMsg}</span>}
@@ -402,28 +342,33 @@ export default function WorkflowsView({
         </div>
       )}
 
-      {/* ── Recently Completed ── */}
-      <div className="completed-header" onClick={onToggleCompleted}>
-        <span className="completed-toggle">{completedCollapsed ? '▸' : '▾'}</span>
-        <span>Recently Completed</span>
-        <span className="completed-count">{displayedCompletedWorkflows.length}</span>
+      {/* ── Recently completed ── */}
+      <div
+        className={`section-header completed-header${completedCollapsed ? '' : ' open'}`}
+        role="button" tabIndex={0} aria-expanded={!completedCollapsed}
+        onClick={onToggleCompleted}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleCompleted() } }}
+      >
+        <Icon name="chevronRight" size={16} className="completed-toggle" />
+        <span className="section-title">Recently completed</span>
+        {!completedCollapsed && <span className="section-count completed-count">{displayedCompletedWorkflows.length}</span>}
         <button
-          className="completed-refresh-btn"
+          className="icon-btn completed-refresh-btn"
           onClick={e => { e.stopPropagation(); onRefreshCompleted() }}
           disabled={completedLoading}
-          title="Refresh completed workflows"
-        >{completedLoading ? '…' : '↻'}</button>
+          title="Refresh completed workflows" aria-label="Refresh completed workflows"
+        >{completedLoading ? '…' : <Icon name="refresh" size={16} />}</button>
       </div>
       {!completedCollapsed && (
-        <div className="completed-filters" onClick={e => e.stopPropagation()}>
+        <div className="seg completed-filters" role="group" aria-label="Status" onClick={e => e.stopPropagation()}>
           {(['all', 'failed', 'completed', 'canceled', 'terminated'] as CompletedStatusFilter[]).map(f => (
             <button
               key={f}
-              className={`completed-filter-btn${completedStatusFilter === f ? ' active' : ''}`}
+              className={`seg-btn completed-filter-btn${completedStatusFilter === f ? ' active' : ''}`}
               onClick={() => setAndPersistFilter(f)}
             >
               {f === 'all' ? 'All' : f.charAt(0).toUpperCase() + f.slice(1)}
-              {f === 'failed' && hasFailedWorkflows && <span className="completed-filter-warn">⚠</span>}
+              {f === 'failed' && hasFailedWorkflows && <span className="completed-filter-warn" aria-label="some failed" />}
             </button>
           ))}
         </div>
@@ -435,9 +380,7 @@ export default function WorkflowsView({
           ) : (
             displayedCompletedWorkflows.map(wf => {
               const url = temporalUiUrl(wf)
-              const shortId = wf.workflowId.length > 40
-                ? wf.workflowId.slice(0, 38) + '…'
-                : wf.workflowId
+              const shortId = shortWorkflowId(wf.workflowId)
               const statusCls = wf.status.toLowerCase()
               return (
                 <div
@@ -448,35 +391,20 @@ export default function WorkflowsView({
                   style={{ cursor: 'pointer' }}
                 >
                   <div className="wf-type">{wf.workflowType}</div>
+                  <div className="wf-meta">
+                    <span className={`pill wf-status-badge wf-status-${statusCls}`}>{statusCls}</span>
+                    <span className="pill wf-ns">{wf.namespace}</span>
+                    <WorkflowRefs wf={wf} />
+                    <span className="wf-age">
+                      {wf.closeTime ? <span className="wf-close-time" title={new Date(wf.closeTime).toLocaleString()}>closed {heartbeatAge(wf.closeTime)}</span> : heartbeatAge(wf.startTime)}
+                    </span>
+                  </div>
                   <div className="wf-id" title={wf.workflowId}>
                     {url
                       ? <a href={url} target="_blank" rel="noreferrer" className="wf-link" onClick={e => e.stopPropagation()}>{shortId}</a>
                       : shortId}
                   </div>
-                  <div className="wf-meta">
-                    <span className="wf-ns">{wf.namespace}</span>
-                    <span className={`wf-status-badge wf-status-${statusCls}`}>{statusCls}</span>
-                    {wf.issueNumber && wf.repo && (
-                      <a href={`https://github.com/${wf.repo}/issues/${wf.issueNumber}`} target="_blank" rel="noreferrer" className="wf-link" onClick={e => e.stopPropagation()} title={`GitHub issue #${wf.issueNumber}`}>#{wf.issueNumber}</a>
-                    )}
-                    {wf.prNumber && wf.repo && (
-                      <a href={`https://github.com/${wf.repo}/pull/${wf.prNumber}`} target="_blank" rel="noreferrer" className="wf-link" onClick={e => e.stopPropagation()} title={`GitHub PR #${wf.prNumber}`}>PR #{wf.prNumber}</a>
-                    )}
-                    {wf.docPrs && wf.docPrs.split(/\s+/).map(ref => {
-                      const m = ref.match(/^([\w-]+\/[\w-]+)#(\d+)$/)
-                      if (!m) return null
-                      return (
-                        <a key={ref} href={`https://github.com/${m[1]}/pull/${m[2]}`} target="_blank" rel="noreferrer" className="wf-link" onClick={e => e.stopPropagation()} title={`Doc PR ${ref}`}>doc #{m[2]}</a>
-                      )
-                    })}
-                    <span className="wf-age">{heartbeatAge(wf.startTime)}</span>
-                  </div>
                   <div className="wf-actions">
-                    {wf.closeTime && (
-                      <span className="wf-close-time" title={new Date(wf.closeTime).toLocaleString()}>
-                        closed {heartbeatAge(wf.closeTime)}
-                      </span>
-                    )}
                     {(() => {
                       const ws = wfActionState(wf)
                       const wfMsg = wfActionMsg[wfKey(wf)] ?? ''
@@ -484,9 +412,9 @@ export default function WorkflowsView({
                         <>
                           {ws === 'idle' && (
                             <button
-                              className="wf-btn wf-btn-restart"
+                              className="btn btn-s btn-quiet wf-btn wf-btn-restart"
                               onClick={e => { e.stopPropagation(); handleWfActionLocal(wf, 'restart') }}
-                            >restart</button>
+                            ><Icon name="restart" size={15} />Restart</button>
                           )}
                           {ws === 'pending' && <span className="wf-action-feedback wf-action-pending">…</span>}
                           {ws === 'success' && <span className="wf-action-feedback wf-action-success">{wfMsg}</span>}

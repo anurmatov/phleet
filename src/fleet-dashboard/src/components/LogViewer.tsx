@@ -1,5 +1,6 @@
 import { useRef, useEffect } from 'react'
 import type { LogViewerState } from '../hooks/useLogViewer'
+import Icon from './Icon'
 
 interface LogViewerProps {
   agentName: string
@@ -38,35 +39,32 @@ export default function LogViewer({ agentName, log }: LogViewerProps) {
           <span className="log-panel-sub">live logs</span>
         </span>
         <div className="log-panel-controls">
-          <div className="log-filter-group">
+          <div className="seg log-filter-group" role="group" aria-label="Level">
             {(['all', 'error', 'warn', 'info'] as const).map(f => (
               <button
                 key={f}
-                className={`log-filter-btn${logFilter === f ? ' active' : ''}${f !== 'all' ? ` log-filter-${f}` : ''}`}
+                className={`seg-btn log-filter-btn${logFilter === f ? ' active' : ''}${f !== 'all' ? ` log-filter-${f}` : ''}`}
                 onClick={() => onSetFilter(f)}
               >{f}</button>
             ))}
           </div>
           <button
-            className={`log-ctrl-btn${logPaused ? ' active' : ''}`}
-            title={logPaused ? 'Resume' : 'Pause'}
+            className={`icon-btn log-ctrl-btn${logPaused ? ' active' : ''}`}
+            title={logPaused ? 'Resume' : 'Pause'} aria-label={logPaused ? 'Resume' : 'Pause'}
             onClick={onTogglePause}
-          >{logPaused ? '▶' : '⏸'}</button>
+          ><Icon name={logPaused ? 'play' : 'pause'} /></button>
           <button
-            className={`log-ctrl-btn${logAutoScroll ? ' active' : ''}`}
+            className={`icon-btn log-ctrl-btn${logAutoScroll ? ' active' : ''}`}
             title={logAutoScroll ? 'Disable auto-scroll' : 'Enable auto-scroll'}
+            aria-label={logAutoScroll ? 'Disable auto-scroll' : 'Enable auto-scroll'}
             onClick={onToggleAutoScroll}
-          >↓</button>
-          <button
-            className="log-ctrl-btn"
-            title="Clear"
-            onClick={onClear}
-          >✕</button>
-          <button
-            className="log-close-btn"
-            title="Close"
-            onClick={onClose}
-          >✕ close</button>
+          ><Icon name="follow" /></button>
+          <button className="icon-btn log-ctrl-btn" title="Clear" aria-label="Clear" onClick={onClear}>
+            <Icon name="trash" />
+          </button>
+          <button className="icon-btn log-close-btn" title="Close" aria-label="Close" onClick={onClose}>
+            <Icon name="close" />
+          </button>
         </div>
       </div>
       <div className="log-body">
@@ -105,7 +103,7 @@ export default function LogViewer({ agentName, log }: LogViewerProps) {
         <div ref={logBottomRef} />
       </div>
       {logPaused && (
-        <div className="log-paused-banner">⏸ paused — new lines buffered</div>
+        <div className="log-paused-banner">Paused — new lines are kept and shown when you resume</div>
       )}
     </div>
   )

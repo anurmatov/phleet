@@ -14,6 +14,7 @@ import type { MemoryListItem, MemorySearchResult, MemoryStatsResponse } from '..
 import { apiGet } from '../utils'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
 import MemoryContentView from './MemoryContentView'
+import Icon from './Icon'
 
 const UNASSIGNED = '(unassigned)'
 // Key format matches spec: memory-tree-collapsed-{project} → "true" (expanded) | "false" (collapsed)
@@ -225,7 +226,7 @@ export default function MemoryView() {
     a === UNASSIGNED ? 1 : b === UNASSIGNED ? -1 : a.localeCompare(b))
 
   return (
-    <div className="memory-page">
+    <div className={`memory-page${selectedId ? ' has-selection' : ''}`}>
       {/* Left pane */}
       <div className="memory-left">
         {/* M4: Filter input with clear button, muted style */}
@@ -292,7 +293,7 @@ export default function MemoryView() {
               return (
                 <div key={project} className="memory-tree-project">
                   <button className="memory-tree-project-btn" onClick={() => toggleProject(project)}>
-                    <span className="memory-tree-arrow">{projExpanded ? '▾' : '▸'}</span>
+                    <span className={`memory-tree-arrow${projExpanded ? ' open' : ''}`}><Icon name="chevronRight" size={14} /></span>
                     <span className="memory-tree-project-name">{project}</span>
                     <span className="memory-tree-count">
                       {[...byType.values()].reduce((s, a) => s + a.length, 0)}
@@ -308,7 +309,7 @@ export default function MemoryView() {
                     return (
                       <div key={type} className="memory-tree-type">
                         <button className="memory-tree-type-btn" onClick={() => toggleType(typeKey)}>
-                          <span className="memory-tree-arrow">{typeExpanded ? '▾' : '▸'}</span>
+                          <span className={`memory-tree-arrow${typeExpanded ? ' open' : ''}`}><Icon name="chevronRight" size={14} /></span>
                           <span className="memory-tree-type-name">{type}</span>
                           <span className="memory-tree-count">{mems.length}</span>
                         </button>
@@ -338,7 +339,7 @@ export default function MemoryView() {
         <div className={`memory-stats-panel${statsCollapsed ? ' memory-stats-collapsed' : ''}`}>
           <div className="memory-stats-header">
             <button className="memory-stats-toggle-btn" onClick={() => setStatsCollapsed(c => !c)}>
-              <span className="memory-stats-chevron">{statsCollapsed ? '▸' : '▾'}</span>
+              <span className={`memory-stats-chevron${statsCollapsed ? '' : ' open'}`}><Icon name="chevronRight" size={14} /></span>
               <span className="memory-stats-title">
                 Read stats{statsSince ? ` · ${new Date(statsSince).toLocaleDateString()}` : ''}
               </span>
@@ -382,6 +383,12 @@ export default function MemoryView() {
 
       {/* Right pane */}
       <div className="memory-right">
+        {/* A phone shows the list or the memory, never both: this is the way back to the list. */}
+        {selectedId && (
+          <button className="btn btn-quiet btn-s memory-back only-phone" onClick={() => setSelectedId(null)}>
+            <Icon name="chevronLeft" size={16} />All memories
+          </button>
+        )}
         {deleteToast && <div className="memory-delete-toast">{deleteToast}</div>}
         {selectedId
           ? <MemoryContentView

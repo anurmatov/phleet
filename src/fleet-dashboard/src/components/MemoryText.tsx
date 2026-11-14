@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
 import MemoryContentView from './MemoryContentView'
+import Icon from './Icon'
 
 // Matches full UUID or 8-char short form
 const UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi
@@ -77,7 +78,7 @@ function MemoryModal({ id, onClose }: MemoryModalProps) {
   return createPortal(
     <div className="memory-modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
       <div className="memory-modal">
-        <button className="memory-modal-close" onClick={onClose}>×</button>
+        <button className="icon-btn memory-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         <MemoryContentView id={id} onDeleted={onClose} />
       </div>
     </div>,

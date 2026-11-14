@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import type { WorkflowTypeInfo } from '../types'
 import { apiFetch } from '../utils'
 import FieldHint from './FieldHint'
+import Icon from './Icon'
 
 interface CreateScheduleModalProps {
   workflowTypes: WorkflowTypeInfo[]
@@ -95,7 +96,7 @@ export default function CreateScheduleModal({ workflowTypes, namespaces, onClose
 
         <div className="swf-header">
           <span className="swf-title">Create Schedule</span>
-          <button className="swf-close" onClick={onClose}>✕</button>
+          <button className="icon-btn swf-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
 
         <div className="swf-body">

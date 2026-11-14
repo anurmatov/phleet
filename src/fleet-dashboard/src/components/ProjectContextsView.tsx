@@ -7,6 +7,7 @@ import SizeMeter from './SizeMeter'
 import SizeCellView from './SizeCellView'
 import { sizeCell, type MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
+import Icon from './Icon'
 
 interface ProjectContextsViewProps {
   /** The page's state and requests: the same versioned editor the instructions page uses. */
@@ -75,9 +76,9 @@ export default function ProjectContextsView({ state, sizeLimit }: ProjectContext
               {showArchived ? 'Hide archived' : `Show archived (${inactiveContexts.length})`}
             </button>
           )}
-          <button className="completed-refresh-btn" onClick={onRefresh} disabled={contextsLoading} title="Refresh project contexts">↻</button>
-          <button className="view-page-action" onClick={() => onShowNewForm(!showNewForm)}>
-            {showNewForm ? 'Cancel' : '+ New Project Context'}
+          <button className="icon-btn completed-refresh-btn" onClick={onRefresh} disabled={contextsLoading} title="Refresh project contexts" aria-label="Refresh project contexts"><Icon name="refresh" /></button>
+          <button className={`btn view-page-action${showNewForm ? '' : ' btn-primary'}`} onClick={() => onShowNewForm(!showNewForm)}>
+            {showNewForm ? 'Cancel' : <><Icon name="plus" size={16} />New project context</>}
           </button>
         </div>
       </div>
@@ -200,7 +201,7 @@ export default function ProjectContextsView({ state, sizeLimit }: ProjectContext
                     <span className={`config-feedback config-feedback-${toggleState}`}>{toggleMsg}</span>
                   )}
                 </div>
-                <span className="history-toggle">{isOpen ? '▲' : '▼'}</span>
+                <span className={`history-toggle${isOpen ? ' open' : ''}`}><Icon name="chevronDown" size={18} /></span>
               </div>
 
               {isOpen && (

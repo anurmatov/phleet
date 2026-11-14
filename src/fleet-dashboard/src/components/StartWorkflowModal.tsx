@@ -5,6 +5,7 @@ import { parseSchema, formToJson, jsonToForm, initFormValues, SchemaField, useRe
 import type { FormValues } from './WorkflowEditor/schemaUtils'
 import FieldHint from './FieldHint'
 import Modal from './Modal'
+import Icon from './Icon'
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -140,7 +141,7 @@ export default function StartWorkflowModal({ workflowTypes, agents, onClose }: S
         {/* ── Header ── */}
         <div className="swf-header">
           <span className="swf-title">Start Workflow</span>
-          <button className="swf-close" onClick={onClose}>✕</button>
+          <button className="icon-btn swf-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
 
         <div className="swf-body">

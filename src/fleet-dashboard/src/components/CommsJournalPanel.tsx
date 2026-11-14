@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../utils'
+import Icon from './Icon'
 import { mediaStatItems, type JournalMediaStatus } from '../journalMedia'
 
 interface JournalObserverStatus {
@@ -49,8 +50,10 @@ export default function CommsJournalPanel() {
   return (
     <div className="journal-panel">
       <div className="journal-panel-header">
-        <span className="section-title">Comms journal</span>
-        <button className="row-btn" onClick={load} disabled={loading}>{loading ? '…' : 'refresh'}</button>
+        <span className="journal-panel-title">Comms journal</span>
+        <button className="icon-btn icon-btn-s" onClick={load} disabled={loading} title="Refresh" aria-label="Refresh comms journal">
+          {loading ? '…' : <Icon name="refresh" size={15} />}
+        </button>
       </div>
       {status?.status === 'disabled' ? (
         <div className="journal-panel-muted">Comms journal not enabled — see docs/comms-deployment.md</div>

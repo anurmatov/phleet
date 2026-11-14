@@ -1,0 +1,489 @@
+/* The ground everything stands on: reset, type, and the handful of parts every page is built
+ * from. A page's own stylesheet arranges these; it does not restyle them. */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-m);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
+}
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+
+a { color: var(--info); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+code, pre, kbd, samp { font-family: var(--mono); }
+
+/* One focus ring, the same on everything, and only for a keyboard. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r-s);
+}
+
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+
+.icon { flex-shrink: 0; display: block; }
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+/* One shape. What changes is weight: the thing a page is for is primary, the thing that cannot
+   be undone is danger, and everything else stays quiet until it is wanted. */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--control);
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-m);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-m);
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.btn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--text-3); }
+.btn:active:not(:disabled) { background: var(--surface-3); }
+.btn:disabled { opacity: 0.5; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
+.btn-primary:active:not(:disabled) { background: var(--accent-strong); }
+
+.btn-danger {
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
+  color: var(--danger);
+}
+.btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 24%, var(--surface)); border-color: var(--danger); }
+
+.btn-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+}
+.btn-quiet:hover:not(:disabled) { background: var(--hover); border-color: transparent; color: var(--text); }
+
+.btn-s {
+  min-height: var(--control-s);
+  padding: 0 10px;
+  font-size: var(--fs-s);
+  border-radius: var(--r-s);
+}
+
+.btn-block { width: 100%; }
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control);
+  height: var(--control);
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-m);
+  background: transparent;
+  color: var(--text-2);
+  position: relative;
+  transition: background 0.12s, color 0.12s;
+}
+.icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.icon-btn:disabled { opacity: 0.4; }
+.icon-btn.active { background: var(--pressed); color: var(--text); }
+
+.icon-btn.confirming { background: var(--warn-soft); color: var(--warn); }
+.icon-btn-s { width: var(--control-s); height: var(--control-s); border-radius: var(--r-s); }
+
+.btn-danger-quiet { background: transparent; border-color: transparent; color: var(--danger); }
+.btn-danger-quiet:hover:not(:disabled) { background: var(--danger-soft); border-color: transparent; }
+
+/* Shown at one width only. A control that exists twice (in the sidebar and on the page, say)
+   is hidden here rather than left out, so it is also out of the accessibility tree. */
+.only-phone { display: none !important; }
+@media (max-width: 899px) {
+  .only-phone { display: inline-flex !important; }
+}
+
+/* ── Menus ───────────────────────────────────────────────────────────────── */
+/* What a "more" button opens. Placed by whoever opens it. */
+
+.menu {
+  position: absolute;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 184px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-l);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control);
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-m);
+  text-align: left;
+  white-space: nowrap;
+}
+.menu-item .icon { color: var(--text-3); }
+.menu-item:hover:not(:disabled) { background: var(--hover); }
+.menu-item:disabled { opacity: 0.5; }
+.menu-item-danger, .menu-item-danger .icon { color: var(--danger); }
+.menu-item-danger:hover:not(:disabled) { background: var(--danger-soft); }
+
+/* ── Segmented choice ────────────────────────────────────────────────────── */
+/* A filter with a few fixed values: one is always chosen. Scrolls sideways before it wraps. */
+
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  max-width: 100%;
+  padding: 3px;
+  overflow-x: auto;
+  border-radius: var(--r-m);
+  background: var(--surface-3);
+  scrollbar-width: none;
+}
+.seg-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: calc(var(--control-s) - 2px);
+  padding: 0 11px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-1); }
+
+/* ── Status dot ──────────────────────────────────────────────────────────── */
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.dot-green { background: var(--accent); }
+.dot-yellow { background: var(--warn); }
+.dot-red { background: var(--danger); }
+.dot-grey { background: var(--text-3); }
+
+/* ── Lists ───────────────────────────────────────────────────────────────── */
+/* Rows in one bordered box, a hairline between them. */
+
+.list {
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.list > * + * { border-top: 1px solid var(--border); }
+.list > :first-child { border-top-left-radius: inherit; border-top-right-radius: inherit; }
+.list > :last-child { border-bottom-left-radius: inherit; border-bottom-right-radius: inherit; }
+
+.mono { font-family: var(--mono); }
+.muted { color: var(--text-2); }
+
+/* ── Pills ───────────────────────────────────────────────────────────────── */
+/* A word on a tinted ground. The word carries the meaning; the colour only repeats it. */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.pill-ok { background: var(--accent-soft); color: var(--accent); }
+.pill-warn { background: var(--warn-soft); color: var(--warn); }
+.pill-danger { background: var(--danger-soft); color: var(--danger); }
+.pill-info { background: var(--info-soft); color: var(--info); }
+.pill-purple { background: var(--purple-soft); color: var(--purple); }
+.pill-mono { font-family: var(--mono); font-weight: 400; }
+
+/* ── Surfaces ────────────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-1);
+}
+
+.empty,
+.wf-empty {
+  padding: 40px 20px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-xl);
+  color: var(--text-2);
+  font-size: var(--fs-m);
+  text-align: center;
+}
+
+kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: var(--fs-2xs);
+}
+
+/* ── Forms ───────────────────────────────────────────────────────────────── */
+
+input[type='text'], input[type='search'], input[type='number'], input[type='password'],
+input[type='email'], input[type='url'], input:not([type]), select, textarea {
+  min-height: var(--control);
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-m);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-m);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+textarea { padding: 10px 12px; line-height: 1.5; }
+input::placeholder, textarea::placeholder { color: var(--text-3); }
+input:hover, select:hover, textarea:hover { border-color: var(--text-3); }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  outline: none;
+}
+input[type='checkbox'], input[type='radio'] {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  accent-color: var(--accent);
+}
+
+/* A phone zooms the whole page in on any field whose text is under 16px, and does not zoom
+   back. Fields are 16px there so it never starts. */
+@media (pointer: coarse) {
+  input[type='text'], input[type='search'], input[type='number'], input[type='password'],
+  input[type='email'], input[type='url'], input:not([type]), select, textarea {
+    font-size: 16px;
+  }
+}
+
+/* ── A page ──────────────────────────────────────────────────────────────── */
+
+.view-page {
+  width: 100%;
+  max-width: var(--content);
+  margin: 0 auto;
+}
+
+.view-page-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin-bottom: 20px;
+}
+
+.view-page-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-right: auto;
+  font-size: var(--fs-3xl);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.view-page-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--control);
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-m);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-m);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+}
+.view-page-action:hover:not(:disabled) { background: var(--surface-2); border-color: var(--text-3); }
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 28px 0 12px;
+}
+.section-title {
+  font-size: var(--fs-l);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+/* ── Connection ──────────────────────────────────────────────────────────── */
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.conn-connected .conn-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.conn-connecting .conn-dot { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+.conn-disconnected .conn-dot { background: var(--danger); }
+
+.conn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-s);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.conn-chip.conn-connecting { background: var(--warn-soft); color: var(--warn); }
+.conn-chip.conn-disconnected { background: var(--danger-soft); color: var(--danger); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ── Toasts ──────────────────────────────────────────────────────────────── */
+/* Above the tab bar on a phone and clear of the page's own buttons; never over the thing a
+   thumb is reaching for, and under every sheet, bar and dialog: those have the floor. */
+
+.toast-area {
+  position: fixed;
+  z-index: 180;
+  right: 20px;
+  bottom: calc(20px + var(--tabbar) + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 12px 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--info);
+  border-radius: var(--r-l);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  font-size: var(--fs-m);
+  pointer-events: auto;
+  animation: toast-in 0.2s ease-out;
+}
+.toast-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.toast-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: -4px -4px -4px 0;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text-3);
+}
+.toast-close:hover { background: var(--hover); color: var(--text); }
+.toast.toast-agent-dead, .toast.toast-workflow-failed { border-left-color: var(--danger); }
+.toast.toast-agent-stale, .toast.toast-task-stuck { border-left-color: var(--warn); }
+.toast.toast-info { border-left-color: var(--info); }
+
+@media (max-width: 899px) {
+  .toast-area { right: 16px; left: 16px; width: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

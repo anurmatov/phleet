@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
+import { ConnectGitHubModal, ConnectTelegramModal } from './SetupBanner'
 import SecretBindingsSection from './SecretBindingsSection'
 import DevicesSection from './DevicesSection'
+import Icon from './Icon'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -62,15 +64,15 @@ function ConfigEditModal({ editKey, onClose, onSaved }: ConfigEditModalProps) {
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
-      <div className="config-modal" style={{ maxWidth: 480 }} onClick={e => e.stopPropagation()}>
+      <div className="config-modal" onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">{editKey ? `Edit ${editKey}` : 'Add new key'}</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
           {!editKey && (
             <div className="config-row">
-              <label className="config-label">Key <span style={{ color: 'var(--red)' }}>*</span></label>
+              <label className="config-label">Key <span className="wfd-required">*</span></label>
               <input
                 className="config-input"
                 placeholder="MY_SECRET_KEY"
@@ -82,7 +84,7 @@ function ConfigEditModal({ editKey, onClose, onSaved }: ConfigEditModalProps) {
             </div>
           )}
           <div className="config-row">
-            <label className="config-label">Value <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">Value <span className="wfd-required">*</span></label>
             <input
               className="config-input"
               type={isSensitiveKey(key) ? 'password' : 'text'}
@@ -98,13 +100,12 @@ function ConfigEditModal({ editKey, onClose, onSaved }: ConfigEditModalProps) {
               ref={fileInputRef}
               type="file"
               className="config-input"
-              style={{ padding: '6px 8px' }}
               onChange={handleFileUpload}
             />
             <div className="setup-field-hint">Useful for PEM keys, certificates, and binary blobs.</div>
           </div>
-          {err && <div className="config-feedback" style={{ color: 'var(--red)' }}>{err}</div>}
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          {err && <div className="config-feedback config-feedback-error">{err}</div>}
+          <div className="config-actions">
             <button className="config-save-btn" disabled={saving} onClick={handleSave}>
               {saving ? 'Saving…' : 'Save'}
             </button>
@@ -158,8 +159,8 @@ interface CredentialsViewProps {
 
 function StatusBadge({ configured }: { configured: boolean }) {
   return (
-    <span className={`cred-status-badge ${configured ? 'cred-status-badge--ok' : 'cred-status-badge--missing'}`}>
-      {configured ? '✓ Configured' : '○ Not configured'}
+    <span className={`pill ${configured ? 'pill-ok' : 'pill-warn'} cred-status-badge`}>
+      {configured ? 'Connected' : 'Not connected'}
     </span>
   )
 }
@@ -204,10 +205,10 @@ function MountModal({ fileId, fileName, onClose, onMounted }: MountModalProps) {
 
   return (
     <div className="config-modal-overlay" onClick={onClose}>
-      <div className="config-modal" style={{ maxWidth: 420 }} onClick={e => e.stopPropagation()}>
+      <div className="config-modal" onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">Mount "{fileName}"</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
           <div className="config-row">
@@ -225,9 +226,9 @@ function MountModal({ fileId, fileName, onClose, onMounted }: MountModalProps) {
               <option value="rw">Read-write (rw)</option>
             </select>
           </div>
-          {err && <div className="config-feedback" style={{ color: 'var(--red)' }}>{err}</div>}
+          {err && <div className="config-feedback config-feedback-error">{err}</div>}
           <div className="setup-field-hint">Changes take effect on next reprovision of the agent.</div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <div className="config-actions">
             <button className="config-save-btn" disabled={saving} onClick={handleMount}>
               {saving ? 'Mounting…' : 'Mount'}
             </button>
@@ -264,11 +265,18 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
   const [toast, setToast] = useState<string | null>(null)
   const [deleteFileConfirm, setDeleteFileConfirm] = useState<number | null>(null)
 
-  void onSetupConnected // used by parent to refresh setup status after connection changes
+  const [connecting, setConnecting] = useState<'telegram' | 'github' | null>(null)
 
   function showToast(msg: string) {
     setToast(msg)
     setTimeout(() => setToast(null), 4000)
+  }
+
+  // A connection changed here: this page re-reads it, and so does whoever shows the setup state.
+  function connected(msg: string) {
+    showToast(msg)
+    void loadConnections()
+    onSetupConnected()
   }
 
   async function loadConnections() {
@@ -439,79 +447,13 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
   }
 
   return (
-    <div className="cred-view">
+    <div className="view-page cred-view">
       {toast && <div className="setup-toast">{toast}</div>}
 
-      <div className="view-header">
-        <h2 className="view-title">Credentials</h2>
-        <p className="view-subtitle">Manage connections, environment variables, and credential files.</p>
+      <div className="view-page-header">
+        <h1 className="view-page-title view-title">Credentials</h1>
       </div>
-
-      {/* ── Config Keys ─────────────────────────────────────────────────────── */}
-      <section className="cred-section">
-        <div className="cred-section-header">
-          <div className="cred-section-title">Environment Variables</div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input
-              className="config-input"
-              style={{ width: 200 }}
-              placeholder="Search keys…"
-              value={configSearch}
-              onChange={e => setConfigSearch(e.target.value)}
-            />
-            <button className="config-save-btn" onClick={() => setEditingKey('new')}>
-              + Add key
-            </button>
-          </div>
-        </div>
-        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
-          All .env keys. Changes are written atomically and peer services are notified immediately via RabbitMQ.
-          Keys matching TOKEN, KEY, SECRET, or PASSWORD are masked.
-        </p>
-
-        {configLoading
-          ? <div style={{ color: 'var(--muted)', fontSize: 12, padding: 8 }}>Loading…</div>
-          : (
-            <div className="cred-env-table">
-              <div className="cred-env-header">
-                <span>Key</span>
-                <span>Value</span>
-                <span>Actions</span>
-              </div>
-              {filteredEntries.length === 0 && (
-                <div className="cred-env-empty">{configSearch ? 'No matches.' : 'No environment variables found.'}</div>
-              )}
-              {filteredEntries.map(entry => (
-                <div key={entry.key} className="cred-env-row">
-                  <span className="cred-env-key">{entry.key}</span>
-                  <span className="cred-env-value">
-                    {revealKey === entry.key
-                      ? (revealLoading
-                        ? <span style={{ color: 'var(--muted)' }}>…</span>
-                        : <span style={{ fontFamily: 'monospace', color: 'var(--accent)' }}>{revealValue}</span>)
-                      : entry.maskedValue
-                    }
-                  </span>
-                  <span className="cred-env-actions">
-                    {entry.isSensitive && (
-                      <button className="cred-action-btn" onClick={() => handleReveal(entry.key)}>
-                        {revealKey === entry.key ? '◻ hide' : '◉ reveal'}
-                      </button>
-                    )}
-                    <button className="cred-action-btn" onClick={() => setEditingKey(entry.key)}>Edit</button>
-                  </span>
-                </div>
-              ))}
-            </div>
-          )
-        }
-      </section>
-
-      {/* ── Secret bindings ─────────────────────────────────────────────────── */}
-      <SecretBindingsSection onToast={showToast} />
-
-      {/* ── Devices ─────────────────────────────────────────────────────────── */}
-      <DevicesSection onToast={showToast} />
+      <p className="view-page-intro">What the fleet signs in with, who is signed in to it, and what its agents are given.</p>
 
       {/* ── Connections ─────────────────────────────────────────────────────── */}
       <section className="cred-section">
@@ -543,10 +485,12 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
               >
                 {testState.telegram === 'testing' ? 'Testing…' : 'Test connection'}
               </button>
-              <span className="cred-change-hint">Use Setup Banner to change</span>
+              <button className="wfd-cancel-btn" onClick={() => setConnecting('telegram')}>
+                {connections?.telegram.configured ? 'Update' : 'Connect'}
+              </button>
             </div>
             {testMsg.telegram && (
-              <div className="cred-test-result" style={{ color: testState.telegram === 'ok' ? 'var(--accent)' : 'var(--red)' }}>
+              <div className={`cred-test-result ${testState.telegram === 'ok' ? 'ok' : 'failed'}`}>
                 {testMsg.telegram}
               </div>
             )}
@@ -575,10 +519,12 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
               >
                 {testState.github === 'testing' ? 'Testing…' : 'Test connection'}
               </button>
-              <span className="cred-change-hint">Use Setup Banner to change</span>
+              <button className="wfd-cancel-btn" onClick={() => setConnecting('github')}>
+                {connections?.gitHub.configured ? 'Update' : 'Connect'}
+              </button>
             </div>
             {testMsg.github && (
-              <div className="cred-test-result" style={{ color: testState.github === 'ok' ? 'var(--accent)' : 'var(--red)' }}>
+              <div className={`cred-test-result ${testState.github === 'ok' ? 'ok' : 'failed'}`}>
                 {testMsg.github}
               </div>
             )}
@@ -586,6 +532,71 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
 
         </div>
       </section>
+
+      {/* ── Devices ─────────────────────────────────────────────────────────── */}
+      <DevicesSection onToast={showToast} />
+
+      {/* ── Config Keys ─────────────────────────────────────────────────────── */}
+      <section className="cred-section">
+        <div className="cred-section-header">
+          <div className="cred-section-title">Environment Variables</div>
+          <div className="cred-section-tools">
+            <input
+              className="config-input cred-search"
+              placeholder="Search keys…"
+              value={configSearch}
+              onChange={e => setConfigSearch(e.target.value)}
+            />
+            <button className="config-save-btn" onClick={() => setEditingKey('new')}>
+              <Icon name="plus" size={16} />Add key
+            </button>
+          </div>
+        </div>
+        <p className="cred-note">
+          All .env keys. Changes are written atomically and peer services are notified immediately via RabbitMQ.
+          Keys matching TOKEN, KEY, SECRET, or PASSWORD are masked.
+        </p>
+
+        {configLoading
+          ? <div className="config-loading">Loading…</div>
+          : (
+            <div className="cred-env-table">
+              <div className="cred-env-header">
+                <span>Key</span>
+                <span>Value</span>
+                <span>Actions</span>
+              </div>
+              {filteredEntries.length === 0 && (
+                <div className="cred-env-empty">{configSearch ? 'No matches.' : 'No environment variables found.'}</div>
+              )}
+              {filteredEntries.map(entry => (
+                <div key={entry.key} className="cred-env-row">
+                  <span className="cred-env-key">{entry.key}</span>
+                  <span className="cred-env-value">
+                    {revealKey === entry.key
+                      ? (revealLoading
+                        ? <span className="muted">…</span>
+                        : <span className="cred-revealed">{revealValue}</span>)
+                      : entry.maskedValue
+                    }
+                  </span>
+                  <span className="cred-env-actions">
+                    {entry.isSensitive && (
+                      <button className="cred-action-btn" onClick={() => handleReveal(entry.key)}>
+                        {revealKey === entry.key ? 'Hide' : 'Reveal'}
+                      </button>
+                    )}
+                    <button className="cred-action-btn" onClick={() => setEditingKey(entry.key)}>Edit</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )
+        }
+      </section>
+
+      {/* ── Secret bindings ─────────────────────────────────────────────────── */}
+      <SecretBindingsSection onToast={showToast} />
 
       {/* ── Files ────────────────────────────────────────────────────────────── */}
       <section className="cred-section">
@@ -596,7 +607,7 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
-          <input ref={fileInputRef} type="file" className="config-input" style={{ padding: '6px 8px', flex: 1 }}
+          <input ref={fileInputRef} type="file" className="cred-upload-file"
             onChange={e => {
               const f = e.target.files?.[0]
               if (f) {
@@ -605,13 +616,11 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
               }
             }} />
           {droppedFile && (
-            <span style={{ fontSize: 12, color: 'var(--accent)', whiteSpace: 'nowrap' }}>
-              ↳ {droppedFile.name}
-            </span>
+            <span className="cred-upload-dropped">{droppedFile.name}</span>
           )}
-          <input className="config-input" style={{ width: 160 }} placeholder="Name (label)"
+          <input className="config-input cred-upload-name" placeholder="Name (label)"
             value={uploadForm.name} onChange={e => setUploadForm(u => ({ ...u, name: e.target.value }))} />
-          <select className="config-input" style={{ width: 160 }} value={uploadForm.type}
+          <select className="config-input cred-upload-type" value={uploadForm.type}
             onChange={e => setUploadForm(u => ({ ...u, type: e.target.value }))}>
             <option value="generic">Generic</option>
             <option value="ssh-private-key">SSH private key</option>
@@ -622,11 +631,9 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
           </button>
         </div>
         {!isDragging && !droppedFile && (
-          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
-            Drag and drop a file onto the row above to select it.
-          </div>
+          <div className="cred-note">Drag and drop a file onto the row above to select it.</div>
         )}
-        {uploadErr && <div className="config-feedback" style={{ color: 'var(--red)', marginBottom: 8 }}>{uploadErr}</div>}
+        {uploadErr && <div className="config-feedback config-feedback-error">{uploadErr}</div>}
 
         {credFiles.length === 0 && (
           <div className="cred-empty">No credential files uploaded yet.</div>
@@ -638,12 +645,12 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
               <span className="cred-file-name">{cf.name}</span>
               <span className="cred-file-type">{cf.type}</span>
               <span className="cred-file-size">{formatBytes(cf.sizeBytes)}</span>
-              <span className="cred-file-filename" style={{ color: 'var(--muted)', fontFamily: 'monospace', fontSize: 12 }}>
+              <span className="cred-file-filename">
                 {cf.fileName}
               </span>
-              <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-                <button className="cred-action-btn" onClick={() => handleDownload(cf.id, cf.fileName)}>↓ Download</button>
-                <button className="cred-action-btn" onClick={() => setMountingFile(cf)}>+ Mount</button>
+              <div className="cred-file-actions">
+                <button className="cred-action-btn" onClick={() => handleDownload(cf.id, cf.fileName)}>Download</button>
+                <button className="cred-action-btn" onClick={() => setMountingFile(cf)}>Mount</button>
                 {deleteFileConfirm === cf.id
                   ? <>
                     <button className="cred-action-btn cred-action-btn--danger" onClick={() => handleDeleteFile(cf.id)}>Confirm</button>
@@ -658,7 +665,7 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
                 {cf.mounts.map(m => (
                   <div key={m.id} className="cred-mount-row">
                     <span className="cred-mount-agent">{m.agentName}</span>
-                    <span className="cred-mount-path" style={{ fontFamily: 'monospace', fontSize: 12 }}>{m.mountPath}</span>
+                    <span className="cred-mount-path">{m.mountPath}</span>
                     <span className="cred-mount-mode">{m.mode}</span>
                     {unmountConfirm?.mountId === m.id
                       ? <>
@@ -686,6 +693,12 @@ export default function CredentialsView({ onSetupConnected }: CredentialsViewPro
             setEditingKey(undefined)
           }}
         />
+      )}
+      {connecting === 'telegram' && (
+        <ConnectTelegramModal onClose={() => setConnecting(null)} onConnected={connected} />
+      )}
+      {connecting === 'github' && (
+        <ConnectGitHubModal onClose={() => setConnecting(null)} onConnected={connected} configured={connections?.gitHub.configured ?? false} />
       )}
       {mountingFile && (
         <MountModal

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import type { OutputStyleDetail } from '../types'
 import { apiGet, apiSend } from '../utils'
 import FieldHint from './FieldHint'
+import Icon from './Icon'
 
 type ActionState = 'idle' | 'pending' | 'success' | 'error'
 
@@ -213,12 +214,12 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
           {styles.length > 0 && <span className="section-count">{styles.length}</span>}
         </h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button className="completed-refresh-btn" onClick={load} disabled={loading} title="Refresh output styles">↻</button>
+          <button className="icon-btn completed-refresh-btn" onClick={load} disabled={loading} title="Refresh output styles" aria-label="Refresh output styles"><Icon name="refresh" /></button>
           <button
-            className="view-page-action"
+            className={`btn view-page-action${showNewForm ? '' : ' btn-primary'}`}
             onClick={() => { setShowNewForm(s => !s); setNewFormState('idle') }}
           >
-            {showNewForm ? 'Cancel' : '+ New Style'}
+            {showNewForm ? 'Cancel' : <><Icon name="plus" size={16} />New style</>}
           </button>
         </div>
       </div>
@@ -326,7 +327,7 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
                     </span>
                   )}
                 </div>
-                <span className="history-toggle">{isOpen ? '▲' : '▼'}</span>
+                <span className={`history-toggle${isOpen ? ' open' : ''}`}><Icon name="chevronDown" size={18} /></span>
               </div>
 
               {isOpen && (

@@ -1,6 +1,7 @@
 import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import { decodeUnicode } from '../utils'
 import Modal from './Modal'
+import Icon from './Icon'
 
 /**
  * A workflow's execution history, newest event first. Shown over whichever page lists the
@@ -20,11 +21,12 @@ export default function WorkflowHistoryPanel({ actions }: { actions: WorkflowAct
     <Modal label="Workflow history" overlayClassName="wf-detail-overlay" className="wf-detail-modal" onClose={closeDetail}>
       <div className="wf-detail-header">
         <span className="wf-detail-title">
-          {selectedWf.workflowType} / <span className="wf-detail-id">{selectedWf.workflowId}</span>
+          {selectedWf.workflowType}
+          <span className="wf-detail-id">{selectedWf.workflowId}</span>
         </span>
         <div className="wf-detail-header-actions">
-          <button className="wf-detail-refresh" onClick={refreshDetail} disabled={historyLoading} title="Refresh history">↻</button>
-          <button className="wf-detail-close" onClick={closeDetail}>✕</button>
+          <button className="icon-btn wf-detail-refresh" onClick={refreshDetail} disabled={historyLoading} title="Refresh history" aria-label="Refresh history"><Icon name="refresh" /></button>
+          <button className="icon-btn wf-detail-close" onClick={closeDetail} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
       </div>
       <div className="wf-detail-body">
@@ -50,7 +52,7 @@ export default function WorkflowHistoryPanel({ actions }: { actions: WorkflowAct
                 {ev.signalName && <span className="wf-ev-signal">{ev.signalName}</span>}
                 {ev.failureMessage && !hasDetail && <span className="wf-ev-failure">{ev.failureMessage}</span>}
                 <span className="wf-ev-time">{new Date(ev.timestamp).toLocaleTimeString()}</span>
-                {hasDetail && <span className="wf-ev-expand">{expanded ? '▲' : '▼'}</span>}
+                {hasDetail && <span className={`wf-ev-expand${expanded ? ' open' : ''}`}><Icon name="chevronDown" size={14} /></span>}
               </div>
               {expanded && hasDetail && (
                 <div className="wf-ev-detail">

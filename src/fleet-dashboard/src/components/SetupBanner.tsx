@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
 import type { AgentTemplateSummary } from '../types'
+import Icon from './Icon'
 
 // Matches the nested shape returned by SetupStatusDto
 interface SetupStatus {
@@ -24,7 +25,7 @@ interface TelegramModalProps {
   onConnected: (toast: string) => void
 }
 
-function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
+export function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
   const [ctoBotToken, setCtoBotToken] = useState('')
   const [notifierBotToken, setNotifierBotToken] = useState('')
   const [groupChatId, setGroupChatId] = useState('')
@@ -123,7 +124,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
       <div className="config-modal" style={{ maxWidth: 480 }} onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">Connect Telegram</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
 
@@ -137,7 +138,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {/* CTO bot token */}
           <div className="config-row">
             <label className="config-label">
-              CTO bot token <span style={{ color: 'var(--red)' }}>*</span>
+              CTO bot token <span style={{ color: 'var(--danger)' }}>*</span>
             </label>
             <input
               className={`config-input${fieldErrors.ctoToken ? ' input--error' : ''}`}
@@ -161,7 +162,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           <div className="config-row">
             <label className="config-label">
               Notifier bot token{' '}
-              <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
+              <span style={{ color: 'var(--text-2)', fontWeight: 400 }}>(optional)</span>
             </label>
             <input
               className={`config-input${fieldErrors.notifierToken ? ' input--error' : ''}`}
@@ -179,7 +180,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           <div className="config-row">
             <label className="config-label">
               Group chat ID{' '}
-              <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
+              <span style={{ color: 'var(--text-2)', fontWeight: 400 }}>(optional)</span>
             </label>
             <input
               className={`config-input${fieldErrors.groupChat ? ' input--error' : ''}`}
@@ -201,7 +202,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {/* Your Telegram user ID */}
           <div className="config-row">
             <label className="config-label">
-              Your Telegram user ID <span style={{ color: 'var(--red)' }}>*</span>
+              Your Telegram user ID <span style={{ color: 'var(--danger)' }}>*</span>
             </label>
             <input
               className="config-input"
@@ -229,7 +230,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {testMsg && (
             <div
               className="config-feedback"
-              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}
+              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--danger)', marginBottom: 8 }}
             >
               {testMsg}
             </div>
@@ -263,7 +264,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {saveMsg && (
             <div
               className="config-feedback"
-              style={{ color: 'var(--red)', marginTop: 8 }}
+              style={{ color: 'var(--danger)', marginTop: 8 }}
             >
               {saveMsg}
             </div>
@@ -282,7 +283,7 @@ interface GitHubModalProps {
   configured: boolean
 }
 
-function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalProps) {
+export function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalProps) {
   const [appId, setAppId] = useState('')
   const [pem, setPem] = useState('')
   const [appIdRevealed, setAppIdRevealed] = useState(!configured)
@@ -367,7 +368,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
       <div className="config-modal" style={{ maxWidth: 480 }} onClick={e => e.stopPropagation()}>
         <div className="config-modal-header">
           <span className="config-modal-title">Connect GitHub App</span>
-          <button className="config-modal-close" onClick={onClose}>✕ close</button>
+          <button className="icon-btn config-modal-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
         </div>
         <div className="config-modal-body">
 
@@ -380,7 +381,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
 
           {/* App ID */}
           <div className="config-row">
-            <label className="config-label">App ID <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">App ID <span style={{ color: 'var(--danger)' }}>*</span></label>
             {configured && !appIdRevealed ? (
               <div className="setup-masked-field">
                 <span className="setup-masked-value">••••••• (configured)</span>
@@ -416,7 +417,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
 
           {/* Private key */}
           <div className="config-row">
-            <label className="config-label">Private key (.pem) <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">Private key (.pem) <span style={{ color: 'var(--danger)' }}>*</span></label>
             {configured && !pemRevealed ? (
               <div className="setup-masked-field">
                 <span className="setup-masked-value">••••••• (configured)</span>
@@ -436,7 +437,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
                   onChange={handlePemFile}
                 />
                 {pem && (
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 4 }}>
                     {pem.split('\n').length} lines loaded
                   </div>
                 )}
@@ -467,7 +468,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
           {testMsg && (
             <div
               className="config-feedback"
-              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}
+              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--danger)', marginBottom: 8 }}
             >
               {testMsg}
             </div>
@@ -496,7 +497,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
           {saveMsg && (
             <div
               className="config-feedback"
-              style={{ color: 'var(--red)', marginTop: 8 }}
+              style={{ color: 'var(--danger)', marginTop: 8 }}
             >
               {saveMsg}
             </div>
@@ -538,14 +539,10 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
     onConnected()
   }
 
-  // Compact chip row once everything is configured and there are agents
+  // Nothing to set up: say nothing. Credentials has the state of both connections.
   if (bothConfigured && agentCount > 0) {
     return (
       <>
-        <div className="setup-banner setup-banner--compact">
-          <span className="setup-chip setup-chip--ok">✓ Telegram</span>
-          <span className="setup-chip setup-chip--ok">✓ GitHub</span>
-        </div>
         {toasts.map(t => (
           <div key={t.id} className="setup-toast">{t.text}</div>
         ))}
@@ -559,7 +556,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
         {/* Telegram card */}
         {!telegramOk ? (
           <div className="setup-card setup-card--pending">
-            <div className="setup-card-icon">✈</div>
+            <div className="setup-card-icon"><Icon name="chat" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">Connect Telegram</div>
               <div className="setup-card-desc">Add your bot token so agents can receive and send messages.</div>
@@ -570,7 +567,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
           </div>
         ) : (
           <div className="setup-card setup-card--done">
-            <div className="setup-card-icon">✓</div>
+            <div className="setup-card-icon"><Icon name="check" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">Telegram connected</div>
             </div>
@@ -583,7 +580,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
         {/* GitHub card */}
         {!githubOk ? (
           <div className="setup-card setup-card--pending">
-            <div className="setup-card-icon">⌥</div>
+            <div className="setup-card-icon"><Icon name="workflows" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">Connect GitHub App</div>
               <div className="setup-card-desc">Add your GitHub App credentials so agents can push code and open PRs.</div>
@@ -594,7 +591,7 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
           </div>
         ) : (
           <div className="setup-card setup-card--done">
-            <div className="setup-card-icon">✓</div>
+            <div className="setup-card-icon"><Icon name="check" size={20} /></div>
             <div className="setup-card-body">
               <div className="setup-card-title">GitHub connected</div>
             </div>
@@ -607,14 +604,14 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
         {/* First agent nudge + template grid */}
         {agentCount === 0 && (
           <div className="setup-card setup-card--info setup-card--templates">
-            <div className="setup-card-body" style={{ width: '100%' }}>
+            <div className="setup-card-body">
               <div className="setup-card-title">Provision your first agent</div>
               <div className="setup-card-desc">Start with a co-cto — your strategic AI partner. It can provision specialists (dev, ops, pm, etc.) on demand.</div>
 
               {/* Telegram hard prereq banner */}
               {!telegramOk && (
                 <div className="setup-prereq-banner setup-prereq-banner--amber">
-                  <span>⚠&nbsp; Connect Telegram first to provision agents — agents need Telegram to receive commands.</span>
+                  <span>Connect Telegram first to provision agents — agents need Telegram to receive commands.</span>
                   <button
                     className="setup-prereq-link"
                     onClick={() => setTelegramOpen(true)}
@@ -641,7 +638,6 @@ export default function SetupBanner({ status, agentCount, onConnected, onNewAgen
                       className={`template-card${!telegramOk ? ' template-card--disabled' : ''}`}
                       onClick={() => telegramOk && onNewAgentFromTemplate(t.name)}
                       disabled={!telegramOk}
-                      style={!telegramOk ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
                     >
                       <div className="template-card-name">{t.displayName}</div>
                       <div className="template-card-desc">{t.description}</div>

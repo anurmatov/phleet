@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { apiGet, apiSend, errorMessage } from '../utils'
 import FieldHint from './FieldHint'
+import Icon from './Icon'
 
 interface RepoRow {
   name: string
@@ -107,10 +108,10 @@ export default function RepositoriesView() {
             </button>
           )}
           <button
-            className="view-page-action"
+            className={`btn view-page-action${showNewForm ? '' : ' btn-primary'}`}
             onClick={() => { setShowNewForm(s => !s); setNewFormState('idle') }}
           >
-            {showNewForm ? 'Cancel' : '+ New Repository'}
+            {showNewForm ? 'Cancel' : <><Icon name="plus" size={16} />New repository</>}
           </button>
         </div>
       </div>

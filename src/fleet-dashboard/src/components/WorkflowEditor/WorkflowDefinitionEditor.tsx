@@ -10,6 +10,7 @@ import JsonPreview from './JsonPreview'
 import StepConfigPanel from './StepConfigPanel'
 import type { StepType } from './editorTypes'
 import type { WorkflowDefinitionDetail, WorkflowTypeInfo } from '../../types'
+import Icon from '../Icon'
 
 interface WorkflowDefinitionEditorProps {
   /** null = new definition */
@@ -124,7 +125,7 @@ export default function WorkflowDefinitionEditor({ defName, onBack, onSaved, wor
   if (loadError) return (
     <div className="wfe-editor">
       <div className="wfe-topbar">
-        <button className="wfe-back-btn" onClick={onBack}>← Definitions</button>
+        <button className="wfe-back-btn" onClick={onBack}><Icon name="chevronLeft" size={16} />Definitions</button>
       </div>
       <div className="wfe-load-error">
         <span className="wfe-load-error-icon">✕</span>
@@ -137,7 +138,7 @@ export default function WorkflowDefinitionEditor({ defName, onBack, onSaved, wor
     <div className="wfe-editor">
       {/* Top bar */}
       <div className="wfe-topbar">
-        <button className="wfe-back-btn" onClick={onBack}>← Definitions</button>
+        <button className="wfe-back-btn" onClick={onBack}><Icon name="chevronLeft" size={16} />Definitions</button>
         <div className="wfe-topbar-meta">
           {isNew ? (
             <input
@@ -294,7 +295,7 @@ function HistoryDrawer({ versions, currentVersion, onClose, onLoad }: HistoryDra
     <div className="wfe-history-drawer">
       <div className="wfe-history-header">
         <span>Version History</span>
-        <button className="wfe-history-close" onClick={onClose}>✕</button>
+        <button className="icon-btn wfe-history-close" onClick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
       </div>
       {versions.length === 0 && <div className="wfe-history-empty">No previous versions.</div>}
       {versions.map(v => (

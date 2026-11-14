@@ -34,7 +34,7 @@ export default function NamespacesView({
         </h1>
       </div>
 
-      <p style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: 13 }}>
+      <p className="view-page-intro">
         Read-only overview. Namespaces are configured on the Temporal server.
       </p>
 
@@ -45,7 +45,7 @@ export default function NamespacesView({
       <div className="instructions-list">
         {nsData.map(({ ns, activeWorkflows, nsSchedules, nsTypes }) => (
           <div key={ns} className="instr-row">
-            <div className="instr-header" style={{ cursor: 'default' }}>
+            <div className="instr-header instr-header-static">
               <span className="instr-name">{ns}</span>
               <span className="instr-meta">
                 <span className="instr-agents" title={`${activeWorkflows.length} active workflows`}>
@@ -60,24 +60,11 @@ export default function NamespacesView({
               </span>
             </div>
             {nsTypes.length > 0 && (
-              <div style={{ padding: '8px 16px 12px', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
-                <div className="config-label" style={{ marginBottom: 6 }}>Registered workflow types</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <div className="ns-types">
+                <div className="config-label">Registered workflow types</div>
+                <div className="ns-type-list">
                   {nsTypes.map(t => (
-                    <span
-                      key={t.name}
-                      style={{
-                        background: 'var(--bg-tertiary, #1e2a3a)',
-                        border: '1px solid var(--border)',
-                        borderRadius: 4,
-                        padding: '2px 8px',
-                        fontSize: 12,
-                        color: 'var(--text-secondary)',
-                      }}
-                      title={t.description || t.name}
-                    >
-                      {t.name}
-                    </span>
+                    <span key={t.name} className="pill pill-mono" title={t.description || t.name}>{t.name}</span>
                   ))}
                 </div>
               </div>

@@ -3,6 +3,7 @@ import type { ScheduleSummary, ScheduleDetail, WorkflowTypeInfo } from '../types
 import { apiGet, apiSend, errorMessage } from '../utils'
 import CreateScheduleModal from './CreateScheduleModal'
 import { useTick } from '../hooks/useTick'
+import Icon from './Icon'
 
 function formatRelativeOrFuture(iso: string): string {
   const diff = new Date(iso).getTime() - Date.now()
@@ -52,8 +53,8 @@ function ConfirmBar({ description, onConfirm, onCancel }: {
     <div className="confirm-bar">
       <span className="confirm-bar-desc">{description}</span>
       <div className="confirm-bar-actions">
-        <button className="confirm-bar-btn confirm-bar-cancel" onClick={onCancel}>Cancel</button>
-        <button className="confirm-bar-btn confirm-bar-confirm" onClick={() => { onConfirm(); onCancel() }}>Confirm</button>
+        <button className="btn confirm-bar-btn confirm-bar-cancel" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-danger confirm-bar-btn confirm-bar-confirm" onClick={() => { onConfirm(); onCancel() }}>Confirm</button>
       </div>
     </div>
   )
@@ -121,48 +122,47 @@ function ScheduleCard({ schedule, onRefresh }: ScheduleCardProps) {
   const human = cronHumanReadable(schedule.cronExpression)
 
   return (
-    <div>
-      <div className="wf-row wf-row-flex" onClick={toggleExpand} style={{ cursor: 'pointer' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-          <span className="wf-id">{schedule.scheduleId}</span>
-          <span className="wf-ns-badge">{schedule.namespace}</span>
-          <span className={`wf-status-badge ${schedule.paused ? 'wf-status-paused' : 'wf-status-running'}`}>
+    <div className={`sched-row${schedule.paused ? ' paused' : ''}${expanded ? ' expanded' : ''}`}>
+      <div
+        className="sched-main"
+        role="button" tabIndex={0} aria-expanded={expanded}
+        onClick={toggleExpand}
+        onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleExpand() } }}
+      >
+        <div className="sched-id">{schedule.scheduleId}</div>
+        <div className="sched-when">
+          <Icon name="clock" size={15} />
+          {human && <span>{human}</span>}
+          {schedule.cronExpression && <span className="sched-cron" title={human}>{schedule.cronExpression}</span>}
+        </div>
+        <div className="sched-meta">
+          <span className={`pill wf-status-badge ${schedule.paused ? 'wf-status-paused' : 'wf-status-running'}`}>
             {schedule.paused ? 'paused' : 'active'}
           </span>
-          {schedule.workflowType && (
-            <span className="wf-queue">{schedule.workflowType}</span>
-          )}
-          {schedule.cronExpression && (
-            <span className="wf-queue" title={human}>{schedule.cronExpression}</span>
-          )}
-          {schedule.memo && (
-            <span className="wf-task-summary" style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>{schedule.memo}</span>
-          )}
+          <span className="pill wf-ns-badge">{schedule.namespace}</span>
+          {schedule.workflowType && <span className="sched-type">{schedule.workflowType}</span>}
+          {schedule.memo && <span className="sched-memo">{schedule.memo}</span>}
         </div>
-        <div className="wf-actions" onClick={e => e.stopPropagation()}>
+        <div className="sched-actions" onClick={e => e.stopPropagation()}>
           {actionState === 'idle' && (
             <>
               <button
-                className="wf-btn wf-btn-signal"
+                className="btn btn-s"
                 onClick={() => doAction(schedule.paused ? 'unpause' : 'pause')}
                 title={schedule.paused ? 'Unpause' : 'Pause'}
               >
-                {schedule.paused ? '▶ Unpause' : '⏸ Pause'}
+                <Icon name={schedule.paused ? 'play' : 'pause'} size={15} />{schedule.paused ? 'Unpause' : 'Pause'}
               </button>
-              <button
-                className="wf-btn wf-btn-signal"
-                onClick={() => doAction('trigger')}
-                title="Trigger immediate run"
-              >
-                ⚡ Trigger
+              <button className="btn btn-s" onClick={() => doAction('trigger')} title="Trigger immediate run">
+                <Icon name="bolt" size={15} />Trigger
               </button>
               {!confirmDelete && (
                 <button
-                  className="wf-btn wf-btn-cancel"
+                  className="icon-btn icon-btn-s sched-delete"
                   onClick={() => { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 5000) }}
-                  title="Delete schedule"
+                  title="Delete schedule" aria-label="Delete schedule"
                 >
-                  ✕ Delete
+                  <Icon name="trash" size={16} />
                 </button>
               )}
             </>
@@ -182,33 +182,36 @@ function ScheduleCard({ schedule, onRefresh }: ScheduleCardProps) {
       )}
 
       {expanded && (
-        <div className="wf-detail" style={{ padding: '8px 12px' }}>
-          {detailLoading && <div className="wf-detail-loading">Loading details…</div>}
-          {detailError  && <div className="wf-detail-error">{detailError}</div>}
+        <div className="sched-detail">
+          {detailLoading && <div className="config-loading">Loading details…</div>}
+          {detailError  && <div className="config-feedback config-feedback-error">{detailError}</div>}
           {detail && (
-            <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+            <>
               {detail.nextRunTime && (
-                <div><strong>Next run:</strong> {formatRelativeOrFuture(detail.nextRunTime)} ({new Date(detail.nextRunTime).toLocaleString()})</div>
+                <div className="row-detail-item">
+                  <span className="row-detail-label">next run</span>
+                  <span className="row-detail-value">{formatRelativeOrFuture(detail.nextRunTime)} · {new Date(detail.nextRunTime).toLocaleString()}</span>
+                </div>
               )}
               {detail.lastRunTime && (
-                <div><strong>Last run:</strong> {formatRelativeOrFuture(detail.lastRunTime)} ({new Date(detail.lastRunTime).toLocaleString()})</div>
+                <div className="row-detail-item">
+                  <span className="row-detail-label">last run</span>
+                  <span className="row-detail-value">{formatRelativeOrFuture(detail.lastRunTime)} · {new Date(detail.lastRunTime).toLocaleString()}</span>
+                </div>
               )}
               {detail.lastRunWorkflowId && (
-                <div>
-                  <strong>Last workflow:</strong>{' '}
-                  <span style={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{detail.lastRunWorkflowId}</span>
+                <div className="row-detail-item">
+                  <span className="row-detail-label">last workflow</span>
+                  <span className="row-detail-value mono">{detail.lastRunWorkflowId}</span>
                 </div>
               )}
-              {human && <div><strong>Schedule:</strong> {human}</div>}
               {detail.input !== null && detail.input !== undefined && JSON.stringify(detail.input) !== '{}' && (
-                <div>
-                  <strong>Input:</strong>
-                  <pre style={{ margin: '2px 0 0', fontSize: '0.76rem', overflowX: 'auto' }}>
-                    {JSON.stringify(detail.input, null, 2)}
-                  </pre>
+                <div className="row-detail-item">
+                  <span className="row-detail-label">input</span>
+                  <pre className="sched-input">{JSON.stringify(detail.input, null, 2)}</pre>
                 </div>
               )}
-            </div>
+            </>
           )}
         </div>
       )}
@@ -249,36 +252,21 @@ export default function SchedulesView({ schedules, loading, workflowTypes, names
           Schedules
           <span className="section-count">{filtered.length}</span>
         </h1>
-        <div className="wf-header-right">
-          <button className="wf-btn wf-btn-signal" onClick={() => setShowCreateModal(true)}>
-            + New Schedule
-          </button>
-          <button className="wf-btn" onClick={onRefresh} disabled={loading} title="Refresh">
-            {loading ? '…' : '⟳'}
-          </button>
-        </div>
+        {filterNamespaces.length > 1 && (
+          <div className="seg ns-filters" role="group" aria-label="Namespace">
+            <button className={`seg-btn ns-btn${nsFilter === 'all' ? ' active' : ''}`} onClick={() => setNsFilter('all')}>all</button>
+            {filterNamespaces.map(ns => (
+              <button key={ns} className={`seg-btn ns-btn${nsFilter === ns ? ' active' : ''}`} onClick={() => setNsFilter(ns)}>{ns}</button>
+            ))}
+          </div>
+        )}
+        <button className="icon-btn" onClick={onRefresh} disabled={loading} title="Refresh" aria-label="Refresh schedules">
+          {loading ? '…' : <Icon name="refresh" />}
+        </button>
+        <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
+          <Icon name="plus" size={16} />New schedule
+        </button>
       </div>
-
-      {/* Namespace filter pills */}
-      {filterNamespaces.length > 1 && (
-        <div className="ns-filters">
-          <button
-            className={`ns-btn${nsFilter === 'all' ? ' active' : ''}`}
-            onClick={() => setNsFilter('all')}
-          >
-            all
-          </button>
-          {filterNamespaces.map(ns => (
-            <button
-              key={ns}
-              className={`ns-btn${nsFilter === ns ? ' active' : ''}`}
-              onClick={() => setNsFilter(ns)}
-            >
-              {ns}
-            </button>
-          ))}
-        </div>
-      )}
 
       {loading && schedules.length === 0 && (
         <div className="view-empty">Loading schedules…</div>
@@ -288,7 +276,7 @@ export default function SchedulesView({ schedules, loading, workflowTypes, names
         <div className="view-empty">No schedules found.</div>
       )}
 
-      <div className="wf-table">
+      <div className="list sched-list">
         {filtered.map(s => (
           <ScheduleCard
             key={`${s.namespace}/${s.scheduleId}`}

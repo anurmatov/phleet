@@ -8,6 +8,7 @@ import type {
   CancelState,
   WorkflowSummary,
 } from '../types'
+import Icon from './Icon'
 import { statusDot, heartbeatAge, formatDuration, formatTime, formatUptime, temporalUiUrl } from '../utils'
 
 interface AgentCardProps {
@@ -59,7 +60,7 @@ interface AgentCardProps {
 }
 
 export function PriorityBadge({ priority }: { priority?: boolean }) {
-  return priority ? <span className="queue-badge" title="primary-human queue lane">priority</span> : null
+  return priority ? <span className="pill pill-purple queue-badge" title="primary-human queue lane">priority</span> : null
 }
 
 export default function AgentCard({
@@ -108,98 +109,111 @@ export default function AgentCard({
     }
   }, [highlightedEntityId, agent.agentName, onClearHighlight])
 
+  const busy = '…'
+  const statusLabel = agent.effectiveStatus === 'dead' ? 'offline' : agent.effectiveStatus
+
   return (
     <div ref={cardRef} className={`agent-row status-${agent.effectiveStatus}${expanded ? ' expanded' : ''}${isEditingConfig ? ' config-editing' : ''}`}>
 
       {/* ── Main row ── */}
       <div className="agent-row-main">
-        <div className="agent-row-stripe" />
-
-        {/* Clickable summary area */}
-        <div className="agent-row-summary" onClick={onExpand}>
-          <span className="agent-row-dot">{statusDot(agent.effectiveStatus)}</span>
-          <span className="agent-row-name">{agent.agentName}</span>
-          {agent.model && <span className="agent-model agent-row-model">{agent.model}</span>}
+        {/* The whole summary opens the row; the actions beside it are their own controls. */}
+        <div
+          className="agent-row-summary"
+          role="button"
+          tabIndex={0}
+          aria-expanded={expanded}
+          onClick={onExpand}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onExpand() } }}
+        >
+          <span className="agent-row-dot" title={`${statusLabel} · ${heartbeatAge(agent.lastSeen)}`}>{statusDot(agent.effectiveStatus)}</span>
+          <span className="agent-row-id">
+            <span className="agent-row-name">{agent.agentName}</span>
+            {agent.model && <span className="agent-model agent-row-model">{agent.model}</span>}
+          </span>
           <span className="agent-row-task">
             {agent.currentTask
               ? <span className="task-active task-truncated">{agent.currentTask}</span>
               : <span className="task-idle">idle</span>
             }
           </span>
-          {agent.queuedCount > 0 && (
-            <span className="agent-row-queue-badge">{agent.queuedCount} queued</span>
-          )}
-          {(agent.priorityQueuedCount ?? 0) > 0 && (
-            <span className="agent-row-queue-badge">{agent.priorityQueuedCount} priority</span>
-          )}
-          {agent.backgroundTasks && agent.backgroundTasks.length > 0 && (
-            <span className="agent-row-bg-badge">{agent.backgroundTasks.length} bg</span>
-          )}
-          {agent.effectiveStatus === 'stale' && (
-            <span className="agent-row-hb hb-stale" title={heartbeatAge(agent.lastSeen)}>stale</span>
-          )}
-          {agent.effectiveStatus === 'dead' && (
-            <span className="agent-row-hb hb-dead" title={heartbeatAge(agent.lastSeen)}>offline</span>
-          )}
+          <span className="agent-row-badges">
+            {agent.queuedCount > 0 && (
+              <span className="pill pill-info agent-row-queue-badge">{agent.queuedCount} queued</span>
+            )}
+            {(agent.priorityQueuedCount ?? 0) > 0 && (
+              <span className="pill pill-purple agent-row-queue-badge">{agent.priorityQueuedCount} priority</span>
+            )}
+            {agent.backgroundTasks && agent.backgroundTasks.length > 0 && (
+              <span className="pill agent-row-bg-badge">{agent.backgroundTasks.length} bg</span>
+            )}
+            {agent.effectiveStatus === 'stale' && (
+              <span className="pill pill-warn agent-row-hb hb-stale" title={heartbeatAge(agent.lastSeen)}>stale</span>
+            )}
+            {agent.effectiveStatus === 'dead' && (
+              <span className="pill pill-danger agent-row-hb hb-dead" title={heartbeatAge(agent.lastSeen)}>offline</span>
+            )}
+          </span>
         </div>
 
-        {/* 5 inline action buttons */}
+        {/* The actions used most, one press away. On a phone they move into the opened row, with labels. */}
         <div className="agent-row-actions" onClick={e => e.stopPropagation()}>
           <button
-            className={`row-btn${isDead ? ' row-btn-dim' : rs === 'confirming' ? ' confirming' : ''}`}
-            title="Restart"
+            className={`icon-btn${rs === 'confirming' ? ' confirming' : ''}`}
+            title="Restart" aria-label="Restart"
             onClick={onRestart}
             disabled={isDead || rs === 'restarting'}
-          >{rs === 'restarting' ? '…' : '↺'}</button>
+          >{rs === 'restarting' ? busy : <Icon name="restart" />}</button>
           <button
-            className={`row-btn${isDead ? ' row-btn-dim' : rps === 'confirming' ? ' confirming' : ''}`}
-            title="Reprovision"
+            className={`icon-btn${rps === 'confirming' ? ' confirming' : ''}`}
+            title="Reprovision" aria-label="Reprovision"
             onClick={onReprovision}
             disabled={isDead || rps === 'provisioning'}
-          >{rps === 'provisioning' ? '…' : '↻'}</button>
+          >{rps === 'provisioning' ? busy : <Icon name="reprovision" />}</button>
           <button
-            className={`row-btn${!agent.currentTask ? ' row-btn-dim' : cs === 'confirming' ? ' confirming' : ''}`}
-            title="Cancel task"
+            className={`icon-btn${cs === 'confirming' ? ' confirming' : ''}`}
+            title="Cancel task" aria-label="Cancel task"
             onClick={onCancel}
             disabled={!agent.currentTask || cs === 'cancelling'}
-          >{cs === 'cancelling' ? '…' : '✕'}</button>
+          >{cs === 'cancelling' ? busy : <Icon name="cancel" />}</button>
           <button
-            className={`row-btn${logViewerOpen ? ' active' : ''}`}
-            title="Logs"
+            className={`icon-btn${logViewerOpen ? ' active' : ''}`}
+            title="Logs" aria-label="Logs"
             onClick={onViewLogs}
-          >≡</button>
+          ><Icon name="logs" /></button>
           <button
-            className={`row-btn${overflowOpen ? ' active' : ''}`}
-            title="More actions"
+            className={`icon-btn${overflowOpen ? ' active' : ''}`}
+            title="More actions" aria-label="More actions"
+            aria-expanded={overflowOpen}
             onClick={() => setOverflowOpen(o => !o)}
-          >···</button>
+          ><Icon name="more" /></button>
         </div>
 
         {/* Overflow menu */}
         {overflowOpen && (
-          <div className="agent-row-overflow" onClick={e => e.stopPropagation()}>
-            <button onClick={() => { onEditConfig(); setOverflowOpen(false) }}>
-              {isEditingConfig ? 'close config' : 'edit config'}
+          <div className="menu agent-row-overflow" onClick={e => e.stopPropagation()}>
+            <button className="menu-item" onClick={() => { onEditConfig(); setOverflowOpen(false) }}>
+              <Icon name="settings" size={16} />{isEditingConfig ? 'Close config' : 'Edit config'}
             </button>
             {isDead
-              ? <button onClick={() => { onStart(); setOverflowOpen(false) }} disabled={sts === 'pending'}>
-                  {sts === 'pending' ? '…' : 'start'}
+              ? <button className="menu-item" onClick={() => { onStart(); setOverflowOpen(false) }} disabled={sts === 'pending'}>
+                  <Icon name="play" size={16} />{sts === 'pending' ? busy : 'Start'}
                 </button>
-              : <button onClick={() => { onStop(); setOverflowOpen(false) }}>
-                  {ss === 'confirming' ? 'confirm stop?' : 'stop'}
+              : <button className={`menu-item${ss === 'confirming' ? ' menu-item-danger' : ''}`} onClick={() => { onStop(); setOverflowOpen(false) }}>
+                  <Icon name="stop" size={16} />{ss === 'confirming' ? 'Confirm stop?' : 'Stop'}
                 </button>
             }
             <button
-              className="overflow-delete"
+              className="menu-item menu-item-danger overflow-delete"
               onClick={() => { onDeleteClick(); setOverflowOpen(false) }}
               disabled={deleteState === 'deleting'}
-            >{deleteState === 'deleting' ? '…' : 'delete'}</button>
+            ><Icon name="trash" size={16} />{deleteState === 'deleting' ? busy : 'Delete'}</button>
           </div>
         )}
 
         {/* Expand chevron */}
-        <button className="agent-row-chevron" onClick={onExpand} title={expanded ? 'Collapse' : 'Expand'}>
-          {expanded ? '▲' : '▼'}
+        <button className="icon-btn agent-row-chevron" onClick={onExpand} title={expanded ? 'Collapse' : 'Expand'} aria-label={expanded ? 'Collapse' : 'Expand'}>
+          <Icon name="chevronDown" />
         </button>
       </div>
 
@@ -208,8 +222,8 @@ export default function AgentCard({
         <div className="row-confirm" onClick={e => e.stopPropagation()}>
           <span className="row-confirm-text">Restart <strong>{agent.agentName}</strong>? This will interrupt any running task.</span>
           <div className="row-confirm-actions">
-            <button className="row-confirm-ok" onClick={onRestartConfirm}>Restart</button>
-            <button className="row-confirm-cancel" onClick={onRestartCancel}>Cancel</button>
+            <button className="btn btn-s row-confirm-cancel" onClick={onRestartCancel}>Cancel</button>
+            <button className="btn btn-s btn-primary row-confirm-ok" onClick={onRestartConfirm}>Restart</button>
           </div>
         </div>
       )}
@@ -217,8 +231,8 @@ export default function AgentCard({
         <div className="row-confirm" onClick={e => e.stopPropagation()}>
           <span className="row-confirm-text">Reprovision <strong>{agent.agentName}</strong>? Container will be recreated.</span>
           <div className="row-confirm-actions">
-            <button className="row-confirm-ok" onClick={onReprovisionConfirm}>Reprovision</button>
-            <button className="row-confirm-cancel" onClick={onReprovisionCancel}>Cancel</button>
+            <button className="btn btn-s row-confirm-cancel" onClick={onReprovisionCancel}>Cancel</button>
+            <button className="btn btn-s btn-primary row-confirm-ok" onClick={onReprovisionConfirm}>Reprovision</button>
           </div>
         </div>
       )}
@@ -226,17 +240,17 @@ export default function AgentCard({
         <div className="row-confirm" onClick={e => e.stopPropagation()}>
           <span className="row-confirm-text">Cancel all tasks on <strong>{agent.agentName}</strong>?</span>
           <div className="row-confirm-actions">
-            <button className="row-confirm-ok row-confirm-cancel-ok" onClick={onCancelConfirm}>Cancel Tasks</button>
-            <button className="row-confirm-cancel" onClick={onCancelCancel}>Keep Running</button>
+            <button className="btn btn-s row-confirm-cancel" onClick={onCancelCancel}>Keep Running</button>
+            <button className="btn btn-s btn-danger row-confirm-ok row-confirm-cancel-ok" onClick={onCancelConfirm}>Cancel Tasks</button>
           </div>
         </div>
       )}
       {deleteState === 'confirming' && (
-        <div className="row-confirm" onClick={e => e.stopPropagation()}>
+        <div className="row-confirm row-confirm-danger" onClick={e => e.stopPropagation()}>
           <span className="row-confirm-text">Delete <strong>{agent.agentName}</strong>? Container and DB record will be removed.</span>
           <div className="row-confirm-actions">
-            <button className="row-confirm-ok row-confirm-delete-ok" onClick={onDeleteConfirm}>Delete</button>
-            <button className="row-confirm-cancel" onClick={onDeleteCancel}>Cancel</button>
+            <button className="btn btn-s row-confirm-cancel" onClick={onDeleteCancel}>Cancel</button>
+            <button className="btn btn-s btn-danger row-confirm-ok row-confirm-delete-ok" onClick={onDeleteConfirm}>Delete</button>
           </div>
         </div>
       )}
@@ -343,7 +357,6 @@ export default function AgentCard({
             <div className="row-detail-item">
               <span className="row-detail-label">queued</span>
               <div className="row-detail-queue">
-                <span className="queue-badge">{agent.queuedCount}</span>
                 {agent.queuedMessages && agent.queuedMessages.map((q, i) => (
                   <div key={i} className="queue-item">
                     <span className="queue-source">{q.source}</span>
@@ -368,12 +381,12 @@ export default function AgentCard({
                     <span className="bg-task-desc">{bt.description}</span>
                     <span className="bg-task-elapsed">{bt.elapsedSeconds}s</span>
                     <button
-                      className="bg-task-cancel-btn"
-                      title="Cancel background task"
+                      className="icon-btn icon-btn-s bg-task-cancel-btn"
+                      title="Cancel background task" aria-label="Cancel background task"
                       disabled={bgState === 'cancelling'}
                       onClick={() => onBgCancel(bt.taskId)}
                     >
-                      {bgState === 'cancelling' ? '…' : bgState === 'done' ? '✓' : '✕'}
+                      {bgState === 'cancelling' ? '…' : <Icon name={bgState === 'done' ? 'check' : 'close'} size={14} />}
                     </button>
                     {bt.summary && <div className="bg-task-summary">{bt.summary}</div>}
                   </div>
@@ -382,47 +395,32 @@ export default function AgentCard({
             </div>
           )}
 
-          {/* Mobile-only action buttons (shown in drawer on mobile) */}
+          {/* The same actions with their names, for a phone, where the row has no room for them. */}
           <div className="agent-row-detail-actions">
-            <button
-              className={`row-btn${isDead ? ' row-btn-dim' : rs === 'confirming' ? ' confirming' : ''}`}
-              title="Restart"
-              onClick={onRestart}
-              disabled={isDead || rs === 'restarting'}
-            >{rs === 'restarting' ? '…' : '↺ restart'}</button>
-            <button
-              className={`row-btn${isDead ? ' row-btn-dim' : rps === 'confirming' ? ' confirming' : ''}`}
-              title="Reprovision"
-              onClick={onReprovision}
-              disabled={isDead || rps === 'provisioning'}
-            >{rps === 'provisioning' ? '…' : '↻ reprovision'}</button>
-            <button
-              className={`row-btn${!agent.currentTask ? ' row-btn-dim' : cs === 'confirming' ? ' confirming' : ''}`}
-              title="Cancel task"
-              onClick={onCancel}
-              disabled={!agent.currentTask || cs === 'cancelling'}
-            >{cs === 'cancelling' ? '…' : '✕ cancel'}</button>
-            <button
-              className={`row-btn${logViewerOpen ? ' active' : ''}`}
-              title="Logs"
-              onClick={onViewLogs}
-            >≡ logs</button>
-            <button onClick={onEditConfig} className="row-btn">
-              {isEditingConfig ? '✎ close config' : '✎ edit config'}
+            <button className="btn btn-s" title="Logs" onClick={onViewLogs}><Icon name="logs" size={16} />Logs</button>
+            <button className="btn btn-s" onClick={onEditConfig}>
+              <Icon name="settings" size={16} />{isEditingConfig ? 'Close config' : 'Edit config'}
+            </button>
+            <button className="btn btn-s" title="Restart" onClick={onRestart} disabled={isDead || rs === 'restarting'}>
+              <Icon name="restart" size={16} />{rs === 'restarting' ? busy : 'Restart'}
+            </button>
+            <button className="btn btn-s" title="Reprovision" onClick={onReprovision} disabled={isDead || rps === 'provisioning'}>
+              <Icon name="reprovision" size={16} />{rps === 'provisioning' ? busy : 'Reprovision'}
+            </button>
+            <button className="btn btn-s" title="Cancel task" onClick={onCancel} disabled={!agent.currentTask || cs === 'cancelling'}>
+              <Icon name="cancel" size={16} />{cs === 'cancelling' ? busy : 'Cancel task'}
             </button>
             {isDead
-              ? <button className="row-btn" onClick={onStart} disabled={sts === 'pending'}>
-                  {sts === 'pending' ? '…' : '▶ start'}
+              ? <button className="btn btn-s" onClick={onStart} disabled={sts === 'pending'}>
+                  <Icon name="play" size={16} />{sts === 'pending' ? busy : 'Start'}
                 </button>
-              : <button className="row-btn" onClick={onStop}>
-                  {ss === 'confirming' ? 'confirm stop?' : '■ stop'}
+              : <button className={`btn btn-s${ss === 'confirming' ? ' btn-danger' : ''}`} onClick={onStop}>
+                  <Icon name="stop" size={16} />{ss === 'confirming' ? 'Confirm stop?' : 'Stop'}
                 </button>
             }
-            <button
-              className="row-btn overflow-delete"
-              onClick={onDeleteClick}
-              disabled={deleteState === 'deleting'}
-            >{deleteState === 'deleting' ? '…' : '🗑 delete'}</button>
+            <button className="btn btn-s btn-danger-quiet" onClick={onDeleteClick} disabled={deleteState === 'deleting'}>
+              <Icon name="trash" size={16} />{deleteState === 'deleting' ? busy : 'Delete'}
+            </button>
           </div>
 
           {/* Task history */}
@@ -450,7 +448,7 @@ export default function AgentCard({
               )
             })}
             {!historyLoading && taskHistory.length > 1 && (
-              <button className="history-show-more" onClick={() => setHistoryExpanded(e => !e)}>
+              <button className="btn btn-s btn-quiet history-show-more" onClick={() => setHistoryExpanded(e => !e)}>
                 {historyExpanded ? 'show less' : `+${taskHistory.length - 1} more`}
               </button>
             )}

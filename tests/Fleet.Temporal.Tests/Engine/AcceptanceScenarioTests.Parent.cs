@@ -266,17 +266,29 @@ public sealed partial class AcceptanceScenarioTests
         Assert.Equal(WorkflowExecutionStatus.Failed, run.Status); Assert.Equal(SeedReviewLimitTests.DeliveryFailed, run.FailureMessage);
     }
 
+    // The bound is the one it always was, twelve 300-second sleeps. What follows it is the run's
+    // own technical stall: no acceptance-blocked gate, no decision to wait for.
     [Fact]
-    public async Task Parent_CiPendingUsesTwelveDurableSleepsThenBlocks()
+    public async Task Parent_CiPendingUsesTwelveDurableSleepsThenStalls()
     {
         var actor = new Actor { Ci = "pending" };
         var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
         {
             await WaitTimers(handle, 1); await h.AdvanceAsync(TimeSpan.FromSeconds(3601));
-            await WaitPhase(handle, h, "acceptance-blocked"); Assert.Contains("block=ci_timeout;", h.LastUpsert(await handle.FetchHistoryAsync(), "Acceptance")); await Decision(handle, h, "stop");
-        });
+            await WaitPhase(handle, h, "technical-stalled");
+            var history = await handle.FetchHistoryAsync();
+            Assert.Contains("block=ci_timeout;", h.LastUpsert(history, "Acceptance"));
+            Assert.Empty(SeedHarness.Upserts(history, "GateRef"));
+            Assert.Equal(12, history.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300));
+        }, captureWaiter: true);
         Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow"));
-        Assert.Equal(12, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300)); ValidWrites(run);
+        Assert.DoesNotContain("acceptance-blocked", run.Upserts("Phase"));
+        Assert.DoesNotContain(run.Calls, c => c.Step == "notify_acceptance_gate");
+        Assert.Single(run.Calls, c => c.Step == "notify_stalled");
+        Assert.Equal(12, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300));
+        // Nobody answers a stall: four reads three hours apart, then the outcome of a gate timeout.
+        Assert.Equal(4, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 10800));
+        Assert.Equal("cancelled", run.WaiterDecision); Assert.Equal(WorkflowExecutionStatus.Completed, run.Status); ValidWrites(run);
     }
 
     // A decision that lands while the gate notice is still running resolves the wait before its
@@ -319,19 +331,21 @@ public sealed partial class AcceptanceScenarioTests
         Assert.Contains($"--match-head-commit {actor.Head}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction); ValidWrites(run);
     }
 
+    // A planless run whose CI never finishes still drafts no plan and invents none. It used to park
+    // at a blocked gate under the no-plan identity; it now stalls, and a stall has no gate identity.
     [Fact]
-    public async Task Parent_PlanlessCiTimeoutParksWithoutDraftingOrInventingAPlan()
+    public async Task Parent_PlanlessCiTimeoutStallsWithoutDraftingOrInventingAPlan()
     {
         var actor = new Actor { Ci = "pending", PlanHash = "none", PlanStatus = "missing" };
         var run = await SeedHarness.RunAsync("UwePrImplementationWorkflow", ParentInput(), actor.Respond, async (handle, h) =>
         {
             await WaitTimers(handle, 1); await h.AdvanceAsync(TimeSpan.FromSeconds(3601));
-            await WaitPhase(handle, h, "acceptance-blocked");
-            Assert.Equal("block:1:0:00000000", h.LastUpsert(await handle.FetchHistoryAsync(), "GateRef"));
+            await WaitPhase(handle, h, "technical-stalled");
             Assert.Contains("block=ci_timeout;", h.LastUpsert(await handle.FetchHistoryAsync(), "Acceptance"));
-            await Decision(handle, h, "stop");
         });
-        Assert.DoesNotContain(run.Calls, c => c.Step == "prepare_plan_gate");
+        Assert.DoesNotContain(run.Calls, c => c.Step is "prepare_plan_gate" or "notify_acceptance_gate");
+        Assert.Empty(run.Upserts("GateRef"));
+        Assert.DoesNotContain("acceptance-blocked", run.Upserts("Phase"));
         Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow")); ValidWrites(run);
     }
 
@@ -378,11 +392,15 @@ public sealed partial class AcceptanceScenarioTests
         {
             await WaitPhase(handle, h, "human-review");
             Assert.DoesNotContain(h.Calls, c => c.Step == "pin");
+            // The pause opened because one CI-only read of this head was green, and only then.
+            Assert.Equal(actor.Head, System.Text.RegularExpressions.Regex.Match(Assert.Single(h.Calls, c => c.Step == "ci_probe").Instruction, "expects head ([0-9a-f]{40})").Groups[1].Value);
             await handle.SignalAsync("human-review", [JsonSerializer.SerializeToElement(new { Decision = decision, Comment = "revise" })]);
             await h.WaitForGateVisitAsync(handle, "merge-approval:1"); await h.SignalHumanApprovalAsync(handle);
         });
         Assert.Equal(2, run.ConsensusInputs.Count(i => i.ReviewRef is not null));
         Assert.Single(run.Calls, c => c.Step == "pin");
+        // The second review approved, so no second pause and no second probe.
+        Assert.Single(run.Calls, c => c.Step == "ci_probe");
         if (decision == "approved")
         {
             Assert.DoesNotContain(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal));
@@ -543,6 +561,8 @@ public sealed partial class AcceptanceScenarioTests
                 var old = Head; if (call.Step != "phase1_implement") _head++;
                 return $"IMPLEMENTATION: {(Incomplete ? "incomplete" : "complete")}\nPR_URL: {Pr}\nHEAD_RANGE: {old}..{Head}\nHEAD_SHA: {Head}";
             }
+            if (call.Step == "ci_probe") return SeedHarness.CiProbe(Head, Ci);
+            if (call.Step == "merge_preflight") return SeedHarness.PreflightClear;
             if (call.Step is "pin" or "pin_after_approval") return SeedHarness.DocOnlyPin(Head)
                 .Replace("CI: success", "CI: " + Ci).Replace("PRIOR_ATTEMPTS_CLEAN: yes", "PRIOR_ATTEMPTS_CLEAN: " + PriorClean).Replace("CHANGE_CLASS: doc_only", $"CHANGE_CLASS: {(DocOnly ? "doc_only" : "code")}")
                 .Replace("PLAN_SHA256: " + Plan, "PLAN_SHA256: " + PlanHash).Replace("PLAN: ok", $"PLAN: {PlanStatus}").Replace("PRIOR_RECEIPTS: no", $"PRIOR_RECEIPTS: {(PriorReceipts ? "yes" : "no")}")

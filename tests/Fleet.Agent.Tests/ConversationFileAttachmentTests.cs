@@ -31,8 +31,11 @@ public sealed class ConversationFileAttachmentTests : IDisposable
 
     private ConversationAttachmentFetcher Fetcher(string contentType, string? extensionHeader, string? attachmentDir = "set")
     {
-        var handler = new Served(_ =>
+        var handler = new Served(request =>
         {
+            // Without this the chat service serves an agent images only.
+            Assert.True(request.Headers.Contains(AttachmentFiles.AcceptsFilesHeader));
+
             var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent("the bytes"u8.ToArray()) };
             response.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
             if (extensionHeader is not null)

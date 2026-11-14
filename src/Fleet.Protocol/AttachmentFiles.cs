@@ -40,6 +40,14 @@ public static class AttachmentFiles
     /// </summary>
     public const string ExtensionHeader = "X-Fleet-Attachment-Extension";
 
+    /// <summary>
+    /// South request header an agent sends when it knows what to do with a file that is not an
+    /// image. An agent built before files hands everything it fetches to the model as a picture,
+    /// so the chat service serves it images only: to that agent a file is "not available", which
+    /// it already reports to the person, instead of a turn that fails on a picture that is not one.
+    /// </summary>
+    public const string AcceptsFilesHeader = "X-Fleet-Accepts-Files";
+
     /// <summary>The extension of a file whose own is not on the list.</summary>
     public const string UnknownExtension = ".bin";
 

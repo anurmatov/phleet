@@ -99,6 +99,8 @@ public sealed class ConversationSouthClient
         var path = $"/attachments/{attachmentId}/content";
 
         using var message = new HttpRequestMessage(HttpMethod.Get, path);
+        // This agent knows a file from a picture; without this the service serves images only.
+        message.Headers.TryAddWithoutValidation(AttachmentFiles.AcceptsFilesHeader, "1");
         using var response = await _http.SendAsync(
             message, HttpCompletionOption.ResponseHeadersRead, ct);
 

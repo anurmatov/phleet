@@ -97,7 +97,9 @@ internal sealed class FakeConversationStore : IConversationStore
 
     public Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default) =>
         Task.FromResult<string?>(
-            kind == AgentTargetKind.Conversation && string.Equals(id, ConversationId, StringComparison.Ordinal)
+            (kind == AgentTargetKind.Conversation && string.Equals(id, ConversationId, StringComparison.Ordinal))
+            // Every attachment this fake holds is in its one conversation, so belongs to its agent.
+            || (kind == AgentTargetKind.Attachment && Attachments.ContainsKey(id))
                 ? AgentName
                 : null);
 

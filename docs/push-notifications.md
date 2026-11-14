@@ -64,6 +64,13 @@ It never carries task text, a comment, a failure message, a reply's text or any 
 visible text it carries the identifiers the app needs to open the right screen: namespace, workflow
 identifier, run identifier, signal name, agent name, or conversation identifier.
 
+Every notification also carries a **count** for the app's icon: how many runs are waiting for a
+person, one for each signal a run is waiting for, which is how the app counts them. It is set
+when the notification is sent, so one that is sent again carries the count as it is then. When
+the count changes and nothing else is going out — a gate was answered from the dashboard, or its
+run was cancelled — a notification with the count and nothing else is sent: no words, no sound,
+at Apple's low priority. A number of waiting runs says nothing about any of them.
+
 A chat reply is reported by the chat service, not detected here: when an answer commits and no
 client is attached, Fleet.Comms calls `POST /internal/push/chat-reply` with its own
 `cj1.chat-push.fleet-comms` token. The route is internal, never proxied, and does nothing while push
@@ -78,6 +85,10 @@ is off. The notification goes out at once rather than on the next 30-second pass
   yesterday. The cost: something that happened while the orchestrator was down is not announced.
   The same applies to a Temporal namespace that was unreachable at start-up: the orchestrator
   keeps trying it, and the first look after it connects only records what is already waiting.
+- **The count is corrected by the next change, not by a restart.** The first look records the
+  count without sending it, like everything else at start-up, so an icon that was wrong when the
+  orchestrator went down stays wrong until a gate starts or stops waiting, or the app is opened:
+  the app sets its own icon from what it reads.
 - **A run someone cancelled or terminated is not a failure.** Whoever stopped it already knows.
 - **An agent stopped through the API is not "down".** The orchestrator sees a stopped agent and a
   crashed one the same way, so `POST /api/agents/{name}/stop` records that the stop was asked for,
@@ -99,7 +110,11 @@ is off. The notification goes out at once rather than on the next 30-second pass
   cannot register.
 - **At most ten devices.**
 - **Delivery is Apple's.** "Accepted" means Apple took the notification, not that the phone showed
-  it. Focus modes, notification settings and an offline phone are outside this.
+  it. Focus modes, notification settings and an offline phone are outside this. A count alone is
+  sent at low priority, which Apple may hold back to save the phone's battery, so the icon can
+  trail the fleet by a while.
+- **The count is the fleet's, the same for every device.** It does not know what one phone has
+  already answered or looked at, and it counts only the namespaces the orchestrator can reach.
 - **A refused send is tried again, per device.** A device that did not accept a notification
   (Apple busy or unreachable) is sent it again on later passes while the event is still true, up
   to ten sends in all: about five minutes at the default interval. A device that accepted is not

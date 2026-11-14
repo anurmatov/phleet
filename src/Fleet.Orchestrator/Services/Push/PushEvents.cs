@@ -50,6 +50,8 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
     // Agent name → the key of the "down" notification sent for it, while it stays down.
     private readonly Dictionary<string, string> _downKeys = new(StringComparer.OrdinalIgnoreCase);
     private bool _seeded;
+    // The count devices were last told, or null before the first observation.
+    private int? _badge;
     // The namespaces an earlier observation covered, for gates and for failures.
     private readonly HashSet<string> _gateNamespaces = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _failureNamespaces = new(StringComparer.OrdinalIgnoreCase);
@@ -157,9 +159,42 @@ public sealed class PushEventDetector(TimeSpan agentDownGrace, OperatorStops sto
 
     /// <summary>
     /// Whether what a notification announced is still true as of the last observation: the gate is
-    /// still waiting, the failure is still in the window, the agent is still down since the same moment.
+    /// still waiting, the failure is still in the window, the agent is still down since the same
+    /// moment, the count is still the count.
     /// </summary>
-    public bool IsCurrent(string key) => _gates.Contains(key) || _failures.Contains(key) || _downKeys.ContainsValue(key);
+    public bool IsCurrent(string key) =>
+        _gates.Contains(key) || _failures.Contains(key) || _downKeys.ContainsValue(key) || key == PushMessages.BadgeKey(_gates.Count);
+
+    /// <summary>
+    /// How many runs are waiting for a person as of the last observation: one for each signal a
+    /// run is waiting for, which is how the app counts them.
+    /// </summary>
+    public int WaitingCount => _gates.Count;
+
+    /// <summary>
+    /// A notification that only corrects the count on the app's icon, when the count has changed
+    /// since devices were last told and nothing else this pass tells them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A gate that starts waiting is announced, and the announcement carries the new count. A gate
+    /// that stops waiting — answered from the dashboard, or its run cancelled — is announced by
+    /// nothing, and without this the icon would go on showing it until the app was opened.
+    /// </para>
+    /// <para>
+    /// The first call reports nothing, like the first observation: after a restart the count the
+    /// icon shows is corrected by the next change, not by the restart.
+    /// </para>
+    /// </remarks>
+    /// <param name="carriedByAnother">Whether a notification going out this pass already carries the count.</param>
+    public PushMessage? TakeBadgeChange(bool carriedByAnother)
+    {
+        var count = _gates.Count;
+        var told = _badge;
+        _badge = count;
+        if (told is null || told == count || carriedByAnother) return null;
+        return PushMessages.BadgeOnly(count);
+    }
 
     /// <summary>
     /// The signals a run is waiting for: registered for its type, and naming its current phase. A
@@ -217,6 +252,22 @@ public static class PushMessages
         Body: "New reply",
         Target: new Dictionary<string, string> { ["agentName"] = agentName, ["conversationId"] = conversationId },
         Key: string.Join('\u001f', "chat", conversationId, seq.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+    /// <summary>
+    /// The count on the app's icon and nothing else: no words, no sound. A number of waiting runs
+    /// says nothing about any of them.
+    /// </summary>
+    public static PushMessage BadgeOnly(int count) => new(
+        Kind: PushMessage.BadgeKind,
+        Title: "",
+        Body: "",
+        Target: new Dictionary<string, string>(),
+        Key: BadgeKey(count),
+        Badge: count);
+
+    /// <summary>Names a count, so one that has since changed is not sent again.</summary>
+    public static string BadgeKey(int count) =>
+        string.Join('\u001f', PushMessage.BadgeKind, count.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     /// <summary>The repository and the pull request or issue, else the workflow identifier.</summary>
     public static string Subject(WorkflowSummary run)

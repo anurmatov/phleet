@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Application;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -67,6 +68,7 @@ public sealed class AgentCreateEndpointsTests : IAsyncLifetime
         builder.Services.AddSingleton(new TemporalClientRegistry(
             Options.Create(new TemporalOptions()), NullLogger<TemporalClientRegistry>.Instance));
 
+        builder.Services.AddAgentWrites();
         _app = builder.Build();
         _app.MapAgentCreateEndpoints();
 

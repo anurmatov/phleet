@@ -14,8 +14,11 @@ namespace Fleet.Orchestrator.Services;
 /// Telegram/GitHub credential validation.
 /// Every .env write goes through <see cref="EnvFile"/>, which holds the one write lock.
 /// </summary>
-public sealed class SetupService
+public sealed class SetupService : Fleet.Orchestrator.Application.ITelegramSetup
 {
+    bool Fleet.Orchestrator.Application.ITelegramSetup.IsConfigured => GetStatus().Telegram.Configured;
+    long? Fleet.Orchestrator.Application.ITelegramSetup.OwnerUserId => GetTelegramUserId();
+
     // Known-weak default values that count as "not configured"
     private static readonly HashSet<string> WeakDefaults = new(StringComparer.OrdinalIgnoreCase)
     {

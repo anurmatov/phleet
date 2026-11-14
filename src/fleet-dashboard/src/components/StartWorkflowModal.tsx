@@ -4,6 +4,7 @@ import { apiFetch } from '../utils'
 import { parseSchema, formToJson, jsonToForm, initFormValues, SchemaField, useRepositories } from './WorkflowEditor/schemaUtils'
 import type { FormValues } from './WorkflowEditor/schemaUtils'
 import FieldHint from './FieldHint'
+import Modal from './Modal'
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -134,8 +135,7 @@ export default function StartWorkflowModal({ workflowTypes, agents, onClose }: S
   }
 
   return (
-    <div className="swf-overlay" onClick={onClose}>
-      <div className="swf-modal" onClick={e => e.stopPropagation()}>
+    <Modal label="Start Workflow" overlayClassName="swf-overlay" className="swf-modal" onClose={onClose}>
 
         {/* ── Header ── */}
         <div className="swf-header">
@@ -315,7 +315,6 @@ export default function StartWorkflowModal({ workflowTypes, agents, onClose }: S
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   )
 }

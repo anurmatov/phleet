@@ -1,12 +1,15 @@
 using System.ComponentModel;
-using Fleet.Orchestrator.Data;
-using Microsoft.EntityFrameworkCore;
+using Fleet.Orchestrator.Application;
 using ModelContextProtocol.Server;
 
 namespace Fleet.Orchestrator.Tools;
 
+/// <summary>
+/// The MCP adapter for one env-ref change. The bound-secret rule is <see cref="AgentConfigWriter"/>'s:
+/// an agent (<see cref="WriteCaller.Mcp"/>) may attach a bound key only when its binding allows it.
+/// </summary>
 [McpServerToolType]
-public sealed class ManageAgentEnvRefsTool(IServiceScopeFactory scopeFactory)
+public sealed class ManageAgentEnvRefsTool(AgentConfigWriter writer)
 {
     [McpServerTool(Name = "manage_agent_env_refs")]
     [Description("Add or remove an environment variable key reference for an agent. Env refs are secret key names read from the .env file at provision time (no actual values stored).")]
@@ -15,60 +18,25 @@ public sealed class ManageAgentEnvRefsTool(IServiceScopeFactory scopeFactory)
         [Description("Action: 'add' or 'remove'")] string action,
         [Description("Environment variable key name (e.g. TELEGRAM_BOT_TOKEN)")] string env_key_name)
     {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-        var agent = await db.Agents
-            .Include(a => a.EnvRefs)
-            .FirstOrDefaultAsync(a => a.Name == agent_name);
-
-        if (agent is null)
-            return $"Agent '{agent_name}' not found in DB.";
-
         action = action.Trim().ToLowerInvariant();
+        if (action is not ("add" or "remove"))
+            return $"Unknown action '{action}'. Use 'add' or 'remove'.";
 
-        switch (action)
+        var outcome = action == "add"
+            ? await writer.AddEnvRefAsync(agent_name, env_key_name, WriteCaller.Mcp)
+            : await writer.RemoveEnvRefAsync(agent_name, env_key_name);
+
+        if (outcome.Fault is { } fault)
+            return fault.Code == "agent_not_found" ? $"Agent '{agent_name}' not found in DB." : fault.Message;
+        if (outcome.NotDelivered is { } notPublished)
+            return notPublished;
+
+        return outcome.Value switch
         {
-            case "add":
-            {
-                if (agent.EnvRefs.Any(r => r.EnvKeyName.Equals(env_key_name, StringComparison.OrdinalIgnoreCase)))
-                    return $"Env ref '{env_key_name}' already exists for agent '{agent_name}'.";
-
-                // A bound secret is granted by the operator, unless its binding says agents may. The
-                // comparison ignores case so a differently-cased name cannot slip past the binding.
-                var binding = (await db.SecretBindings.AsNoTracking().ToListAsync())
-                    .FirstOrDefault(b => b.EnvKeyName.Equals(env_key_name, StringComparison.OrdinalIgnoreCase));
-                if (binding is not null && (!binding.AgentAttachable || binding.EnvKeyName != env_key_name))
-                    return $"Env ref '{env_key_name}' is a bound secret that only the operator can attach "
-                         + "(dashboard, or PUT /api/agents/{name}/config). Nothing was changed.";
-
-                agent.EnvRefs.Add(new AgentEnvRef { AgentId = agent.Id, EnvKeyName = env_key_name });
-                try { await db.SaveChangesAsync(); }
-                catch (Fleet.Orchestrator.Services.SecretStatePublicationException ex)
-                {
-                    return $"Env ref '{env_key_name}' was saved for agent '{agent_name}', but NOT published: {ex.Message}";
-                }
-                return $"Added env ref '{env_key_name}' to agent '{agent_name}'.";
-            }
-
-            case "remove":
-            {
-                var existing = agent.EnvRefs.FirstOrDefault(r => r.EnvKeyName.Equals(env_key_name, StringComparison.OrdinalIgnoreCase));
-                if (existing is null)
-                    return $"Env ref '{env_key_name}' not found for agent '{agent_name}'.";
-
-                db.AgentEnvRefs.Remove(existing);
-                try { await db.SaveChangesAsync(); }
-                catch (Fleet.Orchestrator.Services.SecretStatePublicationException ex)
-                {
-                    // Never "Removed": the grant is gone from the database but was not revoked at the forwarder.
-                    return $"Env ref '{env_key_name}' was deleted for agent '{agent_name}', but the revocation was NOT published: {ex.Message}";
-                }
-                return $"Removed env ref '{env_key_name}' from agent '{agent_name}'.";
-            }
-
-            default:
-                return $"Unknown action '{action}'. Use 'add' or 'remove'.";
-        }
+            EnvRefChange.Added => $"Added env ref '{env_key_name}' to agent '{agent_name}'.",
+            EnvRefChange.AlreadyPresent => $"Env ref '{env_key_name}' already exists for agent '{agent_name}'.",
+            EnvRefChange.Removed => $"Removed env ref '{env_key_name}' from agent '{agent_name}'.",
+            _ => $"Env ref '{env_key_name}' not found for agent '{agent_name}'.",
+        };
     }
 }

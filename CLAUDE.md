@@ -529,7 +529,7 @@ Size warnings (#346) are advisory and measured in UTF-8 bytes, never tokens: `Pr
 compose var `FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES`, default 0 = off). `0` disables a check; invalid values fall back to the
 default with one Warning. They are parsed from the raw config string — never add them to an options class — and read once at
 startup, so a change needs a recreate. Writes always succeed; REST adds `size`, MCP appends `Size:` lines. Suggested memory
-values are in the README.
+values are in `docs/configuration.md`.
 
 `Agent:TurnStallTimeoutMinutes` (agent, default 180, `0` = off, 1–10080; out of range exits 1 at startup) limits how long a
 running turn may go without one executor event, on every provider. It is a limit on silence, never a deadline: `TurnRun`

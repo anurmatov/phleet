@@ -43,7 +43,7 @@ internal static partial class Writers
     public static AgentConfigWriter ConfigWriter(
         IServiceScopeFactory scopes, IAclChangeNotifier acl,
         AgentConfigPublisherService? publisher = null, ITelegramSetup? telegram = null) =>
-        new(scopes, acl, publisher ?? InertPublisher(), telegram ?? new TelegramSetup(), NullLogger<AgentConfigWriter>.Instance);
+        new(scopes, acl, publisher ?? InertPublisher(), telegram ?? new TelegramSetup(), new AgentHostPorts(), NullLogger<AgentConfigWriter>.Instance);
 
     public static AgentCreator Creator(
         IServiceScopeFactory scopes, IConfiguration configuration,
@@ -52,7 +52,7 @@ internal static partial class Writers
         new(scopes, telegram ?? new TelegramSetup(), acl ?? new SilentAclNotifier(),
             configWriter ?? new RecordingConfigWriter(),
             registry ?? new AgentRegistry(null!, NullLogger<AgentRegistry>.Instance),
-            provisioning: null!, temporal: null!, configuration, NullLogger<AgentCreator>.Instance);
+            provisioning: null!, temporal: null!, configuration, new AgentHostPorts(), NullLogger<AgentCreator>.Instance);
 
     public static UpdateAgentConfigTool UpdateConfigTool(IServiceScopeFactory scopes, IAclChangeNotifier acl) =>
         new(ConfigWriter(scopes, acl));

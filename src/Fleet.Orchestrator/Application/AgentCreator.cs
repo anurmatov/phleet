@@ -84,6 +84,7 @@ public sealed class AgentCreator(
     ContainerProvisioningService provisioning,
     TemporalClientRegistry temporal,
     IConfiguration configuration,
+    AgentHostPorts hostPorts,
     ILogger<AgentCreator> logger)
 {
     /// <summary>The bot-token reference an agent gets when the caller names none; without one its transport never starts.</summary>
@@ -155,6 +156,13 @@ public sealed class AgentCreator(
             return WriteFaults.Conflict("telegram_not_configured",
                 "Cannot provision agent: Telegram bot token is not configured. Configure Telegram first using the setup banner.");
 
+        // From here to the commit below, one create at a time, and no other writer of a host port
+        // (AgentHostPorts). Everything this create decides from the agents already stored (the
+        // first-agent rule, the name, the port) is decided and saved before another create or a
+        // host_port update reads them: two creates never take the same port, and a second create
+        // of one name is refused here, not by the database.
+        using var hostPortGate = await hostPorts.EnterAsync(ct);
+
         // First agent must be a co-cto — specialists are provisioned by it on demand.
         var isFirstAgent = !await db.Agents.AnyAsync(ct);
         var isCoCto = string.Equals(role, "co-cto", StringComparison.OrdinalIgnoreCase);
@@ -171,9 +179,8 @@ public sealed class AgentCreator(
         // A host port no other agent uses. An agent without a stored port answers on 8080 + its id
         // (ContainerProvisioningService.GetEffectiveHostPort), so the highest port in use is taken
         // over both kinds, and the new agent's port is stored: it never depends on an id it does
-        // not have yet.
-        var ports = await db.Agents.Select(a => new { a.Id, a.HostPort }).ToListAsync(ct);
-        agent.HostPort = Math.Max(8080, ports.Select(p => p.HostPort ?? 8080 + p.Id).DefaultIfEmpty(8080).Max()) + 1;
+        // not have yet. Read under the gate, which is held until this agent is committed.
+        agent.HostPort = await AgentHostPorts.NextFreeAsync(db, ct);
 
         foreach (var tool in Clean(request.Tools))
             agent.Tools.Add(new AgentTool { ToolName = tool, IsEnabled = true });
@@ -217,6 +224,9 @@ public sealed class AgentCreator(
 
         db.Agents.Add(agent);
         await db.SaveChangesAsync(ct);
+        // Committed: the port is taken. What follows (the memory grant, the registry, the container)
+        // reads no port and can take long, so it runs outside the gate.
+        hostPortGate.Dispose();
 
         // A new agent's projects are assignments too — grant them now so its first memory read works
         // without a second manual step.

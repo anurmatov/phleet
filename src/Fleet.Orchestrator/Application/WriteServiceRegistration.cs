@@ -23,6 +23,8 @@ public static class WriteServiceRegistration
         services.TryAddSingleton<IConfigWriter>(sp => sp.GetRequiredService<ConfigService>());
         services.TryAddSingleton<OperatorStops>();
 
+        // One instance: the creator and the config writer must wait on the same gate.
+        services.TryAddSingleton<AgentHostPorts>();
         services.TryAddSingleton<AgentConfigWriter>();
         services.TryAddSingleton<AgentCreator>();
         services.TryAddSingleton<AgentLifecycle>();

@@ -129,6 +129,7 @@ public sealed class AgentConfigWriter(
     IAclChangeNotifier aclNotifier,
     AgentConfigPublisherService publisher,
     ITelegramSetup telegram,
+    AgentHostPorts hostPorts,
     ILogger<AgentConfigWriter> logger)
 {
     private static readonly string[] ClaudeCloudEfforts = ["low", "medium", "high", "xhigh", "max"];
@@ -140,6 +141,11 @@ public sealed class AgentConfigWriter(
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
         if (db is null) return WriteFaults.NoDatabase;
+
+        // An update that sends a host port is a writer of host ports: it holds the same gate as a
+        // create, from before it reads which ports are taken until its save has committed. Any
+        // other update never waits on it.
+        using var hostPortGate = patch.HostPort is null ? null : await hostPorts.EnterAsync(ct);
 
         var agent = await db.Agents
             .Include(a => a.Tools)
@@ -318,6 +324,13 @@ public sealed class AgentConfigWriter(
         }
         if (patch.HostPort is { } hostPort && hostPort != (agent.HostPort ?? 0))
         {
+            // No two agents on one port: the second container could not bind it. 0 clears the
+            // stored port, and the agent then answers on the port derived from its id, which must
+            // be free too. Checked under the gate, so no create can take the port meanwhile.
+            var resulting = AgentHostPorts.Effective(agent.Id, hostPort == 0 ? null : hostPort);
+            if (await AgentHostPorts.FindHolderAsync(db, resulting, agent.Id, ct) is { } holder)
+                return WriteFaults.Conflict("host_port_in_use",
+                    $"Host port {resulting} is already used by agent '{holder}'. Nothing was changed.");
             changes.Add($"- host_port: {agent.HostPort?.ToString() ?? "(none)"} → {(hostPort == 0 ? "(none)" : hostPort.ToString())}");
             agent.HostPort = hostPort == 0 ? null : hostPort;
         }
@@ -544,6 +557,8 @@ public sealed class AgentConfigWriter(
             changes.Add($"- local_base_url: {previousBaseUrl ?? "(none)"} → {agent.LocalBaseUrl ?? "(none)"}");
 
         await db.SaveChangesAsync(ct);
+        // Committed. The broadcasts below read no port, so they run outside the gate.
+        hostPortGate?.Dispose();
 
         if (oldCrossChat != agent.JournalCrossChatEnabled)
             logger.LogInformation("Agent config changed: agent={name} field=journal_cross_chat_enabled old={old} new={new} via={via}",

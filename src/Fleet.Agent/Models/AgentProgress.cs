@@ -24,6 +24,13 @@ public sealed class AgentProgress
     /// <summary>Set when the stream is complete. Contains final assistant text.</summary>
     public string? FinalResult { get; init; }
 
+    /// <summary>
+    /// Assistant text the model wrote before the tool call this event reports: a whole mid-turn
+    /// message, in full. Null on every other event. The executor sets it only once a tool call has
+    /// followed the text, so it is never the turn's answer (that arrives as <see cref="FinalResult"/>).
+    /// </summary>
+    public string? Narration { get; init; }
+
     /// <summary>Session ID for resuming the conversation.</summary>
     public string? SessionId { get; init; }
 

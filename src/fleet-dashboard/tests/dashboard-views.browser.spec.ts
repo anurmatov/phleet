@@ -735,6 +735,10 @@ test('chat: Enter sends; a running turn shows its tools and can be stopped; the 
   chat.push('alpha', 'turn.progress', id, { activity: 'tool', toolName: 'Read' })
   chat.push('alpha', 'turn.progress', id, { activity: 'tool', toolName: 'Read' })
   await expect(page.locator('.chat-working-line')).toContainText('Alpha is using Read…')
+  // What the agent says between tools shows while the turn still runs, apart from the answer.
+  chat.push('alpha', 'turn.message', id, { text: 'Counting them now.' })
+  await expect(page.locator('.chat-bubble--interim')).toHaveText('Agent: Counting them now.')
+  await expect(page.locator('.chat-working')).toBeVisible()
   await expect(page.locator('.chat-trail-step')).toHaveText(['Grep', 'Read ×2'])
 
   await page.getByRole('button', { name: 'Stop' }).click()

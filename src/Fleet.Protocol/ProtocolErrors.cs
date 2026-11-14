@@ -70,6 +70,9 @@ public static class ProtocolLimits
     /// <summary>Outbound notice / recovered-answer text. Exceeding it truncates.</summary>
     public const int MaxNoticeTextChars = 4 * 1024;
 
+    /// <summary>Outbound mid-turn assistant message. Exceeding it truncates and sets <c>truncated: true</c>.</summary>
+    public const int MaxMessageTextChars = 16 * 1024;
+
     /// <summary>Outbound tool name. Exceeding it truncates silently.</summary>
     public const int MaxToolNameChars = 64;
 

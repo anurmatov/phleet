@@ -261,6 +261,7 @@ const chatHistory = [
   chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Read' }, 2),
   chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Read' }, 2),
   chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Read' }, 2),
+  chatEvent('turn.message', 's3', { text: 'The Schedules table sets a minimum width of 720px. Credentials has the same rule, so I am changing both.' }, 1),
   chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Edit' }, 1),
   chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Bash' }, 1),
 ]

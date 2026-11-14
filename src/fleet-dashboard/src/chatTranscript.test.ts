@@ -298,3 +298,21 @@ test('elapsed time, day names and how long ago', () => {
   // A clock that is ahead of this one never gives a negative age.
   assert.equal(agoLabel(now + 60_000, now), 'now')
 })
+
+test('what the agent said before a tool is shown in order, marked as not the answer; an empty one is not shown', () => {
+  const t = fold(
+    ev(1, 'submission.text', 'A', { text: 'fix it' }),
+    ev(2, 'turn.started', 'A'),
+    ev(3, 'turn.message', 'A', { text: 'I will read the file first.' }),
+    ev(4, 'turn.progress', 'A', { activity: 'tool', toolName: 'Read' }),
+    ev(5, 'turn.message', 'A', { text: '   ' }),
+    ev(6, 'turn.message', 'A', { text: 'x'.repeat(10), truncated: true }),
+    ev(7, 'turn.final', 'A', { text: 'Fixed.', completion: 'completed' }),
+  )
+  assert.deepEqual(shapes(t), ['you:fix it', 'agent:I will read the file first.', `agent:${'x'.repeat(10)}`, 'agent:Fixed.'])
+  const agents = t.entries.filter(e => e.type === 'agent')
+  assert.deepEqual(agents.map(e => e.interim === true), [true, true, false])
+  assert.equal(agents[1].note, 'This message was shortened.')
+  // It is not the end of the turn: the turn is still running until its terminal.
+  assert.equal(isTurnRunning(fold(ev(1, 'turn.started', 'A'), ev(2, 'turn.message', 'A', { text: 'working on it' }))), true)
+})

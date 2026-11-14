@@ -103,6 +103,7 @@ they land with their producer.
 | `turn.progress` | `activity` ∈ `typing`\|`tool`, `toolName?` |
 | `turn.notice` | `text`, `truncated?` |
 | `turn.recovered_answer` | `text`, `truncated?` |
+| `turn.message` | `text`, `truncated?` — a whole assistant message written mid-turn, before a tool call (#286) |
 | `turn.final` | `text`, `completion` ∈ `completed`\|`incomplete`\|`idle`\|`failed`, `isPartial`, `truncated`, `mergedSubmissionIds[]` |
 | `turn.error` | `code`, `message` |
 | `turn.canceled` | `reason` ∈ `user`\|`operator`\|`bridge`\|`unknown`, `mergedSubmissionIds[]` |
@@ -115,6 +116,17 @@ they land with their producer.
 the workflow callback — every assistant text of the turn, concatenated. Those two genuinely differ,
 and a contract that assumed one canonical "final answer" would silently change one of the two
 consumers. The concatenated form is not a client event.
+
+**`turn.message` is what the model said between tools, never the answer.** A text the model
+writes is ambiguous until something follows it: a tool call proves it was a mid-turn message, a
+result proves it was the answer. So the runtime emits `turn.message` only once a top-level tool
+call of the same turn has followed the text, on the progress channel, ahead of that tool's
+`turn.progress`; the turn's last text is carried once, by `turn.final`. A client therefore never
+receives one text twice and never receives `turn.message` for a turn after its terminal. It is
+durable (a thread read later still shows it), passes the same sanitizer as the answer, is bounded
+at 16 Ki characters, and is best effort: the progress channel drops under pressure. Claude and
+Codex produce it; Gemini does not, because its stream has no message boundaries. Check-ins and
+debounced group batches never do. Telegram shows during a turn exactly what it showed before.
 
 **Idle turns still terminate.** An `IDLE`-only result or a no-output check-in publishes
 `turn.final { completion: "idle", text: "" }`. The literal string `IDLE` is an internal contract
@@ -285,6 +297,7 @@ putting an image decoder in the process that holds the transcript and the auth s
 | Attachment submit window, from `sealed_at` | 60 min | `attachment_not_found`; row and bytes swept |
 | Outbound `turn.final.text` | 64 KiB | truncate, `truncated: true` |
 | Outbound notice / recovered-answer text | 4 KiB | truncate, `truncated: true` |
+| Outbound mid-turn message (`turn.message`) | 16 Ki chars | truncate, `truncated: true` |
 | Outbound `toolName` | 64 chars | truncate silently |
 | Any serialized event | 128 KiB | drop + counter; if terminal, see above |
 
@@ -638,7 +651,9 @@ contract:
 - **Tool completion is invisible** (#285). A client sees a tool start and never a tool finish, so a
   per-tool spinner has no event that clears it.
 - **There is no incremental assistant-text event** (#286). `ConversationEventKind` has no delta kind,
-  so a client cannot begin rendering — or speaking — before the whole answer exists.
+  so a client cannot begin rendering — or speaking — before the whole answer exists. `turn.message`
+  narrows the gap without closing it: whole messages written before a tool call arrive while the
+  turn runs, but the answer itself still arrives whole, and nothing arrives token by token.
 - **An executor-reported failure arrives as `turn.final` with `completion: incomplete`, not as
   `turn.error`.** A client that watches only `turn.error` will miss the most common provider failure.
   `turn.error` is reserved for a thrown executor (`internal`) and for an executor that reports an

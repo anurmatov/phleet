@@ -243,6 +243,13 @@
   background: var(--surface);
   box-shadow: var(--shadow-1);
 }
+/* Said mid-turn, before a tool: part of the thread, quieter than an answer. */
+.chat-bubble--interim {
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+}
 .chat-meta {
   display: flex;
   flex-wrap: wrap;

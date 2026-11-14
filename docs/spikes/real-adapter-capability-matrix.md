@@ -171,7 +171,9 @@ confirmed:
 - **G1 — tool completion is invisible to clients on every provider.** Confirmed. Tracked as #285.
 - **G2 — there is no incremental assistant-text event in v1.** Confirmed. This is a structural
   input to the voice stop/go decision, not a tuning problem: a voice client cannot begin speaking
-  before the entire answer exists. Tracked as #286.
+  before the entire answer exists. Tracked as #286. (Since then `turn.message` carries whole
+  mid-turn messages that a tool call followed; the G2 rows above are unchanged by it, because
+  text chunks with no tool call between them are still one `turn.final`.)
 - **G3 — Codex's `ToolName` is not a tool name.** Confirmed, and pinned byte-for-byte. Tracked as
   #287.
 

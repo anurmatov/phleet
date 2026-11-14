@@ -59,6 +59,24 @@ public static class ConversationEventKind
     /// <summary>A stale answer from a prior turn, preserved across a drain.</summary>
     public const string TurnRecoveredAnswer = "turn.recovered_answer";
 
+    /// <summary>
+    /// A whole assistant message the model wrote mid-turn, before going on to call a tool (#286).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not a delta and not the answer. It is emitted only once a tool call has followed the text,
+    /// because until then the same text may turn out to be the turn's answer — and that is
+    /// <see cref="TurnFinal"/>'s to carry, once. So a client never sees one text twice, and never
+    /// sees this kind after the terminal of its turn.
+    /// </para>
+    /// <para>
+    /// Not terminal, and best effort: it travels the shared progress channel, which drops under
+    /// pressure. A turn with none is a turn whose model said nothing between tools, or a provider
+    /// that does not surface message boundaries (Gemini).
+    /// </para>
+    /// </remarks>
+    public const string TurnMessage = "turn.message";
+
     /// <summary>Terminal: the turn produced its chat-visible answer.</summary>
     public const string TurnFinal = "turn.final";
 
@@ -139,6 +157,7 @@ public static class ConversationEventKind
         TurnProgress,
         TurnNotice,
         TurnRecoveredAnswer,
+        TurnMessage,
         TurnFinal,
         TurnError,
         TurnCanceled,

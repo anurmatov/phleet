@@ -101,6 +101,16 @@ public sealed record TurnRecoveredAnswerPayload
 }
 
 /// <summary>
+/// A whole assistant message written mid-turn, before a tool call (#286). Chat-visible text, passed
+/// through the same sanitizer as the answer. Never the answer itself: that is <c>turn.final</c>.
+/// </summary>
+public sealed record TurnMessagePayload
+{
+    public required string Text { get; init; }
+    public bool? Truncated { get; init; }
+}
+
+/// <summary>
 /// Terminal. <see cref="Text"/> is the CHAT-VISIBLE text, matching what the main reply path
 /// delivers. The concatenated all-texts form the workflow callback receives is deliberately a
 /// different string and stays exclusive to that callback — assuming one canonical final string

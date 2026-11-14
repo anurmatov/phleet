@@ -64,7 +64,7 @@ const EntryRow = memo(function EntryRow({ entry, label }: { entry: Entry; label:
     return (
       <div className="chat-row chat-row--agent">
         {!empty && (
-          <div className="chat-bubble chat-bubble--agent chat-markdown">
+          <div className={`chat-bubble chat-bubble--agent chat-markdown${entry.interim ? ' chat-bubble--interim' : ''}`}>
             <span className="chat-sr-only">Agent: </span>
             <AgentMarkdown text={entry.text} copyCode />
           </div>

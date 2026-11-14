@@ -40,8 +40,11 @@ const TERMINAL: ReadonlySet<SubmissionStatus> = new Set(['queue-full', 'dropped'
 export type Entry =
   /** What the person sent. Shown as plain text, never as Markdown. */
   | { type: 'you'; key: string; seq: number; at: number | null; submissionId: string; text: string; attachments: AttachmentRef[] }
-  /** What the agent answered. Shown as Markdown. `note` qualifies it; `text` may be empty. */
-  | { type: 'agent'; key: string; seq: number; at: number | null; text: string; note: string | null }
+  /**
+   * What the agent wrote. Shown as Markdown. `note` qualifies it; `text` may be empty. `interim`
+   * marks a message written mid-turn, before a tool call: part of what it said, not its answer.
+   */
+  | { type: 'agent'; key: string; seq: number; at: number | null; text: string; note: string | null; interim?: true }
   /** A line that is neither: a notice, a failed or stopped turn, history that expired. */
   | { type: 'system'; key: string; at: number | null; tone: 'info' | 'warn' | 'error'; text: string }
 
@@ -174,6 +177,18 @@ function apply(t: Transcript, event: WireEvent): void {
     case 'turn.notice':
       if (text(payload.text)) t.entries.push({ type: 'system', key: event.eventId, at: event.emittedAt, tone: 'info', text: text(payload.text) })
       return
+
+    case 'turn.message': {
+      // What the model said before going on to a tool. The answer comes later, in turn.final.
+      const said = text(payload.text)
+      if (said.trim() !== '') {
+        t.entries.push({
+          type: 'agent', key: event.eventId, seq: event.seq, at: event.emittedAt, text: said,
+          note: payload.truncated === true ? 'This message was shortened.' : null, interim: true,
+        })
+      }
+      return
+    }
 
     case 'turn.recovered_answer':
       t.entries.push({

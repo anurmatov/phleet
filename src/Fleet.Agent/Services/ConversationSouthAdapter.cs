@@ -156,6 +156,7 @@ public sealed class ConversationSouthAdapter : IChannelAdapter
             ConversationEventKind.TurnProgress
                 or ConversationEventKind.TurnNotice
                 or ConversationEventKind.TurnRecoveredAnswer
+                or ConversationEventKind.TurnMessage
                 or ConversationEventKind.ControlAck
                 or ConversationEventKind.ProtocolRejected => SouthOutboundAction.Append,
 
@@ -173,7 +174,8 @@ public sealed class ConversationSouthAdapter : IChannelAdapter
     /// Ephemeral: <c>turn.progress</c> and <c>turn.notice</c>. Their absence at a seq is not a gap.
     /// </para>
     /// <para>
-    /// Durable: the four terminals, <c>turn.recovered_answer</c>, <c>control.ack</c> — and
+    /// Durable: the four terminals, <c>turn.recovered_answer</c>, <c>turn.message</c> (it is part
+    /// of what the agent said, and a thread read later should still show it), <c>control.ack</c> — and
     /// <c>protocol.rejected</c>. The last is not named in D5's list; it is classified durable here
     /// because it is the client's only record that a submission was refused, and a refusal that
     /// silently ages out reads to a returning client as a submission that was never made.

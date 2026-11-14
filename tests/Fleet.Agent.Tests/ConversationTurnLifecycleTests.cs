@@ -102,6 +102,108 @@ public class ConversationTurnLifecycleTests
         Assert.False(payload.IsPartial);
     }
 
+    // ── mid-turn messages (#286) ──────────────────────────────────────────────
+
+    /// <summary>
+    /// What the model wrote before a tool call reaches a client as <c>turn.message</c>, ahead of
+    /// the tool it preceded, through the same sanitizer as the answer — and
+    /// reaches no chat: Telegram shows during a turn what it always did.
+    /// </summary>
+    [Fact]
+    public async Task TextBeforeAToolCall_IsPublishedAsATurnMessage_BeforeThatTool_Sanitized_AndToNoChat()
+    {
+        var sink = Substitute.For<IMessageSink>();
+        var harness = Build(ExecutorYielding(Narrated), sink);
+        var (key, identity) = OpenClientConversation(harness);
+
+        await harness.Manager.StartTask(key, "task", "display", isSessionTask: true, identity: identity);
+        await WaitUntilIdleAsync(harness.Manager, key);
+
+        var kinds = harness.Drain()
+            .Where(e => e.Kind is ConversationEventKind.TurnMessage or ConversationEventKind.TurnProgress or ConversationEventKind.TurnFinal)
+            .ToList();
+        var toolAt = kinds.FindIndex(e => e.Kind == ConversationEventKind.TurnProgress
+            && e.PayloadAs<TurnProgressPayload>()!.Activity == ProgressActivity.Tool);
+        var messageAt = kinds.FindIndex(e => e.Kind == ConversationEventKind.TurnMessage);
+        var finalAt = kinds.FindIndex(e => e.Kind == ConversationEventKind.TurnFinal);
+        // Before its tool: both travel the progress channel, in order. Where the terminal lands
+        // among them is not asserted — terminals drain ahead of progress by design, and in a real
+        // turn the tool and the model's answer take the seconds that make the question moot.
+        Assert.True(messageAt >= 0 && messageAt < toolAt, $"order: message {messageAt}, tool {toolAt}");
+
+        var message = Assert.Single(kinds, e => e.Kind == ConversationEventKind.TurnMessage).PayloadAs<TurnMessagePayload>()!;
+        Assert.Equal("I will look at the picture first.", message.Text);
+        Assert.Null(message.Truncated);
+        Assert.Equal("the answer", kinds[finalAt].PayloadAs<TurnFinalPayload>()!.Text);
+
+        // Nothing of it went to a chat.
+        Assert.DoesNotContain(sink.ReceivedCalls(), call =>
+            call.GetArguments().Any(arg => arg?.ToString()?.Contains("look at the picture", StringComparison.Ordinal) == true));
+
+        static async IAsyncEnumerable<AgentProgress> Narrated()
+        {
+            yield return new AgentProgress
+            {
+                Summary = "Using Read", EventType = "assistant", IsSignificant = true, ToolName = "Read",
+                Narration = "I will look at the picture first. [IMAGE:/workspace/attachments/shot.png]",
+            };
+            yield return new AgentProgress { Summary = "result", EventType = "result", FinalResult = "the answer" };
+            await Task.CompletedTask;
+        }
+    }
+
+    /// <summary>Narration that is nothing once sanitized, or only the IDLE marker, publishes nothing.</summary>
+    [Theory]
+    [InlineData("   ")]
+    [InlineData("IDLE")]
+    [InlineData("[IMAGE:/workspace/attachments/shot.png]")]
+    public async Task EmptyNarration_PublishesNoTurnMessage(string narration)
+    {
+        var harness = Build(ExecutorYielding(Narrated));
+        var (key, identity) = OpenClientConversation(harness);
+
+        await harness.Manager.StartTask(key, "task", "display", isSessionTask: true, identity: identity);
+        await WaitUntilIdleAsync(harness.Manager, key);
+
+        Assert.DoesNotContain(harness.Drain(), e => e.Kind == ConversationEventKind.TurnMessage);
+
+        async IAsyncEnumerable<AgentProgress> Narrated()
+        {
+            yield return new AgentProgress
+            {
+                Summary = "Using Read", EventType = "assistant", IsSignificant = true, ToolName = "Read", Narration = narration,
+            };
+            yield return new AgentProgress { Summary = "result", EventType = "result", FinalResult = "the answer" };
+            await Task.CompletedTask;
+        }
+    }
+
+    /// <summary>A long mid-turn message is cut at its bound and says so.</summary>
+    [Fact]
+    public async Task ALongTurnMessage_IsTruncatedAndFlagged()
+    {
+        var harness = Build(ExecutorYielding(Narrated));
+        var (key, identity) = OpenClientConversation(harness);
+
+        await harness.Manager.StartTask(key, "task", "display", isSessionTask: true, identity: identity);
+        await WaitUntilIdleAsync(harness.Manager, key);
+
+        var message = Assert.Single(harness.Drain(), e => e.Kind == ConversationEventKind.TurnMessage).PayloadAs<TurnMessagePayload>()!;
+        Assert.Equal(ProtocolLimits.MaxMessageTextChars, message.Text.Length);
+        Assert.True(message.Truncated);
+
+        static async IAsyncEnumerable<AgentProgress> Narrated()
+        {
+            yield return new AgentProgress
+            {
+                Summary = "Using Read", EventType = "assistant", IsSignificant = true, ToolName = "Read",
+                Narration = new string('x', ProtocolLimits.MaxMessageTextChars + 500),
+            };
+            yield return new AgentProgress { Summary = "result", EventType = "result", FinalResult = "the answer" };
+            await Task.CompletedTask;
+        }
+    }
+
     /// <summary>AC24: the disposition must mirror the returned dispatch outcome.</summary>
     [Fact]
     public async Task SubmissionAccepted_MirrorsTheReturnedDispatchOutcome()

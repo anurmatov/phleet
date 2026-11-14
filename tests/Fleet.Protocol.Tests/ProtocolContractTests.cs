@@ -55,6 +55,7 @@ public class ProtocolContractTests
         { ConversationEventKind.TurnProgress, new TurnProgressPayload { Activity = ProgressActivity.Tool, ToolName = "Read" } },
         { ConversationEventKind.TurnNotice, new TurnNoticePayload { Text = "notice" } },
         { ConversationEventKind.TurnRecoveredAnswer, new TurnRecoveredAnswerPayload { Text = "recovered" } },
+        { ConversationEventKind.TurnMessage, new TurnMessagePayload { Text = "reading the file first", Truncated = true } },
         { ConversationEventKind.TurnFinal, new TurnFinalPayload { Text = "answer", Completion = TurnCompletion.Completed, IsPartial = false, Truncated = false, MergedSubmissionIds = ["s_0000000000000001"] } },
         { ConversationEventKind.TurnError, new TurnErrorPayload { Code = ProtocolErrorCode.ExecutorError, Message = ProtocolErrors.ExecutorError } },
         { ConversationEventKind.TurnCanceled, new TurnCanceledPayload { Reason = TurnCancelReason.User, MergedSubmissionIds = [] } },

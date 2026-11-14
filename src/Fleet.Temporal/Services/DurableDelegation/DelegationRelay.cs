@@ -8,6 +8,24 @@ using RabbitMQ.Client;
 
 namespace Fleet.Temporal.Services;
 
+/// <summary>What is known about a cancel when the call that sent it has ended.</summary>
+public enum CancelDelivery
+{
+    /// <summary>
+    /// The orchestrator answered, and its answer says nothing is still on its way: it passed the
+    /// cancel to the agent and the agent answered (the orchestrator's route awaits the agent's,
+    /// and the agent's applies the cancel before it answers), or it does not know the agent.
+    /// </summary>
+    Settled,
+
+    /// <summary>
+    /// The cancel may still arrive: the call failed or was stopped part-way, the orchestrator
+    /// could not say what the agent did, or the broadcast fallback was used, which the agent
+    /// reads from its queue whenever it gets to it.
+    /// </summary>
+    Unknown,
+}
+
 /// <summary>What a pending delegation sends outside the process.</summary>
 public interface IDelegationRelay
 {
@@ -22,11 +40,16 @@ public interface IDelegationRelay
     /// <summary>Publishes the directive the delegation is waiting on. Throws when it could not.</summary>
     Task PublishDirectiveAsync(PendingDelegation delegation, CancellationToken ct);
 
-    /// <summary>Best effort: tells the agent to stop the task it is working on. Never throws.</summary>
-    Task SendCancelAsync(PendingDelegation delegation);
+    /// <summary>
+    /// Best effort: tells the agent to stop the task it is working on. Never throws. The agent
+    /// matches a cancel by task id and nothing else, so the answer matters to the caller: until a
+    /// cancel is <see cref="CancelDelivery.Settled"/> it can still reach whatever is running under
+    /// that task id. Cancelling <paramref name="ct"/> stops the call and sends nothing further.
+    /// </summary>
+    Task<CancelDelivery> SendCancelAsync(PendingDelegation delegation, CancellationToken ct = default);
 
     /// <summary>Best effort: tells the escalation target that the agent ran out of budget. Never throws.</summary>
-    Task ReportTimeoutAsync(PendingDelegation delegation, string detail);
+    Task ReportTimeoutAsync(PendingDelegation delegation, string detail, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -89,7 +112,7 @@ public sealed class DelegationRelay : IDelegationRelay
             delegation, delegation.Agent, delegation.CurrentInstruction, delegation.CurrentTaskId,
             delegation.Repo, ct);
 
-    public async Task SendCancelAsync(PendingDelegation delegation)
+    public async Task<CancelDelivery> SendCancelAsync(PendingDelegation delegation, CancellationToken ct = default)
     {
         var agentName = delegation.Agent;
         var taskId = delegation.CurrentTaskId;
@@ -98,7 +121,8 @@ public sealed class DelegationRelay : IDelegationRelay
         {
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(10));
                 var client = _httpClientFactory.CreateClient("orchestrator-cancel");
                 var url = $"{_bridgeConfig.OrchestratorUrl.TrimEnd('/')}/api/agents/{agentName}/cancel/{Uri.EscapeDataString(taskId)}";
                 var request = new HttpRequestMessage(HttpMethod.Post, url);
@@ -108,7 +132,21 @@ public sealed class DelegationRelay : IDelegationRelay
                 _logger.LogInformation(
                     "Targeted cancel sent to orchestrator for agent {Agent}, taskId={TaskId}, status={Status}",
                     agentName, taskId, (int)response.StatusCode);
-                return;
+                // 2xx: the agent answered the orchestrator, so it has applied the cancel. 404: the
+                // orchestrator knows no such agent and sent nothing. Anything else leaves open
+                // what reached the agent.
+                return response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.NotFound
+                    ? CancelDelivery.Settled
+                    : CancelDelivery.Unknown;
+            }
+            catch (Exception ex) when (ct.IsCancellationRequested)
+            {
+                // The caller has stopped waiting. Nothing more is sent on its behalf: a broadcast
+                // started now could arrive at any later time.
+                _logger.LogWarning(
+                    "Orchestrator targeted cancel for agent {Agent}, taskId={TaskId} was stopped before it finished: {Error}",
+                    agentName, taskId, ex.GetType().Name);
+                return CancelDelivery.Unknown;
             }
             catch (Exception ex)
             {
@@ -118,7 +156,8 @@ public sealed class DelegationRelay : IDelegationRelay
 
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
             await PublishAsync(delegation, agentName, "/cancel all", taskId + "/cancel", repo: null, cts.Token);
             _logger.LogInformation("Fallback cancel broadcast sent to agent {Agent} for taskId={TaskId}", agentName, taskId);
         }
@@ -126,13 +165,16 @@ public sealed class DelegationRelay : IDelegationRelay
         {
             _logger.LogWarning(ex, "Failed to send fallback cancel to agent {Agent} for taskId={TaskId}", agentName, taskId);
         }
+
+        return CancelDelivery.Unknown;
     }
 
-    public async Task ReportTimeoutAsync(PendingDelegation delegation, string detail)
+    public async Task ReportTimeoutAsync(PendingDelegation delegation, string detail, CancellationToken ct = default)
     {
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(10));
             var escalationTarget = FleetWorkflowConfig.Instance.EscalationTarget;
             var report = $"[temporal] activity timeout: {detail}. the workflow will fail this activity.";
             await PublishAsync(delegation, escalationTarget, report, delegation.TaskId + "/timeout-report", repo: null, cts.Token);

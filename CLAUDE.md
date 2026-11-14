@@ -430,12 +430,18 @@ histories replay. `DelegationRelay` is a deliberate second copy of the activity'
 and timeout-report code so the switch-off path is untouched; `DelegationRelayParityTests` keeps the
 two byte-identical. The pass (`TickAsync`) talks to Temporal only; every relay send (directive,
 cancel, timeout notice) goes out on a separate lane that reads what a record owes and writes back
-what was sent (4 at once, one per record, given up after 30 s). The service is registered before
+what was sent. At most 4 relay calls are unfinished at once and one per record; a call past its
+time is told to stop and still counts until it has ended; nothing is queued, so what is not sent
+stays owed in the record. The agent matches a cancel by task id only and a retried step reuses its
+task id, so a directive is not published while a cancel for the same task id is owed, unfinished,
+or ended without a definite answer less than 30 s ago (`Fenced`, `PriorCancels`,
+`PublishNotBefore`). The service is registered before
 the peer-config bootstrap on purpose: heartbeats start with the host, relay sends wait for
 `IDelegationRelay.Ready` (`FleetWorkflowConfig.PeerConfigLoaded` and a non-empty escalation target).
 
 MUST NOT: await a relay send from a pass or a reply (ten 10 s cancels once put another activity's
-heartbeat past its 90 s timeout); log or return an instruction, an answer or a task token (the state file is the only place
+heartbeat past its 90 s timeout); publish a directive ahead of a cancel for the same task id, or
+give a place to a new call while the old one has not ended; log or return an instruction, an answer or a task token (the state file is the only place
 they are kept, mode 0600; `GET /pending-delegations` is identifiers, counters and times); raise
 `MaximumAttempts` on a delegate (a retry re-publishes and the agent redoes the work); overwrite a
 state file that cannot be read (it is moved aside). An outage longer than the activity's

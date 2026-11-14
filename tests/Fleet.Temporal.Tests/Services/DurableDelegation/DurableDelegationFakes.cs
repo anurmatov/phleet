@@ -140,9 +140,28 @@ internal sealed class FakeRelay : IDelegationRelay
     /// </summary>
     public Func<string, PendingDelegation, CancellationToken, Task>? BeforeSend { get; set; }
 
+    /// <summary>What <see cref="SendCancelAsync"/> answers when the cancel went out.</summary>
+    public CancelDelivery CancelOutcome { get; set; } = CancelDelivery.Settled;
+
+    /// <summary>Where what is sent arrives, when a test wants to see it from the agent's side.</summary>
+    public TaskIdOnlyReceiver? Receiver { get; set; }
+
+    /// <summary>Every call's start and end, in order: <c>start:cancel:id</c>, <c>end:cancel:id</c>.</summary>
+    public IReadOnlyList<string> Events
+    {
+        get { lock (_lock) return [.. _events]; }
+    }
+
+    private readonly List<string> _events = [];
+
     private async Task EnterAsync(string kind, PendingDelegation delegation, CancellationToken ct)
     {
-        lock (_lock) _started.Add($"{kind}:{delegation.CurrentTaskId}");
+        lock (_lock)
+        {
+            _started.Add($"{kind}:{delegation.CurrentTaskId}");
+            _events.Add($"start:{kind}:{delegation.CurrentTaskId}");
+        }
+
         var now = Interlocked.Increment(ref _inProgress);
         int seen;
         while (now > (seen = Volatile.Read(ref _mostInProgress)))
@@ -158,25 +177,140 @@ internal sealed class FakeRelay : IDelegationRelay
         }
     }
 
+    private void Ended(string kind, PendingDelegation delegation)
+    {
+        lock (_lock) _events.Add($"end:{kind}:{delegation.CurrentTaskId}");
+    }
+
     public async Task PublishDirectiveAsync(PendingDelegation delegation, CancellationToken ct)
     {
         Interlocked.Increment(ref _publishAttempts);
-        await EnterAsync("publish", delegation, ct);
-        if (PublishFailure is not null) throw PublishFailure;
+        try
+        {
+            await EnterAsync("publish", delegation, ct);
+            if (PublishFailure is not null) throw PublishFailure;
+            lock (_lock)
+            {
+                _published.Add((delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction, delegation.Repo));
+                Receiver?.Directive(delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction);
+            }
+        }
+        finally
+        {
+            Ended("publish", delegation);
+        }
+    }
+
+    /// <summary>
+    /// Like the real relay it never throws. A call stopped through <paramref name="ct"/> before it
+    /// went out delivers nothing and cannot say what happened.
+    /// </summary>
+    public async Task<CancelDelivery> SendCancelAsync(PendingDelegation delegation, CancellationToken ct = default)
+    {
+        try
+        {
+            await EnterAsync("cancel", delegation, ct);
+            lock (_lock)
+            {
+                _cancels.Add((delegation.Agent, delegation.CurrentTaskId));
+                Receiver?.Cancel(delegation.Agent, delegation.CurrentTaskId);
+            }
+
+            return CancelOutcome;
+        }
+        catch (OperationCanceledException)
+        {
+            return CancelDelivery.Unknown;
+        }
+        finally
+        {
+            Ended("cancel", delegation);
+        }
+    }
+
+    public async Task ReportTimeoutAsync(PendingDelegation delegation, string detail, CancellationToken ct = default)
+    {
+        try
+        {
+            await EnterAsync("timeout", delegation, ct);
+            lock (_lock) _timeoutReports.Add((delegation.TaskId, detail));
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopped before it went out.
+        }
+        finally
+        {
+            Ended("timeout", delegation);
+        }
+    }
+}
+
+/// <summary>
+/// The agent, as far as a delegation can tell: it knows a piece of work by its task id and by
+/// nothing else. A directive whose task id it is already working on is dropped as a repeat, so
+/// the work in progress is what answers it. A cancel stops whatever is running under the task id,
+/// whoever the cancel was meant for.
+/// </summary>
+internal sealed class TaskIdOnlyReceiver
+{
+    public sealed class Execution
+    {
+        public required int Number { get; init; }
+        public required string Agent { get; init; }
+        public required string TaskId { get; init; }
+        public required string Instruction { get; init; }
+        public bool Cancelled { get; set; }
+        public bool Running => !Cancelled;
+    }
+
+    private readonly Lock _lock = new();
+    private readonly List<Execution> _executions = [];
+    private readonly List<string> _log = [];
+
+    public IReadOnlyList<Execution> Executions
+    {
+        get { lock (_lock) return [.. _executions]; }
+    }
+
+    /// <summary>What arrived, in order: <c>directive:id→#n</c>, <c>cancel:id→#n</c>, <c>cancel:id→nothing</c>.</summary>
+    public IReadOnlyList<string> Log
+    {
+        get { lock (_lock) return [.. _log]; }
+    }
+
+    /// <summary>The execution that a directive with this instruction is being answered by.</summary>
+    public Execution? Serving(string instruction)
+    {
+        lock (_lock) return _serving.GetValueOrDefault(instruction);
+    }
+
+    private readonly Dictionary<string, Execution> _serving = new(StringComparer.Ordinal);
+
+    public void Directive(string agent, string taskId, string instruction)
+    {
         lock (_lock)
-            _published.Add((delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction, delegation.Repo));
+        {
+            var running = _executions.LastOrDefault(e => e.Running && e.Agent == agent && e.TaskId == taskId);
+            if (running is null)
+            {
+                running = new Execution { Number = _executions.Count + 1, Agent = agent, TaskId = taskId, Instruction = instruction };
+                _executions.Add(running);
+            }
+
+            _serving[instruction] = running;
+            _log.Add($"directive:{taskId}→#{running.Number}");
+        }
     }
 
-    public async Task SendCancelAsync(PendingDelegation delegation)
+    public void Cancel(string agent, string taskId)
     {
-        await EnterAsync("cancel", delegation, CancellationToken.None);
-        lock (_lock) _cancels.Add((delegation.Agent, delegation.CurrentTaskId));
-    }
-
-    public async Task ReportTimeoutAsync(PendingDelegation delegation, string detail)
-    {
-        await EnterAsync("timeout", delegation, CancellationToken.None);
-        lock (_lock) _timeoutReports.Add((delegation.TaskId, detail));
+        lock (_lock)
+        {
+            var hit = _executions.Where(e => e.Running && e.Agent == agent && e.TaskId == taskId).ToList();
+            foreach (var execution in hit) execution.Cancelled = true;
+            _log.Add(hit.Count == 0 ? $"cancel:{taskId}→nothing" : $"cancel:{taskId}→#{string.Join(",#", hit.Select(e => e.Number))}");
+        }
     }
 }
 

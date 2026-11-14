@@ -45,14 +45,48 @@ A heartbeat has a deadline and a publish does not, so the two are kept apart.
 Neither a pass nor a reply waits for a send, its own record's included. A relay that is slow or
 does not return delays relay effects and nothing else. What that means in numbers:
 
-- at most 4 sends are in progress at once, and one per record;
-- a send that has not ended after 10 seconds is told to stop and gives its place to the next;
-- a send still not ended after 30 seconds is given up, so the record's next effect can go out. A
-  cancel or a timeout notice is then treated as sent: each is one best-effort attempt, as it was
-  inside the activity, and its record must not wait for ever. A directive is owed again;
-- a send that ends late changes nothing for a record that has since been completed, removed, or
+- at most 4 relay calls are unfinished at any moment, and one per record. Nothing waits in a
+  queue: a call is made or it is not, and what is not made stays owed in its record and is looked
+  at afresh when a call ends;
+- a directive that has not been published after 10 seconds is told to stop; a cancel or a timeout
+  notice after 30. The call is not abandoned. Its place, its record's next effect and the hold on
+  its task id (below) are given back when the call has really ended, because until then it may
+  still deliver. The relay honours the stop, so in practice that is at once;
+- if the relay does not return at all, 4 hung calls stop every further send. What is owed stays in
+  the state file and a restart sends it. Heartbeats are not affected;
+- a cancel or a timeout notice is one best-effort attempt, as it was inside the activity: once its
+  call has ended it is not tried again. A directive that failed is tried again after the next pass;
+- a call that ends late changes nothing for a record that has since been completed, removed, or
   replaced by a later attempt under the same task id;
-- what is owed is in the state file, so a restart sends it.
+- a call cut short because the bridge is stopping does not count as sent.
+
+### A cancel and the execution it was meant for
+
+The agent knows a piece of work by its task id and by nothing else, and a later attempt of a step
+gets the task id its predecessor had. A cancel therefore stops whatever is running under that id
+when it arrives, and a cancel that has left the bridge cannot be called back. The bridge keeps the
+one thing it controls, which is order: **a directive is not published while a cancel for the same
+task id is owed, still out, or may still arrive.**
+
+- A record that replaces another under its task id carries any cancel the predecessor still owed
+  (`PriorCancels` in the state file) and sends it, to the end, before its own directive.
+- While any cancel call for the task id is unfinished, or any call made for the predecessor, the
+  directive waits. The activity is not kept waiting for this: the record is written, Temporal is
+  told the activity completes later, and the record is heartbeated like any other.
+- The cancel goes bridge → orchestrator → agent over HTTP, and each waits for the next to answer.
+  A 2xx from the orchestrator therefore means the agent has applied the cancel, and the directive
+  follows at once. Any other end (an error, a call that was stopped, the `/cancel all` broadcast
+  used when the orchestrator cannot be reached) leaves open whether it will still arrive, and
+  directives for that task id are held for 30 seconds (`PublishNotBefore` in the state file).
+
+What this does not give. The 30 seconds come from the orchestrator's ten-second limit on its call
+to the agent; they are a bound taken from the other services' timeouts, not a proof. Nothing in a
+cancel says which execution it was for, so a cancel delayed for longer than that somewhere between
+the orchestrator and the agent would still stop a successor. Closing that needs the cancel and the
+directive to carry an execution id the agent compares, which is a change to the agent. Two things
+are older than durable delegation and unchanged by it: the `/cancel all` fallback stops every task
+the agent has, and the in-process wait (switch off) sends its cancel by task id with no ordering
+at all.
 
 ### At start-up
 
@@ -112,6 +146,9 @@ Differences from the in-process wait, all deliberate:
   discarding the partial answer.
 - A cancelled or timed-out record stays in `/pending-delegations` (`cancelling`, `timed-out`) until
   its cancel or notice has gone out, although Temporal has already been told.
+- A new attempt of a step whose previous attempt is being cancelled has its directive held until
+  that cancel has ended. The activity used to publish at once, and the old cancel could stop the
+  new attempt's work.
 - A cancel after a continuation names the continuation task (`…/incomplete-retry-N`), which is the
   one the agent is running. It used to name the original task.
 - A budget is checked on a pass, so a timeout is reported up to a pass late when Temporal or the

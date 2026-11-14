@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using Fleet.Temporal.Configuration;
 using Fleet.Temporal.Models;
@@ -41,6 +40,13 @@ namespace Fleet.Temporal.Services;
 /// </para>
 ///
 /// <para>
+/// The lane keeps one order that the agent cannot keep for itself. The agent matches a cancel by
+/// task id alone, and a later attempt of a step reuses its predecessor's task id, so a directive
+/// is never published while a cancel for the same task id is still out or may still arrive
+/// (<see cref="Fenced"/>).
+/// </para>
+///
+/// <para>
 /// What it does not do: outlast a bridge outage longer than the <c>HeartbeatTimeout</c> the
 /// workflow scheduled the delegation with. Temporal times such an activity out and the record is
 /// dropped the next time it is heartbeated.
@@ -54,30 +60,36 @@ public sealed class DurableDelegationService : BackgroundService
     internal static readonly TimeSpan ResendInterval = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Relay sends in progress at once. Each is a broker connection or an HTTP request, and a
-    /// bridge that has just restarted can owe one per pending delegation.
+    /// Relay calls that have been made and have not ended, at most. Each is a broker connection
+    /// or an HTTP request, and a bridge that has just restarted can owe one per pending
+    /// delegation. A call that is past its time still counts until it has really ended.
     /// </summary>
     internal const int MaxConcurrentRelaySends = 4;
 
     private static readonly TimeSpan MinimumSleep = TimeSpan.FromMilliseconds(200);
 
-    [Flags]
-    private enum RelayEffect { None = 0, Publish = 1, Cancel = 2, TimeoutNotice = 4 }
+    private enum RelayEffect { None, Publish, Cancel, TimeoutNotice, PriorCancel }
 
-    /// <summary>One relay send that has been started for one record.</summary>
+    /// <summary>One relay call that has been made for one record and has not ended.</summary>
     private sealed class RelaySend
     {
         public required PendingDelegation Record { get; init; }
         public required RelayEffect Effect { get; init; }
-        public required string TaskIdAtStart { get; init; }
-        /// <summary>Set when the send gets its place and is made; zero while it waits for one.</summary>
-        public long StartedAt;
 
+        /// <summary>The record's task id: what directives and cancels for it are ordered by.</summary>
+        public required string Root { get; init; }
+
+        /// <summary>The record as it was when the call was decided on. The relay works from this.</summary>
+        public required PendingDelegation Snapshot { get; init; }
+
+        public PriorCancel? Prior { get; init; }
+
+        /// <summary>Stops the call when its time is up, or when the service stops.</summary>
+        public required CancellationTokenSource Cancellation { get; init; }
 
         public Task Completion { get; set; } = Task.CompletedTask;
 
-        /// <summary>The service stopped waiting for it. Whatever it does when it ends is ignored.</summary>
-        public bool GivenUp { get; set; }
+        public bool IsCancel => Effect is RelayEffect.Cancel or RelayEffect.PriorCancel;
     }
 
     private readonly DurableDelegationOptions _options;
@@ -93,14 +105,20 @@ public sealed class DurableDelegationService : BackgroundService
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _wake = new(0);
 
-    // The relay lane. _sends is keyed by record INSTANCE, so a delegation that replaced another
-    // under the same task id has a lane of its own, and is guarded by _gate.
+    // The relay lane, guarded by _gate. _sends holds every call that has been made and has not
+    // ended, keyed by record INSTANCE: one call per record at a time, and a record that was
+    // replaced under its task id keeps its entry until its call has really ended. Its size is
+    // what MaxConcurrentRelaySends bounds.
     private readonly Dictionary<PendingDelegation, RelaySend> _sends = new(ReferenceEqualityComparer.Instance);
-    // Calls that were given up and have not ended yet, by kind. No second call of a kind is made
-    // for a record while one is outstanding, so a relay that never returns costs at most one
-    // outstanding call per kind per record.
-    private readonly Dictionary<PendingDelegation, RelayEffect> _abandoned = new(ReferenceEqualityComparer.Instance);
-    private readonly SemaphoreSlim _relaySlots = new(MaxConcurrentRelaySends);
+    // Task ids for which a cancel ended without the bridge knowing whether it will still arrive,
+    // and until when a directive for that task id is held.
+    private readonly Dictionary<string, DateTimeOffset> _unsettledCancels = new(StringComparer.Ordinal);
+    // Whether the last relay pass found no room, so it is said once.
+    private bool _saturated;
+    // Records whose activity is publishing their first directive right now, outside the lane.
+    // They are calls that have not ended like any other, for ordering: a successor's directive
+    // and a cancel carried for the predecessor both wait for them.
+    private readonly HashSet<PendingDelegation> _startingPublishes = new(ReferenceEqualityComparer.Instance);
     private readonly CancellationTokenSource _stopping = new();
     private readonly Lock _pumpLock = new();
     // True while a pass is going round. The relay lane starts nothing new meanwhile: the pass is
@@ -137,17 +155,22 @@ public sealed class DurableDelegationService : BackgroundService
     internal TimeSpan TickInterval { get; set; } = TimeSpan.Zero;
 
     /// <summary>
-    /// How long one relay send holds a place among <see cref="MaxConcurrentRelaySends"/>. A send
-    /// that has not ended by then is told to stop and its place is given to the next one; a
-    /// broker that has gone away must not hold up the sends that could still get through.
+    /// How long a directive may take to publish. A cancel or a timeout notice gets three times
+    /// this, which is above the relay's own limits for them. When the time is up the call is told
+    /// to stop. It is not abandoned: its place, its record's turn and the hold on its task id are
+    /// given back when it has ended, because until then it may still deliver.
     /// </summary>
     internal TimeSpan RelaySendTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// How long a send may stay unfinished before the lane stops waiting for it, so that whatever
-    /// the record owes next can go out.
+    /// How long a directive for a task id is held after a cancel for that task id ended
+    /// <see cref="CancelDelivery.Unknown"/>. The cancel goes bridge → orchestrator → agent over
+    /// HTTP and the orchestrator gives the agent ten seconds, so a cancel the bridge stopped
+    /// waiting for can be applied that much later, plus the orchestrator's own time. This is a
+    /// bound taken from those limits, not a proof: nothing in the cancel says which execution it
+    /// was for.
     /// </summary>
-    private TimeSpan RelayGiveUpAfter => RelaySendTimeout * 3;
+    internal TimeSpan CancelSettleTime { get; set; } = TimeSpan.FromSeconds(30);
 
     private TimeSpan EffectiveTick =>
         TickInterval > TimeSpan.Zero ? TickInterval : TimeSpan.FromSeconds(Math.Max(1, _options.TickSeconds));
@@ -181,10 +204,9 @@ public sealed class DurableDelegationService : BackgroundService
             CreatedAt = now,
             WaitStartedAt = now,
             LastPublishedAt = DateTimeOffset.MinValue,
-            // So the relay lane does not send the directive while the activity is sending it.
-            Publishing = true,
         };
 
+        bool held;
         await _gate.WaitAsync(ct);
         try
         {
@@ -195,7 +217,29 @@ public sealed class DurableDelegationService : BackgroundService
                 _logger.LogWarning(
                     "Delegation taskId={TaskId} replaced a pending record (attempt {PriorAttempt} → {Attempt})",
                     start.TaskId, prior.Attempt, start.Attempt);
+
+                // A cancel the predecessor still owes is not dropped with it and is not left to
+                // arrive whenever it does: this record carries it and sends it first.
+                record.PriorCancels.AddRange(prior.PriorCancels);
+                if (prior.CancelRequested && !prior.CancelSent
+                    && !record.PriorCancels.Any(p => p.Agent == prior.Agent && p.TaskId == prior.CurrentTaskId))
+                {
+                    record.PriorCancels.Add(new PriorCancel { Agent = prior.Agent, TaskId = prior.CurrentTaskId });
+                }
+
+                // And a hold the predecessor was under is still a hold.
+                record.PublishNotBefore = prior.PublishNotBefore;
             }
+
+            if (_unsettledCancels.TryGetValue(start.TaskId, out var until) && until > record.PublishNotBefore)
+                record.PublishNotBefore = until;
+
+            // The directive goes out here and now unless a cancel for the same task id is owed,
+            // still out, or may still arrive. Then the relay lane publishes it when that is over,
+            // and the activity does not wait: the record is heartbeated from the next pass on.
+            held = record.PriorCancels.Count > 0 || now < record.PublishNotBefore || Fenced(record, now);
+            record.Publishing = !held;
+            if (!held) _startingPublishes.Add(record);
 
             // Recorded before it is published, so a reply can never arrive for a delegation the
             // bridge does not know about.
@@ -204,6 +248,16 @@ public sealed class DurableDelegationService : BackgroundService
         finally
         {
             _gate.Release();
+        }
+
+        if (held)
+        {
+            _logger.LogWarning(
+                "Delegation taskId={TaskId} is pending; its directive to {Agent} is held until a cancel for the same task id has finished (durable={Durable})",
+                start.TaskId, start.Agent, _store.Durable);
+            Wake();
+            RequestRelayPass();
+            return;
         }
 
         // Outside the gate: a slow broker must not hold up the other delegations' heartbeats.
@@ -221,6 +275,9 @@ public sealed class DurableDelegationService : BackgroundService
         try
         {
             record.Publishing = false;
+            _startingPublishes.Remove(record);
+            // Whatever was waiting for this call to end.
+            RequestRelayPass();
             // A reply can have settled it already; then there is nothing left to update.
             var stillOurs = _store.TryGet(start.TaskId, out var current) && ReferenceEquals(current, record);
 
@@ -583,13 +640,74 @@ public sealed class DurableDelegationService : BackgroundService
     private RelayEffect Owed(PendingDelegation record, DateTimeOffset now)
     {
         if (record.Publishing) return RelayEffect.None;
+        // Before anything of its own: these belong to executions this record replaced.
+        if (record.PriorCancels.Count > 0) return RelayEffect.PriorCancel;
         if (record.CancelRequested) return record.CancelSent ? RelayEffect.None : RelayEffect.Cancel;
         if (record.TimeoutMessage is not null) return record.TimeoutReported ? RelayEffect.None : RelayEffect.TimeoutNotice;
         if (record.HasResult || record.TemporalSettled) return RelayEffect.None;
 
-        return now - record.LastPublishedAt >= ResendInterval && now >= record.PublishRetryAfter
+        return now - record.LastPublishedAt >= ResendInterval
+               && now >= record.PublishRetryAfter
+               && now >= record.PublishNotBefore
             ? RelayEffect.Publish
             : RelayEffect.None;
+    }
+
+    /// <summary>
+    /// Whether a directive for this record's task id must wait.
+    ///
+    /// <para>
+    /// The agent matches a cancel by task id and nothing else, and a task id is reused: a later
+    /// attempt of the same step gets the id its predecessor had. So a cancel meant for one
+    /// execution stops whatever is running under that id when it arrives. The only place that can
+    /// be prevented without the agent's help is here, by order: a directive is not published
+    /// while a cancel for the same task id is still out, or may still arrive.
+    /// </para>
+    ///
+    /// <list type="bullet">
+    /// <item>A cancel call for the task id has not ended. It does not matter which record it was
+    /// made for, or how long ago; a call that is past its time has been told to stop and is
+    /// waited for all the same, because a send that has left cannot be recalled.</item>
+    /// <item>Any call made for an earlier record under the task id has not ended: a directive of
+    /// the predecessor's arriving after this one would be taken for it.</item>
+    /// <item>A cancel for the task id ended <see cref="CancelDelivery.Unknown"/> less than
+    /// <see cref="CancelSettleTime"/> ago.</item>
+    /// </list>
+    /// </summary>
+    private bool Fenced(PendingDelegation record, DateTimeOffset now)
+    {
+        foreach (var call in _sends.Values)
+        {
+            if (!string.Equals(call.Root, record.TaskId, StringComparison.Ordinal)) continue;
+            if (call.IsCancel || !ReferenceEquals(call.Record, record)) return true;
+        }
+
+        if (PredecessorDirectiveIsOut(record)) return true;
+
+        return _unsettledCancels.TryGetValue(record.TaskId, out var until) && now < until;
+    }
+
+    /// <summary>
+    /// A directive published for an earlier record under this task id has not ended. A cancel
+    /// carried for that record waits for it too: sent first, it would arrive ahead of the
+    /// directive it is meant to stop.
+    /// </summary>
+    private bool PredecessorDirectiveIsOut(PendingDelegation record)
+    {
+        foreach (var starting in _startingPublishes)
+        {
+            if (!ReferenceEquals(starting, record) && string.Equals(starting.TaskId, record.TaskId, StringComparison.Ordinal))
+                return true;
+        }
+
+        foreach (var call in _sends.Values)
+        {
+            if (call.Effect == RelayEffect.Publish && !ReferenceEquals(call.Record, record)
+                && string.Equals(call.Root, record.TaskId, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -640,20 +758,25 @@ public sealed class DurableDelegationService : BackgroundService
     }
 
     /// <summary>
-    /// Starts a send for every record that owes one and has none in progress.
+    /// Makes a call for every record that owes one, as far as there is room.
     ///
     /// <para>
-    /// One send per record at a time, so a record's effects go out in the order its state asks
-    /// for them. <see cref="MaxConcurrentRelaySends"/> at once across records. A send that has not
-    /// ended after <see cref="RelaySendTimeout"/> gives its place up, so the lane keeps moving
-    /// past a send that hangs, and after <see cref="RelayGiveUpAfter"/> it is given up altogether
-    /// so the same record's next effect can go out.
+    /// Nothing waits in a queue. A call is either made now, in this method, or not made: what is
+    /// not made stays owed in its record and is looked at afresh on the next relay pass, which
+    /// every call asks for when it ends. So there is no moment between deciding to send something
+    /// and sending it in which the record can change under a stale copy.
+    /// </para>
+    ///
+    /// <para>
+    /// <see cref="MaxConcurrentRelaySends"/> counts calls that have been made and have not ended.
+    /// A call that is past its time is told to stop, and goes on counting until it has: its place
+    /// is not handed to another call while it may still be using a connection. One call per record
+    /// at a time, for the same reason, so a record's effects reach the relay in the order its
+    /// state asked for them.
     /// </para>
     /// </summary>
     private async Task RelayPassAsync(CancellationToken ct)
     {
-        var due = new List<(RelaySend Send, PendingDelegation Snapshot)>();
-
         await _gate.WaitAsync(ct);
         try
         {
@@ -676,57 +799,29 @@ public sealed class DurableDelegationService : BackgroundService
             _heldForConfiguration = false;
 
             var now = _time.GetUtcNow();
+            foreach (var root in _unsettledCancels.Where(q => now >= q.Value).Select(q => q.Key).ToList())
+                _unsettledCancels.Remove(root);
+
             foreach (var record in _store.All)
             {
-                if (_sends.TryGetValue(record, out var running))
+                if (_sends.Count >= MaxConcurrentRelaySends)
                 {
-                    // Waiting for a place is not hanging: only a send that was made can be given up.
-                    var startedAt = Volatile.Read(ref running.StartedAt);
-                    if (startedAt == 0 || Stopwatch.GetElapsedTime(startedAt) < RelayGiveUpAfter) continue;
-                    GiveUp(running, now);
+                    if (!_saturated)
+                        _logger.LogWarning(
+                            "Durable delegation relay: {Count} sends have not finished; nothing more is sent until one does. What is owed stays in the records",
+                            _sends.Count);
+                    _saturated = true;
+                    return;
                 }
 
-                var effect = Owed(record, now);
-                if (effect == RelayEffect.None) continue;
-                if ((_abandoned.GetValueOrDefault(record) & effect) != 0) continue;
+                if (_sends.ContainsKey(record)) continue;
+                if (PrepareCall(record, now) is not { } send) continue;
 
-                var send = new RelaySend { Record = record, Effect = effect, TaskIdAtStart = record.CurrentTaskId };
                 _sends[record] = send;
-                // The send works from a copy: the pass and a reply go on changing the record.
-                due.Add((send, record.Clone()));
-            }
-        }
-        finally
-        {
-            _gate.Release();
-        }
-
-        foreach (var (send, snapshot) in due)
-        {
-            try
-            {
-                await _relaySlots.WaitAsync(ct);
-            }
-            catch (OperationCanceledException)
-            {
-                await ForgetAsync(due.Select(d => d.Send).Where(s => s.Completion == Task.CompletedTask));
-                throw;
+                send.Completion = RunSendAsync(send);
             }
 
-            Volatile.Write(ref send.StartedAt, Stopwatch.GetTimestamp());
-            send.Completion = RunSendAsync(send, snapshot);
-        }
-    }
-
-    /// <summary>Sends that were chosen but never started because the service is stopping.</summary>
-    private async Task ForgetAsync(IEnumerable<RelaySend> sends)
-    {
-        await _gate.WaitAsync(CancellationToken.None);
-        try
-        {
-            foreach (var send in sends)
-                if (_sends.TryGetValue(send.Record, out var current) && ReferenceEquals(current, send))
-                    _sends.Remove(send.Record);
+            _saturated = false;
         }
         finally
         {
@@ -735,108 +830,157 @@ public sealed class DurableDelegationService : BackgroundService
     }
 
     /// <summary>
-    /// Stops waiting for a send that has been in progress for too long. Whatever it does when it
-    /// finally ends is ignored.
-    ///
-    /// <para>
-    /// A cancel or a timeout notice is marked as sent: both were single best-effort attempts
-    /// inside the activity, and the record must not wait for one for ever. A directive is simply
-    /// owed again, once the outstanding call has ended and the usual wait has passed.
-    /// </para>
+    /// The call the record's state asks for now, with a copy of the record taken at this moment
+    /// for the relay to work from, or null when nothing is owed or it has to wait. Under the gate.
     /// </summary>
-    private void GiveUp(RelaySend send, DateTimeOffset now)
+    private RelaySend? PrepareCall(PendingDelegation record, DateTimeOffset now)
     {
-        send.GivenUp = true;
-        _sends.Remove(send.Record);
-        _abandoned[send.Record] = _abandoned.GetValueOrDefault(send.Record) | send.Effect;
-        _logger.LogWarning(
-            "Gave up on a {Effect} for taskId={TaskId} (agent {Agent}) that has not finished after {Seconds:0.#}s",
-            send.Effect, send.TaskIdAtStart, send.Record.Agent, RelayGiveUpAfter.TotalSeconds);
+        var effect = Owed(record, now);
+        if (effect == RelayEffect.None) return null;
+        if (effect == RelayEffect.Publish && Fenced(record, now)) return null;
 
-        if (send.Effect == RelayEffect.Publish) send.Record.PublishRetryAfter = now + EffectiveTick;
-        else MarkSent(send.Record, send.Effect);
+        var snapshot = record.Clone();
+        PriorCancel? prior = null;
+        if (effect == RelayEffect.PriorCancel)
+        {
+            prior = record.PriorCancels[0];
+            // The cancel a predecessor owed, addressed as the predecessor would have addressed it.
+            snapshot.Agent = prior.Agent;
+            snapshot.CurrentTaskId = prior.TaskId;
+
+            // The predecessor's own call for it may still be out; one is enough.
+            if (_sends.Values.Any(c => c.IsCancel && SameTarget(c.Snapshot, snapshot))) return null;
+            if (PredecessorDirectiveIsOut(record)) return null;
+        }
+
+        return new RelaySend
+        {
+            Record = record,
+            Effect = effect,
+            Root = record.TaskId,
+            Snapshot = snapshot,
+            Prior = prior,
+            Cancellation = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token),
+        };
     }
 
-    private async Task RunSendAsync(RelaySend send, PendingDelegation snapshot)
+    private static bool SameTarget(PendingDelegation a, PendingDelegation b) =>
+        string.Equals(a.Agent, b.Agent, StringComparison.Ordinal)
+        && string.Equals(a.CurrentTaskId, b.CurrentTaskId, StringComparison.Ordinal);
+
+    private async Task RunSendAsync(RelaySend send)
     {
-        // Off the caller: a relay that blocks before its first await must not block the pump.
+        // Off the caller, which holds the gate: a relay that blocks before its first await must
+        // not block the pump, the pass or a reply.
         await Task.Yield();
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
-        timeout.CancelAfter(RelaySendTimeout);
-
-        Task sending;
-        try
-        {
-            sending = send.Effect switch
-            {
-                RelayEffect.Publish => _relay.PublishDirectiveAsync(snapshot, timeout.Token),
-                RelayEffect.Cancel => _relay.SendCancelAsync(snapshot),
-                _ => _relay.ReportTimeoutAsync(snapshot, snapshot.TimeoutMessage!),
-            };
-        }
-        catch (Exception ex)
-        {
-            sending = Task.FromException(ex);
-        }
-
-        // The place is given back when the send ends or when its time is up, whichever is first.
-        var released = 0;
-        void Release()
-        {
-            if (Interlocked.Exchange(ref released, 1) == 0) _relaySlots.Release();
-        }
-
-        using var timer = new Timer(_ => Release(), null, RelaySendTimeout, Timeout.InfiniteTimeSpan);
+        // Each call has its time. When it is up the call is told to stop; a relay that honours
+        // that ends, and from then on can deliver nothing. Its place and its record's turn are
+        // given back only when it HAS ended.
+        var limit = send.Effect == RelayEffect.Publish ? RelaySendTimeout : RelaySendTimeout * 3;
+        var token = send.Cancellation.Token;
+        send.Cancellation.CancelAfter(limit);
 
         var sent = false;
         string? error = null;
+        var delivery = CancelDelivery.Unknown;
         try
         {
-            await sending;
+            switch (send.Effect)
+            {
+                case RelayEffect.Publish:
+                    await _relay.PublishDirectiveAsync(send.Snapshot, token);
+                    break;
+                case RelayEffect.TimeoutNotice:
+                    await _relay.ReportTimeoutAsync(send.Snapshot, send.Snapshot.TimeoutMessage!, token);
+                    break;
+                default:
+                    delivery = await _relay.SendCancelAsync(send.Snapshot, token);
+                    break;
+            }
+
             sent = true;
         }
         catch (Exception ex)
         {
             error = ex.GetType().Name;
         }
-        finally
-        {
-            Release();
-        }
 
         await _gate.WaitAsync(CancellationToken.None);
         try
         {
-            if (send.GivenUp)
-            {
-                // It ended at last: a call of this kind may be made for the record again.
-                var left = _abandoned.GetValueOrDefault(send.Record) & ~send.Effect;
-                if (left == RelayEffect.None) _abandoned.Remove(send.Record);
-                else _abandoned[send.Record] = left;
-            }
-            else
-            {
-                if (_sends.TryGetValue(send.Record, out var current) && ReferenceEquals(current, send))
-                    _sends.Remove(send.Record);
+            if (_sends.TryGetValue(send.Record, out var current) && ReferenceEquals(current, send))
+                _sends.Remove(send.Record);
 
-                Apply(send, sent, error);
-            }
+            // A call cut short because the service is stopping proves nothing about what was
+            // sent. What it was for stays owed, and the next start sends it.
+            var cutShort = _stopping.IsCancellationRequested
+                           && (send.IsCancel ? delivery != CancelDelivery.Settled : !(send.Effect == RelayEffect.Publish && sent));
+
+            if (send.IsCancel) CancelEnded(send, delivery, keepOwed: cutShort);
+            if (!cutShort) Apply(send, sent, error);
         }
         finally
         {
             _gate.Release();
+            send.Cancellation.Dispose();
         }
 
-        // What the record owes next, if anything, and the sends that were waiting for a place.
+        // What the record owes next, what was waiting for this call to end, and what was waiting
+        // for room.
         RequestRelayPass();
     }
 
     /// <summary>
-    /// Writes down what a finished send did. It can finish late: after the record was completed
-    /// by the agent's answer, replaced by a later attempt under the same task id, or given up on.
-    /// So it changes only the record it was started for, only if that record is still the one in
-    /// the store, and only the thing it sent; a record is never removed twice and a successor is
+    /// A cancel call has ended. Unless the relay could say that nothing is still on its way, a
+    /// directive for the same task id is held for <see cref="CancelSettleTime"/>, written into the
+    /// record that is waiting so a restart keeps it. And whoever was carrying this cancel on a
+    /// predecessor's behalf no longer has to send it: it has been sent.
+    /// </summary>
+    private void CancelEnded(RelaySend send, CancelDelivery delivery, bool keepOwed)
+    {
+        _store.TryGet(send.Root, out var current);
+        var changed = false;
+
+        if (delivery != CancelDelivery.Settled)
+        {
+            var until = _time.GetUtcNow() + CancelSettleTime;
+            _unsettledCancels[send.Root] = until;
+            if (current is { CancelRequested: false } && current.PublishNotBefore < until)
+            {
+                current.PublishNotBefore = until;
+                changed = true;
+            }
+
+            _logger.LogWarning(
+                "A cancel for taskId={TaskId} (agent {Agent}) ended without the bridge knowing whether it will still arrive; directives for that task id are held for {Seconds:0.#}s",
+                send.Snapshot.CurrentTaskId, send.Snapshot.Agent, CancelSettleTime.TotalSeconds);
+        }
+
+        if (current is not null && !keepOwed)
+        {
+            var at = current.PriorCancels.FindIndex(p =>
+                string.Equals(p.Agent, send.Snapshot.Agent, StringComparison.Ordinal)
+                && string.Equals(p.TaskId, send.Snapshot.CurrentTaskId, StringComparison.Ordinal));
+            if (at >= 0)
+            {
+                current.PriorCancels.RemoveAt(at);
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            _store.Save();
+            RemoveIfFinished(current!);
+        }
+    }
+
+    /// <summary>
+    /// Writes down what a finished call did for the record it was made for. It can finish late:
+    /// after the record was completed by the agent's answer, or replaced by a later attempt under
+    /// the same task id. So it changes only that record, only if it is still the one in the
+    /// store, and only the thing it sent; a record is never removed twice and a successor is
     /// never touched.
     /// </summary>
     private void Apply(RelaySend send, bool sent, string? error)
@@ -844,12 +988,21 @@ public sealed class DurableDelegationService : BackgroundService
         var record = send.Record;
         if (!_store.TryGet(record.TaskId, out var current) || !ReferenceEquals(current, record)) return;
 
-        if (send.Effect != RelayEffect.Publish)
+        switch (send.Effect)
         {
-            // The relay reports its own failures and never throws; either way this was the one
-            // attempt, as it was inside the activity.
-            MarkSent(record, send.Effect);
-            return;
+            case RelayEffect.PriorCancel:
+                // CancelEnded has taken it off the list.
+                return;
+
+            case RelayEffect.Cancel:
+            case RelayEffect.TimeoutNotice:
+                // The relay reports its own failures and never throws; either way this was the
+                // one attempt, as it was inside the activity.
+                if (send.Effect == RelayEffect.Cancel) record.CancelSent = true;
+                else record.TimeoutReported = true;
+                _store.Save();
+                RemoveIfFinished(record);
+                return;
         }
 
         if (!sent)
@@ -858,27 +1011,16 @@ public sealed class DurableDelegationService : BackgroundService
             record.PublishRetryAfter = _time.GetUtcNow() + EffectiveTick;
             _logger.LogWarning(
                 "Failed to publish directive to agent {Agent} for taskId={TaskId}: {Error}",
-                record.Agent, send.TaskIdAtStart, error);
+                record.Agent, send.Snapshot.CurrentTaskId, error);
             return;
         }
 
         // A continuation recorded while this was on its way is a different directive and is still
         // owed; only what was sent is marked as sent.
-        if (!string.Equals(record.CurrentTaskId, send.TaskIdAtStart, StringComparison.Ordinal)) return;
+        if (!string.Equals(record.CurrentTaskId, send.Snapshot.CurrentTaskId, StringComparison.Ordinal)) return;
 
         record.LastPublishedAt = _time.GetUtcNow();
         _store.Save();
-    }
-
-    private void MarkSent(PendingDelegation record, RelayEffect effect)
-    {
-        if (!_store.TryGet(record.TaskId, out var current) || !ReferenceEquals(current, record)) return;
-
-        if (effect == RelayEffect.Cancel) record.CancelSent = true;
-        else record.TimeoutReported = true;
-
-        _store.Save();
-        RemoveIfFinished(record);
     }
 
     /// <summary>

@@ -72,19 +72,20 @@ public sealed class DurableDelegationSlowRelayTests
     }
 
     /// <summary>
-    /// A relay that never returns, with every kind of send owed: a cancel, a timeout notice, a
-    /// five-minute re-send for each delegation, and a continuation. No pass and no reply waits for
-    /// any of them, the waiting delegations are heartbeated on every pass, and Temporal is told
-    /// about the cancel and the timeout in the first pass. A send that hangs does not keep the
-    /// others from starting, its own record's next one included: the cancel goes out although
-    /// that record's re-send never returned. When the relay comes back each cancel and notice has
-    /// been sent once and nothing was dropped or completed twice.
+    /// A relay that never returns and cannot be told to stop, with every kind of send owed: a
+    /// cancel, a timeout notice, a five-minute re-send for each delegation, and a continuation.
+    /// No pass and no reply waits for any of it, the waiting delegations are heartbeated on every
+    /// pass, and Temporal is told about the cancel and the timeout in the first pass. The four
+    /// calls that were made stay four however long they hang, and what could not be sent stays
+    /// owed. When the relay comes back, a record's cancel goes out after that record's own
+    /// directive has ended, each cancel and notice is sent once, and nothing is dropped or
+    /// completed twice.
     /// </summary>
     [Fact]
     public async Task AHungRelay_NeverHoldsUpAPassOrAReply_AndDelaysOnlyRelayEffects()
     {
         using var h = new DurableHarness();
-        SetRelaySendTimeout(h.Service, TimeSpan.FromMilliseconds(100));
+        SetRelaySendTimeout(h.Service, TimeSpan.FromMilliseconds(50));
         await h.StartAsync(DurableHarness.Start("wf-1/cancelled", budgetSeconds: 3600));
         await h.StartAsync(DurableHarness.Start("wf-1/continued", budgetSeconds: 3600));
         await h.StartAsync(DurableHarness.Start("wf-1/live", budgetSeconds: 3600));
@@ -102,38 +103,26 @@ public sealed class DurableDelegationSlowRelayTests
             DurableReplyOutcome.Continued,
             await h.Service.TryHandleReplyAsync("wf-1/continued", new AgentTaskResult("part one", "incomplete"), default)
                 .WaitAsync(Promptly));
-        // The continuation and the three re-sends that were due are started, and hang.
+        // The continuation and the three re-sends that were due are made, and hang.
         await DurableHarness.WaitForAsync(() => h.Relay.Started.Count == 8, "the continuation and the re-sends were started");
 
-        // Pass after pass, with the relay silent throughout, until the cancel and the notice have
-        // been started too. Each had to wait for its own record's hung re-send to be given up.
-        var passes = 0;
-        var deadline = Environment.TickCount64 + 20_000;
-        while (!(h.Relay.Started.Contains("cancel:wf-1/cancelled") && h.Relay.Started.Contains("timeout:wf-1/timed-out")))
+        // Pass after pass with the relay silent, well past the time every call was given.
+        for (var pass = 1; pass <= 5; pass++)
         {
-            Assert.True(Environment.TickCount64 < deadline, "a hung send kept the cancel or the notice from starting");
             await h.Service.TickAsync(default).WaitAsync(Promptly);
-            passes++;
 
-            Assert.Equal(passes, h.Gateway.HeartbeatTimes.Count(t => t.TaskId == "wf-1/live"));
-            Assert.Equal(passes, h.Gateway.HeartbeatTimes.Count(t => t.TaskId == "wf-1/continued"));
+            Assert.Equal(pass, h.Gateway.HeartbeatTimes.Count(t => t.TaskId == "wf-1/live"));
+            Assert.Equal(pass, h.Gateway.HeartbeatTimes.Count(t => t.TaskId == "wf-1/continued"));
             // Told once, in the first pass.
             Assert.Equal("wf-1/cancelled", Assert.Single(h.Gateway.Cancelled));
             Assert.Equal("wf-1/timed-out", Assert.Single(h.Gateway.Failed).TaskId);
-            await Task.Delay(50);
+            await Task.Delay(60);
         }
 
-        Assert.True(passes >= 2);
-        // One call of each kind per record, however many passes went by.
-        Assert.Equal(
-            [
-                "cancel:wf-1/cancelled",
-                "publish:wf-1/cancelled", "publish:wf-1/continued/incomplete-retry-1", "publish:wf-1/live", "publish:wf-1/timed-out",
-                "timeout:wf-1/timed-out",
-            ],
-            h.Relay.Started.Skip(4).Order(StringComparer.Ordinal).ToArray());
-
-        // Nothing has been sent, and nothing was dropped for want of it.
+        // Nothing more was started behind the four that hang, nothing has been sent, and nothing
+        // was dropped for want of it.
+        Assert.Equal(8, h.Relay.Started.Count);
+        Assert.Equal(4, h.Relay.MostInProgress);
         Assert.Empty(h.Relay.Cancels);
         Assert.Empty(h.Relay.TimeoutReports);
         Assert.Equal(4, h.Relay.Published.Count);
@@ -148,6 +137,9 @@ public sealed class DurableDelegationSlowRelayTests
         await h.SettleAsync();
         await h.TickAsync();
 
+        // The cancel was not made until that record's own directive, which was already out, had ended.
+        var events = h.Relay.Events.ToList();
+        Assert.True(events.LastIndexOf("end:publish:wf-1/cancelled") < events.IndexOf("start:cancel:wf-1/cancelled"));
         Assert.Equal(("reviewer-one", "wf-1/cancelled"), Assert.Single(h.Relay.Cancels));
         Assert.Equal("wf-1/timed-out", Assert.Single(h.Relay.TimeoutReports).TaskId);
         Assert.Equal(8, h.Relay.Published.Count);
@@ -256,36 +248,68 @@ public sealed class DurableDelegationSlowRelayTests
     }
 
     /// <summary>
-    /// A cancel is best effort, as it was inside the activity. One that never finishes is given
-    /// up, so its record does not wait for ever, and what it does when it finally ends is ignored.
+    /// A cancel is one best-effort attempt, as it was inside the activity. One that hangs is told
+    /// to stop when its time is up; a relay that honours that ends the call, the attempt has been
+    /// made, and the record does not wait any longer.
     /// </summary>
     [Fact]
-    public async Task ACancelThatNeverFinishes_IsGivenUp_AndItsRecordDoesNotWaitForEver()
+    public async Task ACancelThatHangs_IsToldToStopWhenItsTimeIsUp_AndThatWasTheOneAttempt()
     {
         using var h = new DurableHarness();
         SetRelaySendTimeout(h.Service, TimeSpan.FromMilliseconds(50));
         await h.StartAsync(DurableHarness.Start());
         h.Gateway.Heartbeat = ActivityCallOutcome.CancelRequested;
+        h.Relay.BeforeSend = (kind, _, ct) => kind == "cancel" ? Task.Delay(Timeout.Infinite, ct) : Task.CompletedTask;
+
+        await h.Service.TickAsync(default).WaitAsync(Promptly);
+        await h.SettleAsync();
+
+        Assert.Empty(await h.PendingAsync());
+        Assert.Empty(h.Relay.Cancels);
+        Assert.Single(h.Gateway.Cancelled);
+        h.Restart();
+        Assert.Empty(await h.PendingAsync());
+    }
+
+    /// <summary>
+    /// A cancel whose call never ends, whatever it is told, is not written off: it may still
+    /// arrive. Its record stays, the cancel stays owed in the file, and a new process sends it.
+    /// Meanwhile it holds one place and nothing else: other delegations are heartbeated and their
+    /// sends go out.
+    /// </summary>
+    [Fact]
+    public async Task ACancelThatNeverEnds_StaysOwed_AndHoldsOnlyItsOwnPlace()
+    {
+        using var h = new DurableHarness();
+        SetRelaySendTimeout(h.Service, TimeSpan.FromMilliseconds(50));
+        await h.StartAsync(DurableHarness.Start("wf-1/cancelled", budgetSeconds: 3600));
+        await h.StartAsync(DurableHarness.Start("wf-1/other", budgetSeconds: 3600));
+        h.Gateway.HeartbeatFor["wf-1/cancelled"] = ActivityCallOutcome.CancelRequested;
         var never = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         h.Relay.BeforeSend = (kind, _, _) => kind == "cancel" ? never.Task : Task.CompletedTask;
 
         await h.Service.TickAsync(default).WaitAsync(Promptly);
-        Assert.Equal("cancelling", Assert.Single(await h.PendingAsync()).State);
-
-        var deadline = Environment.TickCount64 + 10_000;
-        while ((await h.PendingAsync()).Count > 0)
+        await DurableHarness.WaitForAsync(() => h.Relay.Started.Contains("cancel:wf-1/cancelled"), "the cancel was started");
+        h.Clock.Advance(TimeSpan.FromMinutes(6));
+        for (var pass = 0; pass < 4; pass++)
         {
-            Assert.True(Environment.TickCount64 < deadline, "the record is still waiting for a cancel that never finishes");
-            await Task.Delay(50);
+            await Task.Delay(60);
             await h.Service.TickAsync(default).WaitAsync(Promptly);
         }
 
-        Assert.Single(h.Gateway.Cancelled);
-        h.Restart();
-        Assert.Empty(await h.PendingAsync());
+        await DurableHarness.WaitForAsync(() => h.Relay.Published.Count == 3, "the other delegation's re-send went out");
+        Assert.Equal(5, h.Gateway.HeartbeatTimes.Count(t => t.TaskId == "wf-1/other"));
+        Assert.Equal(
+            [("wf-1/cancelled", "cancelling"), ("wf-1/other", "waiting")],
+            (await h.PendingAsync()).Select(p => (p.TaskId, p.State)).ToArray());
+        Assert.Equal(1, h.Relay.Started.Count(s => s == "cancel:wf-1/cancelled"));
 
-        never.SetResult();
-        await DurableHarness.WaitForAsync(() => h.Relay.Cancels.Count == 1, "the abandoned cancel ended");
-        Assert.Empty(await h.PendingAsync());
+        // A new process has only the file, and the relay answers it.
+        h.Relay.BeforeSend = null;
+        h.Restart();
+        await h.TickAsync();
+
+        Assert.Equal(("reviewer-one", "wf-1/cancelled"), Assert.Single(h.Relay.Cancels));
+        Assert.Equal("wf-1/other", Assert.Single(await h.PendingAsync()).TaskId);
     }
 }

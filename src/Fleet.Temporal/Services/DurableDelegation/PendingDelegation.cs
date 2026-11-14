@@ -97,6 +97,20 @@ public sealed class PendingDelegation
     public bool CancelSent { get; set; }
 
     /// <summary>
+    /// Cancels owed on behalf of the records this one replaced under the same task id, oldest
+    /// first. They are sent, and have ended, before this record's directive is published: the
+    /// agent matches a cancel by task id alone, so a cancel meant for an earlier execution that
+    /// arrived after this one's directive would stop this one.
+    /// </summary>
+    public List<PriorCancel> PriorCancels { get; set; } = [];
+
+    /// <summary>
+    /// The directive is not published before this. Set when a cancel for the same task id ended
+    /// without the bridge knowing whether it will still arrive.
+    /// </summary>
+    public DateTimeOffset PublishNotBefore { get; set; }
+
+    /// <summary>
     /// Temporal needs nothing more for this activity: it has been failed, reported cancelled, or
     /// is gone. The record is no longer heartbeated and stays only until what it still owes the
     /// relay (a cancel, a timeout notice) has been sent.
@@ -123,6 +137,7 @@ public sealed class PendingDelegation
     [JsonIgnore]
     public bool Finished =>
         TemporalSettled
+        && PriorCancels.Count == 0
         && (!CancelRequested || CancelSent)
         && (TimeoutMessage is null || TimeoutReported);
 
@@ -135,7 +150,21 @@ public sealed class PendingDelegation
     [JsonIgnore]
     public DateTimeOffset Deadline => WaitStartedAt + Budget;
 
-    public PendingDelegation Clone() => (PendingDelegation)MemberwiseClone();
+    public PendingDelegation Clone()
+    {
+        var copy = (PendingDelegation)MemberwiseClone();
+        copy.PriorCancels = [.. PriorCancels];
+        return copy;
+    }
+}
+
+/// <summary>A cancel still owed to an execution that a later record has replaced.</summary>
+public sealed class PriorCancel
+{
+    public string Agent { get; set; } = "";
+
+    /// <summary>The id the agent was working under: the task id, or a continuation's.</summary>
+    public string TaskId { get; set; } = "";
 }
 
 /// <summary>What the activity knows when it hands a delegation over.</summary>

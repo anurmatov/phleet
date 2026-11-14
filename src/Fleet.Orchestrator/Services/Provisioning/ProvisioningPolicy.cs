@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 
 namespace Fleet.Orchestrator.Services;
@@ -9,7 +10,7 @@ namespace Fleet.Orchestrator.Services;
 internal sealed class ProvisioningPolicy(IConfiguration config, JournalTokenService journalTokens)
 {
     internal string? PrimaryHumanRawValue() =>
-        EnvFile.Read(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env").GetValueOrDefault("FLEET_PRIMARY_HUMAN_USER_ID");
+        EnvFile.Read(ProvisioningOptions.From(config).EnvFilePath).GetValueOrDefault("FLEET_PRIMARY_HUMAN_USER_ID");
 
     /// <summary>
     /// The deployment's primary human on Telegram, or null when it is blank or not a valid id.
@@ -108,7 +109,7 @@ internal sealed class ProvisioningPolicy(IConfiguration config, JournalTokenServ
     /// </remarks>
     internal bool MediaEndpointIsConfigured()
     {
-        var env = EnvFile.Read(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+        var env = EnvFile.Read(ProvisioningOptions.From(config).EnvFilePath);
         return HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_ENDPOINT");
     }
 

@@ -3,7 +3,9 @@
 
 .app-layout {
   min-height: 100dvh;
-  padding-left: var(--sidebar);
+  /* A phone on its side has a notch on one edge: the page keeps clear of it. */
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-left: calc(var(--sidebar) + env(safe-area-inset-left, 0px));
 }
 
 /* ── Brand ───────────────────────────────────────────────────────────────── */
@@ -159,8 +161,8 @@ div.sidenav-action { display: flex; align-items: center; color: var(--text-2); }
   display: flex;
   align-items: center;
   gap: 12px;
-  height: var(--header);
-  padding: 0 var(--gutter);
+  height: calc(var(--header) + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) var(--gutter) 0;
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: saturate(160%) blur(12px);
   -webkit-backdrop-filter: saturate(160%) blur(12px);
@@ -268,7 +270,7 @@ input.header-search-input {
 .app-main--memory,
 .app-main--chat {
   display: flex;
-  height: calc(100dvh - var(--header) - var(--tabbar) - env(safe-area-inset-bottom, 0px));
+  height: calc(100dvh - var(--header) - var(--tabbar) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   padding: 0;
   overflow: hidden;
 }
@@ -284,7 +286,7 @@ input.header-search-input {
     inset: auto 0 0 0;
     display: flex;
     height: calc(var(--tabbar) + env(safe-area-inset-bottom, 0px));
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     backdrop-filter: saturate(160%) blur(14px);
     -webkit-backdrop-filter: saturate(160%) blur(14px);

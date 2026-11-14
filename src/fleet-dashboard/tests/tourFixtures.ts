@@ -14,23 +14,23 @@ const agent = (over: Record<string, unknown>) => ({
 })
 
 export const agents = [
-  agent({ agentName: 'acto', displayName: 'Acto', role: 'co-cto', effectiveStatus: 'busy', reportedStatus: 'busy',
+  agent({ agentName: 'agent1', displayName: 'Agent 1', role: 'coordinator', effectiveStatus: 'busy', reportedStatus: 'busy',
     currentTask: 'Reviewing the design for issue #412: split the provisioning service into plan and apply', currentTaskId: 't-1',
-    queuedCount: 2, priorityQueuedCount: 1, containerName: 'fleet-acto',
+    queuedCount: 2, priorityQueuedCount: 1, containerName: 'fleet-agent1',
     queuedMessages: [
       { preview: 'Can you look at the failing migration test?', source: 'telegram', queuedAt: minutesAgo(3), priority: true },
       { preview: 'Workflow callback: consensus round 2 finished', source: 'temporal', queuedAt: minutesAgo(1) },
     ] }),
-  agent({ agentName: 'adev', displayName: 'Adev', role: 'developer', effectiveStatus: 'busy', reportedStatus: 'busy',
-    currentTask: 'Implementing PR #415 — dashboard: redraw the agent list', currentTaskId: 't-2', containerName: 'fleet-adev',
+  agent({ agentName: 'agent2', displayName: 'Agent 2', role: 'developer', effectiveStatus: 'busy', reportedStatus: 'busy',
+    currentTask: 'Implementing PR #415 — dashboard: redraw the agent list', currentTaskId: 't-2', containerName: 'fleet-agent2',
     backgroundTasks: [{ taskId: 'bg-1', taskType: 'bash', description: 'dotnet test tests/Fleet.Orchestrator.Tests', elapsedSeconds: 184, summary: null }] }),
-  agent({ agentName: 'adev-codex', displayName: 'Adev Codex', role: 'developer', model: 'gpt-5.5-codex', containerName: 'fleet-adev-codex' }),
+  agent({ agentName: 'agent3', displayName: 'Agent 3', role: 'developer', model: 'gpt-5.5-codex', containerName: 'fleet-agent3' }),
   agent({ agentName: 'reviewer', displayName: 'Reviewer', role: 'reviewer', model: 'claude-sonnet-5-5', effectiveStatus: 'stale',
     lastSeen: minutesAgo(4), containerName: 'fleet-reviewer' }),
   agent({ agentName: 'planner', displayName: 'Planner', role: 'product', model: 'claude-opus-5-5', effectiveStatus: 'dead',
     reportedStatus: 'idle', lastSeen: minutesAgo(52), containerName: 'fleet-planner' }),
-  agent({ agentName: 'scribe', displayName: 'Scribe', role: 'docs', model: 'ollama/gemma4:27b', effectiveStatus: 'stopped',
-    reportedStatus: 'stopped', lastSeen: minutesAgo(900), containerName: 'fleet-scribe', version: null }),
+  agent({ agentName: 'agent4', displayName: 'Agent 4', role: 'docs', model: 'ollama/gemma4:27b', effectiveStatus: 'stopped',
+    reportedStatus: 'stopped', lastSeen: minutesAgo(900), containerName: 'fleet-agent4', version: null }),
 ]
 
 const run = (over: Record<string, unknown>) => ({
@@ -71,20 +71,20 @@ const versioned = (name: string, agentsFor: string[], bytes: number, versions = 
   ({ name, currentVersion: versions, isActive: true, totalVersions: versions, agents: agentsFor, currentBytes: bytes })
 
 export const instructions = [
-  versioned('base', ['acto', 'adev', 'adev-codex', 'reviewer', 'planner', 'scribe'], 4210, 12),
-  versioned('co-cto', ['acto'], 8930, 31),
-  versioned('developer', ['adev', 'adev-codex'], 11840, 18),
+  versioned('base', ['agent1', 'agent2', 'agent3', 'reviewer', 'planner', 'agent4'], 4210, 12),
+  versioned('coordinator', ['agent1'], 8930, 31),
+  versioned('developer', ['agent2', 'agent3'], 11840, 18),
   versioned('reviewer', ['reviewer'], 5120, 6),
   { ...versioned('legacy-triage', [], 1900, 2), isActive: false },
 ]
 
 export const projectContexts = [
-  versioned('project', ['acto', 'adev', 'adev-codex', 'reviewer'], 7650, 9),
-  versioned('ios-client', ['adev'], 3120, 2),
+  versioned('project', ['agent1', 'agent2', 'agent3', 'reviewer'], 7650, 9),
+  versioned('ios-client', ['agent2'], 3120, 2),
 ]
 
 export const outputStyles = [
-  { name: 'plain', description: 'Short answers, no headings', body: 'Answer in plain sentences.', agents: ['acto', 'reviewer'] },
+  { name: 'plain', description: 'Short answers, no headings', body: 'Answer in plain sentences.', agents: ['agent1', 'reviewer'] },
   { name: 'report', description: 'Findings first, then evidence', body: 'Lead with the finding.', agents: ['planner'] },
 ]
 
@@ -121,7 +121,7 @@ export const memories = [
 ]
 
 export const memoryDoc = {
-  id: 'm-1', title: 'How deploys reach the host', type: 'reference', agent: 'acto', project: 'project', tags: ['deploy', 'ops'],
+  id: 'm-1', title: 'How deploys reach the host', type: 'reference', agent: 'agent1', project: 'project', tags: ['deploy', 'ops'],
   source: 'conversation', created_at: minutesAgo(9000), updated_at: minutesAgo(300),
   content: '# How deploys reach the host\n\nA merge to `main` builds the images. The deploy pipeline pulls them and recreates the services **one at a time**.\n\n- the orchestrator first\n- then the bridge\n- agents last, by reprovision\n\n```\n./deploy.sh --service orchestrator\n```\n',
 }
@@ -154,12 +154,12 @@ export const routes: Record<string, unknown> = {
   '/api/memory/m-1': memoryDoc,
   '/api/memory/stats/reads': { since: minutesAgo(10000), entries: [] },
   '/api/prompt-size-policy': { unit: 'utf8Bytes', instruction: { limitBytes: 10000, limitKey: 'k' }, projectContext: { limitBytes: 10000, limitKey: 'k' } },
-  '/api/chat/agents': { available: true, agents: [{ agentName: 'acto', displayName: 'Acto' }, { agentName: 'adev', displayName: 'Adev' }] },
+  '/api/chat/agents': { available: true, agents: [{ agentName: 'agent1', displayName: 'Agent 1' }, { agentName: 'agent2', displayName: 'Agent 2' }] },
   '/api/auth/devices': devices,
   '/api/epic-grants': [],
   '/api/credential-files': [
     { id: 1, name: 'deploy-key', type: 'ssh', fileName: 'id_ed25519', sizeBytes: 411, createdAt: minutesAgo(9000),
-      mounts: [{ id: 1, agentName: 'adev', mountPath: '/root/.ssh/id_ed25519', mode: '0400' }] },
+      mounts: [{ id: 1, agentName: 'agent2', mountPath: '/root/.ssh/id_ed25519', mode: '0400' }] },
   ],
   '/api/credentials/connections': {
     telegram: { configured: true, groupChatEnabled: true, maskedCtoBotToken: '7•••••••Qx', maskedNotifierBotToken: null,
@@ -171,7 +171,7 @@ export const routes: Record<string, unknown> = {
   '/api/agent-templates': [],
   '/api/push': { enabled: false, devices: 0 },
   '/api/comms/journal/status': { status: 'available', schemaVersion: 7,
-    observers: [{ observer: 'acto', messages: 1840, lastIngestAt: minutesAgo(1) }, { observer: 'adev', messages: 912, lastIngestAt: minutesAgo(4) }],
+    observers: [{ observer: 'agent1', messages: 1840, lastIngestAt: minutesAgo(1) }, { observer: 'agent2', messages: 912, lastIngestAt: minutesAgo(4) }],
     rejectedSinceStart: {}, gc: { lastRunAt: minutesAgo(50), deletedSinceStart: { messages: 0, conversations: 0 }, failedSinceStart: 0 },
     ingest: { samples: 200, p50Ms: 4, p95Ms: 11 }, media: null },
 }
@@ -179,14 +179,14 @@ export const routes: Record<string, unknown> = {
 const versionsOf = (name: string, count: number) => Array.from({ length: Math.min(count, 4) }, (_, i) => {
   const n = count - i
   return { versionNumber: n, content: `# ${name}\n\nYou work in this repository. Read the issue before the code.\n\n- Keep changes small (v${n}).\n- Say what you verified.\n`,
-    createdAt: new Date(Date.now() - (i + 1) * 86_400_000).toISOString().slice(0, 16).replace('T', ' '), createdBy: i % 2 ? 'acto' : 'owner',
+    createdAt: new Date(Date.now() - (i + 1) * 86_400_000).toISOString().slice(0, 16).replace('T', ' '), createdBy: i % 2 ? 'agent1' : 'owner',
     reason: i === 0 ? 'Tighten the review rule' : i === 1 ? 'Add the verification line' : null }
 })
 
 const history = [
   { eventId: 1, eventType: 'WorkflowExecutionStarted', timestamp: minutesAgo(31), inputSummary: '{"IssueNumber":401,"Repo":"example/project"}' },
-  { eventId: 5, eventType: 'ActivityTaskScheduled', timestamp: minutesAgo(30), activityType: 'DelegateToAgent', agent: 'adev', inputSummary: 'Implement issue #401' },
-  { eventId: 9, eventType: 'ActivityTaskCompleted', timestamp: minutesAgo(12), activityType: 'DelegateToAgent', agent: 'adev', outputSummary: 'Opened PR #409' },
+  { eventId: 5, eventType: 'ActivityTaskScheduled', timestamp: minutesAgo(30), activityType: 'DelegateToAgent', agent: 'agent2', inputSummary: 'Implement issue #401' },
+  { eventId: 9, eventType: 'ActivityTaskCompleted', timestamp: minutesAgo(12), activityType: 'DelegateToAgent', agent: 'agent2', outputSummary: 'Opened PR #409' },
   { eventId: 12, eventType: 'ActivityTaskScheduled', timestamp: minutesAgo(11), activityType: 'DelegateToAgent', agent: 'reviewer', inputSummary: 'Review PR #409' },
 ]
 
@@ -221,7 +221,7 @@ const PROTOCOL = 'fleet.conversation.v1'
 let chatSeq = 0
 const chatEvent = (kind: string, submissionId: string, payload: Record<string, unknown>, minutes: number) => ({
   protocol: PROTOCOL, eventId: `ev-${++chatSeq}`, seq: chatSeq, emittedAt: minutesAgo(minutes), kind,
-  identity: { principalId: 'owner', role: 'owner', channelId: 'client', conversationId: 'c-acto', submissionId, attempt: 1 },
+  identity: { principalId: 'owner', role: 'owner', channelId: 'client', conversationId: 'c-agent1', submissionId, attempt: 1 },
   payload,
 })
 
@@ -233,13 +233,13 @@ const chatHistory = [
     text: [
       'Two, both on Tuesday after the image was rebuilt:',
       '',
-      '- **adev-codex**: the app-server did not answer `initialize` within the timeout.',
-      '- **scribe**: the local model was still loading.',
+      '- **agent3**: the app-server did not answer `initialize` within the timeout.',
+      '- **agent4**: the local model was still loading.',
       '',
       'Both came up on the second try. To see it yourself:',
       '',
       '```bash',
-      'docker logs fleet-adev-codex --since 168h | grep -i warmup',
+      'docker logs fleet-agent3 --since 168h | grep -i warmup',
       '```',
     ].join('\n'),
   }, 1498),
@@ -281,26 +281,26 @@ export function chatAnswer(method: string, path: string, body: unknown): unknown
     return {
       protocol: PROTOCOL,
       conversations: [
-        { conversationId: 'c-acto', agent: 'acto', externalRef: 'main', nextSeq: chatHistory.length + 1, retainedFloorSeq: 1, lastActivityAt: minutesAgo(1),
+        { conversationId: 'c-agent1', agent: 'agent1', externalRef: 'main', nextSeq: chatHistory.length + 1, retainedFloorSeq: 1, lastActivityAt: minutesAgo(1),
           lastMessage: { from: 'user', text: 'Yes, and check the Credentials page for the same thing.' } },
-        { conversationId: 'c-adev', agent: 'adev', externalRef: 'main', nextSeq: 12, retainedFloorSeq: 1, lastActivityAt: minutesAgo(190),
+        { conversationId: 'c-agent2', agent: 'agent2', externalRef: 'main', nextSeq: 12, retainedFloorSeq: 1, lastActivityAt: minutesAgo(190),
           lastMessage: { from: 'agent', text: 'PR #415 is up: the agent list is redrawn and the tests pass.' } },
       ],
     }
   }
   if (method === 'POST' && path === '/v1/conversations') {
-    const agent = (body as { agent?: string } | null)?.agent ?? 'acto'
+    const agent = (body as { agent?: string } | null)?.agent ?? 'agent1'
     return { protocol: PROTOCOL, conversationId: `c-${agent}`, agent, nextSeq: 1, retainedFloorSeq: 1 }
   }
   const events = path.match(/^\/v1\/conversations\/([^/]+)\/events$/)
   if (method === 'GET' && events) {
-    return { protocol: PROTOCOL, events: events[1] === 'c-acto' ? chatHistory : [], nextAfterSeq: 0, hasMore: false }
+    return { protocol: PROTOCOL, events: events[1] === 'c-agent1' ? chatHistory : [], nextAfterSeq: 0, hasMore: false }
   }
   return undefined
 }
 
-/** What this browser has shown of each thread: Adev's has moved on since. */
-export const chatSeen = { acto: chatHistory.length, adev: 6 }
+/** What this browser has shown of each thread: Agent 2's has moved on since. */
+export const chatSeen = { agent1: chatHistory.length, agent2: 6 }
 
 /** Every page of the dashboard, by the hash that opens it. */
 export const pages = [
@@ -330,7 +330,7 @@ export const scenes = [
     '/api/agents': [], '/api/workflows': [],
     '/api/setup/status': { telegram: { configured: false, groupChatEnabled: false }, gitHub: { configured: false } },
     '/api/agent-templates': [
-      { name: 'co-cto', displayName: 'Co-CTO', description: 'Plans the work, reviews it and provisions specialists.', defaultModel: 'claude-opus-5-5', toolCount: 24, mcpCount: 5 },
+      { name: 'coordinator', displayName: 'Coordinator', description: 'Plans the work, reviews it and provisions specialists.', defaultModel: 'claude-opus-5-5', toolCount: 24, mcpCount: 5 },
       { name: 'developer', displayName: 'Developer', description: 'Implements issues as pull requests.', defaultModel: 'claude-sonnet-5-5', toolCount: 18, mcpCount: 3 },
       { name: 'reviewer', displayName: 'Reviewer', description: 'Reads a change and says what is wrong with it.', defaultModel: 'claude-sonnet-5-5', toolCount: 12, mcpCount: 2 },
     ] } },

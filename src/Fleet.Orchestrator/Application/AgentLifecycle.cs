@@ -51,6 +51,7 @@ public sealed class AgentLifecycle(
             return WriteFaults.Failed("docker_failed", $"Failed to stop container '{containerName}' — check orchestrator logs");
 
         operatorStops.MarkStopped(agentName);
+        registry.InvalidateReply(agentName);
         return WriteOutcome<ContainerAction>.Ok(new ContainerAction(containerName));
     }
 
@@ -64,6 +65,7 @@ public sealed class AgentLifecycle(
         if (!await docker.StartContainerAsync(containerName))
             return WriteFaults.Failed("docker_failed", $"Failed to start container '{containerName}' — check orchestrator logs");
 
+        registry.InvalidateReply(agentName);
         return WriteOutcome<ContainerAction>.Ok(new ContainerAction(containerName));
     }
 
@@ -88,6 +90,7 @@ public sealed class AgentLifecycle(
         if (!await docker.RestartContainerAsync(containerName))
             return WriteFaults.Failed("docker_failed", $"Failed to restart container '{containerName}' — check orchestrator logs");
 
+        registry.InvalidateReply(agentName);
         return WriteOutcome<ContainerAction>.Ok(new ContainerAction(containerName));
     }
 

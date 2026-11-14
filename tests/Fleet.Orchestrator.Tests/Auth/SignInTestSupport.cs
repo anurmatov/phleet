@@ -89,6 +89,11 @@ internal sealed class CountingSecretHasher(ISecretHasher inner) : ISecretHasher
 /// </summary>
 internal sealed class SignInHost : IAsyncDisposable
 {
+    private sealed class NoRuntime : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+    }
     public const string ServiceToken = "synthetic-service-token";
     public const string ConfigToken = "synthetic-config-token";
 
@@ -159,6 +164,9 @@ internal sealed class SignInHost : IAsyncDisposable
         builder.Services.AddSingleton<JournalTokenService>();
         builder.Services.AddSingleton<TaskHistoryStore>();
         builder.Services.AddSingleton<AgentRegistry>();
+        builder.Services.AddSingleton(new DockerService(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<DockerService>.Instance,
+            new HttpClient(new NoRuntime()) { BaseAddress = new Uri("http://localhost") }));
         builder.Services.AddRateLimiter(rl =>
         {
             rl.AddSignInPolicy();

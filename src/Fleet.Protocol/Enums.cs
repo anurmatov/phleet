@@ -196,6 +196,9 @@ public enum ProtocolErrorCode
     /// reads without knowing what it answers is a different message. Appended, never inserted.
     /// </remarks>
     ReplyTargetNotFound,
+
+    /// <summary>The current runtime cannot consume a quoted reply; ordinary chat is unchanged.</summary>
+    ReplyUnavailable,
 }
 
 /// <summary>Coarse attachment classification (D14). Metadata only — no bytes, no URL.</summary>

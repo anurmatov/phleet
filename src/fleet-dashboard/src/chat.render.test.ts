@@ -36,10 +36,13 @@ test('agent replies are Markdown with safe links and no raw HTML; the person’s
     ]
     const pending: PendingSend[] = [
       { submissionId: 'p1', text: 'not sent', files: [], status: 'failed', acceptedSeq: null, problem: 'Not confirmed.', canRetry: true },
+      { submissionId: 'p3', text: 'keep my words', files: [], status: 'failed', acceptedSeq: null,
+        problem: 'Reply is unavailable.', canRetry: false, canRemoveReply: true,
+        replyTo: { key: 'e2', who: 'agent', text: 'earlier answer' } },
       { submissionId: 'p2', text: 'on its way', files: [], status: 'sending', acceptedSeq: null, problem: null, canRetry: false },
     ]
     const html = renderToStaticMarkup(createElement(ChatTranscript, {
-      entries, status: { S1: 'waiting' }, pending, onRetry: () => {}, onDiscard: () => {},
+      entries, status: { S1: 'waiting' }, pending, onRetry: () => {}, onDiscard: () => {}, onRemoveReply: () => {},
     }))
 
     // The person's message: literal text, never Markdown or HTML.
@@ -83,6 +86,8 @@ test('agent replies are Markdown with safe links and no raw HTML; the person’s
     assert.ok(html.includes('Not confirmed.'))
     assert.match(html, />Retry</)
     assert.match(html, />Discard</)
+    assert.match(html, />Remove reply</)
+    assert.ok(html.includes('keep my words'))
     assert.ok(html.includes('Sending…'))
   } finally { await server.close() }
 })

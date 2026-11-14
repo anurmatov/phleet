@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 
@@ -31,10 +32,45 @@ internal sealed record ChatProvisioning(string SouthBaseUrl, string SouthToken, 
 /// </remarks>
 public static partial class ChatAgents
 {
-    public static bool SupportsReply(Models.AgentState? agent) =>
+    private static bool ReportsReply(Models.AgentState? agent) =>
         agent is { IsDbOnly: false }
         && agent.EffectiveStatus is "idle" or "busy"
         && agent.Capabilities?.Contains(SignIn.ChatReplyCapability, StringComparer.Ordinal) == true;
+
+    /// <summary>Telemetry proves support only for the configured, currently running Docker instance.</summary>
+    public static async Task<bool> SupportsReplyAsync(
+        Models.AgentState? agent, string? configuredContainer, DockerService docker, CancellationToken ct)
+    {
+        if (!ReportsReply(agent) || string.IsNullOrWhiteSpace(configuredContainer)) return false;
+        // A stuck Docker socket must withdraw Reply, not exhaust the chat issuer's request budget.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(1));
+        // Never let a heartbeat choose the container inspected with the orchestrator's authority.
+        return SupportsReply(agent, await docker.InspectContainerAsync(configuredContainer, deadline.Token));
+    }
+
+    internal static bool SupportsReply(Models.AgentState? agent, string? inspectedRuntime)
+    {
+        if (!ReportsReply(agent) || inspectedRuntime is null) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(inspectedRuntime);
+            var root = document.RootElement;
+            var runtime = root.GetProperty("State");
+            var id = root.GetProperty("Id").GetString();
+            var reported = agent!.ContainerName;
+            return runtime.GetProperty("Running").ValueKind == JsonValueKind.True
+                && id is { Length: 64 } && id.All(Uri.IsHexDigit)
+                && reported is { Length: >= 12 and <= 64 } && reported.All(Uri.IsHexDigit)
+                && id.StartsWith(reported, StringComparison.OrdinalIgnoreCase)
+                && DateTimeOffset.TryParse(runtime.GetProperty("StartedAt").GetString(), out var started)
+                && started.Year > 1 && agent.LastSeen >= started;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>Where a chat-enabled agent reaches the chat service's agent-facing listener.</summary>
     public const string DefaultSouthUrl = "http://fleet-comms:8082";

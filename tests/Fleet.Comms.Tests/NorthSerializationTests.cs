@@ -227,6 +227,7 @@ public class NorthSerializationTests
                 // Appended for replies: the message a submission answers is not one of the
                 // conversation's.
                 ProtocolErrorCode.ReplyTargetNotFound,
+                ProtocolErrorCode.ReplyUnavailable,
             ],
             Enum.GetValues<ProtocolErrorCode>());
     }
@@ -254,6 +255,7 @@ public class NorthSerializationTests
     [InlineData(ProtocolErrorCode.UnsupportedMediaType, "\"unsupported_media_type\"")]
     [InlineData(ProtocolErrorCode.AttachmentGone, "\"attachment_gone\"")]
     [InlineData(ProtocolErrorCode.AgentUnavailable, "\"agent_unavailable\"")]
+    [InlineData(ProtocolErrorCode.ReplyUnavailable, "\"reply_unavailable\"")]
     public void ConversationErrorCodes_HaveFixedMessagesAndWireForms(ProtocolErrorCode code, string wire)
     {
         Assert.Equal(wire, JsonSerializer.Serialize(code, FleetProtocolJson.Options));

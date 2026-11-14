@@ -32,6 +32,7 @@ public static class ProtocolErrors
     public const string AttachmentGone = "The attachment is no longer available.";
     public const string AgentUnavailable = "This agent does not accept chat.";
     public const string ReplyTargetNotFound = "The message being replied to is not available.";
+    public const string ReplyUnavailable = "Reply is unavailable for the current runtime. Remove the reply to send a new message.";
 
     /// <summary>Look up the fixed message for a code. Never returns runtime-derived text.</summary>
     public static string MessageFor(ProtocolErrorCode code) => code switch
@@ -56,6 +57,7 @@ public static class ProtocolErrors
         ProtocolErrorCode.AttachmentGone => AttachmentGone,
         ProtocolErrorCode.AgentUnavailable => AgentUnavailable,
         ProtocolErrorCode.ReplyTargetNotFound => ReplyTargetNotFound,
+        ProtocolErrorCode.ReplyUnavailable => ReplyUnavailable,
         _ => Internal,
     };
 }

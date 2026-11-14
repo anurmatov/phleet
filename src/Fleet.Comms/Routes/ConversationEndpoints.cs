@@ -231,9 +231,11 @@ public static class ConversationEndpoints
             || !string.Equals(answer.Caller.PrincipalId, caller.PrincipalId, StringComparison.Ordinal))
             return Unauthorized();
 
-        return answer.AgentChatEnabled == true && (!requiresReply || answer.AgentReplySupported == true)
-            ? null
-            : Error(ProtocolErrorCode.AgentUnavailable, StatusCodes.Status409Conflict);
+        if (answer.AgentChatEnabled != true)
+            return Error(ProtocolErrorCode.AgentUnavailable, StatusCodes.Status409Conflict);
+        return requiresReply && answer.AgentReplySupported != true
+            ? Error(ProtocolErrorCode.ReplyUnavailable, StatusCodes.Status409Conflict)
+            : null;
     }
 
     // ── catch-up ─────────────────────────────────────────────────────────────

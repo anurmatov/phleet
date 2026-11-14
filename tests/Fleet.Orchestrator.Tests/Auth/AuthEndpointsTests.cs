@@ -433,11 +433,11 @@ public class AuthEndpointsTests
 
         var body = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/chat/agents", cookie: cookie));
         Assert.True(body.GetProperty("available").GetBoolean());
-        Assert.True(body.GetProperty("agents")[0].GetProperty("replySupported").GetBoolean());
+        Assert.False(body.GetProperty("agents")[0].GetProperty("replySupported").GetBoolean());
         Assert.False(body.GetProperty("agents")[1].GetProperty("replySupported").GetBoolean());
         var checkedAgent = await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
             new { cookie = $"{CallerAuthenticator.SessionCookie}={cookie}", agent = "builder" }));
-        Assert.True(checkedAgent.GetProperty("agentReplySupported").GetBoolean());
+        Assert.False(checkedAgent.GetProperty("agentReplySupported").GetBoolean());
         Assert.Equal(
             [("builder", "builder"), ("reviewer", "Reviewer")],
             body.GetProperty("agents").EnumerateArray()

@@ -860,3 +860,29 @@ test('only a send still waiting for its answer is left out, and one message hide
   assert.equal(pendingToShow(transcriptWith([5, 'again']), [send({ status: 'failed' })]).length, 1)
   assert.equal(pendingToShow(transcriptWith([5, 'other words']), [send({})]).length, 1)
 })
+
+test('a Reply refusal keeps the message and removes only the quotation on explicit recovery', async () => {
+  const server = chatService().on('POST', /\/submissions$/, { status: 409,
+    body: { protocol: PROTOCOL, code: 'reply_unavailable', message: 'x' } })
+  const c = await live(server)
+  c.chat.send('my unsent words', [], { key: '01JEVENT', who: 'agent', text: 'An earlier answer' })
+  await settle()
+  const pending = c.last().pending[0]
+  assert.equal(pending.status, 'failed')
+  assert.equal(pending.text, 'my unsent words')
+  assert.equal(pending.canRetry, false)
+  assert.equal(pending.canRemoveReply, true)
+  assert.doesNotMatch(pending.problem!, /settings|chat is off/i)
+  c.chat.removeReply(pending.submissionId)
+  assert.equal(c.last().pending[0].text, 'my unsent words')
+  assert.equal(c.last().pending[0].replyTo, null)
+  assert.equal(c.last().pending[0].canRetry, true)
+  assert.equal(server.callsTo('POST', /\/submissions$/).length, 1)
+  server.on('POST', /\/submissions$/, { status: 201, body: { protocol: PROTOCOL, acceptedSeq: 1 } })
+  c.chat.retry(pending.submissionId)
+  await settle()
+  const retried = server.callsTo('POST', /\/submissions$/)[1].body as { text: string; replyToEventId?: string; submissionId: string }
+  assert.equal(retried.text, 'my unsent words')
+  assert.equal(retried.replyToEventId, undefined)
+  assert.equal(retried.submissionId, pending.submissionId)
+})

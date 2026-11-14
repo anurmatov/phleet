@@ -165,6 +165,11 @@ public sealed class AgentRegistry
     public AgentState? Get(string agentName) =>
         _agents.TryGetValue(agentName, out var state) ? state : null;
 
+    public void InvalidateReply(string agentName)
+    {
+        if (_agents.TryGetValue(agentName, out var state)) state.Capabilities = null;
+    }
+
     /// <summary>Removes an agent from the in-memory registry. Called after DB deletion to prevent ghost entries.</summary>
     public void Remove(string agentName) =>
         _agents.TryRemove(agentName, out _);

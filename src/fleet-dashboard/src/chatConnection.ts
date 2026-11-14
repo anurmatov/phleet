@@ -73,6 +73,8 @@ export interface OutgoingFile {
 
 /** A message this page sent, until the transcript shows it. */
 export interface PendingSend {
+  /** A definite refusal before acceptance allows the person to remove the reply explicitly. */
+  canRemoveReply?: boolean
   submissionId: string
   text: string
   /** The files that go with it, in the order they were picked. */
@@ -412,6 +414,14 @@ export class ChatConnection {
     this.update({ pending: this.state.pending.filter(p => p.submissionId !== submissionId || p.status !== 'failed') })
   }
 
+  removeReply(submissionId: string): void {
+    const pending = this.state.pending.find(p => p.submissionId === submissionId)
+    if (!pending || pending.status !== 'failed' || !pending.canRemoveReply || !pending.replyTo) return
+    // Keep the text, files and idempotency identity. Never silently resend changed words.
+    this.patchPending(submissionId, { replyTo: null, canRemoveReply: false, canRetry: true,
+      problem: 'Reply removed. Retry to send this message without a quotation.' })
+  }
+
   private async post(submissionId: string): Promise<void> {
     const conversationId = this.state.conversationId
     if (!this.state.pending.some(p => p.submissionId === submissionId) || !conversationId) return
@@ -473,7 +483,8 @@ export class ChatConnection {
       return
     }
     const problem = sendProblem(refusal)
-    this.patchPending(submissionId, { status: 'failed', problem: problem.message, canRetry: problem.canRetry })
+    this.patchPending(submissionId, { status: 'failed', problem: problem.message, canRetry: problem.canRetry,
+      canRemoveReply: refusal.code === 'reply_unavailable' && pending.replyTo != null })
     if (refusal.code === 'conversation_not_found' && this.state.phase !== 'stopped') {
       this.onRefusal('reopen', 'The conversation was not found.')
     }

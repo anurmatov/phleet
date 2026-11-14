@@ -110,3 +110,24 @@ export function phoneSetupProblemMessage(problem: PhoneSetupProblem): string {
     case 'code_too_long': return 'That is too much for one code. Use a shorter address or service token.'
   }
 }
+
+/**
+ * Puts a setup code on the clipboard as text, for a phone that has no camera to point at the
+ * picture: the app reads a pasted code exactly as it reads a scanned one.
+ *
+ * It is the same one-time code either way, so copying it is no more than showing it. The
+ * clipboard is the browser's to refuse — outside a secure context there is none, and a write can
+ * be denied — and both are answered with false rather than thrown, so the page can say so.
+ */
+export async function copyPhoneSetupCode(
+  code: string,
+  clipboard: { writeText(text: string): Promise<void> } | undefined | null,
+): Promise<boolean> {
+  if (!code || !clipboard) return false
+  try {
+    await clipboard.writeText(code)
+    return true
+  } catch {
+    return false
+  }
+}

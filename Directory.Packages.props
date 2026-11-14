@@ -35,7 +35,7 @@
     <!-- One MCP SDK version across the fleet: the agent, Comms and Telegram speak to each other. -->
     <PackageVersion Include="ModelContextProtocol" Version="0.8.0-preview.1" />
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="0.8.0-preview.1" />
-    <PackageVersion Include="MySqlConnector" Version="2.4.0" />
+    <PackageVersion Include="MySqlConnector" Version="2.6.1" />
     <PackageVersion Include="Pomelo.EntityFrameworkCore.MySql" Version="9.0.0" />
     <PackageVersion Include="Qdrant.Client" Version="1.13.0" />
     <PackageVersion Include="RabbitMQ.Client" Version="7.1.2" />

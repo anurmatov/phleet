@@ -91,6 +91,60 @@ public sealed class ColdStartPromptTests
     }
 
     [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    public async Task A_queued_prompt_is_selected_at_launch_after_the_process_changes_after_claim(
+        bool merged, bool steered, bool warmAtClaim)
+    {
+        await using var executor = new RestartableExecutor { Warm = warmAtClaim };
+        var manager = BuildManager(executor);
+        try
+        {
+            await manager.StartTask(1, "workflow step", "workflow step", isSessionTask: true, source: TaskSource.Relay);
+            await executor.WaitStarted(1);
+            await manager.StartTask(2, Warm, "hello", isSessionTask: true, coldStartTask: Cold);
+            if (merged)
+                await manager.StartTask(2, "SECOND-WARM", "second", isSessionTask: true, coldStartTask: "SECOND-COLD");
+
+            var entry = Assert.Single(manager.GetQueueSnapshot());
+            foreach (var part in entry.Parts) part.Steered = steered;
+            var claimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.QueueEntryClaimedForTest = () =>
+            {
+                executor.Warm = !warmAtClaim;
+                claimed.SetResult();
+            };
+            executor.Release();
+            await claimed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await executor.WaitStarted(2);
+
+            Assert.Equal(!warmAtClaim, executor.IsProcessWarm);
+            var prompt = executor.Tasks[1];
+            var expected = warmAtClaim ? Cold : Warm;
+            if (steered) expected = TaskManager.SteeredPartPrefix + "\n\n" + expected;
+            if (!merged) Assert.Equal(expected, prompt);
+            else
+            {
+                Assert.Contains(expected, prompt);
+                Assert.Contains("SECOND-WARM", prompt);
+                Assert.DoesNotContain("SECOND-COLD", prompt);
+                Assert.True(prompt.IndexOf(expected, StringComparison.Ordinal)
+                    < prompt.IndexOf("SECOND-WARM", StringComparison.Ordinal));
+                Assert.Equal(steered ? 2 : 0,
+                    prompt.Split(TaskManager.SteeredPartPrefix, StringSplitOptions.None).Length - 1);
+            }
+            Assert.DoesNotContain(warmAtClaim ? Warm : Cold, prompt);
+        }
+        finally { await Stop(manager, executor); }
+    }
+
+    [Theory]
     [InlineData(true, Warm)]
     [InlineData(false, Cold)]
     public async Task A_message_that_starts_at_once_gets_the_prompt_for_the_process_it_starts_on(bool warm, string expected)

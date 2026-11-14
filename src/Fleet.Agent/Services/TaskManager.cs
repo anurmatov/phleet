@@ -1152,14 +1152,19 @@ public sealed class TaskManager
                         // Identity and the merged-submission list must survive the queue. Without them the turn
                         // runs under a freshly synthesized identity, so the submission that produced
                         // submission.accepted{queued} never receives a terminal event and a client waits forever.
-                        var payload = MidTurnText.WithSteeredPrefix(queued).BuildPayload(DateTimeOffset.Now,
-                            processCold: !_executor.IsProcessWarm);
+                        // A process can restart after claim, before this turn is launched. Keep
+                        // both renderings with identical batch metadata until LaunchTurn chooses.
+                        var promptEntry = MidTurnText.WithSteeredPrefix(queued);
+                        var startedAt = DateTimeOffset.Now;
+                        var payload = promptEntry.BuildPayload(startedAt);
+                        var coldStartTask = promptEntry.BuildPayload(startedAt, processCold: true).Task;
                         start = new TurnStart(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
                             payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
                             payload.Images, payload.Documents, payload.UserId,
                             payload.Identity ?? SynthesizeIdentity(queued.ChatId, payload.Source),
                             payload.MergedSubmissionIds,
-                            queued.Parts.SelectMany(QueueIntake.KeysOfPart).Distinct().ToArray());
+                            queued.Parts.SelectMany(QueueIntake.KeysOfPart).Distinct().ToArray(),
+                            ColdStartTask: coldStartTask);
                         registered = RegisterTurnLocked(start);
                     }
                     catch (Exception ex)

@@ -67,7 +67,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
           </div>
 
           <div className="config-row">
-            <label className="config-label">Name <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">Name <span style={{ color: 'var(--danger)' }}>*</span></label>
             <FieldHint>Unique identifier used as the container name prefix and DB key. Lowercase, no spaces (e.g. <code>anew</code>).</FieldHint>
             <input
               className="config-input"
@@ -94,7 +94,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
             <input className="config-input" value={createForm.displayName} onChange={e => onFormChange({ displayName: e.target.value })} placeholder="e.g. anew (auto-fills from name)" />
           </div>
           <div className="config-row">
-            <label className="config-label">Role <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">Role <span style={{ color: 'var(--danger)' }}>*</span></label>
             <FieldHint>Maps to an instruction file in the roles directory (e.g. <code>developer</code> loads <code>roles/developer/system.md</code>).</FieldHint>
             <input className="config-input" value={createForm.role} onChange={e => onFormChange({ role: e.target.value })} placeholder="e.g. developer" />
           </div>
@@ -112,7 +112,7 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
           {!isLocal && (
           <div className="config-row">
             <label className="config-label">
-              Model{provider !== 'codex' && <span style={{ color: 'var(--red)' }}> *</span>}
+              Model{provider !== 'codex' && <span style={{ color: 'var(--danger)' }}> *</span>}
             </label>
             <ModelSelector
               provider={provider}

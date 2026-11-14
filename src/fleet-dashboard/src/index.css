@@ -5,7 +5,8 @@
  *   shell   the frame: sidebar, header, tab bar
  *   pages   each page's own arrangement of those parts
  *   kit     buttons, fields, dialogs and versioned lists the settings pages share
- *   fleet   the Agents and Workflows pages
+ *   fleet   the Agents, Workflows and Schedules pages
+ *   views   pages that are not lists: Memory, Chat, logs, a workflow's history, the editor
  */
 @import './styles/tokens.css';
 @import './styles/base.css';
@@ -13,3 +14,4 @@
 @import './styles/pages.css';
 @import './styles/kit.css';
 @import './styles/fleet.css';
+@import './styles/views.css';

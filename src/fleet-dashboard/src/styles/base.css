@@ -431,11 +431,11 @@ input[type='checkbox'], input[type='radio'] {
 
 /* ── Toasts ──────────────────────────────────────────────────────────────── */
 /* Above the tab bar on a phone and clear of the page's own buttons; never over the thing a
-   thumb is reaching for. */
+   thumb is reaching for, and under every sheet, bar and dialog: those have the floor. */
 
 .toast-area {
   position: fixed;
-  z-index: 700;
+  z-index: 180;
   right: 20px;
   bottom: calc(20px + var(--tabbar) + env(safe-area-inset-bottom, 0px));
   display: flex;

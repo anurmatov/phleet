@@ -86,7 +86,7 @@ export default function StepConfigPanel({ root, selectedPath, onChange, workflow
   return (
     <div className="wfe-config-panel">
       <div className="wfe-config-title">
-        <span className="wfe-config-type" style={{ color: STEP_COLORS[step.type] ?? '#94a3b8' }}>
+        <span className="wfe-config-type" style={{ color: STEP_COLORS[step.type] ?? 'var(--text-3)' }}>
           {step.type}
         </span>
       </div>

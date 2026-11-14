@@ -14,6 +14,7 @@ import type { MemoryListItem, MemorySearchResult, MemoryStatsResponse } from '..
 import { apiGet } from '../utils'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
 import MemoryContentView from './MemoryContentView'
+import Icon from './Icon'
 
 const UNASSIGNED = '(unassigned)'
 // Key format matches spec: memory-tree-collapsed-{project} → "true" (expanded) | "false" (collapsed)
@@ -225,7 +226,7 @@ export default function MemoryView() {
     a === UNASSIGNED ? 1 : b === UNASSIGNED ? -1 : a.localeCompare(b))
 
   return (
-    <div className="memory-page">
+    <div className={`memory-page${selectedId ? ' has-selection' : ''}`}>
       {/* Left pane */}
       <div className="memory-left">
         {/* M4: Filter input with clear button, muted style */}
@@ -382,6 +383,12 @@ export default function MemoryView() {
 
       {/* Right pane */}
       <div className="memory-right">
+        {/* A phone shows the list or the memory, never both: this is the way back to the list. */}
+        {selectedId && (
+          <button className="btn btn-quiet btn-s memory-back only-phone" onClick={() => setSelectedId(null)}>
+            <Icon name="chevronLeft" size={16} />All memories
+          </button>
+        )}
         {deleteToast && <div className="memory-delete-toast">{deleteToast}</div>}
         {selectedId
           ? <MemoryContentView

@@ -30,7 +30,7 @@ export default function InstructionPicker({ allInstructions, selected, sizeLimit
 
   if (rows.length === 0) {
     return (
-      <div style={{ fontSize: 12, color: 'var(--muted)', padding: '4px 0' }}>
+      <div style={{ fontSize: 12, color: 'var(--text-2)', padding: '4px 0' }}>
         No instructions available (create one in the Instructions panel).
       </div>
     )

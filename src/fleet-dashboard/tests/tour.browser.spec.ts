@@ -107,7 +107,7 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
   'signal-comment': async page => { await page.getByRole('button', { name: 'Request changes' }).first().click() },
   'confirm-bar': async page => { await page.getByRole('button', { name: 'Approve merge' }).click() },
   'new-schedule': async page => { await page.getByRole('button', { name: /new schedule/i }).click() },
-  'more-sheet': async (page, phone) => { if (phone) await page.getByRole('button', { name: 'More', exact: true }).click() },
+  'more-sheet': async (page, phone) => { if (phone) await page.locator('.tabbar-item').last().click() },
 }
 
 for (const scene of scenes) {

@@ -7,9 +7,8 @@ import {
 import { qrMatrix } from '../qrMatrix'
 import { useTick } from '../hooks/useTick'
 import { deviceTitle, readDevices, type DeviceRow } from '../session'
+import Icon from './Icon'
 
-const label: React.CSSProperties = { fontSize: 11, color: 'var(--muted)', display: 'block', marginBottom: 2 }
-const note: React.CSSProperties = { fontSize: 12, color: 'var(--muted)', margin: '6px 0' }
 
 /** How long a setup code stays on screen before it hides itself. */
 const VISIBLE_SECONDS = 120
@@ -139,30 +138,30 @@ export default function DevicesSection({ onToast }: { onToast?: (message: string
     <section className="cred-section">
       <div className="cred-section-header">
         <div className="cred-section-title">Devices</div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="cred-section-tools">
           {form === null && (
-            <button className="cred-action-btn" onClick={() => setForm(emptyPhoneSetupForm(window.location.origin))}>
-              Connect a phone
+            <button className="config-save-btn" onClick={() => setForm(emptyPhoneSetupForm(window.location.origin))}>
+              <Icon name="plus" size={16} />Connect a phone
             </button>
           )}
-          <button className="cred-action-btn" onClick={signOut}>Sign out of this browser</button>
+          <button className="wfd-cancel-btn" onClick={signOut}>Sign out of this browser</button>
         </div>
       </div>
 
-      <p style={note}>Every browser and app signed in to this fleet. Revoking one signs it out at once.</p>
-      {listError && <p style={{ ...note, color: 'var(--danger, #c0392b)' }} role="alert">{listError}</p>}
+      <p className="cred-note">Every browser and app signed in to this fleet. Revoking one signs it out at once.</p>
+      {listError && <p className="cred-note cred-note-error" role="alert">{listError}</p>}
 
       {devices !== null && (
         <div className="device-list">
-          {active.length === 0 && <p style={note}>No device is signed in.</p>}
+          {active.length === 0 && <p className="cred-note">No device is signed in.</p>}
           {[...active, ...revoked].map(device => (
             <div key={device.deviceId} className={`device-row${device.revokedAt ? ' device-row--revoked' : ''}`}>
               <div className="device-row-main">
                 <div className="device-row-name">
                   {deviceTitle(device)}
-                  <span className="device-badge">{device.kind === 'browser' ? 'browser' : 'app'}</span>
-                  {device.current && <span className="device-badge">this browser</span>}
-                  {device.revokedAt && <span className="device-badge">revoked</span>}
+                  <span className="pill device-badge">{device.kind === 'browser' ? 'browser' : 'app'}</span>
+                  {device.current && <span className="pill pill-ok device-badge">this browser</span>}
+                  {device.revokedAt && <span className="pill device-badge">revoked</span>}
                 </div>
                 <div className="device-row-meta">
                   {device.revokedAt
@@ -172,7 +171,7 @@ export default function DevicesSection({ onToast }: { onToast?: (message: string
               </div>
               {!device.revokedAt && (confirming === device.deviceId ? (
                 <>
-                  <button className="cred-action-btn" onClick={() => revoke(device)}>Confirm revoke</button>
+                  <button className="cred-action-btn cred-action-btn--danger" onClick={() => revoke(device)}>Confirm revoke</button>
                   <button className="cred-action-btn" onClick={() => setConfirming(null)}>Cancel</button>
                 </>
               ) : (
@@ -184,53 +183,53 @@ export default function DevicesSection({ onToast }: { onToast?: (message: string
       )}
 
       {form !== null && (
-        <div style={{ maxWidth: 520 }}>
-          <div style={{ marginBottom: 8 }}>
-            <label style={label} htmlFor="phone-setup-name">Name for the phone (optional)</label>
-            <input id="phone-setup-name" className="config-input" style={{ width: '100%' }}
+        <div className="phone-setup">
+          <div className="config-row">
+            <label className="config-label" htmlFor="phone-setup-name">Name for the phone (optional)</label>
+            <input id="phone-setup-name" className="config-input"
               value={form.deviceName} maxLength={DEVICE_NAME_MAX_LENGTH}
               onChange={e => change({ deviceName: e.target.value })} autoComplete="off" />
           </div>
 
-          <div style={{ marginBottom: 8 }}>
-            <label style={label} htmlFor="phone-setup-origin">Address the phone will use</label>
-            <input id="phone-setup-origin" className="config-input" style={{ width: '100%' }}
+          <div className="config-row">
+            <label className="config-label" htmlFor="phone-setup-origin">Address the phone will use</label>
+            <input id="phone-setup-origin" className="config-input"
               value={form.origin} onChange={e => change({ origin: e.target.value })}
               autoComplete="off" spellCheck={false} />
           </div>
 
-          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-            <div style={{ flex: 1 }}>
-              <label style={label} htmlFor="phone-setup-client-id">Access client ID (optional)</label>
-              <input id="phone-setup-client-id" className="config-input" style={{ width: '100%' }}
+          <div className="wfd-form-row wfd-form-row-inline">
+            <div>
+              <label className="config-label" htmlFor="phone-setup-client-id">Access client ID (optional)</label>
+              <input id="phone-setup-client-id" className="config-input"
                 value={form.accessClientId} onChange={e => change({ accessClientId: e.target.value })}
                 autoComplete="off" spellCheck={false} />
             </div>
-            <div style={{ flex: 1 }}>
-              <label style={label} htmlFor="phone-setup-client-secret">Access client secret (optional)</label>
-              <input id="phone-setup-client-secret" className="config-input" style={{ width: '100%' }} type="password"
+            <div>
+              <label className="config-label" htmlFor="phone-setup-client-secret">Access client secret (optional)</label>
+              <input id="phone-setup-client-secret" className="config-input" type="password"
                 value={form.accessClientSecret} onChange={e => change({ accessClientSecret: e.target.value })}
                 autoComplete="off" spellCheck={false} />
             </div>
           </div>
-          <p style={note}>
+          <p className="cred-note">
             Only if this dashboard sits behind an access proxy. Use a service token created for that
             phone alone, so it can be revoked on its own.
           </p>
 
-          {error && <p style={{ ...note, color: 'var(--danger, #c0392b)' }} role="alert">{error}</p>}
+          {error && <p className="cred-note cred-note-error" role="alert">{error}</p>}
 
-          <div style={{ display: 'flex', gap: 8, margin: '8px 0' }}>
+          <div className="config-actions phone-setup-actions">
             {code === null
               ? <button className="config-save-btn" onClick={show} disabled={busy}>{busy ? 'Asking…' : 'Show code'}</button>
               : <button className="config-save-btn" onClick={() => setCode(null)}>Hide code</button>}
-            <button className="cred-action-btn" onClick={close}>Close</button>
+            <button className="wfd-cancel-btn" onClick={close}>Close</button>
           </div>
 
           {matrix && (
             <div>
               <QrCode matrix={matrix} />
-              <p style={note} role="status">
+              <p className="cred-note" role="status">
                 Scan this with the app. The code connects one phone, once, and stops working after
                 fifteen minutes. It hides itself after two.
               </p>
@@ -251,9 +250,8 @@ function QrCode({ matrix }: { matrix: boolean[][] }) {
     .join('')
 
   return (
-    <svg viewBox={`0 0 ${size} ${size}`} width={320} height={320} role="img"
-      aria-label="Setup code for the phone" shapeRendering="crispEdges"
-      style={{ background: '#fff', borderRadius: 6, display: 'block' }}>
+    <svg viewBox={`0 0 ${size} ${size}`} width={320} height={320} role="img" className="phone-setup-code"
+      aria-label="Setup code for the phone" shapeRendering="crispEdges">
       <rect width={size} height={size} fill="#fff" />
       <path d={path} fill="#000" />
     </svg>

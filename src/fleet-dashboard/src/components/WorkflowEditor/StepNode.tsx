@@ -77,7 +77,7 @@ export default function StepNode({
         {...attributes}
       >
         <span className="wfe-step-drag-handle">⠿</span>
-        <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[step.type] ?? '#94a3b8', color: STEP_COLORS[step.type] ?? '#94a3b8' }}>
+        <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[step.type] ?? 'var(--text-3)', color: STEP_COLORS[step.type] ?? 'var(--text-3)' }}>
           {step.type}
         </span>
         {step.name && <span className="wfe-step-name">{step.name}</span>}
@@ -115,7 +115,7 @@ export default function StepNode({
           {step.step ? (
             <div className="wfe-step-node" style={{ opacity: 0.85 }}>
               <div className="wfe-step-header">
-                <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[step.step.type] ?? '#94a3b8', color: STEP_COLORS[step.step.type] ?? '#94a3b8' }}>
+                <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[step.step.type] ?? 'var(--text-3)', color: STEP_COLORS[step.step.type] ?? 'var(--text-3)' }}>
                   {step.step.type}
                 </span>
                 {step.step.name && <span className="wfe-step-name">{step.step.name}</span>}
@@ -161,7 +161,7 @@ export default function StepNode({
               ) : (
                 <div className="wfe-step-node" style={{ opacity: 0.85 }}>
                   <div className="wfe-step-header">
-                    <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[(step.default as AnyStep).type] ?? '#94a3b8', color: STEP_COLORS[(step.default as AnyStep).type] ?? '#94a3b8' }}>
+                    <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[(step.default as AnyStep).type] ?? 'var(--text-3)', color: STEP_COLORS[(step.default as AnyStep).type] ?? 'var(--text-3)' }}>
                       {(step.default as AnyStep).type}
                     </span>
                     {(step.default as AnyStep).name && <span className="wfe-step-name">{(step.default as AnyStep).name}</span>}
@@ -256,7 +256,7 @@ function ContainerBody({ step, path, selectedPath, errors, depth, onSelect, onDe
             <button
               key={t}
               className="wfe-add-picker-item"
-              style={{ color: STEP_COLORS[t] ?? '#94a3b8' }}
+              style={{ color: STEP_COLORS[t] ?? 'var(--text-3)' }}
               onClick={() => { onAddChild(path, t); setAddPickerOpen(false) }}
             >{t}</button>
           ))}
@@ -278,7 +278,7 @@ export function StepNodeGhost({ step }: { step: AnyStep }) {
   return (
     <div className="wfe-step-node wfe-step-ghost">
       <div className="wfe-step-header">
-        <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[step.type] ?? '#94a3b8', color: STEP_COLORS[step.type] ?? '#94a3b8' }}>
+        <span className="wfe-step-type-badge" style={{ borderColor: STEP_COLORS[step.type] ?? 'var(--text-3)', color: STEP_COLORS[step.type] ?? 'var(--text-3)' }}>
           {step.type}
         </span>
         {step.name && <span className="wfe-step-name">{step.name}</span>}

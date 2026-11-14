@@ -403,10 +403,63 @@
   .wf-signal-group { flex-wrap: wrap; }
 
   .attention-card { padding: 14px; }
-  .attention-card-actions, .attention-card-actions .wf-signal-groups, .attention-card-actions .wf-signal-group { width: 100%; }
-  .attention-card-actions .wf-signal-btns { flex: 1; }
-  .attention-card-actions .wf-signal-btns .btn { flex: 1; min-height: var(--control); font-size: var(--fs-m); }
+  /* The decision is what the card is for: its buttons take the card's width, side by side. */
+  .attention-card-actions, .attention-card-actions .wf-signal-groups { width: 100%; }
+  .attention-card-actions .wf-signal-group { flex-direction: column; align-items: stretch; width: 100%; gap: 6px; }
+  .attention-card-actions .wf-signal-btns { flex-wrap: nowrap; }
+  .attention-card-actions .wf-signal-btns .btn { flex: 1; min-width: 0; min-height: var(--control); font-size: var(--fs-m); white-space: normal; }
 
   .confirm-bar-actions { width: 100%; }
   .confirm-bar-actions .btn { flex: 1; }
+}
+
+/* ── Schedules ───────────────────────────────────────────────────────────── */
+
+.sched-list:empty { display: none; }
+.sched-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'id actions' 'when actions' 'meta actions';
+  align-items: center;
+  gap: 4px 16px;
+  padding: 14px 12px 14px 18px;
+  border-radius: inherit;
+  cursor: pointer;
+}
+.sched-id { grid-area: id; font-size: var(--fs-l); font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.sched-main:hover .sched-id { color: var(--accent); }
+.sched-row.paused .sched-id { color: var(--text-2); }
+.sched-when { grid-area: when; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; color: var(--text-2); font-size: var(--fs-m); }
+.sched-when .icon { color: var(--text-3); }
+.sched-cron { color: var(--text-3); font-family: var(--mono); font-size: var(--fs-xs); }
+.sched-meta { grid-area: meta; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-top: 4px; font-size: var(--fs-s); }
+.sched-type { color: var(--text-2); font-family: var(--mono); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.sched-memo { color: var(--text-3); overflow-wrap: anywhere; }
+.wf-status-paused { background: var(--surface-3); color: var(--text-2); }
+.sched-actions { grid-area: actions; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.sched-delete:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.sched-detail {
+  display: grid;
+  gap: 8px;
+  padding: 2px 18px 16px;
+  font-size: var(--fs-s);
+}
+.sched-input {
+  max-width: 100%;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-m);
+  background: var(--surface-2);
+  font-size: var(--fs-xs);
+}
+
+@media (max-width: 899px) {
+  .sched-main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'id' 'when' 'meta' 'actions';
+    padding: 14px;
+  }
+  .sched-actions { margin-top: 8px; }
+  .sched-detail { padding: 0 14px 14px; }
 }

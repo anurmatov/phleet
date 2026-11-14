@@ -25,7 +25,7 @@ interface TelegramModalProps {
   onConnected: (toast: string) => void
 }
 
-function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
+export function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
   const [ctoBotToken, setCtoBotToken] = useState('')
   const [notifierBotToken, setNotifierBotToken] = useState('')
   const [groupChatId, setGroupChatId] = useState('')
@@ -138,7 +138,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {/* CTO bot token */}
           <div className="config-row">
             <label className="config-label">
-              CTO bot token <span style={{ color: 'var(--red)' }}>*</span>
+              CTO bot token <span style={{ color: 'var(--danger)' }}>*</span>
             </label>
             <input
               className={`config-input${fieldErrors.ctoToken ? ' input--error' : ''}`}
@@ -162,7 +162,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           <div className="config-row">
             <label className="config-label">
               Notifier bot token{' '}
-              <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
+              <span style={{ color: 'var(--text-2)', fontWeight: 400 }}>(optional)</span>
             </label>
             <input
               className={`config-input${fieldErrors.notifierToken ? ' input--error' : ''}`}
@@ -180,7 +180,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           <div className="config-row">
             <label className="config-label">
               Group chat ID{' '}
-              <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span>
+              <span style={{ color: 'var(--text-2)', fontWeight: 400 }}>(optional)</span>
             </label>
             <input
               className={`config-input${fieldErrors.groupChat ? ' input--error' : ''}`}
@@ -202,7 +202,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {/* Your Telegram user ID */}
           <div className="config-row">
             <label className="config-label">
-              Your Telegram user ID <span style={{ color: 'var(--red)' }}>*</span>
+              Your Telegram user ID <span style={{ color: 'var(--danger)' }}>*</span>
             </label>
             <input
               className="config-input"
@@ -230,7 +230,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {testMsg && (
             <div
               className="config-feedback"
-              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}
+              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--danger)', marginBottom: 8 }}
             >
               {testMsg}
             </div>
@@ -264,7 +264,7 @@ function ConnectTelegramModal({ onClose, onConnected }: TelegramModalProps) {
           {saveMsg && (
             <div
               className="config-feedback"
-              style={{ color: 'var(--red)', marginTop: 8 }}
+              style={{ color: 'var(--danger)', marginTop: 8 }}
             >
               {saveMsg}
             </div>
@@ -283,7 +283,7 @@ interface GitHubModalProps {
   configured: boolean
 }
 
-function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalProps) {
+export function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalProps) {
   const [appId, setAppId] = useState('')
   const [pem, setPem] = useState('')
   const [appIdRevealed, setAppIdRevealed] = useState(!configured)
@@ -381,7 +381,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
 
           {/* App ID */}
           <div className="config-row">
-            <label className="config-label">App ID <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">App ID <span style={{ color: 'var(--danger)' }}>*</span></label>
             {configured && !appIdRevealed ? (
               <div className="setup-masked-field">
                 <span className="setup-masked-value">••••••• (configured)</span>
@@ -417,7 +417,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
 
           {/* Private key */}
           <div className="config-row">
-            <label className="config-label">Private key (.pem) <span style={{ color: 'var(--red)' }}>*</span></label>
+            <label className="config-label">Private key (.pem) <span style={{ color: 'var(--danger)' }}>*</span></label>
             {configured && !pemRevealed ? (
               <div className="setup-masked-field">
                 <span className="setup-masked-value">••••••• (configured)</span>
@@ -437,7 +437,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
                   onChange={handlePemFile}
                 />
                 {pem && (
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 4 }}>
                     {pem.split('\n').length} lines loaded
                   </div>
                 )}
@@ -468,7 +468,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
           {testMsg && (
             <div
               className="config-feedback"
-              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--red)', marginBottom: 8 }}
+              style={{ color: testState === 'ok' ? 'var(--accent)' : 'var(--danger)', marginBottom: 8 }}
             >
               {testMsg}
             </div>
@@ -497,7 +497,7 @@ function ConnectGitHubModal({ onClose, onConnected, configured }: GitHubModalPro
           {saveMsg && (
             <div
               className="config-feedback"
-              style={{ color: 'var(--red)', marginTop: 8 }}
+              style={{ color: 'var(--danger)', marginTop: 8 }}
             >
               {saveMsg}
             </div>

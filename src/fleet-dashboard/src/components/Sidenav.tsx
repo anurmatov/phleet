@@ -47,7 +47,8 @@ export default function Sidenav({
         : null
     }
     const count = counts[view]
-    return count === undefined ? null : <span className="sidenav-badge">{count}</span>
+    // A zero is not news, and for a list not read yet it would be wrong.
+    return count ? <span className="sidenav-badge">{count}</span> : null
   }
 
   return (

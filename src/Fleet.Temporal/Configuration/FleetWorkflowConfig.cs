@@ -29,20 +29,6 @@ public static class FleetWorkflowConfig
         Interlocked.Exchange(ref _groupChatId, chatId);
     }
 
-    private static int _peerConfigLoaded;
-
-    /// <summary>
-    /// True once <c>PeerConfigHostedService</c> has fetched this bridge's configuration from the
-    /// orchestrator: the coordinator agent (the escalation target) and the group chat id are the
-    /// deployment's, not the defaults the process started with. Anything that sends on behalf of a
-    /// workflow outside an activity waits for it; activities cannot start before it, because the
-    /// workers start after the bootstrap.
-    /// </summary>
-    public static bool PeerConfigLoaded => Volatile.Read(ref _peerConfigLoaded) == 1;
-
-    /// <summary>Called once by <c>PeerConfigHostedService</c> when its bootstrap has succeeded.</summary>
-    public static void MarkPeerConfigLoaded() => Interlocked.Exchange(ref _peerConfigLoaded, 1);
-
     /// <summary>
     /// The initialized options instance.
     /// </summary>

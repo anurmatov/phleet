@@ -415,33 +415,6 @@ notify. Notices carry identity, status and a fixed cause category, never failure
 strings. There is no recovery automation. Bridge `GET /workflow-failures` shows the records. See
 `docs/workflow-failure-notifier.md`.
 
-## Durable delegation
-
-Off by default (`FLEET_DURABLE_DELEGATION_ENABLED=false` → bridge `DurableDelegation__Enabled`;
-fresh setup writes it, upgrade adds it only when missing). Off, `DelegateToAgentActivity` waits for
-the agent inside one activity execution and a bridge restart fails every delegation in flight. On,
-the activity writes a record to `DurableDelegation__StateFile` (same mounted directory as the
-failure notifier), publishes the directive and throws `CompleteAsyncException`;
-`DurableDelegationService` then does from the record what the wait loop did (heartbeat every
-`TickSeconds`, re-send every 5 minutes, budget → `TimeoutException`, incomplete-answer
-continuations, cancel to the agent) and `TemporalRelayListener` completes the activity by its task
-token when the reply arrives. Workflow commands are unchanged, so nothing is patched and recorded
-histories replay. `DelegationRelay` is a deliberate second copy of the activity's publish, cancel
-and timeout-report code so the switch-off path is untouched; `DelegationRelayParityTests` keeps the
-two byte-identical. The pass (`TickAsync`) talks to Temporal only; every relay send (directive,
-cancel, timeout notice) goes out on a separate lane that reads what a record owes and writes back
-what was sent (4 at once, one per record, given up after 30 s). The service is registered before
-the peer-config bootstrap on purpose: heartbeats start with the host, relay sends wait for
-`IDelegationRelay.Ready` (`FleetWorkflowConfig.PeerConfigLoaded` and a non-empty escalation target).
-
-MUST NOT: await a relay send from a pass or a reply (ten 10 s cancels once put another activity's
-heartbeat past its 90 s timeout); log or return an instruction, an answer or a task token (the state file is the only place
-they are kept, mode 0600; `GET /pending-delegations` is identifiers, counters and times); raise
-`MaximumAttempts` on a delegate (a retry re-publishes and the agent redoes the work); overwrite a
-state file that cannot be read (it is moved aside). An outage longer than the activity's
-`HeartbeatTimeout` (90 s consensus, 2 min UWE and `notify_cto`) still loses the delegation, and so
-does the one restart that turns the switch on or off. See `docs/durable-delegation.md`.
-
 ## Configuration
 
 Agent config is DB-driven (MySQL via EF Core). On first run, the orchestrator seeds from `seed.json`.

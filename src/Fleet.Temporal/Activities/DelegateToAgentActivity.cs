@@ -55,18 +55,13 @@ public sealed class DelegateToAgentActivity
     private readonly IConnectionFactory _connectionFactory;
     private readonly IHttpClientFactory _httpClientFactory;
 
-    // Null, or switched off, in every deployment that has not opted in: the activity then waits
-    // for the agent itself, below, exactly as it always did.
-    private readonly DurableDelegationService? _durable;
-
     public DelegateToAgentActivity(
         IOptions<RabbitMqOptions> rabbitConfig,
         IOptions<TemporalBridgeOptions> bridgeConfig,
         TaskCompletionRegistry registry,
         IConnectionFactory connectionFactory,
         IHttpClientFactory httpClientFactory,
-        ILogger<DelegateToAgentActivity> logger,
-        DurableDelegationService? durable = null)
+        ILogger<DelegateToAgentActivity> logger)
     {
         _rabbitConfig = rabbitConfig.Value;
         _bridgeConfig = bridgeConfig.Value;
@@ -74,7 +69,6 @@ public sealed class DelegateToAgentActivity
         _connectionFactory = connectionFactory;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
-        _durable = durable;
     }
 
     /// <summary>
@@ -140,33 +134,6 @@ public sealed class DelegateToAgentActivity
 
         if (budgetIsExplicit)
             GuardTimerOrdering(ctx, timeout, agentName, taskId);
-
-        // Durable delegation (off unless DurableDelegation:Enabled): the wait does not happen in
-        // this execution at all. The delegation is recorded and published, Temporal is told the
-        // activity completes later, and DurableDelegationService heartbeats, re-sends, enforces
-        // the budget and completes it from the record — across a bridge restart too. A local
-        // activity cannot complete later, so it keeps the wait below.
-        if (_durable is { Enabled: true } && !ctx.Info.IsLocal)
-        {
-            await _durable.StartDelegationAsync(
-                new DelegationStart(
-                    TaskId: taskId,
-                    Agent: agentName,
-                    Instruction: instruction,
-                    Repo: repo,
-                    Budget: timeout,
-                    RetryOnIncomplete: retryOnIncomplete,
-                    MaxIncompleteRetries: maxIncompleteRetries,
-                    Namespace: ctx.Info.WorkflowNamespace,
-                    WorkflowId: ctx.Info.WorkflowId,
-                    RunId: ctx.Info.WorkflowRunId,
-                    WorkflowType: ctx.Info.WorkflowType,
-                    ActivityId: ctx.Info.ActivityId,
-                    Attempt: ctx.Info.Attempt,
-                    TaskToken: ctx.Info.TaskToken),
-                ctx.CancellationToken);
-            throw new CompleteAsyncException();
-        }
 
         // Register before publishing — avoids a race where response arrives before TCS is registered
         var tcs = _registry.Register(taskId);

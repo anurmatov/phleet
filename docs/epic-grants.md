@@ -184,9 +184,7 @@ next attested review.
 - **Restart the Temporal bridge only when no `ConsensusReviewWorkflow` is Running and no UWE run is
   inside a delegate step.** Consensus delegates run with a single attempt, so a bridge restart
   fails in-flight reviews. Search attributes `GateVisit`, `ReviewRef`, `ReviewScrub` register at
-  bridge start. With `FLEET_DURABLE_DELEGATION_ENABLED=true` a restart that is back within the
-  delegation's heartbeat timeout no longer fails them; `docs/durable-delegation.md` says what
-  remains of this rule.
+  bridge start.
 - To enable: set `FLEET_EPIC_GRANTS_ENABLED=true`, restart the orchestrator, **then restart every
   service that bootstraps peer configuration from the orchestrator only at startup** (in the
   reference compose, the Telegram service).

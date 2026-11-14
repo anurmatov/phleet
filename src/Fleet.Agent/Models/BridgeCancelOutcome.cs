@@ -7,7 +7,10 @@ namespace Fleet.Agent.Models;
 /// </summary>
 public enum BridgeCancelOutcome
 {
-    /// <summary>The task was queued or running under that execution id, and has been told to stop.</summary>
+    /// <summary>
+    /// The task was held under that execution id: running and told to stop, queued and removed,
+    /// or not yet admitted and now never to be.
+    /// </summary>
     Cancelled,
 
     /// <summary>No task is held under the task id: it has finished, or it never arrived.</summary>

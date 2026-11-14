@@ -221,6 +221,218 @@ public sealed class BridgeExecutionCancelTests
         Assert.Equal(BridgeCancelOutcome.Cancelled, await manager.CancelBridgeExecutionAsync(TaskId, "execution-1"));
     }
 
+    // ── between holding the task id and being admitted ───────────────────────
+
+    /// <summary>
+    /// The admission gate, taken by the test. While it is held no directive can be queued or
+    /// registered; one that has arrived holds its task id and waits. The gate is re-entrant for
+    /// the thread that holds it, and a cancel decides under it before its first await, so a
+    /// cancel called from that thread runs in exactly that moment. Everything between
+    /// <c>Enter</c> and <c>Exit</c> therefore stays on one thread: no await.
+    /// </summary>
+    private static Lock GateOf(TaskManager manager) =>
+        (Lock)typeof(TaskManager).GetField("_admissionGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(manager)!;
+
+    private static void UntilReserved(TaskManager manager, int count) =>
+        Assert.True(
+            SpinWait.SpinUntil(() => manager.ActiveTaskIdCountForTest == count, TimeSpan.FromSeconds(10)),
+            $"expected {count} task id(s) to be held");
+
+    private static readonly TimeSpan Promptly = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// A directive has arrived and holds its task id, and has not been admitted yet. The cancel
+    /// for its execution arrives in that moment. It used to find the task id held and nothing
+    /// under it, answer <c>not_found</c>, and the directive was then admitted and ran: a cancel
+    /// that had been answered as final had stopped nothing.
+    ///
+    /// <para>
+    /// The cancel wins now: its answer is <c>cancelled</c>, the directive is neither queued nor
+    /// run, and nothing is published for it. The task id is free at once, so the next attempt's
+    /// directive, arriving while the cancelled one has still not got past the gate, is admitted
+    /// and runs normally.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task ACancelBetweenReservationAndAdmission_Wins_AndTheExecutionNeverStarts()
+    {
+        var turns = new Turns();
+        var manager = Manager(turns);
+        var completions = 0;
+        manager.OnTaskCompleted += (_, _, _, _, _, _, _, _) => Interlocked.Increment(ref completions);
+        var gate = GateOf(manager);
+        Task<TaskDispatchOutcome> first, second;
+        Task<BridgeCancelOutcome> cancel;
+
+        gate.Enter();
+        try
+        {
+            first = Task.Run(() => DirectiveAsync(manager, "first attempt", "execution-1"));
+            UntilReserved(manager, 1);
+
+            cancel = manager.CancelBridgeExecutionAsync(TaskId, "execution-1");
+            Assert.True(cancel.IsCompleted, "the cancel was decided under the gate, with nothing to wait for");
+
+            // The next attempt, while the first is still waiting at the gate.
+            second = Task.Run(() => DirectiveAsync(manager, "second attempt", "execution-2"));
+            Assert.True(
+                SpinWait.SpinUntil(() => manager.ExecutionIdOf(TaskId) == "execution-2" || second.IsCompleted, Promptly),
+                "the second attempt neither took the task id nor was turned away");
+            Assert.False(first.IsCompleted);
+        }
+        finally
+        {
+            gate.Exit();
+        }
+
+        Assert.Equal(BridgeCancelOutcome.Cancelled, await cancel);
+        Assert.Equal(TaskDispatchOutcome.Dropped, await first.WaitAsync(Promptly));
+        Assert.Equal(TaskDispatchOutcome.Ran, await second.WaitAsync(Promptly));
+
+        var turn = await turns.WaitForAsync(1);
+        Assert.Equal("second attempt", turn.Task);
+        Assert.Equal("execution-2", manager.ExecutionIdOf(TaskId));
+
+        // The first attempt's cancel, delivered once more, is another execution's business now.
+        Assert.Equal(BridgeCancelOutcome.OtherExecution, await manager.CancelBridgeExecutionAsync(TaskId, "execution-1"));
+        Assert.False(turn.Stopped);
+        Assert.Equal(BridgeCancelOutcome.Cancelled, await manager.CancelBridgeExecutionAsync(TaskId, "execution-2"));
+        await turns.WaitUntilEndedAsync(turn);
+        await UntilIdleAsync(manager);
+
+        // One turn ran, and it was never the first attempt's. The only completion is the second's.
+        Assert.Equal(["second attempt"], turns.All.Select(t => t.Task).ToArray());
+        Assert.Equal(1, Volatile.Read(ref completions));
+    }
+
+    /// <summary>
+    /// The same moment with the agent busy, where the directive would have been queued. It is not
+    /// queued: when the running turn ends, nothing follows it.
+    /// </summary>
+    [Fact]
+    public async Task ACancelBetweenReservationAndAdmission_Wins_WhenTheDirectiveWouldHaveBeenQueued()
+    {
+        var turns = new Turns();
+        var manager = Manager(turns);
+        _ = manager.StartTask(1, "something else", "something else", isSessionTask: false);
+        var blocker = await turns.WaitForAsync(1);
+        var gate = GateOf(manager);
+        Task<TaskDispatchOutcome> directive;
+        Task<BridgeCancelOutcome> cancel;
+
+        gate.Enter();
+        try
+        {
+            directive = Task.Run(() => DirectiveAsync(manager, "would be queued", "execution-1"));
+            UntilReserved(manager, 1);
+            cancel = manager.CancelBridgeExecutionAsync(TaskId, "execution-1");
+            Assert.True(cancel.IsCompleted);
+        }
+        finally
+        {
+            gate.Exit();
+        }
+
+        Assert.Equal(BridgeCancelOutcome.Cancelled, await cancel);
+        Assert.Equal(TaskDispatchOutcome.Dropped, await directive.WaitAsync(Promptly));
+        Assert.Equal(0, manager.ActiveTaskIdCountForTest);
+
+        blocker.Finish.SetResult();
+        await turns.WaitUntilEndedAsync(blocker);
+        using (var cts = new CancellationTokenSource(Promptly))
+            while (manager.HasRunningTasks(1)) await Task.Delay(10, cts.Token);
+        Assert.Equal(["something else"], turns.All.Select(t => t.Task).ToArray());
+        Assert.False(manager.HasRunningTasks(Chat));
+    }
+
+    /// <summary>
+    /// The ordering on the other side: the admission has the gate first. The cancel waits for it,
+    /// then finds the task registered and stops it there. Whichever of the two gets the gate, the
+    /// execution does not survive a cancel that was answered <c>cancelled</c>.
+    /// </summary>
+    [Fact]
+    public async Task ACancelThatArrivesWhileTheDirectiveIsBeingAdmitted_FindsItAdmitted_AndStopsIt()
+    {
+        var turns = new Turns();
+        var manager = Manager(turns);
+        Task<BridgeCancelOutcome>? cancel = null;
+        var cancelIsWaiting = new ManualResetEventSlim();
+        manager.DispatchCheckpointForTest = checkpoint =>
+        {
+            // Inside the gate, the turn not yet registered. A cancel from another thread cannot
+            // get in until this returns.
+            if (checkpoint != "admission_idle" || cancel is not null) return;
+            cancel = Task.Run(() =>
+            {
+                cancelIsWaiting.Set();
+                return manager.CancelBridgeExecutionAsync(TaskId, "execution-1");
+            });
+            Assert.True(cancelIsWaiting.Wait(Promptly));
+            Assert.False(cancel.IsCompleted);
+        };
+
+        Assert.Equal(TaskDispatchOutcome.Ran, await DirectiveAsync(manager, "work", "execution-1"));
+
+        Assert.NotNull(cancel);
+        Assert.Equal(BridgeCancelOutcome.Cancelled, await cancel.WaitAsync(Promptly));
+        await UntilIdleAsync(manager);
+        Assert.All(turns.All, turn => Assert.True(turn.Stopped));
+    }
+
+    /// <summary>
+    /// And before the directive has arrived at all there is nothing to cancel, and the answer
+    /// says so. It leaves nothing behind: the directive that arrives afterwards is admitted, and
+    /// a cancel that follows it stops it.
+    /// </summary>
+    [Fact]
+    public async Task ACancelBeforeTheDirectiveHasArrived_FindsNothing_AndLeavesNothingBehind()
+    {
+        var turns = new Turns();
+        var manager = Manager(turns);
+
+        Assert.Equal(BridgeCancelOutcome.NotFound, await manager.CancelBridgeExecutionAsync(TaskId, "execution-1"));
+
+        Assert.Equal(TaskDispatchOutcome.Ran, await DirectiveAsync(manager, "work", "execution-1"));
+        var turn = await turns.WaitForAsync(1);
+        Assert.False(turn.Stopped);
+        Assert.Equal(BridgeCancelOutcome.Cancelled, await manager.CancelBridgeExecutionAsync(TaskId, "execution-1"));
+        await turns.WaitUntilEndedAsync(turn);
+        Assert.True(turn.Stopped);
+    }
+
+    /// <summary>
+    /// A cancel without an execution id is not changed in that moment either. It still finds
+    /// nothing, and the directive is then admitted and runs, as on every agent before this.
+    /// </summary>
+    [Fact]
+    public async Task ACancelWithoutAnExecutionId_BetweenReservationAndAdmission_BehavesAsBefore()
+    {
+        var turns = new Turns();
+        var manager = Manager(turns);
+        var gate = GateOf(manager);
+        Task<TaskDispatchOutcome> directive;
+        Task<bool> cancel;
+
+        gate.Enter();
+        try
+        {
+            directive = Task.Run(() => DirectiveAsync(manager, "work", "execution-1"));
+            UntilReserved(manager, 1);
+            cancel = manager.CancelByBridgeTaskIdAsync(TaskId);
+            Assert.True(cancel.IsCompleted);
+        }
+        finally
+        {
+            gate.Exit();
+        }
+
+        Assert.False(await cancel);
+        Assert.Equal(TaskDispatchOutcome.Ran, await directive.WaitAsync(Promptly));
+        var turn = await turns.WaitForAsync(1);
+        Assert.False(turn.Stopped);
+        Assert.Equal(BridgeCancelOutcome.Cancelled, await manager.CancelBridgeExecutionAsync(TaskId, "execution-1"));
+    }
+
     // ── compatibility ─────────────────────────────────────────────────────────
 
     /// <summary>

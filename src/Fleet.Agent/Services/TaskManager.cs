@@ -20,7 +20,10 @@ public sealed class TaskManager
 
     private readonly ConcurrentDictionary<long, ChatTaskState> _chatTasks = new();
     // taskId dedup: tracks bridge taskIds that are currently in-flight
-    private readonly ConcurrentDictionary<string, bool> _activeTaskIds = new();
+    // The value is the execution id of the directive that took the reservation, null when it
+    // carried none (see CancelBridgeExecutionAsync). The reservation lives exactly as long as the
+    // task is queued or running, so this is where the id is kept with the task.
+    private readonly ConcurrentDictionary<string, string?> _activeTaskIds = new();
 
     private readonly DispatchQueue _messageQueue;
     private readonly PrimaryHumanDedup _primaryDedup = new();
@@ -244,7 +247,7 @@ public sealed class TaskManager
         long userId = 0,
         ConversationIdentity? identity = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        bool steeringEligible = false)
+        bool steeringEligible = false, string? executionId = null)
     {
         if (source is not (TaskSource.UserMessage or TaskSource.NewCommand)) priority = TaskPriority.Routine;
         var keyed = priority == TaskPriority.PrimaryHuman && telegramMessageId > 0;
@@ -259,7 +262,7 @@ public sealed class TaskManager
         try
         {
             var outcome = await StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity,
-                priority: priority, telegramMessageId: telegramMessageId, steeringEligible: steeringEligible);
+                priority: priority, telegramMessageId: telegramMessageId, steeringEligible: steeringEligible, executionId: executionId);
             if (keyed && outcome is TaskDispatchOutcome.Dropped or TaskDispatchOutcome.QueueFull) _primaryDedup.Complete(chatId, telegramMessageId);
             return outcome;
         }
@@ -282,10 +285,10 @@ public sealed class TaskManager
         long userId = 0,
         ConversationIdentity? identity = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        bool steeringEligible = false)
+        bool steeringEligible = false, string? executionId = null)
     {
         var dispatch = StartTask(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-            images, documents, userId, identity, priority, telegramMessageId, steeringEligible);
+            images, documents, userId, identity, priority, telegramMessageId, steeringEligible, executionId);
         if (dispatch.IsCompletedSuccessfully) return;
         _ = ObserveDetachedStartAsync(dispatch, chatId, source, taskId, correlationId is not null);
     }
@@ -317,7 +320,7 @@ public sealed class TaskManager
         long userId = 0,
         ConversationIdentity? identity = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        bool steeringEligible = false)
+        bool steeringEligible = false, string? executionId = null)
     {
         // A null identity means a caller that predates the seam — synthesize one from the runtime
         // key so every dispatch decision has something to report against, and every existing call
@@ -329,7 +332,7 @@ public sealed class TaskManager
         // Dedup: ignore re-delivered bridge directives with the same taskId. A queued entry keeps
         // the reservation it took here until its own turn ends; HandOver starts it without coming
         // back through this method.
-        if (taskId is not null && !_activeTaskIds.TryAdd(taskId, true))
+        if (taskId is not null && !_activeTaskIds.TryAdd(taskId, string.IsNullOrEmpty(executionId) ? null : executionId))
         {
             _logger.LogInformation("Duplicate taskId={TaskId} ignored (already in-flight)", taskId);
             return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
@@ -2227,6 +2230,85 @@ public sealed class TaskManager
             _logger.LogInformation("CancelByBridgeTaskId: no active task for bridgeTaskId={BridgeTaskId} (already done or not yet registered)", bridgeTaskId);
 
         return found;
+    }
+
+    /// <summary>
+    /// Cancels the task with the given bridge taskId, but only if it is the execution the cancel
+    /// names. A workflow reuses a task id when it runs a step again, so a cancel issued for one
+    /// attempt can arrive when the id belongs to the next; <see cref="CancelByBridgeTaskIdAsync"/>
+    /// would stop that one. A durable delegation's directive carries an execution id, kept with
+    /// the task for as long as it is queued or running, and its cancel carries the same id.
+    ///
+    /// <para>
+    /// Nothing is stopped unless the ids are equal: not a task that has finished or never arrived
+    /// (<see cref="BridgeCancelOutcome.NotFound"/>), not a task that is now another execution's
+    /// (<see cref="BridgeCancelOutcome.OtherExecution"/>), and not a task whose directive carried
+    /// no id (<see cref="BridgeCancelOutcome.NoExecutionId"/>): that one was started by the
+    /// in-process delegation path or by a bridge from before the id, so it cannot be the
+    /// execution a cancel WITH an id was issued for. Every answer is final for the caller.
+    /// </para>
+    ///
+    /// <para>
+    /// The decision and the choice of what to stop are made in one hold of the admission gate. No
+    /// task is queued or registered while it is held, and a task is queued or registered only
+    /// while its own execution holds the reservation, so what is picked here belongs to the
+    /// execution that was just compared (or is the previous holder's turn in its last moments,
+    /// which has already finished its work).
+    /// </para>
+    /// </summary>
+    public async Task<BridgeCancelOutcome> CancelBridgeExecutionAsync(string bridgeTaskId, string executionId)
+    {
+        var running = new List<RunningTask>();
+        IReadOnlyList<QueuedMessage> queued = [];
+        BridgeCancelOutcome? refused = null;
+
+        lock (_admissionGate)
+        {
+            if (!_activeTaskIds.TryGetValue(bridgeTaskId, out var held))
+                refused = BridgeCancelOutcome.NotFound;
+            else if (held is null)
+                refused = BridgeCancelOutcome.NoExecutionId;
+            else if (!string.Equals(held, executionId, StringComparison.Ordinal))
+                refused = BridgeCancelOutcome.OtherExecution;
+            else
+            {
+                foreach (var (_, state) in _chatTasks)
+                    foreach (var t in state.Snapshot())
+                        if (t.BridgeTaskId == bridgeTaskId) running.Add(t);
+
+                queued = _messageQueue.RemoveByTaskId(bridgeTaskId);
+                foreach (var item in queued)
+                    foreach (var part in item.Parts)
+                        if (part.TaskId is not null) _activeTaskIds.TryRemove(part.TaskId, out _);
+            }
+        }
+
+        if (refused is { } outcome)
+        {
+            _logger.LogInformation(
+                "CancelBridgeExecution: nothing cancelled for bridgeTaskId={BridgeTaskId}, executionId={ExecutionId}: {Outcome}",
+                bridgeTaskId, executionId, outcome);
+            return outcome;
+        }
+
+        foreach (var t in running)
+        {
+            t.CancelReason = TurnCancelReason.Bridge;
+            try { await t.Cts.CancelAsync(); }
+            catch (ObjectDisposedException) { }
+        }
+
+        foreach (var item in queued)
+            foreach (var part in item.Parts)
+                foreach (var key in KeysOfPart(part)) _primaryDedup.Complete(item.ChatId, key);
+
+        // The reservation is held and nothing is queued or running under it: the directive is
+        // being admitted at this very moment. The same benign miss as in CancelByBridgeTaskIdAsync.
+        var found = running.Count > 0 || queued.Count > 0;
+        _logger.LogInformation(
+            "CancelBridgeExecution: {Result} bridgeTaskId={BridgeTaskId}, executionId={ExecutionId}",
+            found ? "cancelled" : "no task yet for", bridgeTaskId, executionId);
+        return found ? BridgeCancelOutcome.Cancelled : BridgeCancelOutcome.NotFound;
     }
 
     /// <summary>

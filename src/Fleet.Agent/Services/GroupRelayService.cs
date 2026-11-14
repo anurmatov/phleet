@@ -74,9 +74,10 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
 
     /// <summary>
     /// Fired when a message from another agent is received via the relay.
-    /// Parameters: chatId, sender, text, type, correlationId, taskId, workflowId, signalName.
+    /// Parameters: chatId, sender, text, type, correlationId, taskId, workflowId, signalName,
+    /// executionId (set only on a directive from a durable workflow delegation).
     /// </summary>
-    public event Action<long, string, string, string, string?, string?, string?, string?>? MessageReceived;
+    public event Action<long, string, string, string, string?, string?, string?, string?, string?>? MessageReceived;
 
     public GroupRelayService(
         IOptions<AgentOptions> agentConfig,
@@ -393,7 +394,7 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             _logger.LogInformation("Relay received from {Sender} (type={Type}, chat={ChatId}): {Text}",
                 message.Sender, message.Type, message.ChatId, TruncateForLog(message.Text));
 
-            MessageReceived?.Invoke(message.ChatId, message.Sender, message.Text, message.Type, message.CorrelationId, message.TaskId, message.WorkflowId, message.SignalName);
+            MessageReceived?.Invoke(message.ChatId, message.Sender, message.Text, message.Type, message.CorrelationId, message.TaskId, message.WorkflowId, message.SignalName, message.ExecutionId);
         }
         catch (Exception ex)
         {
@@ -460,7 +461,11 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await _connection.CloseAsync();
     }
 
+    // ExecutionId is read from a directive and never written by the agent, so what the agent
+    // publishes is the same bytes as before.
     private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
         string Type = RelayMessageType.Directive, string? CorrelationId = null, string? TaskId = null,
-        string? WorkflowId = null, string? SignalName = null);
+        string? WorkflowId = null, string? SignalName = null,
+        [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        string? ExecutionId = null);
 }

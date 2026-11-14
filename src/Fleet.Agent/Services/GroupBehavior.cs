@@ -340,7 +340,7 @@ public sealed class GroupBehavior
 
     // --- Relay handling ---
 
-    public void OnRelayMessage(long chatId, string sender, string text, string type, string? correlationId = null, string? taskId = null, string? workflowId = null, string? signalName = null)
+    public void OnRelayMessage(long chatId, string sender, string text, string type, string? correlationId = null, string? taskId = null, string? workflowId = null, string? signalName = null, string? executionId = null)
     {
         if (type == RelayMessageType.ConfigUpdate)
         {
@@ -461,7 +461,7 @@ public sealed class GroupBehavior
                 buffer.MarkChecked();
                 var displayText = $"[From: {sender}] {TaskManager.TruncateText(text, 500)}";
                 _taskManager.StartTaskDetached(chatId, prompt, displayText, isSessionTask: true,
-                    source: TaskSource.Relay, relaySender: sender, taskId: taskId);
+                    source: TaskSource.Relay, relaySender: sender, taskId: taskId, executionId: executionId);
             }
             catch (Exception ex)
             {

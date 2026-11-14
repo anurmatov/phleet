@@ -173,21 +173,39 @@ public sealed class RequireAcceptanceTests
     }
 
     // Five since the merge hold: PIN, the CI wait, the cleanup wait, a delegated approval's re-pin
-    // and the re-pin a human approval is checked with. One text; each also reports its CI read.
+    // and the re-pin a human approval is checked with. All carry the mode and the off contract.
+    // Four share one text and report their CI read; the delegated re-pin keeps the text it shipped
+    // with, because nothing on the grant path changes.
     [Fact]
     public void Pin_AllFiveInstructions_IncludeModeAndOffContract()
     {
-        var pins = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).OfType<DelegateStep>().Where(s => s.Name is "pin" or "pin_after_approval").ToArray();
+        var steps = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).ToList();
+        var pins = steps.OfType<DelegateStep>().Where(s => s.Name is "pin" or "pin_after_approval").ToArray();
         Assert.Equal(5, pins.Length);
         Assert.Equal(2, pins.Count(p => p.Name == "pin_after_approval"));
-        Assert.Single(pins.Select(p => p.Instruction).Distinct());
-        Assert.All(pins, p =>
+        Assert.All(pins, p => { Assert.Contains("REQUIRE_ACCEPTANCE: {{vars.acceptance_mode}}", p.Instruction); Assert.Contains("In off mode", p.Instruction); });
+
+        var delegated = Assert.IsType<DelegateStep>(Assert.Single(steps.OfType<SequenceStep>(), s => s.Name == "merge_repin").Steps[0]);
+        Assert.Equal("pin_after_approval", delegated.Name);
+        Assert.Contains("Return HEAD_OID, CI and CHANGE_CLASS only.", delegated.Instruction);
+        Assert.Contains("PR, HEAD_OID, IS_DRAFT, CI, CI_FAILING, CHANGE_CLASS,", delegated.Instruction);
+        Assert.DoesNotContain("CI_READ", delegated.Instruction);
+        Assert.DoesNotContain("CI_DETAIL", delegated.Instruction);
+
+        var reading = pins.Where(p => !ReferenceEquals(p, delegated)).ToArray();
+        Assert.Equal(4, reading.Length);
+        Assert.Single(reading, p => p.Name == "pin_after_approval");
+        Assert.Single(reading.Select(p => p.Instruction).Distinct());
+        Assert.All(reading, p =>
         {
-            Assert.Contains("REQUIRE_ACCEPTANCE: {{vars.acceptance_mode}}", p.Instruction); Assert.Contains("In off mode", p.Instruction);
             Assert.Contains("Return HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS only.", p.Instruction);
             Assert.Contains("PR, HEAD_OID, IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS,", p.Instruction);
             Assert.Contains("error when any GitHub read failed; CI is then pending", p.Instruction);
         });
+        // The only difference between the two texts is those tokens.
+        Assert.Equal(delegated.Instruction, reading[0].Instruction!
+            .Replace("Return HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS only. CI_READ is ok when every check-run and status page was read and error when any GitHub read failed; CI is then pending.", "Return HEAD_OID, CI and CHANGE_CLASS only.", StringComparison.Ordinal)
+            .Replace("IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS,", "IS_DRAFT, CI, CI_FAILING, CHANGE_CLASS,", StringComparison.Ordinal));
     }
 
     [Fact]

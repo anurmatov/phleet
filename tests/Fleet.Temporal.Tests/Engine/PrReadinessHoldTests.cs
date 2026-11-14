@@ -784,7 +784,8 @@ public sealed class PrReadinessHoldTests
 
     /// <summary>
     /// The grant path's steps, compared as JSON with what <c>main</c> shipped before the holds: the
-    /// pinned merge, the routing of a re-pin, and the single read with its outcome branch.
+    /// pinned merge, the whole re-pin (<c>Fixtures/seed-main/pr-merge-repin.json</c>, taken from
+    /// <c>main</c>'s seed) and its routing, and the single read with its outcome branch.
     /// </summary>
     [Fact]
     public void Seed_GrantPathSubtree_ByteEqualToMain()
@@ -808,6 +809,10 @@ public sealed class PrReadinessHoldTests
         var repin = approved.GetProperty("default");
         Assert.Equal("merge_repin", Name(repin));
         Assert.Equal(["pin_after_approval", "pin_fields_mode", "approval_head_still_exact"], repin.GetProperty("steps").EnumerateArray().Select(Name));
+        // The whole re-pin a delegated approval takes, its PIN instruction included, is the subtree main shipped.
+        var repinOnMain = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "seed-main", "pr-merge-repin.json"));
+        Assert.Equal(Canonical(repinOnMain), Canonical(repin.GetRawText()));
+        Assert.Single(steps, s => Name(s) == "merge_repin");
         Assert.Equal("set_variable", Type(approved.GetProperty("cases").GetProperty("none")));
 
         var mode = Assert.Single(steps, s => Name(s) == "phase4_merge_mode");

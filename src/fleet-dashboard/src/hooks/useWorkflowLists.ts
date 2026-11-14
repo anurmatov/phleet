@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import type { WorkflowSummary } from '../types'
 import { apiGet } from '../utils'
 
@@ -11,6 +11,8 @@ export interface WorkflowLists {
   workflowsLoading: boolean
   /** Re-reads the running workflows over HTTP; the socket keeps them current otherwise. */
   refreshWorkflows: () => void
+  /** Applies a live snapshot and supersedes HTTP reads already in flight. */
+  receiveWorkflows: (list: WorkflowSummary[]) => void
   completedCollapsed: boolean
   toggleCompleted: () => void
   completedLoading: boolean
@@ -32,10 +34,20 @@ export function useWorkflowLists(workflows: WorkflowSummary[], setWorkflows: (li
   const [nsFilter, setNsFilter] = useState('all')
   const [startOpen, setStartOpen] = useState(false)
 
+  const socketRevision = useRef(0)
+  const receiveWorkflows = useCallback((list: WorkflowSummary[]) => {
+    socketRevision.current++
+    setWorkflows(list)
+  }, [setWorkflows])
+
   const refreshWorkflows = useCallback(() => {
+    const revision = socketRevision.current
     setWorkflowsLoading(true)
     apiGet<WorkflowSummary[]>('/api/workflows')
-      .then(setWorkflows)
+      .then(list => {
+        // A newer socket snapshot wins over an earlier HTTP read, including initial load.
+        if (socketRevision.current === revision) setWorkflows(list)
+      })
       .catch(() => {})
       .finally(() => setWorkflowsLoading(false))
   }, [setWorkflows])
@@ -53,7 +65,7 @@ export function useWorkflowLists(workflows: WorkflowSummary[], setWorkflows: (li
   const filteredCompletedWorkflows = useMemo(() => nsFilter === 'all' ? completed : completed.filter(w => w.namespace === nsFilter), [completed, nsFilter])
 
   return {
-    workflowsLoading, refreshWorkflows,
+    workflowsLoading, refreshWorkflows, receiveWorkflows,
     completedCollapsed, toggleCompleted: () => setCompletedCollapsed(c => !c),
     completedLoading, refreshCompleted,
     nsFilter, setNsFilter, namespaces, filteredWorkflows, filteredCompletedWorkflows,

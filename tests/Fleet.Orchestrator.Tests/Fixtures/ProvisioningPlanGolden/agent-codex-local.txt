@@ -1,0 +1,191 @@
+## preview
+container: fleet-agent-codex-local (resolved fleet-agent-codex-local)
+image: fleet:agent-golden
+memory: 1073741824
+secret network address: (none)
+env:
+  CODEX_OSS_BASE_URL=<secret>
+  RabbitMq__Host=rabbitmq
+  GIT_USER_NAME=synthetic-codex-local
+  GIT_USER_EMAIL=fleet-agent-codex-local@users.noreply.github.com
+  GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
+  Whisper__ServiceUrl=http://fleet-whisper:8080
+  Tts__ServiceUrl=http://fleet-kokoro-tts:8880
+binds:
+  ./workspaces/fleet-agent-codex-local:/workspace
+  ./workspaces/fleet-agent-codex-local/.generated/projects:/app/projects:ro
+  ./workspaces/fleet-agent-codex-local/.generated/appsettings.json:/app/appsettings.json:ro
+  ./workspaces/fleet-agent-codex-local/claude:/root/.claude
+  ./workspaces/fleet-agent-codex-local/.generated/settings.json:/root/.claude/settings.json:ro
+  ./workspaces/fleet-agent-codex-local/codex:/root/.codex
+  ./workspaces/fleet-agent-codex-local/.generated/.mcp.json:/workspace/.mcp.json:ro
+  ./workspaces/fleet-agent-codex-local/.generated/roles:/app/roles:ro
+  ./workspaces/fleet-agent-codex-local/.generated/codex-root.toml:/app/codex-root.toml:ro
+  ./.codex-credentials.json:/root/.codex-host/auth.json:ro
+networks:
+  fleet-net
+extra hosts:
+diffs:
+  container not found — not running
+
+## result
+ok: container 'fleet-agent-codex-local' created and started (id=0123456789ab, networks=[fleet-net])
+
+## docker calls
+GET /v1.41/containers/fleet-agent-codex-local/json
+POST /v1.41/containers/create
+POST /v1.41/containers/fleet-agent-codex-local/start
+
+## create body
+{
+  "Image": "fleet:agent-golden",
+  "Env": [
+    "CODEX_OSS_BASE_URL=<secret>",
+    "RabbitMq__Host=rabbitmq",
+    "GIT_USER_NAME=synthetic-codex-local",
+    "GIT_USER_EMAIL=fleet-agent-codex-local@users.noreply.github.com",
+    "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
+    "Whisper__ServiceUrl=http://fleet-whisper:8080",
+    "Tts__ServiceUrl=http://fleet-kokoro-tts:8880"
+  ],
+  "ExposedPorts": {
+    "8080/tcp": {}
+  },
+  "HostConfig": {
+    "Memory": 1073741824,
+    "Binds": [
+      "<base>/workspaces/fleet-agent-codex-local:/workspace",
+      "<base>/workspaces/fleet-agent-codex-local/.generated/projects:/app/projects:ro",
+      "<base>/workspaces/fleet-agent-codex-local/.generated/appsettings.json:/app/appsettings.json:ro",
+      "<base>/workspaces/fleet-agent-codex-local/claude:/root/.claude",
+      "<base>/workspaces/fleet-agent-codex-local/.generated/settings.json:/root/.claude/settings.json:ro",
+      "<base>/workspaces/fleet-agent-codex-local/codex:/root/.codex",
+      "<base>/workspaces/fleet-agent-codex-local/.generated/.mcp.json:/workspace/.mcp.json:ro",
+      "<base>/workspaces/fleet-agent-codex-local/.generated/roles:/app/roles:ro",
+      "<base>/workspaces/fleet-agent-codex-local/.generated/codex-root.toml:/app/codex-root.toml:ro",
+      "<base>/.codex-credentials.json:/root/.codex-host/auth.json:ro"
+    ],
+    "RestartPolicy": {
+      "Name": "unless-stopped"
+    },
+    "NetworkMode": "fleet-net",
+    "PortBindings": {
+      "8080/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "8083"
+        }
+      ]
+    },
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-size": "10m",
+        "max-file": "3"
+      }
+    }
+  },
+  "NetworkingConfig": {
+    "EndpointsConfig": {
+      "fleet-net": {}
+    }
+  }
+}
+
+## network connects
+
+## generated files
+--- .mcp.json
+{
+  "mcpServers": {
+    "fleet-memory": {
+      "type": "http",
+      "url": "http://fleet-memory:3100?agent=agent-codex-local"
+    }
+  }
+}
+--- appsettings.json
+{
+  "Agent": {
+    "Name": "agent-codex-local",
+    "ContainerName": "fleet-agent-codex-local",
+    "Role": "devops",
+    "Model": "ollama/qwen3.8:27b",
+    "Provider": "codex",
+    "Projects": [
+      "Alpha"
+    ],
+    "AllowedTools": [
+      "Bash",
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-temporal__notify_cto"
+    ],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ProactiveIntervalMinutes": 0,
+    "GroupListenMode": "mention",
+    "GroupDebounceSeconds": 15,
+    "WarmupTimeoutSeconds": 60,
+    "ShortName": "synthetic-codex-local",
+    "ShowStats": true,
+    "PrefixMessages": false,
+    "FormattingMode": 0,
+    "SuppressToolMessages": false,
+    "Effort": null,
+    "JsonSchema": null,
+    "AgentsJson": null,
+    "CodexSandboxMode": "workspace-write",
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "InstructionOrder": [],
+    "CodexOssBaseUrl": "http://inference-host:11434/v1",
+    "ContextWindow": 65536,
+    "HarnessExtra": "history.persistence = \u0022save-all\u0022"
+  },
+  "Telegram": {
+    "AllowedUserIds": [],
+    "AllowedGroupIds": [],
+    "SendOnly": false,
+    "CanReceiveChatRequests": false,
+    "RequestReceivedMessage": null
+  },
+  "Conversations": {
+    "SouthBaseUrl": "http://fleet-comms:8082",
+    "SouthBearerToken": "cj1.south.agent-codex-local.jL8WYSoZfqhwXCzuS4QHFi2_dluKkdMHMgE3q9sreOU",
+    "PrimaryHumanPrincipalId": "owner"
+  }
+}
+--- codex-root.toml
+check_for_update_on_startup = false
+
+[analytics]
+enabled = false
+
+[history]
+persistence = "save-all"
+
+--- projects/Alpha/context.md
+# Alpha v2
+
+The canonical context.
+
+--- settings.json
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-temporal__notify_cto"
+    ]
+  }
+}
+## log lines
+[Information] Generating config for 'agent-codex-local': 2 tools [Bash, mcp__fleet-temporal__notify_cto], 0 MCP endpoints [], permissionMode=acceptEdits
+[Warning] No instructions configured for 'agent-codex-local' — skipping instruction file generation
+[Information] Local model for 'agent-codex-local': harness codex, server http://inference-host:11434, context window 65536
+[Warning] Local model for 'agent-codex-local': CODEX_OSS_BASE_URL Env Ref superseded by the local server URL; remove the Env Ref
+[Information] Generated config files for 'agent-codex-local' in <base>/workspaces/fleet-agent-codex-local/.generated
+[Information] Generated project context files for 'agent-codex-local' in <base>/workspaces/fleet-agent-codex-local/.generated/projects (1 project(s))
+[Information] Provisioning 'agent-codex-local' container='fleet-agent-codex-local' image='fleet:agent-golden'

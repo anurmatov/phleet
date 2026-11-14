@@ -13,8 +13,7 @@ namespace Fleet.Temporal.Activities;
 /// </summary>
 public sealed class BroadcastTokenUpdateActivity
 {
-    private const string RelayFanoutExchange = "fleet.relay";
-    private const string TokenUpdate = "token-update";
+    private const string RelayFanoutExchange = RelayBroker.TokenBroadcastExchange;
 
     private readonly IConnectionFactory _connectionFactory;
     private readonly ILogger<BroadcastTokenUpdateActivity> _logger;
@@ -63,35 +62,23 @@ public sealed class BroadcastTokenUpdateActivity
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
 
         // Build provider-aware token payload
-        var tokenPayload = new
-        {
-            provider,
-            accessToken,
-            refreshToken,
-            expiresAt,
-            scopes,
-            subscriptionType,
-            rateLimitTier,
-            idToken,
-            accountId,
-        };
+        var tokenJson = JsonSerializer.Serialize(new TokenUpdatePayload(
+            provider, accessToken, refreshToken, expiresAt, scopes, subscriptionType, rateLimitTier,
+            idToken, accountId));
 
-        var tokenJson = JsonSerializer.Serialize(tokenPayload);
-
-        // Broadcast to all agents via fleet.relay fanout
-        // Sender = "temporal-bridge" — agents filter by provider to decide whether to apply
-        var agentMessage = JsonSerializer.Serialize(new
-        {
-            ChatId = 0L,
-            Sender = "temporal-bridge",
-            Text = tokenJson,
-            Timestamp = DateTimeOffset.UtcNow,
-            Type = TokenUpdate,
-        });
+        // Broadcast to all agents via fleet.relay fanout. Agents filter by provider to decide
+        // whether to apply.
+        var agentMessage = new RelayMessage(
+            ChatId: 0,
+            Sender: RelaySender.TemporalBridge,
+            Text: tokenJson,
+            Timestamp: DateTimeOffset.UtcNow,
+            Type: RelayMessageType.TokenUpdate);
 
         await channel.BasicPublishAsync(
             RelayFanoutExchange, routingKey: "", mandatory: false,
-            basicProperties: props, body: Encoding.UTF8.GetBytes(agentMessage), cancellationToken: ct);
+            basicProperties: props, body: RelayWire.Serialize(agentMessage, RelayShape.Envelope),
+            cancellationToken: ct);
 
         _logger.LogInformation(
             "Published {Provider} token update to all agents via {Exchange}", provider, RelayFanoutExchange);

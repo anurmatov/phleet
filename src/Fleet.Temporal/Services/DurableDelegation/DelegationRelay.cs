@@ -287,7 +287,7 @@ public sealed class DelegationRelay : IDelegationRelay
             Repo: repo,
             ExecutionId: executionId);
 
-        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+        var body = RelayWire.Serialize(message, RelayShape.Delegation);
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
         var routingKey = agentName.ToLowerInvariant();
 

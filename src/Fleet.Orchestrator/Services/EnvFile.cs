@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Configuration;
 namespace Fleet.Orchestrator.Services;
 
 /// <summary>
@@ -20,11 +21,11 @@ namespace Fleet.Orchestrator.Services;
 /// </remarks>
 public static class EnvFile
 {
-    public const string DefaultPath = "/app/deploy/.env";
+    public const string DefaultPath = ProvisioningOptions.DefaultEnvFilePath;
 
     /// <summary>The configured path of the file (<c>Provisioning:EnvFilePath</c>).</summary>
     public static string PathFrom(IConfiguration configuration) =>
-        configuration["Provisioning:EnvFilePath"] ?? DefaultPath;
+        ProvisioningOptions.From(configuration).EnvFilePath;
 
     // ── Reading ───────────────────────────────────────────────────────────────
 

@@ -165,7 +165,7 @@ public sealed class CommsOptions
         {
             throw new InvalidOperationException(
                 $"chat_key_invalid: Comms__Journal__TokenKeys: {e.Message}. Each key is base64url "
-                + $"and decodes to at least {Fleet.Conversations.Journal.JournalTokens.MinimumKeyBytes} bytes.");
+                + $"and decodes to at least {JournalTokens.MinimumKeyBytes} bytes.");
         }
 
         if (!Uri.TryCreate(OrchestratorUrl, UriKind.Absolute, out var orchestrator)
@@ -358,7 +358,7 @@ public sealed class JournalOptions
     public string ReadAllSubjects { get; set; } = "";
 
     /// <summary>The parsed keys. Call after <see cref="Validate"/>.</summary>
-    public IReadOnlyList<byte[]> Keys() => Fleet.Conversations.Journal.JournalTokens.ParseKeys(TokenKeys);
+    public IReadOnlyList<byte[]> Keys() => JournalTokens.ParseKeys(TokenKeys);
 
     /// <summary>The parsed exclusion list. Call after <see cref="Validate"/>.</summary>
     public IReadOnlySet<long> ExcludedChats() => ParseExcludedChatIds(ExcludedChatIds);
@@ -471,7 +471,7 @@ public sealed class JournalOptions
             var element = elements[i].Trim();
             if (element.Length == 0) continue;
 
-            if (!Fleet.Conversations.Journal.JournalTokens.IsValidSubject(element))
+            if (!JournalTokens.IsValidSubject(element))
                 throw new FormatException($"element {i + 1} is not a token subject");
 
             subjects.Add(element);

@@ -220,6 +220,15 @@ public sealed class ConversationIntake
             chatUsername: null,
             chatFirstName: null,
             isVoiceTranscription: false);
+        // The same prompt for a provider process restarted while this message waits its turn.
+        var coldStartPrompt = _groupBehavior.BuildDmColdStartTask(
+            chatId: runtimeKey,
+            taskText: text,
+            replyToTelegramMessageId: null,
+            telegramMessageId: 0,
+            chatUsername: null,
+            chatFirstName: null,
+            isVoiceTranscription: false);
 
         // userId: 0 is a SAFETY BOUNDARY, not a default. StartTaskCore indexes a task into the
         // cross-chat user index only when userId != 0, so a client turn never enters that index
@@ -239,7 +248,8 @@ public sealed class ConversationIntake
             runtimeKey, prompt, Display(text), isSessionTask: true,
             source: TaskSource.UserMessage, images: images, userId: 0, identity: identity,
             priority: primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine,
-            steeringEligible: primary);
+            steeringEligible: primary,
+            coldStartTask: coldStartPrompt);
     }
 
     /// <summary>

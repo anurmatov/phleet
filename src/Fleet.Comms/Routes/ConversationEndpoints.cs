@@ -127,7 +127,7 @@ public static class ConversationEndpoints
 
         // The shape every part of the path agrees on: a routing key, a queue segment and a token
         // subject (#530 D9).
-        if (!Fleet.Conversations.Journal.JournalTokens.IsValidSubject(body.Agent))
+        if (!JournalTokens.IsValidSubject(body.Agent))
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
         // A conversation is opened only with an agent that accepts chat NOW. Asked of the

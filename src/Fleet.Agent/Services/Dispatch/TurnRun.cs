@@ -319,7 +319,10 @@ internal sealed class TurnRun(
                 PublishEvent(chatId, ConversationEventKind.TurnStarted, _identity, new TurnStartedPayload());
 
                 completingTask.InjectionCount = 0;
-                _currentTask = firstRedelivery.Task;
+                // The process is gone, so this redelivery starts on a new one: with its history.
+                _currentTask = !_executor.IsProcessWarm && firstRedelivery.ColdStartTask is { } coldStartTask
+                    ? coldStartTask
+                    : firstRedelivery.Task;
                 _currentImages = firstRedelivery.Images;
                 _currentDocuments = firstRedelivery.Documents;
                 _lastError = null;
@@ -348,7 +351,7 @@ internal sealed class TurnRun(
                 var firstPart = QueueIntake.CreateQueuedPart(drained[0].Task, drained[0].DisplayText, drained[0].IsSessionTask,
                     drained[0].Source, drained[0].RelaySender, drained[0].CorrelationId, drained[0].TaskId,
                     drained[0].Images, drained[0].Documents, drained[0].UserId, drained[0].ArrivedAt,
-                    drained[0].Identity);
+                    drained[0].Identity, coldStartTask: drained[0].ColdStartTask);
                 var mergedEntry = new QueuedMessage(chatId, firstPart);
 
                 // overflowStart marks where the first group ends; default to "all fit".
@@ -358,7 +361,7 @@ internal sealed class TurnRun(
                     var part = QueueIntake.CreateQueuedPart(drained[i].Task, drained[i].DisplayText, drained[i].IsSessionTask,
                         drained[i].Source, drained[i].RelaySender, drained[i].CorrelationId, drained[i].TaskId,
                         drained[i].Images, drained[i].Documents, drained[i].UserId, drained[i].ArrivedAt,
-                        drained[i].Identity);
+                        drained[i].Identity, coldStartTask: drained[i].ColdStartTask);
                     if (!mergedEntry.TryAppendPart(part))
                     {
                         // This part doesn't fit in the first group (different source or
@@ -418,8 +421,10 @@ internal sealed class TurnRun(
                 }
                 _lastResult = null;
 
+                // The executor turn that just ended may have ended with its process: then the
+                // continuation starts cold, and its first message has to bring the history with it.
                 var payload = mergedEntry.BuildPayload(DateTimeOffset.Now);
-                _currentTask = payload.Task;
+                _currentTask = payload.TaskAtTurnStart(processCold: !_executor.IsProcessWarm);
                 _currentImages = payload.Images;
                 _currentDocuments = payload.Documents;
 

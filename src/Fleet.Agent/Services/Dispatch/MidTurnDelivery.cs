@@ -248,7 +248,8 @@ internal sealed class MidTurnDelivery(
 
             var relayPart = QueueIntake.CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
                 message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents,
-                message.UserId, message.ArrivedAt, message.Identity, message.Priority, message.TelegramMessageId);
+                message.UserId, message.ArrivedAt, message.Identity, message.Priority, message.TelegramMessageId,
+                message.ColdStartTask);
             var enqueued = _intake.EnqueueFreshMessage(chatId, relayPart, notifyUser, completeBridgeOnDrop: true);
             return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
         }

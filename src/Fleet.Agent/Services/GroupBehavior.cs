@@ -379,6 +379,7 @@ public sealed class GroupBehavior
     {
         var buffer = GetGroupBuffer(chatId);
         var prompt = _prompts.ForCheckIn(buffer, label, instruction);
+        var coldStartPrompt = _prompts.ForCheckInColdStart(buffer, label, instruction);
         buffer.MarkChecked();
         var pendingImages = _pendingImages.Drain(chatId);
         _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
@@ -387,7 +388,8 @@ public sealed class GroupBehavior
         // session tracking, tool buffering, IDLE suppression, and completion events.
         _taskManager.StartTaskDetached(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.CheckIn,
-            images: pendingImages.Count > 0 ? pendingImages : null);
+            images: pendingImages.Count > 0 ? pendingImages : null,
+            coldStartTask: coldStartPrompt);
     }
 
     /// <summary>
@@ -403,11 +405,13 @@ public sealed class GroupBehavior
         var batchTime = DateTimeOffset.UtcNow;
         var pendingImages = _pendingImages.Peek(chatId);
         var prompt = _prompts.ForCheckIn(buffer, label, instruction);
+        var coldStartPrompt = _prompts.ForCheckInColdStart(buffer, label, instruction);
         _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
 
         var outcome = await _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.DebouncedGroupBatch,
-            images: pendingImages.Count > 0 ? pendingImages : null);
+            images: pendingImages.Count > 0 ? pendingImages : null,
+            coldStartTask: coldStartPrompt);
 
         if (outcome is TaskDispatchOutcome.Ran or TaskDispatchOutcome.Injected or TaskDispatchOutcome.Queued)
         {
@@ -424,19 +428,44 @@ public sealed class GroupBehavior
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
-        string? chatTitle = null, bool isVoiceTranscription = false)
+        string? chatTitle = null, bool isVoiceTranscription = false) =>
+        _prompts.ForGroupMessage(GroupBufferFor(chatId, chatTitle), sender, taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    /// <summary>
+    /// <see cref="BuildGroupTask"/> as a provider process with no memory of the conversation needs
+    /// it. Passed to <see cref="TaskManager.StartTask"/> beside the prompt, for a turn that ends
+    /// up starting on a process that was restarted while the message waited.
+    /// </summary>
+    public string BuildGroupColdStartTask(long chatId, string sender, string taskText,
+        long? replyToTelegramMessageId = null, long telegramMessageId = 0,
+        string? chatTitle = null, bool isVoiceTranscription = false) =>
+        _prompts.ForGroupMessageColdStart(GroupBufferFor(chatId, chatTitle), sender, taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    public string BuildDmTask(long chatId, string taskText, long? replyToTelegramMessageId = null,
+        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null,
+        bool isVoiceTranscription = false) =>
+        _prompts.ForDm(DmBufferFor(chatId, chatUsername, chatFirstName), taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    /// <summary><see cref="BuildDmTask"/> for a cold provider process. See <see cref="BuildGroupColdStartTask"/>.</summary>
+    public string BuildDmColdStartTask(long chatId, string taskText, long? replyToTelegramMessageId = null,
+        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null,
+        bool isVoiceTranscription = false) =>
+        _prompts.ForDmColdStart(DmBufferFor(chatId, chatUsername, chatFirstName), taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    private GroupChatBuffer GroupBufferFor(long chatId, string? chatTitle)
     {
         var buffer = GetGroupBuffer(chatId);
         // Store title on first encounter (don't overwrite once set)
         if (chatTitle is not null && buffer.ChatTitle is null)
             buffer.ChatTitle = chatTitle;
-        return _prompts.ForGroupMessage(buffer, sender, taskText, replyToTelegramMessageId,
-            telegramMessageId, isVoiceTranscription);
+        return buffer;
     }
 
-    public string BuildDmTask(long chatId, string taskText, long? replyToTelegramMessageId = null,
-        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null,
-        bool isVoiceTranscription = false)
+    private GroupChatBuffer DmBufferFor(long chatId, string? chatUsername, string? chatFirstName)
     {
         var buffer = GetGroupBuffer(chatId);
         // Build and cache the DM label on first encounter
@@ -447,7 +476,7 @@ public sealed class GroupBehavior
             else if (chatFirstName is { Length: > 0 })
                 buffer.ChatLabel = $"name=\"{chatFirstName.Replace("\"", "\\\"")}\"";
         }
-        return _prompts.ForDm(buffer, taskText, replyToTelegramMessageId, telegramMessageId, isVoiceTranscription);
+        return buffer;
     }
 
     // --- Welcome DM on approval ---

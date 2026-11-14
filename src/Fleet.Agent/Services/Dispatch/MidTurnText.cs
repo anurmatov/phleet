@@ -47,7 +47,13 @@ internal static class MidTurnText
         var parts = queued.Parts;
         if (!parts.Any(p => p.Steered)) return queued;
         static QueuedMessagePart Prefixed(QueuedMessagePart p) =>
-            p.Steered ? p with { Task = SteeredPartPrefix + "\n\n" + p.Task } : p;
+            p.Steered
+                ? p with
+                {
+                    Task = SteeredPartPrefix + "\n\n" + p.Task,
+                    ColdStartTask = p.ColdStartTask is null ? null : SteeredPartPrefix + "\n\n" + p.ColdStartTask,
+                }
+                : p;
         var rebuilt = new QueuedMessage(queued.ChatId, Prefixed(parts[0]));
         foreach (var part in parts.Skip(1))
             if (!rebuilt.TryAppendPart(Prefixed(part))) return queued;

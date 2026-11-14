@@ -80,6 +80,8 @@ export interface PendingSend {
   status: 'sending' | 'sent' | 'failed'
   /** The seq the message takes in the conversation, once the chat service has said. */
   acceptedSeq: number | null
+  /** Where the conversation stood when this was sent: the message itself can only come after. */
+  sentAfterSeq?: number
   problem: string | null
   canRetry: boolean
 }
@@ -388,6 +390,7 @@ export class ChatConnection {
     const pending: PendingSend = {
       submissionId: this.newId(), text, files: [...files], status: 'sending', acceptedSeq: null, problem: null, canRetry: false,
       ...(replyTo ? { replyTo } : {}),
+      sentAfterSeq: this.state.transcript.lastSeq,
     }
     this.update({ pending: [...this.state.pending, pending] })
     void this.post(pending.submissionId)
@@ -576,4 +579,30 @@ function describe(action: FailureAction, refusal: Refusal): string {
         : refusal.httpStatus === 200 ? 'The chat service sent an answer this page cannot read.'
         : `The chat service is not available (HTTP ${refusal.httpStatus}).`
   }
+}
+
+/**
+ * The sends to draw under the thread: all of them, except one the thread is already showing.
+ *
+ * The chat service writes a message into the conversation before it answers the request that sent
+ * it, so the stream can deliver the message while its send is still unanswered. For that moment
+ * the page holds it twice, and nothing yet says they are one (the answer's `acceptedSeq` is what
+ * does). Drawing both would show the message doubled until the answer lands. So a send still
+ * waiting for its answer is left out while the thread holds a message of the person's with the
+ * same words that arrived after it was sent. Each such message hides at most one send, oldest
+ * first, so two identical messages sent in a row still show as two.
+ *
+ * This decides only what is drawn for that moment. The send itself is settled by its answer.
+ */
+export function pendingToShow(transcript: Transcript, pending: readonly PendingSend[]): PendingSend[] {
+  const claimed = new Set<string>()
+  return pending.filter(p => {
+    if (p.status !== 'sending' || p.sentAfterSeq === undefined) return true
+    const arrived = transcript.entries.find(e =>
+      e.type === 'you' && e.seq > p.sentAfterSeq! && e.text === p.text
+      && e.attachments.length === p.files.length && !claimed.has(e.key))
+    if (!arrived) return true
+    claimed.add(arrived.key)
+    return false
+  })
 }

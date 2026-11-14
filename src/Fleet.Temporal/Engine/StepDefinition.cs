@@ -153,6 +153,22 @@ public record DelegateStep : StepDefinition
     public int MaxIncompleteRetries { get; init; } = 3;
 
     /// <summary>
+    /// Opt-in for a step whose instruction must reach the agent at most once, such as a merge
+    /// command. When true the bridge makes at most one publish attempt for this step's execution:
+    /// no five-minute re-send, no incomplete-answer continuation, and nothing after a restart. A
+    /// workflow cancellation is checked before the directive is scheduled and is never swallowed
+    /// by this step's <c>ignoreFailure</c>; every other failure still follows it.
+    ///
+    /// <para>
+    /// Allowed only on a plain <c>delegate</c> with <c>retryOnIncomplete: false</c> and
+    /// <c>maxIncompleteRetries: 0</c>, and not under any step that sets <c>ignoreFailure</c>
+    /// (<see cref="WorkflowDefinitionValidator"/>). It bounds what the bridge sends, not what the
+    /// agent executes. Absent or false: nothing differs from before the field existed.
+    /// </para>
+    /// </summary>
+    public bool NoRedelivery { get; init; }
+
+    /// <summary>
     /// Optional <c>owner/name</c> the delegation is about (supports {{template}}, e.g.
     /// <c>"{{input.Repo}}"</c>). Sent to the agent as the relay message's structured <c>Repo</c>
     /// field, which the agent uses to route project context (#347). Omitted or resolving to blank

@@ -1,0 +1,107 @@
+{
+  "name": "merge_repin",
+  "type": "sequence",
+  "steps": [
+    {
+      "name": "pin_after_approval",
+      "type": "delegate",
+      "target": "{{config.CtoAgent}}",
+      "instruction": "REQUIRE_ACCEPTANCE: {{vars.acceptance_mode}}\nIn off mode read only the actual gh headRefOid, EVERY page of check-runs and commit statuses for ci-rollup (zero/error is pending), and diff paths for change-class (deny list wins). Return HEAD_OID, CI and CHANGE_CLASS only. Skip issue-body hashing, design lookup, plan, receipts, prior rounds, owner and capability-map checks. Ignore all acceptance tokens even if present. Do not run acceptance work. The instructions below apply only in required mode.\n\nRead-only PIN for {{input.Repo}}, issue {{input.IssueNumber}}, PR {{vars.pr_url}}; if URL absent, find the unique PR on {{input.BranchName}}. Use /opt/fleet/acceptance_plan.py and actual gh headRefOid. Collect EVERY page of check-runs and commit statuses at that exact head for ci-rollup; zero/error is pending, never success. Read diff paths for change-class (deny list wins). Fetch the exact issue body bytes; run body-sha without adding a newline. On first PIN find approval evidence ONLY with temporal_list_workflows limit:100 and query WorkflowType=\"UweDesignWorkflow\" AND Repo=\"{{input.Repo}}\" AND IssueNumber={{input.IssueNumber}} AND ExecutionStatus=\"Completed\" AND ReviewRef=\"<BODY_SHA256>\". Newest startTime first, call temporal_get_workflow_result for each row with workflow_id=<row.workflowId>, run_id=<row.runId>; save returned text verbatim and run acceptance_plan.py design-result --issue {{input.IssueNumber}} --workflow-id <row.workflowId> --run-id <row.runId> --result-file <file>. Only DESIGN_MATCH: yes counts. Every error, null, bare/old bridge result or mismatch means --design-match no in plan-evidence and PLAN_APPROVAL:none. Never fetch a result without run_id or follow a continued run. Hash canonical fenced Acceptance plan JSON, run plan-check. Compare against the in-run approved hash {{vars.approved_plan_sha256}}; no new run inherits an in-run approval. Read all receipt/comment pages, prior-rounds with PriorFixRounds={{input.PriorFixRounds | default: 'absent'}} / PriorBatchRounds={{input.PriorBatchRounds | default: 'absent'}}, prior-clean for EVERY earlier attempt of this run, and harness-evidence at the current head; malformed/error harness evidence is unknown. Validate owner enabled/running, not implementer/reviewer, all capabilities and existing prerequisites with access-check. Resolve an explicit 40-hex private-map commit, not an agent-image value: <capability map, see docs/pr-acceptance.md>. Record commit/hash and resolved SshTargets; missing map makes host access invalid, non-host items still evaluate. No grants, prerequisites, configuration, tools, instructions, definitions, production changes or deployments.\nReturn exactly these token lines: PR, HEAD_OID, IS_DRAFT, CI, CI_FAILING, CHANGE_CLASS, PLAN, PLAN_SHA256, MAX_DURATION, WAIT_SECONDS, PRE_STAGES, POST_STAGES, OWNER, PRIOR_RECEIPTS, PRIOR_ATTEMPTS_CLEAN, PRIOR_ROUNDS, PRIOR_LAST_HEAD, MAP_COMMIT, MAP_SHA256, SSH_TARGETS, PINNED_AT, BODY_SHA256, PLAN_APPROVAL, APPROVED_PLAN_SHA256, ACCEPTANCE_ISO, HARNESS_RETRY_SPENT. Tokens and meanings are those in docs/pr-acceptance.md; missing evidence is never ok.\nPlan source: use the fenced issue-body plan. If that plan is absent and this run already has approved_plan_sha256={{vars.approved_plan_sha256}} from a bound CEO plan gate, read every comment page and select only the plan comment whose canonical JSON hash equals that exact approved hash; validate it and report PLAN_APPROVAL: gate. Never use an unapproved comment or inherit an earlier run gate. If a present body plan differs, report plan_changed rather than hiding it behind an old comment. The plan gate approves its displayed hash, not a subsequent read.",
+      "timeoutMinutes": 15,
+      "outputVar": "pin_report",
+      "ignoreFailure": true,
+      "retryOnIncomplete": false,
+      "maxIncompleteRetries": 0
+    },
+    {
+      "name": "pin_fields_mode",
+      "type": "branch",
+      "on": "{{vars.acceptance_mode}}",
+      "cases": {
+        "required": {
+          "name": "pin_fields",
+          "type": "set_variable",
+          "vars": {
+            "head_oid": "{{vars.pin_report | extract: '(?m)^HEAD_OID: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+            "ci": "{{vars.pin_report | extract: '(?m)^CI: (success|pending|failure)\\r?$' | default: 'pending'}}",
+            "change_class": "{{vars.pin_report | extract: '(?m)^CHANGE_CLASS: (doc_only|code)\\r?$' | default: 'code'}}",
+            "plan": "{{vars.pin_report | extract: '(?m)^PLAN: (ok|missing|invalid|exceeds|changed)\\r?$' | default: 'invalid'}}",
+            "plan_sha": "{{vars.pin_report | extract: '(?m)^PLAN_SHA256: ([0-9a-f]{64})\\r?$' | default: 'none'}}",
+            "max_duration": "{{vars.pin_report | extract: '(?m)^MAX_DURATION: (3600|7200|14400|21600)\\r?$' | default: 'none'}}",
+            "wait_seconds": "{{vars.pin_report | extract: '(?m)^WAIT_SECONDS: (0|60|300|900|1800|3660|7260|14460)\\r?$' | default: 'none'}}",
+            "post_stages": "{{vars.pin_report | extract: '(?m)^POST_STAGES: ([0-4])\\r?$' | default: 'none'}}",
+            "owner": "{{vars.pin_report | extract: '(?m)^OWNER: ([^\\r\\n]+)\\r?$' | default: 'invalid'}}",
+            "prior_receipts": "{{vars.pin_report | extract: '(?m)^PRIOR_RECEIPTS: (yes|no)\\r?$' | default: 'yes'}}",
+            "prior_clean": "{{vars.pin_report | extract: '(?m)^PRIOR_ATTEMPTS_CLEAN: (yes|no)\\r?$' | default: 'no'}}",
+            "prior_rounds": "{{vars.pin_report | extract: '(?m)^PRIOR_ROUNDS: (ok|invalid)\\r?$' | default: 'invalid'}}",
+            "prior_head": "{{vars.pin_report | extract: '(?m)^PRIOR_LAST_HEAD: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+            "plan_approval": "{{vars.pin_report | extract: '(?m)^PLAN_APPROVAL: (design|gate|none)\\r?$' | default: 'none'}}",
+            "acceptance_iso": "{{vars.pin_report | extract: '(?m)^ACCEPTANCE_ISO: (isolated|production)\\r?$' | default: 'production'}}",
+            "harness_spent": "{{vars.pin_report | extract: '(?m)^HARNESS_RETRY_SPENT: (yes|no|unknown)\\r?$' | default: 'unknown'}}",
+            "map_commit": "{{vars.pin_report | extract: '(?m)^MAP_COMMIT: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+            "map_sha": "{{vars.pin_report | extract: '(?m)^MAP_SHA256: ([0-9a-f]{64})\\r?$' | default: 'none'}}",
+            "ssh_targets": "{{vars.pin_report | extract: '(?m)^SSH_TARGETS: ([^\\r\\n]+)\\r?$' | default: 'none'}}",
+            "pinned_at": "{{vars.pin_report | extract: '(?m)^PINNED_AT: ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z)\\r?$' | default: 'none'}}"
+          }
+        }
+      },
+      "default": {
+        "name": "off_pin_fields",
+        "type": "set_variable",
+        "vars": {
+          "head_oid": "{{vars.pin_report | extract: '(?m)^HEAD_OID: ([0-9a-f]{40})\\r?$' | default: 'none'}}",
+          "ci": "{{vars.pin_report | extract: '(?m)^CI: (success|pending|failure)\\r?$' | default: 'pending'}}",
+          "change_class": "{{vars.pin_report | extract: '(?m)^CHANGE_CLASS: (doc_only|code)\\r?$' | default: 'code'}}"
+        }
+      }
+    },
+    {
+      "name": "approval_head_still_exact",
+      "type": "sequence",
+      "steps": [
+        {
+          "name": "approval_head_still_exact_pair",
+          "type": "set_variable",
+          "vars": {
+            "pair": "{{vars.head_oid}}={{vars.H}}"
+          }
+        },
+        {
+          "name": "approval_head_still_exact_equal",
+          "type": "branch",
+          "on": "{{vars.pair | extract: '^([^\\r\\n]+)=\\1$'}}",
+          "cases": {
+            "": {
+              "name": "route_INVALIDATED",
+              "type": "set_variable",
+              "vars": {
+                "state": "INVALIDATED"
+              }
+            }
+          },
+          "default": {
+            "name": "approval_ci_success",
+            "type": "branch",
+            "on": "{{vars.ci}}",
+            "cases": {
+              "success": {
+                "name": "route_MERGE",
+                "type": "set_variable",
+                "vars": {
+                  "state": "MERGE"
+                }
+              }
+            },
+            "default": {
+              "name": "route_INVALIDATED",
+              "type": "set_variable",
+              "vars": {
+                "state": "INVALIDATED"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

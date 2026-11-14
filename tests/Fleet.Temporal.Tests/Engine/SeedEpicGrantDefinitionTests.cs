@@ -255,8 +255,13 @@ public sealed class SeedEpicGrantDefinitionTests
     [Fact]
     public void Pr_MergeVerifier_UsesOnlySupportedGhFields()
     {
-        var verify = WorkflowDefinitionValidator.Walk(SeedHarness.Parse("UwePrImplementationWorkflow"))
-            .OfType<DelegateStep>().Single(d => d.Name == "verify_merge_status");
+        // Two copies of one step: the read after a delegated merge, and the read a human-approved
+        // merge may repeat.
+        var verifiers = WorkflowDefinitionValidator.Walk(SeedHarness.Parse("UwePrImplementationWorkflow"))
+            .OfType<DelegateStep>().Where(d => d.Name == "verify_merge_status").ToList();
+        Assert.Equal(2, verifiers.Count);
+        Assert.Equal(verifiers[0], verifiers[1]);
+        var verify = verifiers[0];
 
         Assert.Contains("--json state,mergedAt,mergeCommit", verify.Instruction);
         Assert.DoesNotMatch(@"state,merged(?!At)", verify.Instruction!);
@@ -638,7 +643,8 @@ internal sealed class SeedHarness
         bool captureWaiter = false,
         Action<JsonNode>? mutateSeed = null,
         bool allowFailure = false,
-        bool localServer = false)
+        bool localServer = false,
+        Func<Call, object?[], Task<AgentTaskResult>?>? delegateOverride = null)
     {
         // localServer: a real local Temporal dev server with wall-clock timers instead of the
         // time-skipping test server, for checks that must observe the server's own terminal status.
@@ -667,6 +673,10 @@ internal sealed class SeedHarness
                 var reply = originalRespond(call);
                 if (reply == "ok" && (call.Step is "pin" or "pin_after_approval")) return DocOnlyPin(latestHead);
                 if (reply == "ok" && call.Step == "phase2_5_unresolved_check") return "UNRESOLVED: none";
+                // The run's own read-only turns: a script that says nothing about them gets a green
+                // CI probe at the latest head and a clear merge preflight.
+                if (reply == "ok" && call.Step == "ci_probe") return CiProbe(latestHead);
+                if (reply == "ok" && call.Step == "merge_preflight") return PreflightClear;
                 if (reply == "ok" && call.Step == "notify_invalidation") return $"HEAD_OID: {latestHead}";
                 if (call.Step == "phase1_implement" || call.Step.StartsWith("revise_", StringComparison.Ordinal))
                 {
@@ -699,7 +709,7 @@ internal sealed class SeedHarness
                     "LoadWorkflowConfig", typeof(JsonElement), [], 0,
                     _ => JsonSerializer.SerializeToElement(new { CtoAgent = "cto-agent", EscalationTarget = "cto-agent" })))
                 .AddActivity(ActivityDefinition.Create("LoadAgentBudgetSeconds", typeof(int), [], 0, _ => 600))
-                .AddActivity(harness.DelegateStub(respond)));
+                .AddActivity(harness.DelegateStub(respond, delegateOverride)));
 
         object? result = null;
         string? waiterDecision = null;
@@ -737,17 +747,26 @@ internal sealed class SeedHarness
         };
     }
 
-    private ActivityDefinition DelegateStub(Func<Call, string> respond) =>
+    /// <summary>
+    /// Every delegation is answered by <paramref name="respond"/> with status <c>completed</c>,
+    /// unless <paramref name="delegateOverride"/> takes it: given the call and the activity's raw
+    /// arguments, it returns the answer itself (any status, a failure, or the real activity's own
+    /// task), or null to leave the call to the script.
+    /// </summary>
+    private ActivityDefinition DelegateStub(
+        Func<Call, string> respond, Func<Call, object?[], Task<AgentTaskResult>?>? delegateOverride) =>
         ActivityDefinition.Create(
             DelegateToAgentActivity.ActivityName,
             typeof(AgentTaskResult),
-            [typeof(string), typeof(string), typeof(string), typeof(bool), typeof(int), typeof(int), typeof(string)],
+            // The last slot is the noRedelivery flag, appended only for a step that sets it.
+            [typeof(string), typeof(string), typeof(string), typeof(bool), typeof(int), typeof(int), typeof(string), typeof(bool)],
             3,
             args =>
             {
                 var taskId = (string)args[2]!;
                 var call = new Call(taskId.Split('/').Last(), (string)args[0]!, (string)args[1]!);
                 lock (_calls) _calls.Add(call);
+                if (delegateOverride?.Invoke(call, args) is { } taken) return taken;
                 return new AgentTaskResult(respond(call), "completed");
             });
 
@@ -771,6 +790,14 @@ internal sealed class SeedHarness
 
     internal static string DocOnlyPin(string head) =>
         $"HEAD_OID: {head}\nCI: success\nCHANGE_CLASS: doc_only\nPLAN: ok\nPLAN_SHA256: {new string('b',64)}\nMAX_DURATION: 14400\nWAIT_SECONDS: 0\nPOST_STAGES: 0\nOWNER: agent3\nPRIOR_RECEIPTS: no\nPRIOR_ATTEMPTS_CLEAN: yes\nPRIOR_ROUNDS: ok\nPRIOR_LAST_HEAD: none\nPLAN_APPROVAL: design\nACCEPTANCE_ISO: isolated\nHARNESS_RETRY_SPENT: no\nPINNED_AT: 2026-01-01T00:00:00Z\nPRE_STAGES: 1\nMAP_COMMIT: none\nMAP_SHA256: none\nSSH_TARGETS: none\nBODY_SHA256: {new string('c',64)}";
+
+    internal static string CiProbe(string head, string ci = "success", string read = "ok") =>
+        $"HEAD_OID: {head}\nCI_READ: {read}\nCI: {ci}\nCI_FAILING: none\nCI_DETAIL: {(ci == "pending" ? "running" : "none")}";
+
+    internal const string PreflightClear = "MERGE_PREFLIGHT: clear\nHOLD_REASON: none\nIS_DRAFT: false\nstate OPEN, mergeStateStatus CLEAN";
+
+    internal static string PreflightHeld(string reason = "queue") =>
+        $"MERGE_PREFLIGHT: held\nHOLD_REASON: {reason}\nIS_DRAFT: false\nstate OPEN, mergeStateStatus BLOCKED";
 
     internal async Task<WorkflowHandle> WaitForChildAsync(WorkflowHandle parent, string type)
     {

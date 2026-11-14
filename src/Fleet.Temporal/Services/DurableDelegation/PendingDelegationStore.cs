@@ -77,6 +77,9 @@ public sealed class PendingDelegationStore
                 record.ExecutionId ??= "";
                 record.PriorCancels ??= [];
                 record.PriorCancels.RemoveAll(p => p is null || string.IsNullOrEmpty(p.Agent) || string.IsNullOrEmpty(p.TaskId));
+                // Read by a publish-once record only: it publishes from the process that
+                // created it and from no other.
+                record.Restored = true;
                 _records[record.TaskId] = record;
             }
 
@@ -113,6 +116,21 @@ public sealed class PendingDelegationStore
         Save();
     }
 
+    /// <summary>
+    /// Adds or replaces the record only if the file then holds it. False, with the store exactly
+    /// as it was before the call, when there is no file or it could not be written.
+    /// </summary>
+    public bool TryPut(PendingDelegation record)
+    {
+        var replaced = _records.TryGetValue(record.TaskId, out var previous);
+        _records[record.TaskId] = record;
+        if (TrySave()) return true;
+
+        if (replaced) _records[record.TaskId] = previous!;
+        else _records.Remove(record.TaskId);
+        return false;
+    }
+
     /// <summary>Removes the record and writes the file. False when there was none.</summary>
     public bool Remove(string taskId)
     {
@@ -121,10 +139,20 @@ public sealed class PendingDelegationStore
         return true;
     }
 
-    /// <summary>Writes the file after a record was changed in place.</summary>
-    public void Save()
+    /// <summary>
+    /// Writes the file after a record was changed in place. Says nothing when it could not: the
+    /// records stay in memory and <see cref="Durable"/> turns false.
+    /// </summary>
+    public void Save() => TrySave();
+
+    /// <summary>
+    /// Writes the file and says whether it now holds what is in memory: true only when there is a
+    /// path and the write and the rename both completed. For a caller that must not go on unless
+    /// the file has what it just changed. The write is the same one <see cref="Save"/> makes.
+    /// </summary>
+    public bool TrySave()
     {
-        if (_path is null) return;
+        if (_path is null) return false;
         try
         {
             var directory = Path.GetDirectoryName(Path.GetFullPath(_path))!;
@@ -145,6 +173,7 @@ public sealed class PendingDelegationStore
             File.Move(temp, _path, overwrite: true);
             if (!_writable) _logger.LogInformation("Pending delegation state {Path} is writable again", _path);
             _writable = true;
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -153,6 +182,7 @@ public sealed class PendingDelegationStore
                     "Pending delegation state {Path} not writable ({Error}); delegations are in memory only and will not survive a restart",
                     _path, ex.GetType().Name);
             _writable = false;
+            return false;
         }
     }
 

@@ -172,12 +172,41 @@ public sealed class RequireAcceptanceTests
         Assert.Contains(run.Calls, c => c.Instruction.Contains("basis doc_only", StringComparison.Ordinal));
     }
 
+    // Six since the merge hold: PIN, the CI wait, the cleanup wait, a delegated approval's re-pin,
+    // and the re-pin a human approval is checked with, once in the hold and once in the stall
+    // after it. All carry the mode and the off contract. Five share one text and report their CI
+    // read; the delegated re-pin keeps the text it shipped with, because nothing on the grant
+    // path changes.
     [Fact]
-    public void Pin_AllFourInstructions_IncludeModeAndOffContract()
+    public void Pin_AllSixInstructions_IncludeModeAndOffContract()
     {
-        var pins = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).OfType<DelegateStep>().Where(s => s.Name is "pin" or "pin_after_approval").ToArray();
-        Assert.Equal(4, pins.Length);
+        var steps = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).ToList();
+        var pins = steps.OfType<DelegateStep>().Where(s => s.Name is "pin" or "pin_after_approval").ToArray();
+        Assert.Equal(6, pins.Length);
+        Assert.Equal(3, pins.Count(p => p.Name == "pin_after_approval"));
         Assert.All(pins, p => { Assert.Contains("REQUIRE_ACCEPTANCE: {{vars.acceptance_mode}}", p.Instruction); Assert.Contains("In off mode", p.Instruction); });
+
+        var delegated = Assert.IsType<DelegateStep>(Assert.Single(steps.OfType<SequenceStep>(), s => s.Name == "merge_repin").Steps[0]);
+        Assert.Equal("pin_after_approval", delegated.Name);
+        Assert.Contains("Return HEAD_OID, CI and CHANGE_CLASS only.", delegated.Instruction);
+        Assert.Contains("PR, HEAD_OID, IS_DRAFT, CI, CI_FAILING, CHANGE_CLASS,", delegated.Instruction);
+        Assert.DoesNotContain("CI_READ", delegated.Instruction);
+        Assert.DoesNotContain("CI_DETAIL", delegated.Instruction);
+
+        var reading = pins.Where(p => !ReferenceEquals(p, delegated)).ToArray();
+        Assert.Equal(5, reading.Length);
+        Assert.Equal(2, reading.Count(p => p.Name == "pin_after_approval"));
+        Assert.Single(reading.Select(p => p.Instruction).Distinct());
+        Assert.All(reading, p =>
+        {
+            Assert.Contains("Return HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS only.", p.Instruction);
+            Assert.Contains("PR, HEAD_OID, IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS,", p.Instruction);
+            Assert.Contains("error when any GitHub read failed; CI is then pending", p.Instruction);
+        });
+        // The only difference between the two texts is those tokens.
+        Assert.Equal(delegated.Instruction, reading[0].Instruction!
+            .Replace("Return HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS only. CI_READ is ok when every check-run and status page was read and error when any GitHub read failed; CI is then pending.", "Return HEAD_OID, CI and CHANGE_CLASS only.", StringComparison.Ordinal)
+            .Replace("IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS,", "IS_DRAFT, CI, CI_FAILING, CHANGE_CLASS,", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -193,14 +222,23 @@ public sealed class RequireAcceptanceTests
         Assert.Equal(2, implementations); Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow"));
     }
 
+    // Off mode keeps the existing bound (twelve 300-second waits). Past it the run stalls on its own
+    // instead of opening the acceptance-blocked gate: no gate notice, no decision, no acceptance work.
     [Fact]
-    public async Task Pr_OffPendingCi_BlocksAtExistingTimeout()
+    public async Task Pr_OffPendingCi_StallsAtExistingTimeout()
     {
-        var run = await SeedHarness.RunAsync(Workflow, Input(), c => Respond(c).Replace("CI: success", "CI: pending"), async (handle, h) =>
-        { await h.AdvanceAsync(TimeSpan.FromHours(2)); await WaitPhase(handle, h, "acceptance-blocked"); await Stop(handle, h); });
+        var run = await SeedHarness.RunAsync(Workflow, Input(), c => c.Step == "ci_probe" ? SeedHarness.CiProbe(Head, "pending") : Respond(c).Replace("CI: success", "CI: pending"), async (handle, h) =>
+        { await h.AdvanceAsync(TimeSpan.FromHours(2)); await WaitPhase(handle, h, "technical-stalled"); });
         Assert.Contains(run.Upserts("Acceptance"), a => a.Contains("block=ci_timeout;", StringComparison.Ordinal));
         Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow"));
-        Assert.Contains(run.Calls, c => c.Step == "notify_acceptance_gate" && c.Instruction.Contains("REQUIRE_ACCEPTANCE: off", StringComparison.Ordinal));
+        Assert.DoesNotContain(run.Upserts("Phase"), p => p is "acceptance-blocked" or "acceptance-continue");
+        Assert.Empty(run.Upserts("GateRef"));
+        Assert.DoesNotContain(run.Calls, c => c.Step == "notify_acceptance_gate");
+        Assert.Equal(12, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300));
+        Assert.Contains("reason ci_timeout", Assert.Single(run.Calls, c => c.Step == "notify_stalled").Instruction);
+        // The stall's reads are the CI-only probe in off mode too.
+        Assert.Equal(4, run.Calls.Count(c => c.Step == "ci_probe"));
+        Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
     }
 
     [Fact]

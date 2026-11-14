@@ -16,10 +16,10 @@ Temporal the activity will be completed later (asynchronous activity completion)
 | what | when | same as before? |
 |---|---|---|
 | heartbeat the activity | every pass (`TickSeconds`, default 15) | yes; it was every 30 s |
-| re-send the directive | every 5 minutes | yes |
+| re-send the directive | every 5 minutes (never for a `noRedelivery` delegation, below) | yes |
 | fail the activity with `TimeoutException` | the agent's budget runs out | yes, same message and error type |
 | tell the escalation target about the timeout | once, after Temporal has been told | yes, but it no longer comes first |
-| continue an `incomplete` answer (`/incomplete-retry-N`) | when it arrives, up to `maxIncompleteRetries` | yes, same prompt and same joined text |
+| continue an `incomplete` answer (`/incomplete-retry-N`) | when it arrives, up to `maxIncompleteRetries` (never for a `noRedelivery` delegation) | yes, same prompt and same joined text |
 | tell the agent to stop | the workflow cancels the activity, or Temporal no longer has it | yes |
 | complete the activity | the agent's answer arrives at the relay listener | yes, same result |
 
@@ -194,6 +194,83 @@ other. A record that ran out of budget while the bridge was down is failed in Te
 keeps its timeout notice until the escalation target is known; the notice is then sent once. The
 log says `relay sends are held` and `relay sends resumed`, once each.
 
+## `noRedelivery`: a directive the bridge attempts once
+
+A UWE `delegate` step can set `"noRedelivery": true`. It is meant for a step whose instruction is a
+command that must not be handed to the agent a second time, such as a merge. Without the field
+nothing here applies: the step schedules the same activity arguments, its record is the same bytes
+in the state file, and it is re-sent, continued and recovered as described above.
+
+What the field guarantees:
+
+1. **The bridge makes at most one attempt to publish the step's directive, per execution of the
+   step.** No five-minute re-send, no continuation of an `incomplete` answer, no second attempt
+   after one that failed or whose outcome is unknown, and nothing after a bridge restart.
+2. **A workflow cancellation is checked before the directive is scheduled, and is never swallowed
+   at this step.** A run that was cancelled earlier (an `ignoreFailure` step can have swallowed it)
+   ends `Canceled` when it reaches the step, with nothing scheduled. A cancel that arrives while
+   the step is out ends the run `Canceled` too, whatever the step's `ignoreFailure` says, and also
+   when the step's activity failed for a reason of its own at the same moment.
+3. **Every other failure still follows the step's own `ignoreFailure`**: a spent budget, a failed
+   publish, an exception. A `failed` or `incomplete` answer is not a failure; it is returned as it
+   came, once.
+
+What it does not guarantee: **that the agent executes the instruction exactly once.** It bounds
+what the bridge sends. The broker can deliver one published message to the agent more than once,
+and the agent can fail part-way through the turn; a definition that needs to know what happened
+reads the state back in a later step.
+
+How each path keeps it:
+
+- **In-process wait** (switch off). The activity publishes, then only heartbeats until an answer,
+  a cancel or the budget. An `incomplete` answer is the result. A bridge restart ends the activity
+  execution, and the step has one attempt.
+- **Durable path** (switch on). The record carries `PublishOnce`, and `PublishAttempted` once the
+  attempt has been decided on. Both are written to the state file only when set.
+  - **The marker comes first.** Under the store's lock the service sets `PublishAttempted`, writes
+    the file, and publishes only if that write completed. This holds for both ways a first
+    directive leaves: the one the activity publishes itself, and the one the relay lane publishes
+    because it was held behind a cancel or had no room.
+  - **No file, no directive.** With no state file configured, or a write that fails, nothing is
+    published and the activity fails with error type `DirectiveNotSent` (not retryable). At the
+    start the record is not kept at all; in the lane the next pass fails the activity. This is the
+    one place where "a file that cannot be written leaves the records in memory" does not apply.
+  - **An attempt is not repeated.** If the activity's own publish throws, the activity fails with
+    that error, as it always did, and the record is gone. If the lane's publish throws or is cut
+    short, the bridge cannot know whether anything left, so the record stays and waits for an
+    answer, a cancel or its budget; it is not sent again.
+  - **After a restart the record never initiates a directive.** A record that was never attempted
+    (it was still held when the bridge stopped) is failed to its activity on the first pass, with
+    `DirectiveNotSent`, so the workflow can go on and read back what state things are in. A record
+    that was attempted is kept exactly like any other restored delegation, except that it cannot
+    send: a late answer completes it, a workflow cancel reaches the agent and is reported, a spent
+    budget is a timeout with its one notice.
+
+The cancel to the agent and the timeout notice to the escalation target are not the directive, and
+are sent as before.
+
+The definition validator refuses the field where the engine could not keep the promise, at load,
+naming the workflow and the step:
+
+- on `delegate_with_escalation` (an escalation `retry` sends the directive again) and on a wait's
+  `notifyStep` (sent again on every reminder);
+- unless the step also sets `"retryOnIncomplete": false` and `"maxIncompleteRetries": 0`, because
+  both default to on;
+- under any ancestor step that sets `ignoreFailure`, which would swallow the cancellation one level
+  up. The step's own `ignoreFailure` is allowed.
+
+Limits:
+
+- One execution is one activity attempt. The engine schedules a delegate with
+  `MaximumAttempts = 1`; raising it would give one publish attempt per retry.
+- A step inside a loop is a new execution each time round, with a publish attempt of its own. The
+  definition has to keep the step from being reached twice.
+- The marker write is a temp file and a rename, not an `fsync`. The guarantee does not rest on it
+  surviving a host crash: whatever the file holds afterwards, a record read from it never
+  publishes.
+- A restored record that was never attempted is failed, not sent, even though sending it would
+  have been the first attempt. The bridge cannot tell that case from a marker write that was lost.
+
 ## The switch
 
 | setting | default | meaning |
@@ -229,7 +306,8 @@ was last sent, plus `enabled` and `durable` (false when the file cannot be writt
   and the bridge starts with no pending delegations. The delegations it held then time out. A
   record that cannot be acted on (no task token) is skipped and counted in the log.
 - **A file that cannot be written** leaves the records in memory: delegations work and do not
-  survive a restart. `/pending-delegations` reports `durable: false` and the log says so once.
+  survive a restart. `/pending-delegations` reports `durable: false` and the log says so once. A
+  `noRedelivery` delegation is the exception: it is not sent at all, and its activity fails.
 - **An answer for a delegation Temporal cannot be told about** (Temporal unreachable) is written to
   the record and the message is acknowledged; a later pass completes the activity with it.
 - **Temporal being away** costs a pass one bounded call (10 seconds) per namespace, not one per
@@ -297,6 +375,14 @@ whose delegation is in flight across a bridge restart completes with the agent's
 history replays; the same restart with the feature off fails; passes keep an activity alive past
 its heartbeat timeout; an outage longer than the timeout loses the delegation and drops the record;
 a workflow cancel reaches the agent; a budget fails the activity the same way on both paths.
+
+`noRedelivery` is covered by tests through the real activity with a moved clock
+(`DelegateNoRedeliveryActivityTests`, `DurableNoRedeliveryTests`) and through the engine on a
+time-skipping test server (`NoRedeliveryEngineTests`): one publish through a whole budget on both
+paths, no continuation, no publish without a confirmed marker write on either first-publish path,
+nothing sent by a restored record, and a cancel that ends the run `Canceled`. A timeout raised by
+the Temporal server itself at such a step (heartbeat or start-to-close) is not exercised; the test
+server does not skip time while an activity is running.
 
 Not covered by any test: a real RabbitMQ broker (publishing and the listener's ack and requeue are
 exercised only with substitutes), a real bridge container restart, and several delegations in

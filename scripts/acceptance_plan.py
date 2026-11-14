@@ -145,6 +145,12 @@ def prior_clean(receipts):
 
 
 def ci_rollup(checks,statuses):
+    result,failures,_ = ci_rollup_detail(checks,statuses)
+    return result,failures
+
+
+def ci_rollup_detail(checks,statuses):
+    """The rollup plus why a pending result is pending: running, none_reported or unexpected_terminal."""
     latest = {}
     for row in checks:
         name = row['name']
@@ -159,14 +165,16 @@ def ci_rollup(checks,statuses):
     failures = sorted({name for name,row in latest.items() if row.get('conclusion') in bad}
                       | {name for name,row in states.items() if row['state'] in ('failure','error')})
     if failures:
-        return 'failure',failures
+        return 'failure',failures,'none'
     active = [row for row in latest.values() if row.get('conclusion') not in ('skipped','neutral')]
-    if (not active and not states) or any(row.get('status') != 'completed' for row in active) or any(row['state']=='pending' for row in states.values()):
-        return 'pending',[]
+    if not active and not states:
+        return 'pending',[],'none_reported'
+    if any(row.get('status') != 'completed' for row in active) or any(row['state']=='pending' for row in states.values()):
+        return 'pending',[],'running'
     # Unexpected terminal values are not success evidence.
     if any(row.get('conclusion') != 'success' for row in active) or any(row['state'] != 'success' for row in states.values()):
-        return 'pending',[]
-    return 'success',[]
+        return 'pending',[],'unexpected_terminal'
+    return 'success',[],'none'
 
 
 def change_class(paths):
@@ -419,8 +427,8 @@ def main(argv=None):
         elif a.command=='change-class':
             print('CHANGE_CLASS: '+change_class(Path(a.paths_file).read_text().splitlines()))
         elif a.command=='ci-rollup':
-            result,failures=ci_rollup(read_json(a.checks_file),read_json(a.statuses_file))
-            print('CI: '+result);print('CI_FAILING: '+(', '.join(failures) or 'none'))
+            result,failures,detail=ci_rollup_detail(read_json(a.checks_file),read_json(a.statuses_file))
+            print('CI: '+result);print('CI_FAILING: '+(', '.join(failures) or 'none'));print('CI_DETAIL: '+detail)
         elif a.command=='access-check':
             plan,config,status=read_json(a.plan_file),read_json(a.config_file),read_json(a.status_file)
             try:

@@ -489,7 +489,20 @@ is owed, unfinished, or ended without a 2xx less than 30 s ago (`Fenced`, `Prior
 the peer-config bootstrap on purpose: heartbeats start with the host, relay sends wait for
 `IDelegationRelay.Ready` (`FleetWorkflowConfig.PeerConfigLoaded` and a non-empty escalation target).
 
-MUST NOT: await a relay send from a pass or a reply (ten 10 s cancels once put another activity's
+A UWE `delegate` step with `noRedelivery: true` gets **at most one bridge publish attempt per
+execution** on either path (no five-minute re-send, no continuation, nothing after a failed attempt
+or a restart), a cancellation check before the directive is scheduled, and a cancellation its own
+`ignoreFailure` never swallows; it is not exactly-once execution by the agent. The flag is an eighth
+activity argument appended only when true, and `PublishOnce`/`PublishAttempted` are written to the
+state file only when set, so a step without the field keeps its arguments, its bytes and its replay.
+`WorkflowDefinitionValidator` refuses it on `delegate_with_escalation`, on a `notifyStep`, with
+continuation retries on, and under any ancestor with `ignoreFailure`.
+
+MUST NOT: publish for a `PublishOnce` record before `PublishAttempted` has been confirmed in the
+state file (`PendingDelegationStore.TrySave`/`TryPut` under `_gate`; no path or a failed write is
+zero publishes and a failed activity, on the activity's own publish and on the lane's); let a
+`PublishOnce` record that was loaded from the file initiate a directive, attempted or not; await a
+relay send from a pass or a reply (ten 10 s cancels once put another activity's
 heartbeat past its 90 s timeout); publish a directive ahead of a cancel for the same task id, or
 give a place to a new call while the old one has not ended; send the `/cancel all` broadcast for a
 record that has an execution id, mint a new id for a record that has one or was loaded without one,

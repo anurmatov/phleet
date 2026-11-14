@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -59,6 +58,10 @@ public sealed class DelegateToAgentActivity
     // for the agent itself, below, exactly as it always did.
     private readonly DurableDelegationService? _durable;
 
+    // The clock the wait below runs on: its heartbeat interval, its five-minute re-send and its
+    // budget. The system clock everywhere but in a test, which moves it by hand.
+    private readonly TimeProvider _time;
+
     public DelegateToAgentActivity(
         IOptions<RabbitMqOptions> rabbitConfig,
         IOptions<TemporalBridgeOptions> bridgeConfig,
@@ -66,8 +69,10 @@ public sealed class DelegateToAgentActivity
         IConnectionFactory connectionFactory,
         IHttpClientFactory httpClientFactory,
         ILogger<DelegateToAgentActivity> logger,
-        DurableDelegationService? durable = null)
+        DurableDelegationService? durable = null,
+        TimeProvider? time = null)
     {
+        _time = time ?? TimeProvider.System;
         _rabbitConfig = rabbitConfig.Value;
         _bridgeConfig = bridgeConfig.Value;
         _registry = registry;
@@ -117,6 +122,21 @@ public sealed class DelegateToAgentActivity
     ///   would have the compiler append this parameter's default and change the activity input of
     ///   workflows that never asked for it.
     /// </param>
+    /// <param name="noRedelivery">
+    ///   When true, this execution makes at most one attempt to publish its directive: the wait
+    ///   never re-sends it, an incomplete answer is returned as it came with no continuation
+    ///   directive (whatever <paramref name="retryOnIncomplete"/> says), and on the durable path
+    ///   nothing is published unless the record was first confirmed on disk, and nothing after a
+    ///   restart. The timeout notice to the escalation target and the cancel to the agent are not
+    ///   the directive and are sent as before. It bounds what the bridge sends, not what the agent
+    ///   executes.
+    ///
+    ///   Only a UWE <c>delegate</c> step with <c>noRedelivery: true</c> passes it, appended after an
+    ///   explicit <c>agentBudgetSeconds</c> of 0 and the repo (or null), and only when true. That
+    ///   step is scheduled with <c>MaximumAttempts = 1</c>, so one activity attempt is the step's
+    ///   whole execution; a caller that let Temporal retry the activity would get one publish
+    ///   attempt per retry.
+    /// </param>
     [Activity(ActivityName)]
     public async Task<AgentTaskResult> DelegateToAgentAsync(
         string agentName,
@@ -125,13 +145,18 @@ public sealed class DelegateToAgentActivity
         bool retryOnIncomplete = true,
         int maxIncompleteRetries = 3,
         int agentBudgetSeconds = 0,
-        string? repo = null)
+        string? repo = null,
+        bool noRedelivery = false)
     {
         var ctx = ActivityExecutionContext.Current;
         repo = ValidateRepo(repo, agentName, taskId);
         _logger.LogInformation(
             "DelegateToAgent: agent={Agent}, taskId={TaskId}, workflowId={WorkflowId}, budgetSeconds={Budget}, repo={Repo}",
             agentName, taskId, ctx.Info.WorkflowId, agentBudgetSeconds, repo ?? "-");
+        if (noRedelivery)
+            _logger.LogInformation(
+                "DelegateToAgent: taskId={TaskId} allows one publish attempt (noRedelivery): no re-send, no continuation",
+                taskId);
 
         var budgetIsExplicit = agentBudgetSeconds > 0;
         var timeout = budgetIsExplicit
@@ -163,7 +188,8 @@ public sealed class DelegateToAgentActivity
                     WorkflowType: ctx.Info.WorkflowType,
                     ActivityId: ctx.Info.ActivityId,
                     Attempt: ctx.Info.Attempt,
-                    TaskToken: ctx.Info.TaskToken),
+                    TaskToken: ctx.Info.TaskToken,
+                    NoRedelivery: noRedelivery),
                 ctx.CancellationToken);
             throw new CompleteAsyncException();
         }
@@ -186,9 +212,11 @@ public sealed class DelegateToAgentActivity
 
         try
         {
-            var result = await WaitForResponseAsync(agentName, tcs, taskId, ctx, timeout, instruction, repo);
+            var result = await WaitForResponseAsync(agentName, tcs, taskId, ctx, timeout, instruction, repo, resend: !noRedelivery);
 
-            if (!retryOnIncomplete || !result.IsIncomplete)
+            // noRedelivery: a continuation is a second directive, so the incomplete answer is the
+            // result, whatever the retry arguments say.
+            if (noRedelivery || !retryOnIncomplete || !result.IsIncomplete)
                 return result;
 
             var accumulatedText = result.Text;
@@ -218,7 +246,7 @@ public sealed class DelegateToAgentActivity
                     throw;
                 }
 
-                result = await WaitForResponseAsync(agentName, retryTcs, retryTaskId, ctx, timeout, continuationInstruction, repo);
+                result = await WaitForResponseAsync(agentName, retryTcs, retryTaskId, ctx, timeout, continuationInstruction, repo, resend: true);
                 accumulatedText += "\n" + result.Text;
 
                 if (!result.IsIncomplete)
@@ -305,6 +333,11 @@ public sealed class DelegateToAgentActivity
     /// elapsed time. Does NOT call TryReportTimeoutToActoAsync — that is the caller's
     /// responsibility so notification fires only once after all retries are exhausted.
     /// </summary>
+    /// <param name="resend">
+    /// False for a <c>noRedelivery</c> delegation: the directive that was published before the
+    /// wait began is the only one, and the wait only heartbeats until an answer, a cancel or the
+    /// budget.
+    /// </param>
     private async Task<AgentTaskResult> WaitForResponseAsync(
         string agentName,
         TaskCompletionSource<AgentTaskResult> tcs,
@@ -312,12 +345,15 @@ public sealed class DelegateToAgentActivity
         ActivityExecutionContext ctx,
         TimeSpan timeout,
         string instruction,
-        string? repo)
+        string? repo,
+        bool resend)
     {
-        var started = Stopwatch.StartNew();
+        var started = _time.GetTimestamp();
 
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.CancellationToken);
-        timeoutCts.CancelAfter(timeout);
+        // The budget, on the activity's clock, and the activity's own cancellation: either ends
+        // the wait, and the catch chain below tells them apart.
+        using var budgetCts = new CancellationTokenSource(timeout, _time);
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.CancellationToken, budgetCts.Token);
 
         // When Temporal cancels the activity (workflow cancellation or explicit cancel request),
         // ctx.CancellationToken is signalled. Register a callback that immediately resolves the
@@ -328,12 +364,12 @@ public sealed class DelegateToAgentActivity
 
         try
         {
-            var lastPublished = DateTimeOffset.UtcNow;
+            var lastPublished = _time.GetUtcNow();
             var resendInterval = TimeSpan.FromMinutes(5);
 
             while (true)
             {
-                var heartbeatDelay = Task.Delay(TimeSpan.FromSeconds(30), timeoutCts.Token);
+                var heartbeatDelay = Task.Delay(TimeSpan.FromSeconds(30), _time, timeoutCts.Token);
                 var completed = await Task.WhenAny(tcs.Task, heartbeatDelay);
 
                 if (completed == tcs.Task)
@@ -359,7 +395,9 @@ public sealed class DelegateToAgentActivity
 
                 // Re-publish directive every 5 min in case agent restarted and lost context.
                 // The agent deduplicates via taskId — if it's already running the task it ignores the re-send.
-                if (DateTimeOffset.UtcNow - lastPublished >= resendInterval)
+                // Once the task has ended it does not: the re-send is then a new turn, which is why a
+                // noRedelivery delegation never makes one.
+                if (resend && _time.GetUtcNow() - lastPublished >= resendInterval)
                 {
                     _logger.LogInformation(
                         "Re-sending directive to {Agent} (taskId={TaskId}) — agent may have restarted",
@@ -367,7 +405,7 @@ public sealed class DelegateToAgentActivity
                     try
                     {
                         await PublishDirectiveAsync(agentName, instruction, taskId, EffectiveGroupChatId, repo, timeoutCts.Token);
-                        lastPublished = DateTimeOffset.UtcNow;
+                        lastPublished = _time.GetUtcNow();
                     }
                     catch (OperationCanceledException)
                     {
@@ -392,7 +430,7 @@ public sealed class DelegateToAgentActivity
             // as a budget so the two can never be read as the same thing.
             _registry.TryCancel(taskId, tcs);
             throw new TimeoutException(
-                $"Agent {agentName} did not respond — elapsed {Format(started.Elapsed)} " +
+                $"Agent {agentName} did not respond — elapsed {Format(_time.GetElapsedTime(started))} " +
                 $"(budget {Format(timeout)}, taskId={taskId}, workflowId={ctx.Info.WorkflowId})");
         }
         catch (OperationCanceledException)
@@ -405,7 +443,7 @@ public sealed class DelegateToAgentActivity
             _registry.TryCancel(taskId, tcs);
             throw new ApplicationFailureException(
                 $"Delegation to agent {agentName} was aborted before any response — elapsed " +
-                $"{Format(started.Elapsed)}, well inside its {Format(timeout)} budget. This is not a " +
+                $"{Format(_time.GetElapsedTime(started))}, well inside its {Format(timeout)} budget. This is not a " +
                 $"timeout: the pending registration was cancelled by something other than this " +
                 $"activity. (taskId={taskId}, workflowId={ctx.Info.WorkflowId})",
                 errorType: "DelegationAborted");

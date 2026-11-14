@@ -430,13 +430,17 @@ histories replay. `DelegationRelay` is a deliberate second copy of the activity'
 and timeout-report code so the switch-off path is untouched; `DelegationRelayParityTests` keeps the
 two byte-identical. The pass (`TickAsync`) talks to Temporal only; every relay send (directive,
 cancel, timeout notice) goes out on a separate lane that reads what a record owes and writes back
-what was sent. At most 4 relay calls are unfinished at once and one per record; a call past its
+what was sent. At most 4 relay calls are unfinished at once (the first directive an activity
+publishes itself is one of them, and is owed to the lane when there is no room) and one per record; a call past its
 time is told to stop and still counts until it has ended; nothing is queued, so what is not sent
 stays owed in the record. A retried step reuses its task id, so each record has an `ExecutionId`
 (minted once, persisted): it is on every directive (optional `ExecutionId` on the relay message)
 and every cancel (optional `?executionId=` on the orchestrator's and the agent's cancel routes;
 `AgentTaskCancel` forwards it), and the agent's `TaskManager.CancelBridgeExecutionAsync` stops a
-task only when the id it keeps with the task-id reservation is equal. A cancel without an id is
+task only when the id it keeps with the task-id reservation is equal. That cancel and admission
+are both decided under `_admissionGate`: a cancel that finds the task id reserved and nothing
+queued or running marks the reservation, and the directive then stops at the gate instead of being
+admitted (MUST NOT answer `not_found` while the reservation exists). A cancel without an id is
 matched by task id as before, and the in-process path sends none. Answers are fenced the same way:
 `RelayCompletionPublisher` reads the task's id while its completion is raised and writes it on the
 answer, and `TryHandleReplyAsync` accepts an answer for a record that has an id only when the ids

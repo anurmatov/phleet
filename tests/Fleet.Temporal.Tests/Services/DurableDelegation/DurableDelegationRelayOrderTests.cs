@@ -288,4 +288,55 @@ public sealed class DurableDelegationRelayOrderTests
         await DurableHarness.WaitForAsync(() => h.Relay.Published.Count == 24, "the twelve re-sends went out");
         Assert.Equal(12, (await h.PendingAsync()).Count);
     }
+
+    /// <summary>
+    /// The first directive of a delegation is published by its activity, not by the lane, and it
+    /// is a relay call all the same. Twelve delegations start while the relay returns from
+    /// nothing: four publish, and the other eight are recorded, returned to their activities at
+    /// once and owed their directive. Every one of the twelve is heartbeated on every pass, and
+    /// nothing else is sent while the four are out, a cancel included. When the relay is back the
+    /// owed directives go out, except the one whose delegation was cancelled meanwhile.
+    /// </summary>
+    [Fact]
+    public async Task HungFirstDirectives_CountAgainstTheSameBound_AndTheRestAreOwedNotLost()
+    {
+        using var h = new DurableHarness();
+        var never = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        h.Relay.BeforeSend = (_, _, _) => never.Task;
+
+        var starts = Enumerable.Range(0, 12)
+            .Select(i => h.Service.StartDelegationAsync(DurableHarness.Start($"wf-1/task-{i:00}", budgetSeconds: 3600), default))
+            .ToList();
+        await DurableHarness.WaitForAsync(
+            () => h.Relay.Started.Count == 12 || starts.Count(t => t.IsCompleted) == 8,
+            "the starts either all published or eight of them returned");
+
+        Assert.Equal(4, h.Relay.Started.Count);
+        Assert.Equal(8, starts.Count(t => t.IsCompletedSuccessfully));
+        Assert.Equal(12, (await h.PendingAsync()).Count);
+
+        h.Gateway.HeartbeatFor["wf-1/task-11"] = ActivityCallOutcome.CancelRequested;
+        for (var pass = 1; pass <= 3; pass++)
+        {
+            await h.Service.TickAsync(default).WaitAsync(Promptly);
+            // One whose activity is still publishing, and one that is owed its directive.
+            Assert.Equal(pass, h.Gateway.HeartbeatTimes.Count(t => t.TaskId == "wf-1/task-00"));
+            Assert.Equal(pass, h.Gateway.HeartbeatTimes.Count(t => t.TaskId == "wf-1/task-07"));
+        }
+
+        Assert.Equal(4, h.Relay.MostInProgress);
+        Assert.Equal(4, h.Relay.Started.Count);
+        Assert.Equal(12, (await h.PendingAsync()).Count);
+
+        never.SetResult();
+        await Task.WhenAll(starts).WaitAsync(Promptly);
+        await DurableHarness.WaitForAsync(
+            () => h.Relay.Published.Count == 11 && h.Relay.Cancels.Count == 1, "the owed directives and the cancel went out");
+        await h.SettleAsync();
+
+        Assert.Equal((Agent, "wf-1/task-11"), Assert.Single(h.Relay.Cancels));
+        Assert.DoesNotContain(h.Relay.Published, p => p.TaskId == "wf-1/task-11");
+        Assert.Equal(11, (await h.PendingAsync()).Count);
+        Assert.InRange(h.Relay.MostInProgress, 4, 4);
+    }
 }

@@ -48,6 +48,10 @@ does not return delays relay effects and nothing else. What that means in number
 - at most 4 relay calls are unfinished at any moment, and one per record. Nothing waits in a
   queue: a call is made or it is not, and what is not made stays owed in its record and is looked
   at afresh when a call ends;
+- the first directive of a delegation, which its activity publishes itself, counts as one of the
+  4. If there is no room, the activity does not wait: the record is written, Temporal is told the
+  activity completes later, the record is heartbeated from the next pass, and the directive is
+  owed and sent by the lane when a call ends;
 - a directive that has not been published after 10 seconds is told to stop; a cancel or a timeout
   notice after 30. The call is not abandoned. Its place, its record's next effect and the hold on
   its task id (below) are given back when the call has really ended, because until then it may
@@ -80,10 +84,16 @@ and says what happened, and every answer is final:
 
 | `outcome` | meaning |
 |---|---|
-| `cancelled` | the task was queued or running under that id and has been told to stop |
+| `cancelled` | the task was held under that id: running and told to stop, queued and removed, or not yet admitted and now never will be |
 | `not_found` | nothing is held under the task id: it finished, or never arrived |
 | `other_execution` | the task id now belongs to another execution; it was left alone |
 | `no_execution_id` | the task id is held by a task whose directive carried no id; it was left alone |
+
+A directive holds its task id a moment before it is queued or started. A cancel for its execution
+that arrives in that moment is not answered `not_found`: the cancel and the admission are decided
+under the same gate, so either the cancel is first, answers `cancelled`, and the directive is never
+queued or run (nothing is published for it, and the task id is free at once), or the admission is
+first and the cancel stops the task where it finds it.
 
 A task without an id was started by the in-process path or by a bridge from before the id. It is
 not the execution a cancel with an id was issued for, so that cancel leaves it; a cancel without an

@@ -116,9 +116,16 @@ public sealed class DurableDelegationService : BackgroundService
     // Whether the last relay pass found no room, so it is said once.
     private bool _saturated;
     // Records whose activity is publishing their first directive right now, outside the lane.
-    // They are calls that have not ended like any other, for ordering: a successor's directive
-    // and a cancel carried for the predecessor both wait for them.
+    // They are calls that have not ended like any other: for ordering (a successor's directive
+    // and a cancel carried for the predecessor both wait for them) and for the bound.
     private readonly HashSet<PendingDelegation> _startingPublishes = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
+    /// Relay calls that have been made and have not ended, whoever made them: the lane's, and the
+    /// first directive an activity publishes itself. This is what
+    /// <see cref="MaxConcurrentRelaySends"/> bounds. Under the gate.
+    /// </summary>
+    private int UnfinishedCalls => _sends.Count + _startingPublishes.Count;
     private readonly CancellationTokenSource _stopping = new();
     private readonly Lock _pumpLock = new();
     // True while a pass is going round. The relay lane starts nothing new meanwhile: the pass is
@@ -210,6 +217,7 @@ public sealed class DurableDelegationService : BackgroundService
         };
 
         bool held;
+        var noRoom = false;
         await _gate.WaitAsync(ct);
         try
         {
@@ -247,6 +255,18 @@ public sealed class DurableDelegationService : BackgroundService
             // still out, or may still arrive. Then the relay lane publishes it when that is over,
             // and the activity does not wait: the record is heartbeated from the next pass on.
             held = record.PriorCancels.Count > 0 || now < record.PublishNotBefore || Fenced(record, now);
+
+            // The first directive is a relay call like any other and counts against the same
+            // bound. When every place is taken it is not sent from here: it is owed, like a
+            // re-send, and the lane sends it when a call ends. The activity does not wait for
+            // that. The record is written, Temporal is told the activity completes later, and
+            // the record is heartbeated from the next pass on.
+            if (!held && UnfinishedCalls >= MaxConcurrentRelaySends)
+            {
+                held = true;
+                noRoom = true;
+            }
+
             record.Publishing = !held;
             if (!held) _startingPublishes.Add(record);
 
@@ -262,7 +282,9 @@ public sealed class DurableDelegationService : BackgroundService
         if (held)
         {
             _logger.LogWarning(
-                "Delegation taskId={TaskId} is pending; its directive to {Agent} is held until a cancel for the same task id has finished (durable={Durable})",
+                noRoom
+                    ? "Delegation taskId={TaskId} is pending; its directive to {Agent} waits for one of the relay calls in progress to finish (durable={Durable})"
+                    : "Delegation taskId={TaskId} is pending; its directive to {Agent} is held until a cancel for the same task id has finished (durable={Durable})",
                 start.TaskId, start.Agent, _store.Durable);
             Wake();
             RequestRelayPass();
@@ -870,12 +892,12 @@ public sealed class DurableDelegationService : BackgroundService
 
             foreach (var record in _store.All)
             {
-                if (_sends.Count >= MaxConcurrentRelaySends)
+                if (UnfinishedCalls >= MaxConcurrentRelaySends)
                 {
                     if (!_saturated)
                         _logger.LogWarning(
                             "Durable delegation relay: {Count} sends have not finished; nothing more is sent until one does. What is owed stays in the records",
-                            _sends.Count);
+                            UnfinishedCalls);
                     _saturated = true;
                     return;
                 }

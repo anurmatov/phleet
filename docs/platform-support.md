@@ -2,8 +2,8 @@
 
 | Platform | Provider | Status |
 |----------|----------|--------|
-| macOS (Apple silicon) | Claude | ✅ Tested end-to-end — actively run on Mac Studio |
-| Linux | Claude / Codex | ⚠️ Expected to work (all containers are linux/amd64 or linux/arm64); untested at release |
+| macOS (Apple silicon) | Claude | ✅ Tested end-to-end |
+| Linux | Claude / Codex | ✅ The maintainer's fleet runs on Linux (x86-64) |
 | Windows | Claude / Codex | ⚠️ Docker Desktop + WSL2 is the intended path. Unverified |
 | Any | Codex | ⚠️ Code paths ship in `seed.example.json`, but Claude has seen far more wall-clock time in real workflows |
 | Any | Codex + GLM (Z.ai GLM Coding Plan) | ⚠️ A `zai/` model prefix runs GLM on your Coding Plan subscription through a loopback forwarder inside the agent. Subscriber-only use. The merged implementation passed exact-head canary acceptance. See `docs/providers/codex-hosted-models.md` |

@@ -1,6 +1,6 @@
 # Architecture
 
-The overview diagram and the five-step summary are in the [README](../README.md#architecture).
+The overview diagram and the five-step summary are in the [README](../README.md#how-it-works).
 
 ## What runs
 

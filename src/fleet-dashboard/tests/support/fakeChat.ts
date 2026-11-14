@@ -85,9 +85,11 @@ export class FakeChat {
       }
       m = path.match(/^\/v1\/conversations\/c-([^/]+)\/submissions$/)
       if (method === 'POST' && m) {
-        const sent = body as { submissionId: string; text: string; attachments?: Array<{ attachmentId: string }> }
+        const sent = body as { submissionId: string; text: string; replyToEventId?: string; attachments?: Array<{ attachmentId: string }> }
         const attachments = (sent.attachments ?? []).map(a => ({ attachmentId: a.attachmentId, kind: 'image', ...this.uploads[a.attachmentId] }))
-        const seq = this.push(m[1], 'submission.text', sent.submissionId, attachments.length ? { text: sent.text, attachments } : { text: sent.text })
+        const seq = this.push(m[1], 'submission.text', sent.submissionId, {
+          text: sent.text, ...(attachments.length ? { attachments } : {}), ...(sent.replyToEventId ? { replyToEventId: sent.replyToEventId } : {}),
+        })
         return json(201, { submissionId: sent.submissionId, acceptedSeq: seq })
       }
       m = path.match(/^\/v1\/conversations\/c-([^/]+):cancel$/)

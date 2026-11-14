@@ -8,7 +8,7 @@ import {
   wsBaseFor, type ChatAgent,
 } from '../chatProtocol'
 import { ChatConnection, type ChatDeps, type ChatState, type OutgoingFile } from '../chatConnection'
-import { agoLabel, foldTrail, formatElapsed, isTurnRunning, type Transcript } from '../chatTranscript'
+import { agoLabel, foldTrail, formatElapsed, isTurnRunning, type Quoted, type Transcript } from '../chatTranscript'
 import { agentStanding, isUnread } from '../chatActivity'
 import { browserJpegEncoder, prepareFile } from '../chatFiles'
 import { chatActivity, useChatActivity } from '../hooks/useChatActivity'
@@ -22,6 +22,8 @@ const DRAFT_KEY = 'fleet.chat.draft.'
 
 /** Files picked and not sent yet, per agent, kept while the page is open. */
 const draftFiles = new Map<string, OutgoingFile[]>()
+/** The message being answered and not sent yet, per agent, kept while the page is open. */
+const draftReplies = new Map<string, Quoted>()
 /** Per-agent state survives tab/page navigation, but never a page reload or sign-out reload. */
 const threads = new Map<string, ChatState>()
 
@@ -203,6 +205,7 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
   const [state, setState] = useState<ChatState | null>(null)
   const [draft, setDraftState] = useState(() => readDraft(agent.agentName))
   const [files, setFilesState] = useState<OutgoingFile[]>(() => draftFiles.get(agent.agentName) ?? [])
+  const [replyTo, setReplyToState] = useState<Quoted | null>(() => draftReplies.get(agent.agentName) ?? null)
   const [preparing, setPreparing] = useState(0)
   const [composerError, setComposerError] = useState('')
   const [dragging, setDragging] = useState(false)
@@ -244,6 +247,17 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
     if (next.length === 0) draftFiles.delete(agent.agentName)
     else draftFiles.set(agent.agentName, next)
   }
+
+  const setReplyTo = useCallback((next: Quoted | null) => {
+    setReplyToState(next)
+    if (next) draftReplies.set(agent.agentName, next)
+    else draftReplies.delete(agent.agentName)
+  }, [agent.agentName])
+  // Start a reply: remember what it answers and put the cursor where the answer is typed.
+  const startReply = useCallback((quoted: Quoted) => {
+    setReplyTo(quoted)
+    input.current?.focus()
+  }, [setReplyTo])
 
   // Where this thread stands, for the list and the mark on the Chat tab. It counts as shown only
   // while the page is in front: an answer that lands in a hidden tab is still news.
@@ -328,16 +342,18 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
   function submit(event?: FormEvent | KeyboardEvent<HTMLTextAreaElement>) {
     event?.preventDefault()
     if (!chat || tooLong || nothingToSend || preparing > 0) return
-    const problem = chat.send(draft, files)
+    const problem = chat.send(draft, files, replyTo)
     if (problem) { setComposerError(problem); return }
     setDraft('')
     setFiles([])
+    setReplyTo(null)
     toLatest()
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     // keyCode 229: Safari reports the Enter that ends an IME composition with isComposing false.
     const isComposing = event.nativeEvent.isComposing || event.keyCode === 229
+    if (event.key === 'Escape' && replyTo) { event.preventDefault(); setReplyTo(null); return }
     if (!isTouch() && shouldSendOnKey({ key: event.key, shiftKey: event.shiftKey, isComposing })) submit(event)
   }
 
@@ -434,7 +450,7 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
             </div>
           )}
           <ChatTranscript entries={state.transcript.entries} status={state.transcript.status} pending={state.pending}
-            onRetry={id => chat?.retry(id)} onDiscard={id => chat?.discard(id)} />
+            onRetry={id => chat?.retry(id)} onDiscard={id => chat?.discard(id)} onReply={canSend ? startReply : undefined} agentLabel={agent.displayName} />
           {running && <Working name={agent.displayName} transcript={state.transcript} />}
         </div>
         {away && (
@@ -453,6 +469,18 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
       )}
 
       <form className="chat-composer" onSubmit={submit}>
+        {replyTo && (
+          <div className="chat-replying">
+            <Icon name="reply" size={16} />
+            <span className="chat-replying-text">
+              <span className="chat-replying-who">Replying to {replyTo.who === 'you' ? 'your message' : agent.displayName}</span>
+              <span className="chat-replying-quote">{replyTo.text}</span>
+            </span>
+            <button type="button" className="icon-btn icon-btn-s" onClick={() => setReplyTo(null)} aria-label="Cancel reply" title="Cancel reply">
+              <Icon name="close" size={16} />
+            </button>
+          </div>
+        )}
         {(files.length > 0 || preparing > 0) && (
           <div className="chat-draft-files">
             {files.map(f => (

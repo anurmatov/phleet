@@ -146,6 +146,11 @@ by the reserve/PUT pair in `docs/first-party-api.md` before the submission is se
 means the same thing omitting the key means.
 | `submission.cancel` | `scope` ∈ `current`\|`all` |
 
+`replyToEventId` is confirmed by the chat service when it accepts the submission, echoed on the
+transcript entry, and reaches the agent as a short quotation of the message it names (who wrote
+it, and its first 600 characters) rendered ahead of the person's words. See
+`docs/first-party-api.md` §5.1.
+
 That is the complete Phase-0 client command set. There is **no** client equivalent of `/new`,
 `/reset`, `/stop`, `/run`, `/status`, `/tts` or `/cancel_bg` — see *Constraints* below.
 

@@ -339,6 +339,18 @@ Authorization: Bearer <token>
 { "protocol": "fleet.conversation.v1", "submissionId": "s_9Qw1Ez", "acceptedSeq": 41 }
 ```
 
+**Reply to a message.** `replyToEventId` on a `create` or `steer` names the `eventId` of an earlier
+message of the same conversation: the person's own `submission.text`, or the agent's `turn.final`,
+`turn.message` or `turn.recovered_answer`. Anything else — a malformed id, an unknown one, another
+conversation's, one that has aged out, an event that is not something anyone said — is
+`400 reply_target_not_found`, and the submission is refused whole rather than accepted without its
+reference. On success the transcript entry (`submission.text`) carries `replyToEventId`, so every
+client reading the thread can show what was answered; a message that answers nothing omits the key,
+as before. The agent is told who wrote the replied-to message and how it starts (at most 600
+characters), ahead of the person's words; it holds no map from event ids to text. A client that
+cannot find the target among the events it holds (retention moved past it) shows the reply without
+the quotation.
+
 **`acceptedSeq` is a catch-up floor.** It is the conversation's `next_seq` as read inside the accept
 transaction: **the first `seq` that any event about this submission can occupy**. Since #305 that is
 also the `seq` of a real event — the accept appends `submission.text`, the transcript entry carrying
@@ -488,6 +500,7 @@ appear inside a terminal event payload and have no status at all.
 | `unsupported_protocol` | **400** | any route |
 | `unsupported_kind` | **400** | malformed body, bad identifier, `limit` above max |
 | `unsupported_attachments` | **400** | non-empty attachment array where the feature is unconfigured |
+| `reply_target_not_found` | **400** on submit | `replyToEventId` is not a message of this conversation; nothing is made durable |
 | `attachment_not_found` § | **400** on submit, **404** on `PUT`/`GET` | unknown, foreign, unsealed, expired or already-bound attachment; also a failed seal (**422**) |
 | `attachment_limit` § | **400** on submit, **409** on reserve | over 4 per submission, a duplicate id, or a live-byte cap |
 | `unsupported_media_type` § | **415** | a reservation declaring anything but the four accepted image types |

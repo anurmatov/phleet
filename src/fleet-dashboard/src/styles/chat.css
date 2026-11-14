@@ -276,6 +276,41 @@
 .chat-system--warn { background: var(--warn-soft); color: var(--warn); }
 .chat-system--error { background: var(--danger-soft); color: var(--danger); }
 
+/* What a message answers, above it. */
+.chat-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: none;
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-xs) var(--r-m) var(--r-m) var(--r-xs);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+button.chat-quote:hover { border-left-color: var(--accent); color: var(--text); }
+.chat-quote--gone { cursor: default; font-style: italic; }
+.chat-quote-who { color: var(--text-3); font-size: var(--fs-2xs); font-weight: 600; }
+.chat-quote-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+/* The message a quote was pressed for, pointed out for a moment. */
+.chat-row--flash > .chat-bubble { animation: chat-flash 1.4s ease-out; }
+@keyframes chat-flash {
+  0%, 35% { box-shadow: 0 0 0 3px var(--focus); }
+  100% { box-shadow: 0 0 0 3px transparent; }
+}
+
 /* Files that went with a message. */
 .chat-attachments {
   display: flex;
@@ -437,6 +472,20 @@ a.chat-file:hover { border-color: var(--border-strong); background: var(--surfac
   background: var(--surface);
 }
 .chat-composer-row { display: flex; align-items: flex-end; gap: 8px; }
+.chat-replying {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 4px 4px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-xs) var(--r-m) var(--r-m) var(--r-xs);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+.chat-replying .icon { flex-shrink: 0; color: var(--accent); }
+.chat-replying-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.chat-replying-who { color: var(--text-3); font-size: var(--fs-2xs); font-weight: 600; }
+.chat-replying-quote { overflow: hidden; font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
 .chat-input {
   flex: 1;
   min-width: 0;
@@ -540,11 +589,11 @@ a.chat-file:hover { border-color: var(--border-strong); background: var(--surfac
 .copy-btn-said:empty { display: none; }
 /* With a pointer the button waits until the message is pointed at; under a finger it is always there. */
 @media (hover: hover) {
-  .chat-row--agent .chat-meta .copy-btn { opacity: 0; }
-  .chat-row--agent:hover .chat-meta .copy-btn,
-  .chat-row--agent .chat-meta .copy-btn:focus-visible,
-  .chat-row--agent .chat-meta .copy-btn--copied,
-  .chat-row--agent .chat-meta .copy-btn--failed { opacity: 1; }
+  .chat-row .chat-meta .copy-btn { opacity: 0; }
+  .chat-row:hover .chat-meta .copy-btn,
+  .chat-row .chat-meta .copy-btn:focus-visible,
+  .chat-row .chat-meta .copy-btn--copied,
+  .chat-row .chat-meta .copy-btn--failed { opacity: 1; }
 }
 
 /* ── what an agent wrote ─────────────────────────────────────────────────── */

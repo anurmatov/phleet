@@ -2,8 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { WireEvent } from './chatProtocol'
 import {
-  GAP_TEXT, agoLabel, applyEvents, applyGap, dayKey, dayLabel, emptyTranscript, foldTrail, formatElapsed, isTurnRunning,
-  replyNote, statusLabel, type Transcript,
+  GAP_TEXT, agoLabel, applyEvents, applyGap, dayKey, dayLabel, emptyTranscript, excerpt, foldTrail, formatElapsed, isTurnRunning,
+  quotedBy, replyNote, statusLabel, type Transcript,
 } from './chatTranscript.ts'
 
 /** An event as catch-up or the stream delivers it. */
@@ -315,4 +315,30 @@ test('what the agent said before a tool is shown in order, marked as not the ans
   assert.equal(agents[1].note, 'This message was shortened.')
   // It is not the end of the turn: the turn is still running until its terminal.
   assert.equal(isTurnRunning(fold(ev(1, 'turn.started', 'A'), ev(2, 'turn.message', 'A', { text: 'working on it' }))), true)
+})
+
+test('a reply knows what it answers: the agent’s words, the person’s own, pictures, or a message no longer held', () => {
+  const t = fold(
+    ev(1, 'submission.text', 'A', { text: 'first question' }),
+    ev(2, 'turn.started', 'A'),
+    ev(3, 'turn.final', 'A', { text: 'A long   answer\nover two lines.', completion: 'completed' }),
+    ev(4, 'submission.text', 'B', { text: 'to the answer', replyToEventId: 'e3' }),
+    ev(5, 'submission.text', 'C', { text: 'to myself', replyToEventId: 'e1' }),
+    ev(6, 'submission.text', 'D', { text: '', attachments: [{ attachmentId: 'a1', kind: 'image' }, { attachmentId: 'a2', kind: 'image' }] }),
+    ev(7, 'submission.text', 'E', { text: 'to the pictures', replyToEventId: 'e6' }),
+    ev(8, 'submission.text', 'F', { text: 'to something gone', replyToEventId: 'e-expired' }),
+  )
+  const byKey = new Map(t.entries.map(e => [e.key, e]))
+  const quote = (key: string) => quotedBy(byKey.get(key)!, byKey)
+
+  assert.equal(quote('e1'), null)
+  assert.equal(quote('e3'), null)
+  assert.deepEqual(quote('e4'), { key: 'e3', who: 'agent', text: 'A long answer over two lines.' })
+  assert.deepEqual(quote('e5'), { key: 'e1', who: 'you', text: 'first question' })
+  assert.deepEqual(quote('e7'), { key: 'e6', who: 'you', text: '2 pictures' })
+  // Aged out of what this page holds: still a reply, with nothing to show of what it answered.
+  assert.deepEqual(quote('e8'), { key: 'e-expired', who: 'agent', text: '' })
+
+  assert.equal(excerpt('x'.repeat(200)).length, 141)
+  assert.equal(excerpt('  spaced \n\n out  '), 'spaced out')
 })

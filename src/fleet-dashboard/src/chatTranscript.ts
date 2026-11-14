@@ -39,7 +39,11 @@ const TERMINAL: ReadonlySet<SubmissionStatus> = new Set(['queue-full', 'dropped'
 
 export type Entry =
   /** What the person sent. Shown as plain text, never as Markdown. */
-  | { type: 'you'; key: string; seq: number; at: number | null; submissionId: string; text: string; attachments: AttachmentRef[] }
+  | {
+      type: 'you'; key: string; seq: number; at: number | null; submissionId: string; text: string; attachments: AttachmentRef[]
+      /** The `key` of the message this one answers, when it answers one. */
+      replyTo?: string
+    }
   /**
    * What the agent wrote. Shown as Markdown. `note` qualifies it; `text` may be empty. `interim`
    * marks a message written mid-turn, before a tool call: part of what it said, not its answer.
@@ -136,6 +140,7 @@ function apply(t: Transcript, event: WireEvent): void {
       t.entries.push({
         type: 'you', key: event.eventId, seq: event.seq, at: event.emittedAt, submissionId,
         text: text(payload.text), attachments: readAttachments(payload),
+        ...(text(payload.replyToEventId) ? { replyTo: text(payload.replyToEventId) } : {}),
       })
       return
 
@@ -346,4 +351,33 @@ export function agoLabel(at: number, now: number): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
   if (seconds < 7 * 86400) return `${Math.floor(seconds / 86400)}d`
   return new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+}
+
+/** A message in one line, for quoting it somewhere small: its start, with an ellipsis when cut. */
+export function excerpt(text: string, max = 140): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  return line.length > max ? `${line.slice(0, max).trimEnd()}…` : line
+}
+
+/** What a reply points at, as a client shows it: who wrote it and how it starts. */
+export interface Quoted {
+  /** The `key` of the message. */
+  key: string
+  who: 'you' | 'agent'
+  text: string
+}
+
+/**
+ * The message an entry answers, looked up among those this page holds. Null when it answers
+ * nothing; a message that has aged out of the conversation is found by nobody and reported with
+ * empty text, so the reply still says it was one.
+ */
+export function quotedBy(entry: Entry, byKey: ReadonlyMap<string, Entry>): Quoted | null {
+  if (entry.type !== 'you' || !entry.replyTo) return null
+  const target = byKey.get(entry.replyTo)
+  if (!target || target.type === 'system') return { key: entry.replyTo, who: 'agent', text: '' }
+  const words = target.text.trim() !== '' ? target.text
+    : target.type === 'you' && target.attachments.length > 0 ? (target.attachments.length === 1 ? 'A picture' : `${target.attachments.length} pictures`)
+    : ''
+  return { key: target.key, who: target.type, text: excerpt(words) }
 }

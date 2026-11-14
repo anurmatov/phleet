@@ -371,3 +371,12 @@ test('why a file did not go up, and whether trying again could help', () => {
   assert.equal(uploadProblem({ httpStatus: 415, code: 'unsupported_media_type' }).canRetry, false)
   assert.equal(uploadProblem({ httpStatus: 409, code: 'attachment_limit' }).canRetry, false)
 })
+
+test('a reply names what it answers; a message that answers nothing has no such key', () => {
+  assert.equal(submitBody('S1', 'yes', [], '01JEVENT').replyToEventId, '01JEVENT')
+  assert.equal('replyToEventId' in submitBody('S1', 'yes'), false)
+  assert.equal('replyToEventId' in submitBody('S1', 'yes', [], null), false)
+  const refused = sendProblem({ httpStatus: 400, code: 'reply_target_not_found' })
+  assert.equal(refused.canRetry, false)
+  assert.match(refused.message, /no longer in the conversation/)
+})

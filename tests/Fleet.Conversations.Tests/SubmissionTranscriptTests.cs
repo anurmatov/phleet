@@ -690,6 +690,76 @@ public sealed class SubmissionTranscriptTests(MySqlFixture fixture)
             Owner = owner,
         });
 
+    // ── replies ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A reply can point at what the person said and at what the agent answered, and the lookup
+    /// returns the words. Events that are not something anyone said are not messages.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_target_is_a_message_of_this_conversation_and_nothing_else()
+    {
+        var conversation = await OpenAsync();
+        var accept = await AcceptAsync(conversation.ConversationId, "what is open?");
+        await RunToTerminalAsync(accept.SubmissionId!);
+
+        var page = await ReadFromAsync(conversation.ConversationId, 0);
+        var mine = page.Events.Single(e => e.Kind == ConversationEventKind.SubmissionText);
+        var answer = page.Events.Single(e => e.Kind == ConversationEventKind.TurnFinal);
+        var started = page.Events.Single(e => e.Kind == ConversationEventKind.TurnStarted);
+
+        var toMine = await _store.FindReplyTargetAsync(conversation.ConversationId, mine.EventId);
+        Assert.Equal("what is open?", toMine!.Text);
+        Assert.True(toMine.FromUser);
+
+        var toAnswer = await _store.FindReplyTargetAsync(conversation.ConversationId, answer.EventId);
+        Assert.Equal("done", toAnswer!.Text);
+        Assert.False(toAnswer.FromUser);
+
+        // Not a message: nothing to reply to.
+        Assert.Null(await _store.FindReplyTargetAsync(conversation.ConversationId, started.EventId));
+        // Unknown.
+        Assert.Null(await _store.FindReplyTargetAsync(conversation.ConversationId, Ulid.NewUlid()));
+
+        // Another conversation's message is the same answer as none at all.
+        var other = await OpenAsync();
+        Assert.Null(await _store.FindReplyTargetAsync(other.ConversationId, mine.EventId));
+    }
+
+    /// <summary>
+    /// The transcript entry says what it answers, so every client that reads the thread can show
+    /// it; a message that answers nothing keeps the payload it always had.
+    /// </summary>
+    [Fact]
+    public async Task The_entry_names_what_it_answers_and_a_plain_message_names_nothing()
+    {
+        var conversation = await OpenAsync();
+        var first = await AcceptAsync(conversation.ConversationId, "what is open?");
+        var target = (await ReadFromAsync(conversation.ConversationId, 0)).Events.Single().EventId;
+
+        var reply = await _store.AcceptSubmissionAsync(new AcceptSubmissionRequest
+        {
+            ConversationId = conversation.ConversationId,
+            ExternalSubmissionId = Ulid.NewUlid(),
+            PayloadFingerprint = PayloadFingerprint.Compute("and closed?", target, conversation.ConversationId),
+            CommandKind = ConversationEventKind.SubmissionCreate,
+            CommandPayloadJson = FleetProtocolJson.Serialize(new { payload = new { text = "and closed?" } }),
+            TranscriptText = "and closed?",
+            ReplyToEventId = target,
+        });
+
+        var entries = (await ReadFromAsync(conversation.ConversationId, 0)).Events
+            .Where(e => e.Kind == ConversationEventKind.SubmissionText).ToList();
+
+        // The plain message has its text and nothing else: no reply key, not even a null one.
+        using var plain = JsonDocument.Parse(entries[0].PayloadJson!);
+        Assert.Equal(["text"], plain.RootElement.EnumerateObject().Select(p => p.Name));
+        using var payload = JsonDocument.Parse(entries[1].PayloadJson!);
+        Assert.Equal(target, payload.RootElement.GetProperty("replyToEventId").GetString());
+        Assert.Equal(reply.AcceptedSeq!.Value, entries[1].Seq);
+        Assert.NotNull(first.SubmissionId);
+    }
+
     private Task<ReadConversationResult> ReadFromAsync(string conversationId, ulong afterSeq) =>
         _store.ReadAsync(new ReadConversationRequest
         {

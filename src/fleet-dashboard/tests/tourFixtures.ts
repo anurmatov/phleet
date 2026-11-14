@@ -255,7 +255,7 @@ const chatHistory = [
     completion: 'completed',
     text: 'No. The table has a fixed minimum width, so on a narrow screen it runs past the edge. I can turn each row into a card below 720px. Want me to open a PR?',
   }, 40),
-  chatEvent('submission.text', 's3', { text: 'Yes, and check the Credentials page for the same thing.' }, 3),
+  chatEvent('submission.text', 's3', { text: 'Yes, and check the Credentials page for the same thing.', replyToEventId: 'ev-6' }, 3),
   chatEvent('turn.started', 's3', {}, 3),
   chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Grep' }, 3),
   chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Read' }, 2),

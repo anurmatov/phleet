@@ -117,6 +117,16 @@ internal sealed class FakeConversationStore : IConversationStore
         });
     }
 
+    /// <summary>The messages a reply may point at, by event id.</summary>
+    public Dictionary<string, ReplyTarget> ReplyTargets { get; } = new(StringComparer.Ordinal);
+
+    public Task<ReplyTarget?> FindReplyTargetAsync(
+        string conversationId, string eventId, CancellationToken ct = default) =>
+        Task.FromResult(
+            string.Equals(conversationId, ConversationId, StringComparison.Ordinal)
+                ? ReplyTargets.GetValueOrDefault(eventId)
+                : null);
+
     public Task<ReadConversationResult> ReadAsync(
         ReadConversationRequest request, CancellationToken ct = default)
     {

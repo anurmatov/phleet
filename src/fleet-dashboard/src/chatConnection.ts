@@ -75,6 +75,8 @@ export interface PendingSend {
   text: string
   /** The files that go with it, in the order they were picked. */
   files: OutgoingFile[]
+  /** The message it answers, when it answers one: its event id, and how to show it until the thread does. */
+  replyTo?: { key: string; who: 'you' | 'agent'; text: string } | null
   status: 'sending' | 'sent' | 'failed'
   /** The seq the message takes in the conversation, once the chat service has said. */
   acceptedSeq: number | null
@@ -377,7 +379,7 @@ export class ChatConnection {
   }
 
   /** Send a message, with any files picked for it. Returns why it was not sent, or null. */
-  send(text: string, files: readonly OutgoingFile[] = []): string | null {
+  send(text: string, files: readonly OutgoingFile[] = [], replyTo: PendingSend['replyTo'] = null): string | null {
     if (!this.canSend()) return 'Not connected yet.'
     if (text.trim() === '' && files.length === 0) return 'Type a message first.'
     if (utf8Bytes(text) > this.state.limits.inboundTextBytes) return 'This message is too long to send.'
@@ -385,6 +387,7 @@ export class ChatConnection {
 
     const pending: PendingSend = {
       submissionId: this.newId(), text, files: [...files], status: 'sending', acceptedSeq: null, problem: null, canRetry: false,
+      ...(replyTo ? { replyTo } : {}),
     }
     this.update({ pending: [...this.state.pending, pending] })
     void this.post(pending.submissionId)
@@ -433,7 +436,7 @@ export class ChatConnection {
     const answer = await this.request(`${conversationPath(conversationId)}/submissions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(submitBody(pending.submissionId, pending.text, attachments)),
+      body: JSON.stringify(submitBody(pending.submissionId, pending.text, attachments, pending.replyTo?.key ?? null)),
     })
     if (this.disposed) return
 

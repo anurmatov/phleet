@@ -784,6 +784,33 @@ test('chat: a deployment with files off says so once and stops offering them; th
   await expect(page.locator('.chat-bubble--failed')).toHaveText('You: look at this')
 })
 
+test('chat: replying to an answer names it to the chat service and shows what was answered above the reply', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha', c => exchange(c, 'alpha', 's1', 'is it broken?', 'Yes. Want me to open a PR?'))
+
+  await page.locator('.chat-row--agent').hover()
+  await page.locator('.chat-row--agent').getByRole('button', { name: 'Reply', exact: true }).click()
+  await expect(page.locator('.chat-replying')).toContainText('Replying to Alpha')
+  await expect(page.locator('.chat-replying-quote')).toHaveText('Yes. Want me to open a PR?')
+  // The cursor is where the answer goes.
+  await expect(page.getByLabel('Message Alpha')).toBeFocused()
+
+  await page.keyboard.type('yes please')
+  await page.keyboard.press('Enter')
+
+  const reply = page.locator('.chat-row--you').last()
+  await expect(reply.locator('.chat-quote-who')).toHaveText('Alpha')
+  await expect(reply.locator('.chat-quote-text')).toHaveText('Yes. Want me to open a PR?')
+  await expect(page.locator('.chat-replying')).toHaveCount(0)
+  // The answer's event id (the third event of the thread), not its text, is what is sent.
+  expect(chat.writes('POST', /\/submissions$/)[0].body).toMatchObject({ text: 'yes please', replyToEventId: 'c-alpha-e3' })
+
+  // Escape takes a started reply back.
+  await page.locator('.chat-row--agent').hover()
+  await page.locator('.chat-row--agent').getByRole('button', { name: 'Reply', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.chat-replying')).toHaveCount(0)
+})
+
 test('chat: what was typed and not sent is still there after a reload', async ({ page }) => {
   await openChat(page, 'chat/alpha')
   await page.getByLabel('Message Alpha').fill('half a thought')

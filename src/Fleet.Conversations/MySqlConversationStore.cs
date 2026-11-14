@@ -506,7 +506,10 @@ public sealed partial class MySqlConversationStore : IConversationStore
                 // the key entirely — so the stored payload is byte-identical to the pre-#308 one and
                 // no deployed client sees a shape change (AC-4, AC-26).
                 payloadJson: FleetProtocolJson.Serialize(
-                    new SubmissionTextPayload { Text = transcript, Attachments = descriptors }),
+                    new SubmissionTextPayload
+                    {
+                        Text = transcript, Attachments = descriptors, ReplyToEventId = request.ReplyToEventId,
+                    }),
                 submissionId: submissionId,
                 attemptId: null,
                 retentionClass: EventRetentionClass.Durable,
@@ -605,6 +608,30 @@ public sealed partial class MySqlConversationStore : IConversationStore
     /// the two statements cannot produce a short read the client would mistake for the end of
     /// history.
     /// </remarks>
+    public async Task<ReplyTarget?> FindReplyTargetAsync(
+        string conversationId, string eventId, CancellationToken ct = default)
+    {
+        await using var connection = await OpenAsync(ct);
+        // By event id (unique), and by conversation in the same statement: an id that exists in
+        // another conversation is the same answer as one that exists nowhere.
+        await using var command = new MySqlCommand(
+            """
+            SELECT kind, JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.text'))
+            FROM conversation_events
+            WHERE event_id = @event AND conversation_id = @conversation
+            """, connection);
+        command.Parameters.AddWithValue("@event", eventId);
+        command.Parameters.AddWithValue("@conversation", conversationId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+
+        var kind = reader.GetString(0);
+        if (!ReplyTarget.Kinds.Contains(kind)) return null;
+
+        return new ReplyTarget { Kind = kind, Text = reader.IsDBNull(1) ? string.Empty : reader.GetString(1) };
+    }
+
     public async Task<ReadConversationResult> ReadAsync(
         ReadConversationRequest request, CancellationToken ct = default)
     {

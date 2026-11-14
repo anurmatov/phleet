@@ -31,6 +31,7 @@ public static class ProtocolErrors
     public const string UnsupportedMediaType = "The media type is not accepted.";
     public const string AttachmentGone = "The attachment is no longer available.";
     public const string AgentUnavailable = "This agent does not accept chat.";
+    public const string ReplyTargetNotFound = "The message being replied to is not available.";
 
     /// <summary>Look up the fixed message for a code. Never returns runtime-derived text.</summary>
     public static string MessageFor(ProtocolErrorCode code) => code switch
@@ -54,6 +55,7 @@ public static class ProtocolErrors
         ProtocolErrorCode.UnsupportedMediaType => UnsupportedMediaType,
         ProtocolErrorCode.AttachmentGone => AttachmentGone,
         ProtocolErrorCode.AgentUnavailable => AgentUnavailable,
+        ProtocolErrorCode.ReplyTargetNotFound => ReplyTargetNotFound,
         _ => Internal,
     };
 }
@@ -72,6 +74,12 @@ public static class ProtocolLimits
 
     /// <summary>Outbound mid-turn assistant message. Exceeding it truncates and sets <c>truncated: true</c>.</summary>
     public const int MaxMessageTextChars = 16 * 1024;
+
+    /// <summary>
+    /// How much of a replied-to message is quoted to the agent. A pointer to what is being answered,
+    /// not a second copy of it: the message itself is already in the conversation.
+    /// </summary>
+    public const int MaxReplyQuoteChars = 600;
 
     /// <summary>Outbound tool name. Exceeding it truncates silently.</summary>
     public const int MaxToolNameChars = 64;

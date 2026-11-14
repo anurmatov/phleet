@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json.Nodes;
 using System.Net.Http.Json;
 using System.Net.Http.Headers;
 using System.Text;
@@ -229,6 +230,105 @@ public class ConversationRouteTests
 
         var body = await ReadAsync<SubmitAcceptedResponse>(response);
         Assert.Equal(store.NextSeq, body.AcceptedSeq);
+    }
+
+    // ── replies ──────────────────────────────────────────────────────────────
+
+    private const string ReplyTargetId = "01JREPLYTARGET000000000001";
+
+    /// <summary>
+    /// A reply to a message of this conversation is accepted, the transcript entry is told what it
+    /// answers, and the agent's command carries who wrote that message and how it starts — the
+    /// agent has no way to turn an event id into words.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_to_a_message_of_the_conversation_is_accepted_and_quoted_to_the_agent()
+    {
+        var store = new FakeConversationStore();
+        store.ReplyTargets[ReplyTargetId] = new ReplyTarget
+        {
+            Kind = ConversationEventKind.TurnFinal,
+            Text = "The table has a fixed minimum width.",
+        };
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+
+        var response = await host.Client.SendAsync(Post(
+            $"/v1/conversations/{store.ConversationId}/submissions", token,
+            new { protocol = ProtocolVersion.Current, type = "create", submissionId = "s_1", text = "fix it", replyToEventId = ReplyTargetId }));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var accepted = Assert.Single(store.Accepted);
+        Assert.Equal(ReplyTargetId, accepted.ReplyToEventId);
+
+        var payload = JsonNode.Parse(accepted.CommandPayloadJson)!["payload"]!;
+        Assert.Equal(ReplyTargetId, payload["replyToEventId"]!.GetValue<string>());
+        Assert.Equal("agent", payload["replyTo"]!["from"]!.GetValue<string>());
+        Assert.Equal("The table has a fixed minimum width.", payload["replyTo"]!["text"]!.GetValue<string>());
+        Assert.Null(payload["replyTo"]!["truncated"]);
+    }
+
+    /// <summary>The quote is the start of the message, never the whole of a long one, and says it was cut.</summary>
+    [Fact]
+    public async Task A_long_replied_to_message_is_quoted_from_its_start_and_marked_cut()
+    {
+        var store = new FakeConversationStore();
+        store.ReplyTargets[ReplyTargetId] = new ReplyTarget
+        {
+            Kind = ConversationEventKind.SubmissionText,
+            Text = new string('x', ProtocolLimits.MaxReplyQuoteChars + 50),
+        };
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+
+        await host.Client.SendAsync(Post(
+            $"/v1/conversations/{store.ConversationId}/submissions", token,
+            new { protocol = ProtocolVersion.Current, type = "create", submissionId = "s_1", text = "and this", replyToEventId = ReplyTargetId }));
+
+        var quote = JsonNode.Parse(Assert.Single(store.Accepted).CommandPayloadJson)!["payload"]!["replyTo"]!;
+        Assert.Equal("user", quote["from"]!.GetValue<string>());
+        Assert.Equal(ProtocolLimits.MaxReplyQuoteChars, quote["text"]!.GetValue<string>().Length);
+        Assert.True(quote["truncated"]!.GetValue<bool>());
+    }
+
+    /// <summary>
+    /// A reply to nothing this conversation holds is refused whole: unknown, malformed, and the
+    /// store saying "not a message" all answer identically, and nothing is made durable.
+    /// </summary>
+    [Theory]
+    [InlineData("01JNOSUCHEVENT000000000001")]
+    [InlineData("not-a-ulid")]
+    [InlineData("")]
+    public async Task A_reply_to_nothing_is_refused_and_creates_nothing(string replyToEventId)
+    {
+        var store = new FakeConversationStore();
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+
+        var response = await host.Client.SendAsync(Post(
+            $"/v1/conversations/{store.ConversationId}/submissions", token,
+            new { protocol = ProtocolVersion.Current, type = "create", submissionId = "s_1", text = "fix it", replyToEventId }));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertFixedBodyAsync(response, ProtocolErrorCode.ReplyTargetNotFound);
+        Assert.Empty(store.Accepted);
+    }
+
+    /// <summary>A message that answers nothing sends the agent the command it always did: no reply key at all.</summary>
+    [Fact]
+    public async Task A_message_that_answers_nothing_carries_no_reply_in_its_command()
+    {
+        var store = new FakeConversationStore();
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+
+        await host.Client.SendAsync(Post(
+            $"/v1/conversations/{store.ConversationId}/submissions", token,
+            new { protocol = ProtocolVersion.Current, type = "create", submissionId = "s_1", text = "hello" }));
+
+        var accepted = Assert.Single(store.Accepted);
+        Assert.Null(accepted.ReplyToEventId);
+        Assert.DoesNotContain("replyTo", accepted.CommandPayloadJson, StringComparison.Ordinal);
     }
 
     [Fact]

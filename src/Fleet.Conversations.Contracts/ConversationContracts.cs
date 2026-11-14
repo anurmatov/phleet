@@ -186,6 +186,13 @@ public sealed record AcceptSubmissionRequest
     public string? TranscriptText { get; init; }
 
     /// <summary>
+    /// The event this message answers, already confirmed by <c>FindReplyTargetAsync</c> to be a
+    /// message of this conversation. Written on the transcript entry and nowhere else; null for a
+    /// message that answers nothing, and for a cancel.
+    /// </summary>
+    public string? ReplyToEventId { get; init; }
+
+    /// <summary>
     /// Attachment ids this submission references, in client order (#308 D3).
     /// </summary>
     /// <remarks>
@@ -581,4 +588,33 @@ public sealed record HeartbeatResult
     /// Reported rather than silently ignored so a caller can stop working on them.
     /// </summary>
     public required IReadOnlyList<string> NotOwned { get; init; }
+}
+
+/// <summary>
+/// A message a reply may point at: what kind of event it is, and what it says.
+/// </summary>
+/// <remarks>
+/// Only the four kinds that are something someone said are ever returned — the user's
+/// <c>submission.text</c>, and the agent's <c>turn.final</c>, <c>turn.message</c> and
+/// <c>turn.recovered_answer</c>. Progress, notices, acknowledgements and terminals without words are
+/// not messages, and a reply to one is refused like a reply to nothing.
+/// </remarks>
+public sealed record ReplyTarget
+{
+    public required string Kind { get; init; }
+
+    /// <summary>The message's text, whole. Empty for a message that was pictures only.</summary>
+    public required string Text { get; init; }
+
+    /// <summary>The kinds a reply may point at.</summary>
+    public static readonly IReadOnlySet<string> Kinds = new HashSet<string>(StringComparer.Ordinal)
+    {
+        ConversationEventKind.SubmissionText,
+        ConversationEventKind.TurnFinal,
+        ConversationEventKind.TurnMessage,
+        ConversationEventKind.TurnRecoveredAnswer,
+    };
+
+    /// <summary>Whether the person wrote it (as opposed to the agent).</summary>
+    public bool FromUser => string.Equals(Kind, ConversationEventKind.SubmissionText, StringComparison.Ordinal);
 }

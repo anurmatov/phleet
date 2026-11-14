@@ -1,8 +1,10 @@
-import { memo, useState, type ReactNode } from 'react'
+import { memo, useMemo, useState, type ReactNode } from 'react'
 import AgentMarkdown from './AgentMarkdown'
 import CopyButton from './CopyButton'
 import Icon from './Icon'
-import { dayKey, dayLabel, statusLabel, timeLabel, type Entry, type SubmissionStatus } from '../chatTranscript'
+import {
+  dayKey, dayLabel, excerpt, quotedBy, statusLabel, timeLabel, type Entry, type Quoted, type SubmissionStatus,
+} from '../chatTranscript'
 import { attachmentContentPath, isImageAttachment, type AttachmentRef } from '../chatProtocol'
 import { sizeLabel } from '../chatFiles'
 import type { PendingSend } from '../chatConnection'
@@ -39,10 +41,52 @@ function Attachment({ attachment }: { attachment: AttachmentRef }) {
   )
 }
 
-const EntryRow = memo(function EntryRow({ entry, label }: { entry: Entry; label: string | null }) {
+/** What a message answers: who wrote it and how it starts. Pressing it goes to that message. */
+function Quote({ quoted, agentLabel }: { quoted: Quoted; agentLabel: string }) {
+  const label = quoted.who === 'you' ? 'You' : agentLabel
+  if (quoted.text === '') return <div className="chat-quote chat-quote--gone">In reply to an earlier message</div>
+  return (
+    <button type="button" className="chat-quote" title="Go to this message"
+      onClick={() => {
+        const target = document.getElementById(entryElementId(quoted.key))
+        if (!target) return
+        target.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        target.classList.remove('chat-row--flash')
+        // Reading a layout property between the two makes the browser start the animation again.
+        void target.offsetWidth
+        target.classList.add('chat-row--flash')
+      }}>
+      <span className="chat-quote-who">{label}</span>
+      <span className="chat-quote-text">{quoted.text}</span>
+    </button>
+  )
+}
+
+/** The id of a message's row, so a reply can scroll to what it answers. */
+function entryElementId(key: string): string {
+  return `chat-e-${key}`
+}
+
+function ReplyButton({ onReply }: { onReply: () => void }) {
+  return (
+    <button type="button" className="copy-btn chat-reply-btn" onClick={onReply} title="Reply" aria-label="Reply">
+      <Icon name="reply" size={14} />
+    </button>
+  )
+}
+
+const EntryRow = memo(function EntryRow({ entry, label, quoted, onReply, agentLabel }: {
+  entry: Entry
+  label: string | null
+  quoted: Quoted | null
+  onReply?: (quoted: Quoted) => void
+  agentLabel: string
+}) {
   if (entry.type === 'you') {
+    const words = entry.text.trim() !== '' ? entry.text : entry.attachments.length === 1 ? 'A picture' : `${entry.attachments.length} pictures`
     return (
-      <div className="chat-row chat-row--you">
+      <div className="chat-row chat-row--you" id={entryElementId(entry.key)}>
+        {quoted && <Quote quoted={quoted} agentLabel={agentLabel} />}
         {entry.attachments.length > 0 && (
           <div className="chat-attachments">
             {entry.attachments.map(a => <Attachment key={a.attachmentId} attachment={a} />)}
@@ -53,8 +97,11 @@ const EntryRow = memo(function EntryRow({ entry, label }: { entry: Entry; label:
             <span className="chat-sr-only">You: </span>{entry.text}
           </div>
         )}
-        {(entry.at !== null || label) && (
-          <div className="chat-meta"><Time at={entry.at} />{label && <span>{label}</span>}</div>
+        {(onReply || entry.at !== null || label) && (
+          <div className="chat-meta">
+            {onReply && <ReplyButton onReply={() => onReply({ key: entry.key, who: 'you', text: excerpt(words) })} />}
+            <Time at={entry.at} />{label && <span>{label}</span>}
+          </div>
         )}
       </div>
     )
@@ -62,7 +109,7 @@ const EntryRow = memo(function EntryRow({ entry, label }: { entry: Entry; label:
   if (entry.type === 'agent') {
     const empty = entry.text.trim() === ''
     return (
-      <div className="chat-row chat-row--agent">
+      <div className="chat-row chat-row--agent" id={entryElementId(entry.key)}>
         {!empty && (
           <div className={`chat-bubble chat-bubble--agent chat-markdown${entry.interim ? ' chat-bubble--interim' : ''}`}>
             <span className="chat-sr-only">Agent: </span>
@@ -74,6 +121,7 @@ const EntryRow = memo(function EntryRow({ entry, label }: { entry: Entry; label:
             <Time at={entry.at} />
             {entry.note && <span>{entry.note}</span>}
             {!empty && <CopyButton text={entry.text} label="Copy reply" />}
+            {!empty && onReply && <ReplyButton onReply={() => onReply({ key: entry.key, who: 'agent', text: excerpt(entry.text) })} />}
           </div>
         )}
       </div>
@@ -82,7 +130,8 @@ const EntryRow = memo(function EntryRow({ entry, label }: { entry: Entry; label:
   return <div className={`chat-system chat-system--${entry.tone}`}>{entry.text}</div>
 })
 
-const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard }: {
+const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard, agentLabel }: {
+  agentLabel: string
   pending: PendingSend
   onRetry: (submissionId: string) => void
   onDiscard: (submissionId: string) => void
@@ -90,6 +139,7 @@ const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard }: {
   const uploading = pending.files.some(f => f.attachmentId === null)
   return (
     <div className="chat-row chat-row--you">
+      {pending.replyTo && <Quote quoted={pending.replyTo} agentLabel={agentLabel} />}
       {pending.files.length > 0 && (
         <div className="chat-attachments">
           {pending.files.map(f => (f.previewUrl
@@ -122,15 +172,22 @@ const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard }: {
  * conversation does not show yet. The person's own words are plain text; only the agent's replies
  * are read as Markdown. A line names the day wherever the day changes.
  */
-export default function ChatTranscript({ entries, status, pending, onRetry, onDiscard, now = Date.now() }: {
+export default function ChatTranscript({
+  entries, status, pending, onRetry, onDiscard, onReply, agentLabel = 'Agent', now = Date.now(),
+}: {
   entries: Entry[]
   status: Record<string, SubmissionStatus>
   pending: PendingSend[]
   onRetry: (submissionId: string) => void
   onDiscard: (submissionId: string) => void
+  /** What the agent is called, for naming whose message a reply answers. */
+  agentLabel?: string
+  /** Start a reply to a message. Absent where replying is not offered. */
+  onReply?: (quoted: Quoted) => void
   /** The moment "Today" is judged from. */
   now?: number
 }) {
+  const byKey = useMemo(() => new Map(entries.map(entry => [entry.key, entry])), [entries])
   const rows: ReactNode[] = []
   let day: number | null = null
   for (const entry of entries) {
@@ -139,7 +196,7 @@ export default function ChatTranscript({ entries, status, pending, onRetry, onDi
       rows.push(<div key={`day:${entry.key}`} className="chat-day" role="separator"><span>{dayLabel(entry.at, now)}</span></div>)
     }
     rows.push(
-      <EntryRow key={entry.key} entry={entry}
+      <EntryRow key={entry.key} entry={entry} quoted={quotedBy(entry, byKey)} onReply={onReply} agentLabel={agentLabel}
         label={entry.type === 'you' ? statusLabel(status[entry.submissionId]) : null} />,
     )
   }
@@ -147,7 +204,7 @@ export default function ChatTranscript({ entries, status, pending, onRetry, onDi
     <>
       {rows}
       {pending.map(p => (
-        <PendingRow key={`pending:${p.submissionId}`} pending={p} onRetry={onRetry} onDiscard={onDiscard} />
+        <PendingRow key={`pending:${p.submissionId}`} pending={p} onRetry={onRetry} onDiscard={onDiscard} agentLabel={agentLabel} />
       ))}
     </>
   )

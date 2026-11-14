@@ -88,14 +88,20 @@ export function openBody(agent: string, clientInstanceId: string) {
  * The idempotency key is the submission id, and a retry sends the same body, so a message whose
  * first answer was lost cannot start a second turn.
  */
-export function submitBody(submissionId: string, text: string, attachments: readonly AttachmentRef[] = []): {
+export function submitBody(
+  submissionId: string, text: string, attachments: readonly AttachmentRef[] = [], replyToEventId: string | null = null,
+): {
   protocol: string; type: string; submissionId: string; idempotencyKey: string; text: string
   attachments?: { attachmentId: string; kind: string }[]
+  replyToEventId?: string
 } {
-  const body = { protocol: PROTOCOL, type: 'create', submissionId, idempotencyKey: submissionId, text }
-  // A message without files keeps the body it always had: the key is left out, not sent empty.
-  return attachments.length === 0 ? body
-    : { ...body, attachments: attachments.map(a => ({ attachmentId: a.attachmentId, kind: a.kind })) }
+  // A message without files, answering nothing, keeps the body it always had: each key is left
+  // out, not sent empty.
+  return {
+    protocol: PROTOCOL, type: 'create', submissionId, idempotencyKey: submissionId, text,
+    ...(attachments.length === 0 ? {} : { attachments: attachments.map(a => ({ attachmentId: a.attachmentId, kind: a.kind })) }),
+    ...(replyToEventId ? { replyToEventId } : {}),
+  }
 }
 
 /** Stop: cancel the turn that is running in this conversation. */
@@ -446,6 +452,9 @@ export function sendProblem(refusal: Refusal): { message: string; canRetry: bool
   }
   if (code === 'conversation_not_found') {
     return { message: 'The conversation was not found. Reconnecting; then retry.', canRetry: true }
+  }
+  if (code === 'reply_target_not_found') {
+    return { message: 'Not sent: the message this replies to is no longer in the conversation. Discard it and send it again without the reply.', canRetry: false }
   }
   if (code === 'idempotency_conflict') {
     return { message: 'Not sent: this browser reused a message id. Nothing was sent twice.', canRetry: false }

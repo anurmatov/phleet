@@ -135,6 +135,15 @@ public interface IConversationStore
         ReadConversationRequest request, CancellationToken ct = default);
 
     /// <summary>
+    /// <b>awaited</b> — the message a reply points at, or null when <paramref name="eventId"/> is
+    /// not a message of <paramref name="conversationId"/> (unknown, another conversation's, aged
+    /// out, or an event that is not something anyone said). The caller has already established
+    /// that the conversation is the caller's own.
+    /// </summary>
+    Task<ReplyTarget?> FindReplyTargetAsync(
+        string conversationId, string eventId, CancellationToken ct = default);
+
+    /// <summary>
     /// <b>awaited</b> — advance a client instance's durable cursor. Monotonic; never backwards.
     /// </summary>
     Task AckCursorAsync(AckCursorRequest request, CancellationToken ct = default);

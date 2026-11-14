@@ -361,6 +361,11 @@ public static class ConversationEndpoints
         if (body.IdempotencyKey is not null && !IsValidIdentifier(body.IdempotencyKey))
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
+        // An event id is a ULID and nothing else. Anything that is not one cannot name a message,
+        // and is answered exactly as an id that names none.
+        if (body.ReplyToEventId is not null && !AttachmentStore.IsSafeId(body.ReplyToEventId))
+            return Error(ProtocolErrorCode.ReplyTargetNotFound, StatusCodes.Status400BadRequest);
+
         // Measured in BYTES, not characters: the bound is a wire bound, and a character count would
         // admit roughly four times the payload for text outside the Basic Latin block.
         if (System.Text.Encoding.UTF8.GetByteCount(body.Text) > ProtocolLimits.MaxInboundTextBytes)
@@ -370,6 +375,18 @@ public static class ConversationEndpoints
         {
             if (await RefuseUnlessChatAsync(http, signIn, store, id, caller, ct) is { } refusal)
                 return refusal;
+
+            // A reply is confirmed before anything is made durable, and refused whole when what
+            // it answers cannot be found: a message the agent reads without knowing what it
+            // answers is a different message. The conversation is the caller's own by now, and
+            // the lookup is by conversation, so another conversation's event id reads as unknown.
+            ReplyTarget? replyTarget = null;
+            if (body.ReplyToEventId is { } replyTo)
+            {
+                replyTarget = await store.FindReplyTargetAsync(id, replyTo, ct);
+                if (replyTarget is null)
+                    return Error(ProtocolErrorCode.ReplyTargetNotFound, StatusCodes.Status400BadRequest);
+            }
 
             var result = await store.AcceptSubmissionAsync(new AcceptSubmissionRequest
             {
@@ -384,13 +401,14 @@ public static class ConversationEndpoints
                 CommandKind = kind,
                 CommandPayloadJson = CommandPayload(
                     kind, caller, id, body.SubmissionId!, body.IdempotencyKey, body.Text,
-                    body.ReplyToEventId, attachmentIds),
+                    body.ReplyToEventId, attachmentIds, replyTarget),
                 AttachmentIds = attachmentIds.Count > 0 ? attachmentIds : null,
 
                 // #305. Every refusal above returns before this point, so a submission that is not
                 // durable has no transcript entry — an over-cap 413, an idempotency 409 and a
                 // malformed 400 all leave the conversation exactly as they found it.
                 TranscriptText = body.Text,
+                ReplyToEventId = body.ReplyToEventId,
             }, ct);
 
             return result.Outcome switch
@@ -690,7 +708,7 @@ public static class ConversationEndpoints
     private static string CommandPayload(
         string kind, AuthenticatedPrincipal caller, string conversationId, string submissionId,
         string? idempotencyKey, string text, string? replyToEventId,
-        IReadOnlyList<string> attachmentIds) =>
+        IReadOnlyList<string> attachmentIds, ReplyTarget? replyTarget = null) =>
         JsonSerializer.Serialize(new
         {
             kind,
@@ -711,8 +729,29 @@ public static class ConversationEndpoints
                 text,
                 replyToEventId,
                 attachments = attachmentIds.Count > 0 ? attachmentIds : null,
+
+                // What the reply answers, in a few words, for the agent's prompt: the agent holds
+                // no map from event ids to text and no route to read one. Null when the message
+                // answers nothing, so that command is the envelope it always was.
+                replyTo = ReplyQuote(replyTarget),
             },
         }, FleetProtocolJson.Options);
+
+    /// <summary>
+    /// The start of the replied-to message and who wrote it. A pointer, not a second copy: the
+    /// message is already in the conversation the agent is in.
+    /// </summary>
+    private static object? ReplyQuote(ReplyTarget? target)
+    {
+        if (target is null) return null;
+
+        var text = target.Text;
+        var truncated = text.Length > ProtocolLimits.MaxReplyQuoteChars;
+        if (truncated)
+            text = text[..Fleet.Shared.TextTruncation.SafeCutIndex(text, ProtocolLimits.MaxReplyQuoteChars)];
+
+        return new { from = target.FromUser ? "user" : "agent", text, truncated = truncated ? true : (bool?)null };
+    }
 
     private static string CancelPayload(
         AuthenticatedPrincipal caller, string conversationId, string submissionId, string scope) =>

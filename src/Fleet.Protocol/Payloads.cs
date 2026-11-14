@@ -63,6 +63,18 @@ public sealed record SubmissionTextPayload
     /// </para>
     /// </remarks>
     public IReadOnlyList<AttachmentDescriptor>? Attachments { get; init; }
+
+    /// <summary>
+    /// The event this message answers: the <c>eventId</c> of an earlier message of the same
+    /// conversation, as the client named it and the server confirmed it at accept.
+    /// </summary>
+    /// <remarks>
+    /// Nullable and omitted, like <see cref="Attachments"/>, so a message that answers nothing keeps
+    /// the payload it always had. Carried here because this event IS the message: every client that
+    /// reads the thread, not only the one that sent it, can show what it was a reply to. The target
+    /// may later age out of retention; a client that cannot find it says so and shows the message.
+    /// </remarks>
+    public string? ReplyToEventId { get; init; }
 }
 
 /// <summary>What dispatch did with the submission (D5).</summary>

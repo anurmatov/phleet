@@ -780,3 +780,25 @@ test('a reservation that points the upload at another host is not followed', asy
   assert.equal(c.last().pending[0].status, 'failed')
   assert.equal(server.calls.some(call => call.method === 'PUT'), false)
 })
+
+test('a reply is sent naming the event it answers, and shown with what it quotes until the thread has it', async () => {
+  const server = chatService().on('POST', /\/submissions$/, { status: 201, body: { protocol: PROTOCOL, submissionId: 'sub-1', acceptedSeq: 9 } })
+  const c = await live(server)
+  c.chat.send('yes, do that', [], { key: '01JEVENT', who: 'agent', text: 'Want a PR?' })
+  await settle()
+  assert.equal((server.callsTo('POST', /\/submissions$/)[0].body as { replyToEventId: string }).replyToEventId, '01JEVENT')
+  assert.deepEqual(c.last().pending[0].replyTo, { key: '01JEVENT', who: 'agent', text: 'Want a PR?' })
+
+  c.chat.send('plain')
+  await settle()
+  assert.equal('replyToEventId' in (server.callsTo('POST', /\/submissions$/)[1].body as object), false)
+})
+
+test('a reply to a message the conversation no longer holds fails for good: sending it again cannot help', async () => {
+  const server = chatService().on('POST', /\/submissions$/, { status: 400, body: { protocol: PROTOCOL, code: 'reply_target_not_found', message: 'x' } })
+  const c = await live(server)
+  c.chat.send('yes', [], { key: '01JGONE', who: 'agent', text: 'old' })
+  await settle()
+  assert.equal(c.last().pending[0].status, 'failed')
+  assert.equal(c.last().pending[0].canRetry, false)
+})

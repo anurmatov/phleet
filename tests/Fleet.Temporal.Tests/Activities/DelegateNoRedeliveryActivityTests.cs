@@ -31,7 +31,8 @@ public sealed class DelegateNoRedeliveryActivityTests
     /// <summary>Eleven minutes: past the two re-sends a wait without the flag makes (at 5 and at 10).</summary>
     private const int BudgetSeconds = 660;
 
-    private sealed class Harness
+    /// <summary>Also built by the seed-level test that runs a shipped step through this activity.</summary>
+    internal sealed class Harness
     {
         public required DelegateToAgentActivity Activity { get; init; }
         public required TaskCompletionRegistry Registry { get; init; }
@@ -51,7 +52,7 @@ public sealed class DelegateNoRedeliveryActivityTests
         }
     }
 
-    private static Harness Build()
+    internal static Harness Build()
     {
         var publishedTaskIds = new List<string>();
         var channel = Substitute.For<IChannel>();

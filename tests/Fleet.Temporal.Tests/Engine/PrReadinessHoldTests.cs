@@ -22,11 +22,12 @@ namespace Fleet.Temporal.Tests.Engine;
 /// </para>
 ///
 /// <para>
-/// What needs the bridge's <c>noRedelivery</c> behaviour (one publish attempt; a cancellation not
-/// swallowed at the merge turn) is not asserted here: the delegate is a stub.
+/// In this file the delegate is a stub. What rests on the bridge and the engine keeping
+/// <c>noRedelivery</c> (one publish attempt, a cancellation that ends the run at the merge turn,
+/// the flag in the activity input) is in <c>PrReadinessHoldTests.MergeTurn.cs</c>.
 /// </para>
 /// </summary>
-public sealed class PrReadinessHoldTests
+public sealed partial class PrReadinessHoldTests
 {
     private const string Workflow = "UwePrImplementationWorkflow";
     private const string Reviewer = "reviewer-a";
@@ -808,11 +809,11 @@ public sealed class PrReadinessHoldTests
         Assert.Equal("{{vars.merge_decision.GrantId | default: 'none'}}", approved.GetProperty("on").GetString());
         var repin = approved.GetProperty("default");
         Assert.Equal("merge_repin", Name(repin));
-        Assert.Equal(["pin_after_approval", "pin_fields_mode", "approval_head_still_exact"], repin.GetProperty("steps").EnumerateArray().Select(Name));
         // The whole re-pin a delegated approval takes, its PIN instruction included, is the subtree main shipped.
         var repinOnMain = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "seed-main", "pr-merge-repin.json"));
         Assert.Equal(Canonical(repinOnMain), Canonical(repin.GetRawText()));
         Assert.Single(steps, s => Name(s) == "merge_repin");
+        Assert.Equal(["pin_after_approval", "pin_fields_mode", "approval_head_still_exact"], repin.GetProperty("steps").EnumerateArray().Select(Name));
         Assert.Equal("set_variable", Type(approved.GetProperty("cases").GetProperty("none")));
 
         var mode = Assert.Single(steps, s => Name(s) == "phase4_merge_mode");
@@ -1003,9 +1004,11 @@ public sealed class PrReadinessHoldTests
     }
 
     private static Task<SeedRun> RunAsync(Script script, Func<WorkflowHandle, SeedHarness, Task> drive,
-        bool captureWaiter = false, bool allowFailure = false, bool required = false) =>
+        bool captureWaiter = false, bool allowFailure = false, bool required = false,
+        Action<System.Text.Json.Nodes.JsonNode>? mutateSeed = null,
+        Func<Call, object?[], Task<Fleet.Temporal.Models.AgentTaskResult>?>? delegateOverride = null) =>
         SeedHarness.RunAsync(Workflow, Input(required, captureWaiter), script.Respond, drive,
-            captureWaiter: captureWaiter, allowFailure: allowFailure);
+            captureWaiter: captureWaiter, allowFailure: allowFailure, mutateSeed: mutateSeed, delegateOverride: delegateOverride);
 
     private static async Task ApproveFirstVisit(WorkflowHandle handle, SeedHarness h)
     {
@@ -1038,10 +1041,14 @@ public sealed class PrReadinessHoldTests
         public Func<int, string> Verify = _ => "merged";
         public ManualResetEventSlim? HoldVerify;
 
+        /// <summary>A step named here does not answer until its gate is set: the turn is out for as long as the test wants.</summary>
+        public readonly Dictionary<string, ManualResetEventSlim> Hold = [];
+
         public string Respond(Call call)
         {
             int n;
             lock (_counts) n = _counts[call.Step] = _counts.GetValueOrDefault(call.Step) + 1;
+            if (Hold.TryGetValue(call.Step, out var held) && !held.Wait(TimeSpan.FromSeconds(90))) throw new TimeoutException($"{call.Step} held");
             switch (call.Step)
             {
                 case "phase1_implement":

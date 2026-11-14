@@ -643,7 +643,8 @@ internal sealed class SeedHarness
         bool captureWaiter = false,
         Action<JsonNode>? mutateSeed = null,
         bool allowFailure = false,
-        bool localServer = false)
+        bool localServer = false,
+        Func<Call, object?[], Task<AgentTaskResult>?>? delegateOverride = null)
     {
         // localServer: a real local Temporal dev server with wall-clock timers instead of the
         // time-skipping test server, for checks that must observe the server's own terminal status.
@@ -708,7 +709,7 @@ internal sealed class SeedHarness
                     "LoadWorkflowConfig", typeof(JsonElement), [], 0,
                     _ => JsonSerializer.SerializeToElement(new { CtoAgent = "cto-agent", EscalationTarget = "cto-agent" })))
                 .AddActivity(ActivityDefinition.Create("LoadAgentBudgetSeconds", typeof(int), [], 0, _ => 600))
-                .AddActivity(harness.DelegateStub(respond)));
+                .AddActivity(harness.DelegateStub(respond, delegateOverride)));
 
         object? result = null;
         string? waiterDecision = null;
@@ -746,7 +747,14 @@ internal sealed class SeedHarness
         };
     }
 
-    private ActivityDefinition DelegateStub(Func<Call, string> respond) =>
+    /// <summary>
+    /// Every delegation is answered by <paramref name="respond"/> with status <c>completed</c>,
+    /// unless <paramref name="delegateOverride"/> takes it: given the call and the activity's raw
+    /// arguments, it returns the answer itself (any status, a failure, or the real activity's own
+    /// task), or null to leave the call to the script.
+    /// </summary>
+    private ActivityDefinition DelegateStub(
+        Func<Call, string> respond, Func<Call, object?[], Task<AgentTaskResult>?>? delegateOverride) =>
         ActivityDefinition.Create(
             DelegateToAgentActivity.ActivityName,
             typeof(AgentTaskResult),
@@ -758,6 +766,7 @@ internal sealed class SeedHarness
                 var taskId = (string)args[2]!;
                 var call = new Call(taskId.Split('/').Last(), (string)args[0]!, (string)args[1]!);
                 lock (_calls) _calls.Add(call);
+                if (delegateOverride?.Invoke(call, args) is { } taken) return taken;
                 return new AgentTaskResult(respond(call), "completed");
             });
 

@@ -244,7 +244,8 @@ public sealed class TaskManager
         long userId = 0,
         ConversationIdentity? identity = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        bool steeringEligible = false)
+        bool steeringEligible = false,
+        string? coldStartTask = null)
     {
         if (source is not (TaskSource.UserMessage or TaskSource.NewCommand)) priority = TaskPriority.Routine;
         var keyed = priority == TaskPriority.PrimaryHuman && telegramMessageId > 0;
@@ -259,7 +260,8 @@ public sealed class TaskManager
         try
         {
             var outcome = await StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity,
-                priority: priority, telegramMessageId: telegramMessageId, steeringEligible: steeringEligible);
+                priority: priority, telegramMessageId: telegramMessageId, steeringEligible: steeringEligible,
+                coldStartTask: coldStartTask);
             if (keyed && outcome is TaskDispatchOutcome.Dropped or TaskDispatchOutcome.QueueFull) _primaryDedup.Complete(chatId, telegramMessageId);
             return outcome;
         }
@@ -282,10 +284,11 @@ public sealed class TaskManager
         long userId = 0,
         ConversationIdentity? identity = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        bool steeringEligible = false)
+        bool steeringEligible = false,
+        string? coldStartTask = null)
     {
         var dispatch = StartTask(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-            images, documents, userId, identity, priority, telegramMessageId, steeringEligible);
+            images, documents, userId, identity, priority, telegramMessageId, steeringEligible, coldStartTask);
         if (dispatch.IsCompletedSuccessfully) return;
         _ = ObserveDetachedStartAsync(dispatch, chatId, source, taskId, correlationId is not null);
     }
@@ -317,7 +320,8 @@ public sealed class TaskManager
         long userId = 0,
         ConversationIdentity? identity = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        bool steeringEligible = false)
+        bool steeringEligible = false,
+        string? coldStartTask = null)
     {
         // A null identity means a caller that predates the seam — synthesize one from the runtime
         // key so every dispatch decision has something to report against, and every existing call
@@ -349,7 +353,7 @@ public sealed class TaskManager
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow, identity, priority, telegramMessageId);
+                    images, documents, userId, DateTimeOffset.UtcNow, identity, priority, telegramMessageId, coldStartTask);
                 if (priority == TaskPriority.PrimaryHuman && telegramMessageId > 0)
                 {
                     lock (runningSession.PrimaryMessageIds) runningSession.PrimaryMessageIds.Add(telegramMessageId);
@@ -361,7 +365,7 @@ public sealed class TaskManager
             {
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-                    images, documents, userId, DateTimeOffset.UtcNow, identity, priority, telegramMessageId);
+                    images, documents, userId, DateTimeOffset.UtcNow, identity, priority, telegramMessageId, coldStartTask);
                 return await _midTurn.DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false);
             }
 
@@ -369,7 +373,7 @@ public sealed class TaskManager
                 _logger.LogInformation("Not injecting {Source} task into running conversational turn for chat {ChatId}; using normal capacity path", source, chatId);
         }
 
-        var queuedPart = QueueIntake.CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity, priority: priority, telegramMessageId: telegramMessageId);
+        var queuedPart = QueueIntake.CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity, priority: priority, telegramMessageId: telegramMessageId, coldStartTask: coldStartTask);
         // #406: only the router's verified-human flag makes a message eligible to steer a running
         // workflow turn, and only after it took today's queue path and was Queued.
         var steer = steeringEligible && source == TaskSource.UserMessage;
@@ -440,7 +444,8 @@ public sealed class TaskManager
         // one-at-a-time until executors can actually interleave turns.
         var start = new TurnStart(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
             images, documents, userId, identity, MergedSubmissionIds: null,
-            PrimaryMessageIds: priority == TaskPriority.PrimaryHuman && telegramMessageId > 0 ? [telegramMessageId] : []);
+            PrimaryMessageIds: priority == TaskPriority.PrimaryHuman && telegramMessageId > 0 ? [telegramMessageId] : [],
+            ColdStartTask: coldStartTask);
         RegisteredTurn? registered = null;
         var busy = false;
         var enqueued = false;
@@ -514,12 +519,17 @@ public sealed class TaskManager
 
     private bool AnyTurnRunning() => _chatTasks.Values.Any(s => s.Count > 0);
 
-    /// <summary>Everything a turn is started with, whether it runs at once or comes off the queue.</summary>
+    /// <summary>
+    /// Everything a turn is started with, whether it runs at once or comes off the queue.
+    /// <c>ColdStartTask</c> is <c>Task</c> as a provider process that holds no conversation needs
+    /// it; which of the two the turn gets is decided in <see cref="LaunchTurn"/>.
+    /// </summary>
     private sealed record TurnStart(
         long ChatId, string Task, string DisplayText, bool IsSessionTask, TaskSource Source,
         string? RelaySender, string? CorrelationId, string? TaskId,
         IReadOnlyList<MessageImage>? Images, IReadOnlyList<MessageDocument>? Documents, long UserId,
-        ConversationIdentity Identity, IReadOnlyList<string>? MergedSubmissionIds, IReadOnlyList<long> PrimaryMessageIds);
+        ConversationIdentity Identity, IReadOnlyList<string>? MergedSubmissionIds, IReadOnlyList<long> PrimaryMessageIds,
+        string? ColdStartTask = null);
 
     /// <summary>A turn that is in the running set. Its task may not have been started yet.</summary>
     private sealed record RegisteredTurn(ChatTaskState State, RunningTask Running, CancellationTokenSource Cts, ConversationIdentity Identity);
@@ -570,8 +580,14 @@ public sealed class TaskManager
     {
         var (state, running, cts, turnIdentity) = registered;
         var (chatId, taskId, userId, source) = (start.ChatId, start.TaskId, start.UserId, start.Source);
+        string task;
         try
         {
+            // Which prompt the turn needs is decided here, where its task starts, not where the
+            // message arrived: a provider process restarted while the message waited holds no
+            // conversation, and the prompt built for a warm one carries none.
+            task = start.ColdStartTask is not null && !_executor.IsProcessWarm ? start.ColdStartTask : start.Task;
+
             PublishEvent(chatId, ConversationEventKind.TurnStarted, turnIdentity, new TurnStartedPayload());
 
             // Register in user-level index for cross-chat cancel
@@ -610,7 +626,7 @@ public sealed class TaskManager
             var bindingSequence = _turnBindings?.BeginTurn(chatId, source);
             try
             {
-                await new TurnRun(_turnDependencies, chatId, running.Id, start.Task, start.IsSessionTask, source, start.RelaySender,
+                await new TurnRun(_turnDependencies, chatId, running.Id, task, start.IsSessionTask, source, start.RelaySender,
                     start.CorrelationId, taskId, start.Images, start.Documents, turnIdentity, cts.Token).RunAsync();
             }
             catch (Exception ex)
@@ -960,7 +976,8 @@ public sealed class TaskManager
                             payload.Images, payload.Documents, payload.UserId,
                             payload.Identity ?? SynthesizeIdentity(queued.ChatId, payload.Source),
                             payload.MergedSubmissionIds,
-                            queued.Parts.SelectMany(QueueIntake.KeysOfPart).Distinct().ToArray());
+                            queued.Parts.SelectMany(QueueIntake.KeysOfPart).Distinct().ToArray(),
+                            payload.ColdStartTask);
                         registered = RegisterTurnLocked(start);
                     }
                     catch (Exception ex)

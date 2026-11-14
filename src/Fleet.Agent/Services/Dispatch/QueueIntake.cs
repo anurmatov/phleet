@@ -51,7 +51,7 @@ internal sealed class QueueIntake(
     {
         var part = CreateQueuedPart(message.Task, message.DisplayText, message.IsSessionTask, message.Source,
             message.RelaySender, message.CorrelationId, message.TaskId, message.Images, message.Documents, message.UserId,
-            message.ArrivedAt, message.Identity, message.Priority, message.TelegramMessageId);
+            message.ArrivedAt, message.Identity, message.Priority, message.TelegramMessageId, message.ColdStartTask);
 
         var pendingResult = TryAppendToPendingQueue(chatId, part);
         if (pendingResult == PendingQueueResult.Merged)
@@ -70,12 +70,14 @@ internal sealed class QueueIntake(
     internal static QueuedMessagePart CreateQueuedPart(string task, string displayText, bool isSessionTask, TaskSource source,
         string? relaySender, string? correlationId, string? taskId, IReadOnlyList<MessageImage>? images,
         IReadOnlyList<MessageDocument>? documents, long userId, DateTimeOffset? arrivedAt = null,
-        ConversationIdentity? identity = null, TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0)
+        ConversationIdentity? identity = null, TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
+        string? coldStartTask = null)
     {
         var senderDisplay = relaySender ?? source.ToString().ToLowerInvariant();
         var arrival = arrivedAt?.ToLocalTime() ?? DateTimeOffset.Now;
         return new QueuedMessagePart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
-            images, documents, userId, arrival, senderDisplay, identity, priority, telegramMessageId);
+            images, documents, userId, arrival, senderDisplay, identity, priority, telegramMessageId,
+            ColdStartTask: coldStartTask);
     }
 
     internal PendingQueueResult TryAppendToPendingQueue(long chatId, QueuedMessagePart part)

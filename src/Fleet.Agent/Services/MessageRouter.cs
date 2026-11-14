@@ -140,11 +140,19 @@ public sealed class MessageRouter
                 // displayText is captured from the pre-assembly text, so the prompt metadata
                 // added below (including the transcription marker) never reaches Telegram.
                 var displayText = task;
+                // Built both ways now; which one the turn gets is decided when it starts.
+                string newTaskColdStart;
                 if (msg.IsGroupChat)
+                {
+                    newTaskColdStart = _groupBehavior.BuildGroupColdStartTask(msg.ChatId, msg.Sender, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
                     task = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
+                }
                 else
+                {
+                    newTaskColdStart = _groupBehavior.BuildDmColdStartTask(msg.ChatId, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
                     task = _groupBehavior.BuildDmTask(msg.ChatId, task, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
-                _taskManager.StartTaskDetached(msg.ChatId, task, displayText, isSessionTask: false,
+                }
+                _taskManager.StartTaskDetached(msg.ChatId, task, displayText, isSessionTask: false, coldStartTask: newTaskColdStart,
                     source: TaskSource.NewCommand, images: msg.Images.Count > 0 ? msg.Images : null,
                     documents: msg.Documents.Count > 0 ? msg.Documents : null,
                     userId: msg.UserId, priority: PrimaryHumanClassifier.Classify(msg, _telegramConfig, _allowlist),
@@ -189,14 +197,23 @@ public sealed class MessageRouter
 
         // messageDisplayText is built above, from the pre-assembly text — the transcription
         // marker is added only here, so it can never reach Telegram via the display path.
+        // Built both ways now; which one the turn gets is decided when it starts.
+        string coldStartTask;
         if (msg.IsGroupChat)
+        {
+            coldStartTask = _groupBehavior.BuildGroupColdStartTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
             trimmed = _groupBehavior.BuildGroupTask(msg.ChatId, msg.Sender, trimmed, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatTitle, msg.IsVoiceTranscription);
+        }
         else
+        {
+            coldStartTask = _groupBehavior.BuildDmColdStartTask(msg.ChatId, trimmed, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
             trimmed = _groupBehavior.BuildDmTask(msg.ChatId, trimmed, msg.ReplyToTelegramMessageId, msg.TelegramMessageId, msg.ChatUsername, msg.ChatFirstName, msg.IsVoiceTranscription);
+        }
 
         // When busy, StartTask enqueues the message and notifies the user automatically.
         // Use /new <task> for parallel tasks, or /cancel to stop the current one.
         _taskManager.StartTaskDetached(msg.ChatId, trimmed, messageDisplayText, isSessionTask: true,
+            coldStartTask: coldStartTask,
             images: msg.Images.Count > 0 ? msg.Images : null,
             documents: msg.Documents.Count > 0 ? msg.Documents : null,
             userId: msg.UserId, priority: PrimaryHumanClassifier.Classify(msg, _telegramConfig, _allowlist),

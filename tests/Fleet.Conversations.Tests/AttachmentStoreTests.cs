@@ -552,6 +552,46 @@ public sealed class AttachmentStoreTests(MySqlFixture fixture)
             PrincipalId = Owner, AgentName = SouthTestHost.Agent,
         });
 
+    /// <summary>
+    /// An image is one of the four types; a file is recorded under the generic type and no other.
+    /// The store refuses a file row that names a type, so "a client's declared type is never
+    /// stored" does not depend on the route remembering to drop it.
+    /// </summary>
+    [Theory]
+    [InlineData(AttachmentKind.Other, "application/octet-stream", ReserveOutcome.Reserved)]
+    [InlineData(AttachmentKind.Other, "text/html", ReserveOutcome.UnsupportedType)]
+    [InlineData(AttachmentKind.Other, "image/png", ReserveOutcome.UnsupportedType)]
+    [InlineData(AttachmentKind.Image, "image/png", ReserveOutcome.Reserved)]
+    [InlineData(AttachmentKind.Image, "application/octet-stream", ReserveOutcome.UnsupportedType)]
+    [InlineData(AttachmentKind.Image, "image/heic", ReserveOutcome.UnsupportedType)]
+    public async Task Reserve_TakesAnImageOfTheFourTypes_OrAFileUnderTheGenericType(
+        AttachmentKind kind, string contentType, ReserveOutcome expected)
+    {
+        var conversation = await OpenAsync();
+
+        var result = await _store.ReserveAttachmentAsync(new ReserveAttachmentRequest
+        {
+            ConversationId = conversation.ConversationId,
+            PrincipalId = Owner,
+            Kind = kind,
+            ContentType = contentType,
+            ByteSize = 16,
+            Sha256 = new string('a', 64),
+            FileName = "notes.md",
+            UploadTokenSha256 = new string('b', 64),
+        });
+
+        Assert.Equal(expected, result.Outcome);
+
+        if (expected == ReserveOutcome.Reserved)
+        {
+            var row = await _store.GetAttachmentAsync(result.AttachmentId!);
+            Assert.Equal(kind, row!.Kind);
+            Assert.Equal(contentType, row.ContentType);
+            Assert.Equal("notes.md", row.FileName);
+        }
+    }
+
     private Task<ReserveAttachmentResult> ReserveAsync(string conversationId, long byteSize) =>
         _store.ReserveAttachmentAsync(new ReserveAttachmentRequest
         {

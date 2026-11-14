@@ -16,9 +16,9 @@ test('agent replies are Markdown with safe links and no raw HTML; the person’s
     const { default: ChatTranscript } = await server.ssrLoadModule('/src/components/ChatTranscript.tsx')
 
     const entries: Entry[] = [
-      { type: 'you', key: 'e1', seq: 1, submissionId: 'S1', text: 'Is **this** bold? <b>no</b> [x](https://example.com)' },
+      { type: 'you', key: 'e1', seq: 1, at: null, attachments: [], submissionId: 'S1', text: 'Is **this** bold? <b>no</b> [x](https://example.com)' },
       {
-        type: 'agent', key: 'e2', seq: 2, note: null,
+        type: 'agent', key: 'e2', seq: 2, at: null, note: null,
         text: [
           'Here is **bold**, `code` and a [link](https://example.com/docs).',
           '',
@@ -31,12 +31,12 @@ test('agent replies are Markdown with safe links and no raw HTML; the person’s
           '```',
         ].join('\n'),
       },
-      { type: 'agent', key: 'e3', seq: 3, text: '', note: 'The agent had nothing to add.' },
-      { type: 'system', key: 'e4', tone: 'error', text: 'The turn failed.' },
+      { type: 'agent', key: 'e3', seq: 3, at: null, text: '', note: 'The agent had nothing to add.' },
+      { type: 'system', key: 'e4', at: null, tone: 'error', text: 'The turn failed.' },
     ]
     const pending: PendingSend[] = [
-      { submissionId: 'p1', text: 'not sent', status: 'failed', acceptedSeq: null, problem: 'Not confirmed.', canRetry: true },
-      { submissionId: 'p2', text: 'on its way', status: 'sending', acceptedSeq: null, problem: null, canRetry: false },
+      { submissionId: 'p1', text: 'not sent', files: [], status: 'failed', acceptedSeq: null, problem: 'Not confirmed.', canRetry: true },
+      { submissionId: 'p2', text: 'on its way', files: [], status: 'sending', acceptedSeq: null, problem: null, canRetry: false },
     ]
     const html = renderToStaticMarkup(createElement(ChatTranscript, {
       entries, status: { S1: 'waiting' }, pending, onRetry: () => {}, onDiscard: () => {},
@@ -96,7 +96,7 @@ test('the connection line says where the thread stands and offers only actions t
     const base: ChatState = {
       phase: 'live', connectedOnce: true, stopReason: null, problem: null, conversationId: 'C1',
       transcript: emptyTranscript(), pending: [], limits: { inboundTextBytes: 32768, catchUpLimitMax: 1000 },
-      stopping: false, notice: null,
+      stopping: false, notice: null, filesOff: false,
     }
     const line = (patch: Partial<ChatState>) =>
       renderToStaticMarkup(createElement(ConnectionLine, { state: { ...base, ...patch }, onReconnect: () => {} }))

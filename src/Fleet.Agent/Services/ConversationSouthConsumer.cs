@@ -460,7 +460,14 @@ public sealed class ConversationSouthConsumer : BackgroundService
                     envelope.Payload?.Text ?? string.Empty,
                     replyToEventId: envelope.Payload?.ReplyToEventId,
                     submissionId: owned.SubmissionId,
-                    images: fetched.Images);
+                    images: fetched.Images,
+                    documents: fetched.Documents,
+                    replyQuote: envelope.Payload?.ReplyTo is { } quoted
+                        ? new ConversationIntake.ReplyQuote(
+                            FromUser: string.Equals(quoted.From, "user", StringComparison.Ordinal),
+                            Text: quoted.Text ?? string.Empty,
+                            Truncated: quoted.Truncated == true)
+                        : null);
 
                 // A notice, not a failure, and emitted through the intake — which already owns the
                 // event publisher and the identity plumbing. A second publish path here would be a
@@ -1055,6 +1062,21 @@ public sealed class ConversationSouthConsumer : BackgroundService
 
         /// <summary>A cancel's scope: <c>current</c> or <c>all</c>. Anything else is <c>current</c>.</summary>
         [JsonPropertyName("scope")] public string? Scope { get; init; }
+
+        /// <summary>
+        /// What the message answers, as the chat service found it when it accepted the message:
+        /// who wrote it and how it starts. Absent on a message that answers nothing and on every
+        /// command from a chat service older than this field.
+        /// </summary>
+        [JsonPropertyName("replyTo")] public CommandReplyTo? ReplyTo { get; init; }
+    }
+
+    internal sealed record CommandReplyTo
+    {
+        /// <summary><c>user</c> or <c>agent</c>. Anything else is read as the agent's.</summary>
+        [JsonPropertyName("from")] public string? From { get; init; }
+        [JsonPropertyName("text")] public string? Text { get; init; }
+        [JsonPropertyName("truncated")] public bool? Truncated { get; init; }
     }
 
     /// <summary>One claimed delivery this process owns until its terminal is committed.</summary>

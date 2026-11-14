@@ -184,7 +184,9 @@ public sealed class ConversationIntake
     public async Task<TaskDispatchOutcome?> SubmitAsync(
         long runtimeKey, string text,
         string? replyToEventId = null, string? submissionId = null,
-        IReadOnlyList<MessageImage>? images = null)
+        IReadOnlyList<MessageImage>? images = null,
+        ReplyQuote? replyQuote = null,
+        IReadOnlyList<MessageDocument>? documents = null)
     {
         var reference = _registry.Lookup(runtimeKey);
         if (reference is null)
@@ -199,6 +201,19 @@ public sealed class ConversationIntake
         {
             PublishRejection(identity, ProtocolErrorCode.PayloadTooLarge, runtimeKey);
             return null;
+        }
+
+        // The size check above is on what the person wrote. What follows is what the model reads:
+        // the same words, after a line saying which earlier message they answer.
+        var said = text;
+        text = WithReplyQuote(text, replyQuote);
+
+        // Files that are not pictures reach the agent as paths it may open, in the same words the
+        // Telegram path uses. Pictures are left as they were: the model is shown them directly.
+        if (documents is { Count: > 0 })
+        {
+            var hints = AttachmentSweeper.BuildHints([], documents);
+            if (hints.Length > 0) text = text.Length > 0 ? $"{text}\n{hints}" : hints;
         }
 
         // Buffer in memory exactly as the DM path does, so a cold executor still gets context.
@@ -245,11 +260,48 @@ public sealed class ConversationIntake
         var primary = IsPrimaryHuman(reference.PrincipalId);
 
         return await _taskManager.StartTask(
-            runtimeKey, prompt, Display(text), isSessionTask: true,
-            source: TaskSource.UserMessage, images: images, userId: 0, identity: identity,
+            runtimeKey, prompt, Display(said), isSessionTask: true,
+            source: TaskSource.UserMessage, images: images, documents: documents, userId: 0, identity: identity,
             priority: primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine,
             steeringEligible: primary,
             coldStartTask: coldStartPrompt);
+    }
+
+    /// <summary>
+    /// What a reply answers: who wrote the earlier message and how it starts, as the chat service
+    /// read it from the conversation when it accepted the reply.
+    /// </summary>
+    public sealed record ReplyQuote(bool FromUser, string Text, bool Truncated);
+
+    /// <summary>
+    /// The message with a line ahead of it naming what it answers, and that message's start as a
+    /// quotation. A reply to a message with no words (pictures only) says so and quotes nothing.
+    /// </summary>
+    /// <remarks>
+    /// The quoted words come from this same conversation — the agent's own answer or the person's
+    /// own message — so they carry no more authority than the thread already had. They are quoted
+    /// line by line so nothing in them can be read as the start of the person's new message, and
+    /// bounded here as well as at the chat service: this is a pointer, not a second copy.
+    /// </remarks>
+    internal static string WithReplyQuote(string text, ReplyQuote? quote)
+    {
+        if (quote is null) return text;
+
+        var whose = quote.FromUser ? "an earlier message of their own" : "an earlier message of yours";
+        var quoted = quote.Text.Trim();
+        if (quoted.Length == 0)
+            return $"[The user is replying to {whose} in this chat, which had no text.]\n\n{text}";
+
+        var truncated = quote.Truncated;
+        if (quoted.Length > ProtocolLimits.MaxReplyQuoteChars)
+        {
+            quoted = quoted[..Fleet.Shared.TextTruncation.SafeCutIndex(quoted, ProtocolLimits.MaxReplyQuoteChars)];
+            truncated = true;
+        }
+
+        var lines = quoted.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n').Select(line => "> " + line);
+        var block = string.Join("\n", lines) + (truncated ? " […]" : string.Empty);
+        return $"[The user is replying to {whose} in this chat:]\n{block}\n\n{text}";
     }
 
     /// <summary>
@@ -280,8 +332,8 @@ public sealed class ConversationIntake
             new TurnNoticePayload
             {
                 Text = unavailable == 1
-                    ? "An image sent with this message is unavailable and was not included."
-                    : $"{unavailable} images sent with this message are unavailable and were not "
+                    ? "A file sent with this message is unavailable and was not included."
+                    : $"{unavailable} files sent with this message are unavailable and were not "
                       + "included.",
             });
     }

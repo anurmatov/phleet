@@ -58,6 +58,25 @@ public sealed record ConversationListItem
     public required ulong NextSeq { get; init; }
     public required ulong RetainedFloorSeq { get; init; }
     public required DateTimeOffset LastActivityAt { get; init; }
+
+    /// <summary>
+    /// The start of the conversation's newest message and who wrote it, for a list that shows a
+    /// line of each thread. Omitted when nothing has been said or everything said has aged out.
+    /// </summary>
+    public ConversationListLastMessage? LastMessage { get; init; }
+}
+
+/// <summary>One line of a thread, in a list of threads.</summary>
+public sealed record ConversationListLastMessage
+{
+    /// <summary><c>user</c> or <c>agent</c>.</summary>
+    public required string From { get; init; }
+
+    /// <summary>At most 160 characters. Empty for a message that was files only.</summary>
+    public required string Text { get; init; }
+
+    /// <summary>Present, and true, only when the message is longer than what is shown.</summary>
+    public bool? Truncated { get; init; }
 }
 
 /// <summary>`GET /v1/conversations/{id}/events` response.</summary>

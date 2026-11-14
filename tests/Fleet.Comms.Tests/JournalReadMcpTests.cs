@@ -1,3 +1,4 @@
+using Fleet.Protocol;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
@@ -115,7 +116,7 @@ public sealed partial class JournalReadMcpTests
     // ── the tool list ────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Exactly_the_three_tools_are_listed_and_all_are_read_only()
+    public async Task Exactly_the_five_read_tools_are_listed_and_all_are_read_only()
     {
         await using var host = await McpHost.StartAsync();
 
@@ -123,11 +124,180 @@ public sealed partial class JournalReadMcpTests
         var tools = response.Result.GetProperty("tools").EnumerateArray().ToArray();
 
         Assert.Equal(
-            ["get_conversation", "get_message", "search_messages"],
+            ["get_chat_message", "get_conversation", "get_message", "search_chat_messages", "search_messages"],
             tools.Select(t => t.GetProperty("name").GetString()!).Order(StringComparer.Ordinal).ToArray());
 
         foreach (var tool in tools)
             Assert.True(tool.GetProperty("annotations").GetProperty("readOnlyHint").GetBoolean());
+    }
+
+    // ── the first-party chat's own history ───────────────────────────────────
+
+    private static ChatHistoryMessage Said(string id, string kind, string text, int minute = 0) => new()
+    {
+        EventId = id, ConversationId = "01JCHATCONVERSATION0000001", Kind = kind, Text = text,
+        At = new DateTimeOffset(2026, 11, 14, 9, minute, 0, TimeSpan.Zero),
+    };
+
+    private const string ChatA1 = "01JCHATEVENTA0000000000001";
+    private const string ChatA2 = "01JCHATEVENTA0000000000002";
+    private const string ChatB1 = "01JCHATEVENTB0000000000001";
+
+    /// <summary>
+    /// The reader is the token's subject and nothing else: each agent is shown its own chat, and
+    /// a subject allowed to read every Telegram message still reads only its own chat.
+    /// </summary>
+    [Fact]
+    public async Task Chat_search_reads_the_callers_own_chat_whoever_the_caller_is()
+    {
+        await using var host = await McpHost.StartAsync();
+        host.Chat.ByAgent[AgentA] = [Said(ChatA2, ConversationEventKind.TurnFinal, "the answer", 2), Said(ChatA1, ConversationEventKind.SubmissionText, "the question", 1)];
+        host.Chat.ByAgent[AgentB] = [Said(ChatB1, ConversationEventKind.SubmissionText, "something private")];
+
+        var mine = await host.CallAsync(Token(JournalTokens.PurposeRead, AgentA), "search_chat_messages", new { });
+        Assert.False(mine.IsError);
+        var items = mine.Json.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Equal([ChatA2, ChatA1], items.Select(i => i.GetProperty("message_id").GetString()));
+        Assert.Equal(["agent", "user"], items.Select(i => i.GetProperty("from").GetString()));
+        Assert.Equal("the answer", items[0].GetProperty("text_preview").GetString());
+        Assert.Equal("2026-11-14T09:02:00.000000Z", items[0].GetProperty("sent_at").GetString());
+        Assert.DoesNotContain("something private", mine.Text, StringComparison.Ordinal);
+
+        // The all-scope subject is all-scope for Telegram. Its chat is its own, and it has none.
+        var reviewer = await host.CallAsync(Token(JournalTokens.PurposeRead, Reviewer), "search_chat_messages", new { });
+        Assert.Empty(reviewer.Json.GetProperty("items").EnumerateArray());
+
+        Assert.Equal([AgentA, Reviewer], host.Chat.Searches.Select(s => s.Agent));
+    }
+
+    [Fact]
+    public async Task Chat_search_passes_its_filters_on_and_previews_long_messages()
+    {
+        await using var host = await McpHost.StartAsync();
+        host.Chat.ByAgent[AgentA] = [Said(ChatA1, ConversationEventKind.TurnFinal, new string('x', ChatHistoryLimits.PreviewChars + 40))];
+
+        var found = await host.CallAsync(Token(JournalTokens.PurposeRead, AgentA), "search_chat_messages", new
+        {
+            query = "  Minimum Width ", from = "agent", since = "2026-11-01T00:00:00Z", until = "2026-12-01T00:00:00+05:00", limit = 7,
+        });
+
+        var query = Assert.Single(host.Chat.Searches).Query;
+        Assert.Equal("Minimum Width", query.Contains);
+        Assert.False(query.FromUser);
+        Assert.Equal(new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero), query.Since);
+        Assert.Equal(new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.FromHours(5)), query.Until);
+        Assert.Equal(7, query.Limit);
+        Assert.Null(query.Before);
+
+        var item = found.Json.GetProperty("items")[0];
+        Assert.Equal(ChatHistoryLimits.PreviewChars, item.GetProperty("text_preview").GetString()!.Length);
+        Assert.True(item.GetProperty("text_truncated").GetBoolean());
+    }
+
+    /// <summary>Arguments are refused from the arguments alone: the store is never asked.</summary>
+    [Theory]
+    [InlineData("""{"query":"x"}""", "invalid_query")]
+    [InlineData("""{"from":"owner"}""", "invalid_argument")]
+    [InlineData("""{"limit":0}""", "invalid_argument")]
+    [InlineData("""{"limit":51}""", "invalid_argument")]
+    [InlineData("""{"since":"yesterday"}""", "invalid_argument")]
+    [InlineData("""{"until":"2026-11-14T09:00:00"}""", "invalid_argument")]
+    [InlineData("""{"cursor":"not-a-cursor"}""", "invalid_cursor")]
+    public async Task Chat_search_refuses_bad_arguments_without_reading(string arguments, string error)
+    {
+        await using var host = await McpHost.StartAsync();
+
+        var response = await host.CallRawAsync(Token(JournalTokens.PurposeRead, AgentA), "search_chat_messages", arguments);
+
+        Assert.True(response.IsError);
+        Assert.Equal(error, response.Json.GetProperty("error").GetString());
+        Assert.Empty(host.Chat.Searches);
+    }
+
+    /// <summary>A cursor pages the search it came from, and no other.</summary>
+    [Fact]
+    public async Task A_chat_cursor_continues_its_own_search_and_is_refused_by_another()
+    {
+        await using var host = await McpHost.StartAsync();
+        var a = Token(JournalTokens.PurposeRead, AgentA);
+        host.Chat.ByAgent[AgentA] = [Said(ChatA2, ConversationEventKind.TurnFinal, "newer", 2)];
+        host.Chat.Next = new ChatHistoryPosition(new DateTimeOffset(2026, 11, 14, 9, 2, 0, TimeSpan.Zero), ChatA2);
+
+        var first = await host.CallAsync(a, "search_chat_messages", new { query = "width" });
+        var cursor = first.Json.GetProperty("next_cursor").GetString()!;
+
+        host.Chat.Next = null;
+        var second = await host.CallAsync(a, "search_chat_messages", new { query = "width", cursor });
+        Assert.False(second.IsError);
+        Assert.Equal(JsonValueKind.Null, second.Json.GetProperty("next_cursor").ValueKind);
+        Assert.Equal(new ChatHistoryPosition(new DateTimeOffset(2026, 11, 14, 9, 2, 0, TimeSpan.Zero), ChatA2), host.Chat.Searches[1].Query.Before);
+
+        var other = await host.CallAsync(a, "search_chat_messages", new { query = "height", cursor });
+        Assert.True(other.IsError);
+        Assert.Equal(ChatHistoryTools.InvalidCursorBody, other.Text);
+        Assert.Equal(2, host.Chat.Searches.Count);
+    }
+
+    /// <summary>
+    /// One message in full; another agent's message and one that does not exist are the same bytes.
+    /// </summary>
+    [Fact]
+    public async Task Chat_get_returns_the_whole_message_and_hides_another_agents_as_absent()
+    {
+        await using var host = await McpHost.StartAsync();
+        var a = Token(JournalTokens.PurposeRead, AgentA);
+        var whole = new string('y', ChatHistoryLimits.PreviewChars * 3);
+        host.Chat.ByAgent[AgentA] = [Said(ChatA1, ConversationEventKind.SubmissionText, whole)];
+        host.Chat.ByAgent[AgentB] = [Said(ChatB1, ConversationEventKind.SubmissionText, "something private")];
+
+        var mine = await host.CallAsync(a, "get_chat_message", new { message_id = ChatA1 });
+        Assert.Equal(whole, mine.Json.GetProperty("text").GetString());
+        Assert.Equal("user", mine.Json.GetProperty("from").GetString());
+
+        var hidden = await host.CallAsync(a, "get_chat_message", new { message_id = ChatB1 });
+        var missing = await host.CallAsync(a, "get_chat_message", new { message_id = "01JCHATEVENTZZZZZZ00000001" });
+        Assert.True(hidden.IsError);
+        Assert.Equal(ChatHistoryTools.NotFoundBody, hidden.Text);
+        Assert.Equal(missing.Text, hidden.Text);
+
+        var malformed = await host.CallAsync(a, "get_chat_message", new { message_id = "../etc" });
+        Assert.Equal("invalid_argument", malformed.Json.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public void A_chat_cursor_that_is_not_one_is_refused()
+    {
+        var position = new ChatHistoryPosition(new DateTimeOffset(2026, 11, 14, 9, 2, 0, TimeSpan.Zero), ChatA2);
+        var hash = ChatHistoryTools.HashFilters("width", null, null, null);
+        var cursor = ChatHistoryTools.EncodeCursor(position, hash);
+
+        Assert.True(ChatHistoryTools.TryDecodeCursor(cursor, hash, out var decoded));
+        Assert.Equal(position, decoded);
+
+        Assert.False(ChatHistoryTools.TryDecodeCursor(cursor, ChatHistoryTools.HashFilters("height", null, null, null), out _));
+        Assert.False(ChatHistoryTools.TryDecodeCursor(cursor + "A", hash, out _));
+        Assert.False(ChatHistoryTools.TryDecodeCursor("", hash, out _));
+        Assert.False(ChatHistoryTools.TryDecodeCursor(new string('A', 400), hash, out _));
+        Assert.False(ChatHistoryTools.TryDecodeCursor(
+            Convert.ToBase64String(Encoding.UTF8.GetBytes($"-5|{ChatA2}|{hash}")), hash, out _));
+        Assert.False(ChatHistoryTools.TryDecodeCursor(
+            Convert.ToBase64String(Encoding.UTF8.GetBytes($"1|not-an-id|{hash}")), hash, out _));
+    }
+
+    private sealed class FakeChatHistory : IChatHistoryReadStore
+    {
+        public Dictionary<string, List<ChatHistoryMessage>> ByAgent { get; } = new(StringComparer.Ordinal);
+        public List<(string Agent, ChatHistoryQuery Query)> Searches { get; } = [];
+        public ChatHistoryPosition? Next { get; set; }
+
+        public Task<ChatHistoryPage> SearchAsync(string agentName, ChatHistoryQuery query, CancellationToken ct = default)
+        {
+            Searches.Add((agentName, query));
+            return Task.FromResult(new ChatHistoryPage(ByAgent.GetValueOrDefault(agentName) ?? [], Next));
+        }
+
+        public Task<ChatHistoryMessage?> GetAsync(string agentName, string eventId, CancellationToken ct = default) =>
+            Task.FromResult(ByAgent.GetValueOrDefault(agentName)?.FirstOrDefault(m => m.EventId == eventId));
     }
 
     // ── scope: another agent's message is a message that does not exist (AC9) ─
@@ -654,8 +824,12 @@ public sealed partial class JournalReadMcpTests
         public FakeJournalReadStore Reads { get; }
         public IServiceProvider Services => _app.Services;
 
+        /// <summary>The first-party chat transcript double the chat history tools read.</summary>
+        public FakeChatHistory Chat { get; private init; } = new();
+
         public static async Task<McpHost> StartAsync(string readAllSubjects = Reviewer, TimeProvider? time = null, string excluded = "")
         {
+            var chat = new FakeChatHistory();
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseSetting(WebHostDefaults.ServerUrlsKey, string.Empty);
             builder.WebHost.UseTestServer();
@@ -675,9 +849,10 @@ public sealed partial class JournalReadMcpTests
             options.ValidateJournal();
 
             var reads = new FakeJournalReadStore();
-            var app = CommsApp.BuildJournalApp(builder, new FakeJournalStore(), options, new JournalRuntimeStats(), time: time, reads: reads);
+            var app = CommsApp.BuildJournalApp(
+                builder, new FakeJournalStore(), options, new JournalRuntimeStats(), time: time, reads: reads, chatHistory: chat);
             await app.StartAsync();
-            return new McpHost(app, reads);
+            return new McpHost(app, reads) { Chat = chat };
         }
 
         public HttpClient CreateClient() => _app.GetTestClient();

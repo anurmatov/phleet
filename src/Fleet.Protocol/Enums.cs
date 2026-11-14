@@ -184,6 +184,18 @@ public enum ProtocolErrorCode
     /// while a missing conversation is one the client opens again. Appended, never inserted.
     /// </remarks>
     AgentUnavailable,
+
+    /// <summary>
+    /// A submission named a <c>replyToEventId</c> that is not a message of its conversation: the id
+    /// is malformed, unknown, belongs to another conversation, has aged out, or names an event that
+    /// is not something anyone said (progress, an acknowledgement).
+    /// </summary>
+    /// <remarks>
+    /// One code for every negative case, so the route does not say which ids exist elsewhere. The
+    /// submission is refused whole rather than accepted without its reference: a message the agent
+    /// reads without knowing what it answers is a different message. Appended, never inserted.
+    /// </remarks>
+    ReplyTargetNotFound,
 }
 
 /// <summary>Coarse attachment classification (D14). Metadata only — no bytes, no URL.</summary>

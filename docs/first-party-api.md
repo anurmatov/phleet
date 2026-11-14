@@ -269,10 +269,17 @@ Authorization: Bearer <token>
   "protocol": "fleet.conversation.v1",
   "conversations": [
     { "conversationId": "c_4Jd8Ls2w", "agent": "builder", "externalRef": "main",
-      "nextSeq": 41, "retainedFloorSeq": 12, "lastActivityAt": "2026-11-12T10:00:00+00:00" }
+      "nextSeq": 41, "retainedFloorSeq": 12, "lastActivityAt": "2026-11-12T10:00:00+00:00",
+      "lastMessage": { "from": "agent", "text": "Three issues are open." } }
   ]
 }
 ```
+
+`lastMessage` is the start of the conversation's newest message (at most 160 characters; `truncated:
+true` when there was more) and who wrote it, `user` or `agent`. A message is what someone said —
+`submission.text`, `turn.final`, `turn.message`, `turn.recovered_answer` — so a thread whose agent
+is still working shows the person's last message. The key is omitted for a conversation in which
+nothing has been said or everything said has aged out, which is the shape the list always had.
 
 **Open or resume a conversation.** `agent` is the agent's unique name, as
 `GET /api/chat/agents` lists it, and must accept chat now (`409 agent_unavailable` otherwise). The
@@ -338,6 +345,18 @@ Authorization: Bearer <token>
 ```json
 { "protocol": "fleet.conversation.v1", "submissionId": "s_9Qw1Ez", "acceptedSeq": 41 }
 ```
+
+**Reply to a message.** `replyToEventId` on a `create` or `steer` names the `eventId` of an earlier
+message of the same conversation: the person's own `submission.text`, or the agent's `turn.final`,
+`turn.message` or `turn.recovered_answer`. Anything else — a malformed id, an unknown one, another
+conversation's, one that has aged out, an event that is not something anyone said — is
+`400 reply_target_not_found`, and the submission is refused whole rather than accepted without its
+reference. On success the transcript entry (`submission.text`) carries `replyToEventId`, so every
+client reading the thread can show what was answered; a message that answers nothing omits the key,
+as before. The agent is told who wrote the replied-to message and how it starts (at most 600
+characters), ahead of the person's words; it holds no map from event ids to text. A client that
+cannot find the target among the events it holds (retention moved past it) shows the reply without
+the quotation.
 
 **`acceptedSeq` is a catch-up floor.** It is the conversation's `next_seq` as read inside the accept
 transaction: **the first `seq` that any event about this submission can occupy**. Since #305 that is
@@ -439,6 +458,30 @@ are exactly the four the provider vision APIs accept, so no server-side transcod
 no image decoder enters the service. **The client converts to JPEG before upload**, which iOS does
 natively and cheaply.
 
+**Send any other file.** Reserve with `"kind": "file"` and the rest is the same three steps.
+What differs is what the service does with it:
+
+- **Its declared `contentType` is never stored or served**, and may be omitted. A file is recorded
+  as `application/octet-stream`, or `application/pdf` when its first bytes are a PDF's — both read
+  from the bytes at seal. Nothing is sniffed as an image and no pixel bound applies; the 8 MiB cap
+  and the digest check do.
+- **It is always saved, never shown in place.** `GET …/content` answers
+  `Content-Disposition: attachment` with the file's name in a reduced form (last path segment, no
+  control or quoting characters, percent-encoded), `X-Content-Type-Options: nosniff` and
+  `Content-Security-Policy: default-src 'none'; sandbox`. An uploaded HTML file is a download.
+- **The transcript descriptor says `kind: "other"`** with the recorded type, the byte size and the
+  name. A client shows it as a named file, not as a picture.
+- **The agent gets a path, not a picture.** Its copy is named by the attachment's id and an
+  extension from a fixed list (`.pdf`, `.md`, `.csv`, `.zip`, … else `.bin`), chosen by the service
+  from the file's name and checked again by the agent; the prompt gains a
+  `[file attachment: <path>]` or `[document attachment: <path>]` line, the words Telegram's files
+  already use. Claude also receives a PDF as a document. A file the agent cannot write to disk is
+  reported in the same notice an unavailable image gets.
+
+`"kind"` may be `"image"` (or absent, as clients older than files send) or `"file"`. Any other
+value is `415 unsupported_media_type`. A chat service older than files answers the same `415` to
+`"file"`, which is how a client learns it takes pictures only.
+
 **One attachment binds to at most one submission.** A second submission naming the same id is
 `attachment_not_found`, and the first submission is untouched. That is not a detail: it is what makes
 "an attachment cannot be pruned while still referenced" true, because exactly one event can hold the
@@ -488,6 +531,7 @@ appear inside a terminal event payload and have no status at all.
 | `unsupported_protocol` | **400** | any route |
 | `unsupported_kind` | **400** | malformed body, bad identifier, `limit` above max |
 | `unsupported_attachments` | **400** | non-empty attachment array where the feature is unconfigured |
+| `reply_target_not_found` | **400** on submit | `replyToEventId` is not a message of this conversation; nothing is made durable |
 | `attachment_not_found` § | **400** on submit, **404** on `PUT`/`GET` | unknown, foreign, unsealed, expired or already-bound attachment; also a failed seal (**422**) |
 | `attachment_limit` § | **400** on submit, **409** on reserve | over 4 per submission, a duplicate id, or a live-byte cap |
 | `unsupported_media_type` § | **415** | a reservation declaring anything but the four accepted image types |
@@ -1131,6 +1175,6 @@ The two sections with **no required-decision number** are **D1** (listener separ
 ## 20. Out of scope
 
 Multi-human tenancy and per-principal context isolation; object storage; outbound (agent-produced)
-attachments; voice, video and arbitrary documents; push notifications; browser-client ticket
+attachments; voice and video as media a model is given (they travel as files); push notifications; browser-client ticket
 exchange; approval gates; the `Fleet.Comms` deployment itself; and the #276/#277 implementations
 this document depends on but does not perform.

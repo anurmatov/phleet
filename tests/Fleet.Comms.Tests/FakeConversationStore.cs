@@ -66,8 +66,12 @@ internal sealed class FakeConversationStore : IConversationStore
         });
     }
 
+    /// <summary>The newest message of the one conversation, as a list would be given it.</summary>
+    public ConversationLastMessage? LastMessage { get; set; }
+
     private ConversationSummary Summary() => new()
     {
+        LastMessage = LastMessage,
         ConversationId = ConversationId,
         AgentName = AgentName,
         ExternalRef = "main-thread",
@@ -97,7 +101,9 @@ internal sealed class FakeConversationStore : IConversationStore
 
     public Task<string?> FindAgentAsync(AgentTargetKind kind, string id, CancellationToken ct = default) =>
         Task.FromResult<string?>(
-            kind == AgentTargetKind.Conversation && string.Equals(id, ConversationId, StringComparison.Ordinal)
+            (kind == AgentTargetKind.Conversation && string.Equals(id, ConversationId, StringComparison.Ordinal))
+            // Every attachment this fake holds is in its one conversation, so belongs to its agent.
+            || (kind == AgentTargetKind.Attachment && Attachments.ContainsKey(id))
                 ? AgentName
                 : null);
 
@@ -116,6 +122,16 @@ internal sealed class FakeConversationStore : IConversationStore
                 : null,
         });
     }
+
+    /// <summary>The messages a reply may point at, by event id.</summary>
+    public Dictionary<string, ReplyTarget> ReplyTargets { get; } = new(StringComparer.Ordinal);
+
+    public Task<ReplyTarget?> FindReplyTargetAsync(
+        string conversationId, string eventId, CancellationToken ct = default) =>
+        Task.FromResult(
+            string.Equals(conversationId, ConversationId, StringComparison.Ordinal)
+                ? ReplyTargets.GetValueOrDefault(eventId)
+                : null);
 
     public Task<ReadConversationResult> ReadAsync(
         ReadConversationRequest request, CancellationToken ct = default)

@@ -88,8 +88,20 @@ export function openBody(agent: string, clientInstanceId: string) {
  * The idempotency key is the submission id, and a retry sends the same body, so a message whose
  * first answer was lost cannot start a second turn.
  */
-export function submitBody(submissionId: string, text: string) {
-  return { protocol: PROTOCOL, type: 'create', submissionId, idempotencyKey: submissionId, text }
+export function submitBody(
+  submissionId: string, text: string, attachments: readonly AttachmentRef[] = [], replyToEventId: string | null = null,
+): {
+  protocol: string; type: string; submissionId: string; idempotencyKey: string; text: string
+  attachments?: { attachmentId: string; kind: string }[]
+  replyToEventId?: string
+} {
+  // A message without files, answering nothing, keeps the body it always had: each key is left
+  // out, not sent empty.
+  return {
+    protocol: PROTOCOL, type: 'create', submissionId, idempotencyKey: submissionId, text,
+    ...(attachments.length === 0 ? {} : { attachments: attachments.map(a => ({ attachmentId: a.attachmentId, kind: a.kind })) }),
+    ...(replyToEventId ? { replyToEventId } : {}),
+  }
 }
 
 /** Stop: cancel the turn that is running in this conversation. */
@@ -179,6 +191,8 @@ export interface WireEvent {
   eventId: string
   seq: number
   kind: string
+  /** When the event was written, in epoch milliseconds, or null when it does not say. */
+  emittedAt: number | null
   identity: { submissionId: string }
   payload: Record<string, unknown>
 }
@@ -202,10 +216,12 @@ export function readEvent(value: unknown): WireEvent | null {
   const eventId = text(fields.eventId)
   const kind = text(fields.kind)
   if (seq === null || seq < 1 || !eventId || !kind) return null
+  const emittedAt = Date.parse(text(fields.emittedAt))
   return {
     eventId,
     seq,
     kind,
+    emittedAt: Number.isFinite(emittedAt) ? emittedAt : null,
     identity: { submissionId: text(record(fields.identity)?.submissionId) },
     payload: record(fields.payload) ?? {},
   }
@@ -234,6 +250,135 @@ export function readCatchUp(body: unknown): CatchUpPage | null {
 export function readAcceptedSeq(body: unknown): number | null {
   const seq = count(record(body)?.acceptedSeq)
   return seq !== null && seq > 0 ? seq : null
+}
+
+/** One of the person's conversations, as `GET /v1/conversations` lists it. */
+export interface ThreadSummary {
+  conversationId: string
+  agent: string
+  /** The seq the next event will take: one past the newest. */
+  nextSeq: number
+  /** When the thread last moved, in epoch milliseconds, or null. */
+  lastActivityAt: number | null
+  /** The start of the thread's newest message and who wrote it, where the chat service says. */
+  lastMessage?: { fromUser: boolean; text: string }
+}
+
+/**
+ * The thread each agent has under the reference this page uses, by agent name. Conversations under
+ * another reference are another client's and are left out. Null when the answer cannot be read.
+ */
+export function readThreads(body: unknown): Record<string, ThreadSummary> | null {
+  const list = record(body)?.conversations
+  if (!Array.isArray(list)) return null
+  const threads: Record<string, ThreadSummary> = {}
+  for (const value of list) {
+    const fields = record(value)
+    const agent = text(fields?.agent)
+    const conversationId = text(fields?.conversationId)
+    const nextSeq = count(fields?.nextSeq)
+    if (!agent || !conversationId || nextSeq === null || fields?.externalRef !== THREAD_REF) continue
+    const at = Date.parse(text(fields?.lastActivityAt))
+    const last = record(fields?.lastMessage)
+    threads[agent] = {
+      conversationId, agent, nextSeq, lastActivityAt: Number.isFinite(at) ? at : null,
+      ...(last && typeof last.text === 'string' ? { lastMessage: { fromUser: last.from === 'user', text: last.text } } : {}),
+    }
+  }
+  return threads
+}
+
+// ── attachments ─────────────────────────────────────────────────────────────
+
+/** A file that is part of a message, as the transcript and a submission name it. */
+export interface AttachmentRef {
+  attachmentId: string
+  kind: string
+  contentType: string
+  byteSize: number | null
+  fileName: string
+}
+
+/** The most files one message may carry. */
+export const MAX_ATTACHMENTS = 4
+
+/** The image types the chat service takes as they are. Anything else is converted to JPEG first. */
+export const IMAGE_TYPES: readonly string[] = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+
+/** The files a `submission.text` payload names. Entries without an id are dropped. */
+export function readAttachments(payload: Record<string, unknown>): AttachmentRef[] {
+  const out: AttachmentRef[] = []
+  for (const value of Array.isArray(payload.attachments) ? payload.attachments : []) {
+    const fields = record(value)
+    const attachmentId = text(fields?.attachmentId)
+    if (!isValidIdentifier(attachmentId)) continue
+    out.push({
+      attachmentId,
+      kind: text(fields?.kind) || 'file',
+      contentType: text(fields?.contentType),
+      byteSize: count(fields?.byteSize),
+      fileName: text(fields?.fileName),
+    })
+  }
+  return out
+}
+
+/** Where a file's bytes are read from. Same origin: the session cookie is the credential. */
+export function attachmentContentPath(attachmentId: string): string {
+  return `/v1/attachments/${encodeURIComponent(attachmentId)}/content`
+}
+
+/** Whether a file is shown as a picture. Decided by what the server recorded, never by its name. */
+export function isImageAttachment(attachment: Pick<AttachmentRef, 'kind' | 'contentType'>): boolean {
+  return attachment.kind === 'image' || IMAGE_TYPES.includes(attachment.contentType)
+}
+
+export function reserveBody(file: { kind: 'image' | 'file'; contentType: string; byteSize: number; sha256: string; fileName: string }) {
+  return {
+    protocol: PROTOCOL, kind: file.kind, contentType: file.contentType, byteSize: file.byteSize,
+    sha256: file.sha256, fileName: file.fileName,
+  }
+}
+
+export interface Reservation {
+  attachmentId: string
+  uploadUrl: string
+  uploadToken: string
+}
+
+/** What a reservation answered, or null. The upload URL must be a path on this origin. */
+export function readReservation(body: unknown): Reservation | null {
+  const fields = record(body)
+  const attachmentId = text(fields?.attachmentId)
+  const uploadUrl = text(fields?.uploadUrl)
+  const uploadToken = text(fields?.uploadToken)
+  if (!isValidIdentifier(attachmentId) || !uploadToken) return null
+  // Never send the upload token anywhere the reservation names: only to this origin's own route.
+  if (!uploadUrl.startsWith('/v1/attachments/') || uploadUrl.includes('..')) return null
+  return { attachmentId, uploadUrl, uploadToken }
+}
+
+/** Why a file did not go up, in words, and whether trying again could help. */
+export function uploadProblem(refusal: Refusal): { message: string; canRetry: boolean; unsupported: boolean } {
+  const { httpStatus, code } = refusal
+  if (code === 'unsupported_attachments' || (httpStatus === 404 && code !== 'attachment_not_found' && code !== 'conversation_not_found')) {
+    return { message: 'This deployment has files in chat switched off.', canRetry: false, unsupported: true }
+  }
+  if (httpStatus === 0) return { message: 'A file did not go up: the chat service did not answer.', canRetry: true, unsupported: false }
+  if (httpStatus === 429 || httpStatus >= 500) {
+    return { message: 'A file did not go up: the chat service is not available just now.', canRetry: true, unsupported: false }
+  }
+  if (httpStatus === 401) return { message: 'This browser is signed out of chat. Reload the page to sign in.', canRetry: true, unsupported: false }
+  if (httpStatus === 413 || code === 'payload_too_large') {
+    return { message: 'A file is too large for the chat service.', canRetry: false, unsupported: false }
+  }
+  if (httpStatus === 415 || code === 'unsupported_media_type') {
+    return { message: 'The chat service does not take this kind of file. An older one takes pictures only.', canRetry: false, unsupported: false }
+  }
+  if (code === 'attachment_limit') return { message: 'The chat service is holding too many files just now.', canRetry: false, unsupported: false }
+  if (httpStatus === 422) return { message: 'The chat service could not read a file as the type it claims to be.', canRetry: false, unsupported: false }
+  if (code === 'attachment_not_found') return { message: 'A file’s upload window ran out. Retry to send it again.', canRetry: true, unsupported: false }
+  return { message: `The chat service refused a file (${code || `HTTP ${httpStatus}`}).`, canRetry: false, unsupported: false }
 }
 
 export type Frame =
@@ -313,6 +458,9 @@ export function sendProblem(refusal: Refusal): { message: string; canRetry: bool
   }
   if (code === 'conversation_not_found') {
     return { message: 'The conversation was not found. Reconnecting; then retry.', canRetry: true }
+  }
+  if (code === 'reply_target_not_found') {
+    return { message: 'Not sent: the message this replies to is no longer in the conversation. Discard it and send it again without the reply.', canRetry: false }
   }
   if (code === 'idempotency_conflict') {
     return { message: 'Not sent: this browser reused a message id. Nothing was sent twice.', canRetry: false }

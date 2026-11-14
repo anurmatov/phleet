@@ -35,6 +35,8 @@ import WorkflowDefinitionsView from './components/WorkflowDefinitionsView'
 import WorkflowDefinitionEditor from './components/WorkflowEditor/WorkflowDefinitionEditor'
 import AlertsView from './components/AlertsView'
 import ChatView from './components/ChatView'
+import { useChatActivity, useChatActivityRefresh } from './hooks/useChatActivity'
+import { unreadAgents } from './chatActivity'
 import LogViewer from './components/LogViewer'
 import SignalModal from './components/SignalModal'
 import CreateAgentModal from './components/CreateAgentModal'
@@ -98,7 +100,24 @@ export default function App() {
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
+  const openChat = useCallback((agentName: string) => {
+    setActiveViewState('chat')
+    setViewParam(agentName)
+    window.history.replaceState(null, '', `#chat/${encodeURIComponent(agentName)}`)
+  }, [])
   const [navOpen, setNavOpen] = useState(false)
+
+  // ── Chat threads that moved on ──────────────────────────────────────────────────────────────
+  // Read here rather than on the Chat page, so the mark is there while another page is open, and
+  // in the tab's title while the dashboard is not in front at all.
+  useChatActivityRefresh()
+  const chatActivity = useChatActivity()
+  const unreadChatCount = unreadAgents(chatActivity).length
+  const chatAgentNames = useMemo(() => new Set(chatActivity.agents.map(a => a.agentName)), [chatActivity.agents])
+  const [baseTitle] = useState(() => document.title)
+  useEffect(() => {
+    document.title = unreadChatCount > 0 ? `(${unreadChatCount}) ${baseTitle}` : baseTitle
+  }, [unreadChatCount, baseTitle])
 
   const [highlightedEntityId, setHighlightedEntityId] = useState<string | null>(null)
   const onClearHighlight = useCallback(() => setHighlightedEntityId(null), [])
@@ -384,6 +403,7 @@ export default function App() {
         }}
         attentionWorkflowCount={attentionCount}
         unreadAlertCount={unreadAlerts.length}
+        unreadChatCount={unreadChatCount}
         reprovisionAllState={agentActions.reprovisionAllState}
         reprovisionAllMsg={agentActions.reprovisionAllMsg}
         onReprovisionAll={agentActions.reprovisionAll}
@@ -420,6 +440,8 @@ export default function App() {
             highlightedEntityId={highlightedEntityId}
             onClearHighlight={onClearHighlight}
             onNewAgent={() => create.open()}
+            chatAgents={chatAgentNames}
+            onChat={openChat}
           />
         )}
 
@@ -435,7 +457,11 @@ export default function App() {
         )}
 
         {activeView === 'chat' && (
-          <ChatView initialAgent={viewParam} />
+          <ChatView
+            initialAgent={viewParam}
+            fleetAgents={agents}
+            onOpenAgent={name => { setActiveView('agents'); onHighlight(name) }}
+          />
         )}
 
         {activeView === 'instructions' && (
@@ -530,6 +556,7 @@ export default function App() {
         onNavigate={view => { setNavOpen(false); setActiveView(view) }}
         attentionWorkflowCount={attentionCount}
         unreadAlertCount={unreadAlerts.length}
+        unreadChatCount={unreadChatCount}
         moreOpen={navOpen}
         onMore={() => setNavOpen(o => !o)}
       />

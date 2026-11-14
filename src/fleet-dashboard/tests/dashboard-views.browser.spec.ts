@@ -1,5 +1,6 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { FakeFleet, EDITED_DEFINITION } from './support/fakeFleet'
+import { FakeChat, PIXEL } from './support/fakeChat'
 
 // What the dashboard's views do, driven through the production App against a substituted
 // orchestrator (tests/support/fakeFleet.ts). These pin behaviour, not structure: where the state
@@ -655,4 +656,214 @@ test('wf-definitions: search filters the list, and the count reaches the sidenav
   await expect(rowByName(page, 'ReviewWorkflow')).toHaveCount(0)
   await page.getByPlaceholder('Search definitions…').fill('review')
   await expect(rowByName(page, 'ReviewWorkflow')).toBeVisible()
+})
+
+// ── Chat ────────────────────────────────────────────────────────────────────────────────────────
+
+async function openChat(page: Page, hash: string, prepare?: (chat: FakeChat) => void, seen?: Record<string, number>) {
+  const fleet = new FakeFleet()
+  const chat = new FakeChat()
+  prepare?.(chat)
+  await fleet.install(page)
+  await chat.install(page)
+  if (seen) await page.addInitScript(kept => { window.localStorage.setItem('fleet.chat.seen', JSON.stringify(kept)) }, seen)
+  await page.goto(`/#${hash}`)
+  // The frame, not the sidebar: on a phone the sidebar is not on screen.
+  await expect(page.locator('.app-main')).toBeVisible()
+  return { fleet, chat }
+}
+
+const chatAgent = (page: Page, name: string): Locator =>
+  page.locator('.chat-agent', { has: page.locator('.chat-agent-name', { hasText: new RegExp(`^${name}$`) }) })
+
+/** A finished exchange: a message and its answer. */
+function exchange(chat: FakeChat, agent: string, id: string, question: string, answer: string) {
+  chat.push(agent, 'submission.text', id, { text: question })
+  chat.push(agent, 'turn.started', id)
+  chat.push(agent, 'turn.final', id, { text: answer, completion: 'completed' })
+}
+
+test('chat: a thread that moved on is marked in the navigation and the list; opening it clears the mark', async ({ page }) => {
+  await openChat(page, 'agents', chat => {
+    exchange(chat, 'alpha', 's1', 'first', 'answer one')
+    exchange(chat, 'beta', 's1', 'hello', 'answer two')
+  }, { alpha: 3, beta: 1 })
+
+  // Beta's thread stands at 3 and this browser showed 1 of it: one thread with news.
+  await expect(navBadge(page, 'Chat')).toHaveText('1')
+  await expect(page).toHaveTitle(/^\(1\) /)
+
+  await page.locator('.sidenav-item', { hasText: 'Chat' }).click()
+  await expect(chatAgent(page, 'Beta').locator('.chat-agent-new')).toBeVisible()
+  await expect(chatAgent(page, 'Alpha').locator('.chat-agent-new')).toHaveCount(0)
+  // A line of each thread, and how each agent is doing, from the fleet, one hover away.
+  await expect(chatAgent(page, 'Beta').locator('.chat-agent-caption')).toHaveText('answer two')
+  await expect(chatAgent(page, 'Alpha').locator('.chat-agent-caption')).toHaveText('answer one')
+  await expect(chatAgent(page, 'Beta')).toHaveAttribute('title', 'Working: Implement the review step')
+  await expect(chatAgent(page, 'Alpha')).toHaveAttribute('title', 'Idle')
+
+  await chatAgent(page, 'Beta').click()
+  await expect(page.locator('.chat-bubble--agent')).toHaveText(/answer two/)
+  await expect(navBadge(page, 'Chat')).toHaveCount(0)
+  await expect(page).not.toHaveTitle(/^\(/)
+  expect(await page.evaluate(() => JSON.parse(window.localStorage.getItem('fleet.chat.seen')!))).toMatchObject({ beta: 3 })
+})
+
+test('chat: a browser that never opened chat does not start with every old thread marked', async ({ page }) => {
+  await openChat(page, 'agents', chat => exchange(chat, 'alpha', 's1', 'old', 'older'))
+  await expect(page.locator('.sidenav-item', { hasText: 'Chat' })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('fleet.chat.seen'))).toBe('{"alpha":3}')
+  await expect(navBadge(page, 'Chat')).toHaveCount(0)
+})
+
+test('chat: Enter sends; a running turn shows its tools and can be stopped; the answer replaces it', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha')
+  const input = page.getByLabel('Message Alpha')
+  await input.fill('count the tests')
+  await input.press('Shift+Enter')
+  await input.pressSequentially('and the files')
+  await input.press('Enter')
+
+  await expect(page.locator('.chat-bubble--you')).toHaveText('You: count the tests\nand the files')
+  await expect(input).toHaveValue('')
+  const sent = chat.writes('POST', /\/submissions$/)
+  expect(sent).toHaveLength(1)
+  expect(sent[0].body).toMatchObject({ type: 'create', text: 'count the tests\nand the files' })
+  expect(sent[0].body).not.toHaveProperty('attachments')
+  const id = (sent[0].body as { submissionId: string }).submissionId
+
+  chat.push('alpha', 'turn.started', id)
+  chat.push('alpha', 'turn.progress', id, { activity: 'tool', toolName: 'Grep' })
+  chat.push('alpha', 'turn.progress', id, { activity: 'tool', toolName: 'Read' })
+  chat.push('alpha', 'turn.progress', id, { activity: 'tool', toolName: 'Read' })
+  await expect(page.locator('.chat-working-line')).toContainText('Alpha is using Read…')
+  // What the agent says between tools shows while the turn still runs, apart from the answer.
+  chat.push('alpha', 'turn.message', id, { text: 'Counting them now.' })
+  await expect(page.locator('.chat-bubble--interim')).toHaveText('Agent: Counting them now.')
+  await expect(page.locator('.chat-working')).toBeVisible()
+  await expect(page.locator('.chat-trail-step')).toHaveText(['Grep', 'Read ×2'])
+
+  await page.getByRole('button', { name: 'Stop' }).click()
+  await expect.poll(() => chat.writes('POST', /:cancel$/).length).toBe(1)
+
+  chat.push('alpha', 'turn.final', id, { text: 'There are **330** tests.', completion: 'completed' })
+  await expect(page.locator('.chat-working')).toHaveCount(0)
+  await expect(page.locator('.chat-bubble--agent strong')).toHaveText('330')
+  await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0)
+})
+
+test('chat: a picture is reserved, sent up with its own token, named by the message, and shown from the thread', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha')
+  await page.locator('#chat-file-picker').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: PIXEL })
+  await expect(page.locator('.chat-draft-file img')).toBeVisible()
+  // A picture alone is a message.
+  await page.getByRole('button', { name: 'Send' }).click()
+
+  await expect(page.locator('.chat-row--you .chat-picture img')).toHaveAttribute('src', '/v1/attachments/att-1/content')
+  await expect(page.locator('.chat-draft-file')).toHaveCount(0)
+
+  const reserve = chat.writes('POST', /\/attachments$/)
+  expect(reserve).toHaveLength(1)
+  expect(reserve[0].body).toMatchObject({ kind: 'image', contentType: 'image/png', byteSize: PIXEL.length, fileName: 'shot.png' })
+  expect((reserve[0].body as { sha256: string }).sha256).toMatch(/^[0-9a-f]{64}$/)
+  const upload = chat.writes('PUT', /\/content$/)
+  expect(upload.map(u => [u.path, u.headers.authorization, u.headers['content-type'], u.body])).toEqual([
+    ['/v1/attachments/att-1/content', 'Bearer token-att-1', 'image/png', PIXEL.length],
+  ])
+  expect(chat.writes('POST', /\/submissions$/)[0].body).toMatchObject({ text: '', attachments: [{ attachmentId: 'att-1', kind: 'image' }] })
+})
+
+test('chat: a file that is not a picture goes up as a file and is shown as a link that saves it', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha')
+  await page.locator('#chat-file-picker').setInputFiles({ name: 'notes.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.7 notes') })
+  // Named, not drawn, before it is sent.
+  await expect(page.locator('.chat-draft-file--named')).toContainText('notes.pdf')
+  await page.getByLabel('Message Alpha').fill('read this')
+  await page.getByRole('button', { name: 'Send' }).click()
+
+  const link = page.locator('.chat-row--you a.chat-file')
+  await expect(link).toContainText('notes.pdf')
+  expect(chat.writes('POST', /\/attachments$/)[0].body).toMatchObject({ kind: 'file', fileName: 'notes.pdf', byteSize: 14 })
+  expect(chat.writes('POST', /\/submissions$/)[0].body).toMatchObject({ text: 'read this', attachments: [{ attachmentId: 'att-1', kind: 'file' }] })
+  await expect(link).toHaveAttribute('href', '/v1/attachments/att-1/content')
+  await expect(link).toHaveAttribute('download', 'notes.pdf')
+  // It is never drawn in the page.
+  await expect(page.locator('.chat-row--you .chat-picture')).toHaveCount(0)
+})
+
+test('chat: a deployment with files off says so once and stops offering them; the words are kept', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha', c => { c.filesOn = false })
+  await page.getByLabel('Message Alpha').fill('look at this')
+  await page.locator('#chat-file-picker').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: PIXEL })
+  await page.getByRole('button', { name: 'Send' }).click()
+
+  await expect(page.locator('.chat-meta--error')).toContainText('files in chat switched off')
+  await expect(page.getByRole('button', { name: 'Attach files' })).toHaveCount(0)
+  // Nothing was sent without its picture, and the failed message can be taken back out.
+  expect(chat.writes('POST', /\/submissions$/)).toHaveLength(0)
+  await expect(page.locator('.chat-bubble--failed')).toHaveText('You: look at this')
+})
+
+test('chat: replying to an answer names it to the chat service and shows what was answered above the reply', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha', c => exchange(c, 'alpha', 's1', 'is it broken?', 'Yes. Want me to open a PR?'))
+
+  await page.locator('.chat-row--agent').hover()
+  await page.locator('.chat-row--agent').getByRole('button', { name: 'Reply', exact: true }).click()
+  await expect(page.locator('.chat-replying')).toContainText('Replying to Alpha')
+  await expect(page.locator('.chat-replying-quote')).toHaveText('Yes. Want me to open a PR?')
+  // The cursor is where the answer goes.
+  await expect(page.getByLabel('Message Alpha')).toBeFocused()
+
+  await page.keyboard.type('yes please')
+  await page.keyboard.press('Enter')
+
+  const reply = page.locator('.chat-row--you').last()
+  await expect(reply.locator('.chat-quote-who')).toHaveText('Alpha')
+  await expect(reply.locator('.chat-quote-text')).toHaveText('Yes. Want me to open a PR?')
+  await expect(page.locator('.chat-replying')).toHaveCount(0)
+  // The answer's event id (the third event of the thread), not its text, is what is sent.
+  expect(chat.writes('POST', /\/submissions$/)[0].body).toMatchObject({ text: 'yes please', replyToEventId: 'c-alpha-e3' })
+
+  // Escape takes a started reply back.
+  await page.locator('.chat-row--agent').hover()
+  await page.locator('.chat-row--agent').getByRole('button', { name: 'Reply', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.chat-replying')).toHaveCount(0)
+})
+
+test('chat: what was typed and not sent is still there after a reload', async ({ page }) => {
+  await openChat(page, 'chat/alpha')
+  await page.getByLabel('Message Alpha').fill('half a thought')
+  await page.reload()
+  await expect(page.getByLabel('Message Alpha')).toHaveValue('half a thought')
+})
+
+test('chat: an agent’s row on the Agents page opens its thread; an agent without chat has no such button', async ({ page }) => {
+  await openChat(page, 'agents')
+  await expect(agentRow(page, 'gamma').getByTitle('Chat')).toHaveCount(0)
+  await agentRow(page, 'beta').locator('.agent-row-actions').getByTitle('Chat').click()
+  await expect(page).toHaveURL(/#chat\/beta$/)
+  await expect(page.locator('.chat-thread-title')).toHaveText('Beta')
+  // And back: the thread's header opens the agent.
+  await page.getByRole('button', { name: 'Beta on the Agents page' }).click()
+  await expect(page).toHaveURL(/#agents$/)
+})
+
+test.describe('chat on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('the list and the thread take turns on the screen', async ({ page }) => {
+    await openChat(page, 'chat', chat => exchange(chat, 'alpha', 's1', 'first', 'answer one'))
+    await expect(chatAgent(page, 'Alpha')).toBeVisible()
+    await expect(page.locator('.chat-thread')).toBeHidden()
+
+    await chatAgent(page, 'Alpha').click()
+    await expect(page.locator('.chat-bubble--agent')).toHaveText(/answer one/)
+    await expect(page.locator('.chat-agents')).toBeHidden()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+
+    await page.getByRole('button', { name: 'All chats' }).click()
+    await expect(chatAgent(page, 'Alpha')).toBeVisible()
+    await expect(page.locator('.chat-thread')).toBeHidden()
+  })
 })

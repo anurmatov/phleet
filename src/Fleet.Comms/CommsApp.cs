@@ -537,7 +537,7 @@ public static class CommsApp
     public static WebApplication BuildJournalApp(
         WebApplicationBuilder builder, IJournalStore store, CommsOptions options,
         JournalRuntimeStats stats, TimeProvider? time = null, JournalMedia? media = null,
-        IJournalReadStore? reads = null)
+        IJournalReadStore? reads = null, IChatHistoryReadStore? chatHistory = null)
     {
         var keys = options.Journal.Keys();
         var excluded = options.Journal.ExcludedChats();
@@ -547,7 +547,16 @@ public static class CommsApp
             ? _ => reads
             : provider => new MySqlJournalReadStore(
                 options.ConversationConnectionString,
-                provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")), time, excluded);
+                provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.Journal.Read")), time, excluded,
+            // The chat transcript is in the same database. A caller that supplies its own journal
+            // read store (a test) and no chat history gets the empty one rather than a connection.
+            chatHistory is not null
+                ? _ => chatHistory
+                : reads is not null
+                    ? null
+                    : provider => new MySqlChatHistoryReadStore(
+                        options.ConversationConnectionString,
+                        provider.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Comms.ChatHistory.Read")));
 
         builder.Services.AddSingleton<IJournalCrossChatAuthorization>(sp => new JournalCrossChatAuthorizationClient(
             new HttpClient { Timeout = Timeout.InfiniteTimeSpan }, options.Journal.OrchestratorUrl, keys[0]));

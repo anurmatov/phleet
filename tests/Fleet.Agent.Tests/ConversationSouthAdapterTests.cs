@@ -117,6 +117,7 @@ public sealed class ConversationSouthAdapterTests
     [InlineData(ConversationEventKind.TurnProgress)]
     [InlineData(ConversationEventKind.TurnNotice)]
     [InlineData(ConversationEventKind.TurnRecoveredAnswer)]
+    [InlineData(ConversationEventKind.TurnMessage)]
     [InlineData(ConversationEventKind.ControlAck)]
     [InlineData(ConversationEventKind.ProtocolRejected)]
     public void EverythingElseClientVisibleAppends(string kind) =>
@@ -150,6 +151,7 @@ public sealed class ConversationSouthAdapterTests
     [InlineData(ConversationEventKind.TurnOutcomeUnknown)]
     [InlineData(ConversationEventKind.TurnStarted)]
     [InlineData(ConversationEventKind.TurnRecoveredAnswer)]
+    [InlineData(ConversationEventKind.TurnMessage)]
     [InlineData(ConversationEventKind.ControlAck)]
     [InlineData(ConversationEventKind.ProtocolRejected)]
     public void EverythingAClientMustNotLoseIsDurable(string kind) =>

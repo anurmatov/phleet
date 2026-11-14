@@ -61,6 +61,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
     // result event is the only owner of AgentProgress.FinalResult, so TaskManager sees one
     // completion per logical turn even though Claude emits both assistant and result events.
     private string? _currentTurnAssistantText;
+    // The latest top-level assistant text of the running turn that nothing has followed yet. A
+    // tool call after it proves it was narration, and the tool-call event then carries it out as
+    // AgentProgress.Narration; a result after it proves it was the answer, and it is dropped here
+    // because the result owns the answer (#286).
+    private string? _pendingNarration;
     private ExecutionStats? _previousCumulativeStats;
 
     // Continuous background stdout reader — feeds all NDJSON events into this channel.
@@ -212,6 +217,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                             messageBytes, _messageCount + 1);
                     OpenTurnFlags();
                     _currentTurnAssistantText = null;
+                    _pendingNarration = null;
                     await WriteStdinLineAsync(message, ct);
                 }
                 catch (IOException) when (attempt < 2)
@@ -350,6 +356,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
                 _logger.LogInformation("Injected message started its own Claude turn; reading its answer");
                 _currentTurnAssistantText = null;
+                _pendingNarration = null;
 
                 await foreach (var read in ReadTurnEventsAsync(
                     reader, endQuietlyOnCancel: false, killOnCancel: true, ct))
@@ -1108,6 +1115,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _preservedDrainedAnswerText = null;
         _preservedDrainedSegments = null;
         _currentTurnAssistantText = null;
+        _pendingNarration = null;
 
         if (_process is null) return;
 
@@ -1237,6 +1245,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
             _preservedDrainedAnswerText = null;
             _preservedDrainedSegments = null;
             _currentTurnAssistantText = null;
+            _pendingNarration = null;
             // A raw command is never steerable, and its tool_use events cannot reopen the gate.
             CloseTurnFlags();
 
@@ -1474,6 +1483,18 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     "Final-answer gate reopened by a tool call ({Count} this turn)", self._gateReopenCount);
             }
 
+            // The same rule as the reopen above, read the other way: text followed by a top-level
+            // tool call of this turn was a mid-turn message. It leaves with this event, together
+            // with any text written in the same message as the call. Nested and background calls
+            // prove nothing about this turn's text and carry none.
+            string? narration = null;
+            if (evt.ParentToolUseId is null && IsCurrentOrigin(evt) && !self._currentTurnResultSeen)
+            {
+                var alongside = string.Join("\n", blocks.Where(b => b.Type == "text" && !string.IsNullOrEmpty(b.Text)).Select(b => b.Text!));
+                narration = JoinNarration(self._pendingNarration, alongside);
+                self._pendingNarration = null;
+            }
+
             return new AgentProgress
             {
                 IsSignificant = true,
@@ -1481,6 +1502,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 EventType = evt.Type,
                 ToolName = toolUse.Name,
                 ToolArgs = argsJson,
+                Narration = narration,
             };
         }
 
@@ -1500,6 +1522,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
             self._turnCommittedToFinalAnswer = true;
             self._currentTurnAssistantText = text;
+            if (IsCurrentOrigin(evt) && !self._currentTurnResultSeen)
+                self._pendingNarration = text;
             return new AgentProgress
             {
                 IsSignificant = true,
@@ -1544,6 +1568,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
             ? evt.Result
             : _currentTurnAssistantText;
         _currentTurnAssistantText = null;
+        _pendingNarration = null;
 
         return new AgentProgress
         {
@@ -1563,6 +1588,13 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     private static bool IsCurrentTurnResult(ClaudeStreamEvent evt) =>
         evt.Type == "result" && IsCurrentOrigin(evt);
+
+    /// <summary>Text held from an earlier message, then text written beside the tool call. Null when there is neither.</summary>
+    private static string? JoinNarration(string? held, string alongside)
+    {
+        if (string.IsNullOrWhiteSpace(held)) return string.IsNullOrWhiteSpace(alongside) ? null : alongside;
+        return string.IsNullOrWhiteSpace(alongside) ? held : held + "\n\n" + alongside;
+    }
 
     private static bool IsCurrentOrigin(ClaudeStreamEvent evt) =>
         evt.Origin is null || string.Equals(evt.Origin.Kind, "human", StringComparison.Ordinal);

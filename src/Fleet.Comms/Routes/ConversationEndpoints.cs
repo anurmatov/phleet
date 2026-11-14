@@ -188,6 +188,14 @@ public static class ConversationEndpoints
                     NextSeq = row.NextSeq,
                     RetainedFloorSeq = row.RetainedFloorSeq,
                     LastActivityAt = row.LastActivityAt,
+                    LastMessage = row.LastMessage is { } last
+                        ? new ConversationListLastMessage
+                        {
+                            From = last.FromUser ? "user" : "agent",
+                            Text = last.Text,
+                            Truncated = last.Truncated ? true : null,
+                        }
+                        : null,
                 }).ToList(),
             }, StatusCodes.Status200OK);
         });
@@ -361,6 +369,11 @@ public static class ConversationEndpoints
         if (body.IdempotencyKey is not null && !IsValidIdentifier(body.IdempotencyKey))
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
+        // An event id is a ULID and nothing else. Anything that is not one cannot name a message,
+        // and is answered exactly as an id that names none.
+        if (body.ReplyToEventId is not null && !AttachmentStore.IsSafeId(body.ReplyToEventId))
+            return Error(ProtocolErrorCode.ReplyTargetNotFound, StatusCodes.Status400BadRequest);
+
         // Measured in BYTES, not characters: the bound is a wire bound, and a character count would
         // admit roughly four times the payload for text outside the Basic Latin block.
         if (System.Text.Encoding.UTF8.GetByteCount(body.Text) > ProtocolLimits.MaxInboundTextBytes)
@@ -370,6 +383,18 @@ public static class ConversationEndpoints
         {
             if (await RefuseUnlessChatAsync(http, signIn, store, id, caller, ct) is { } refusal)
                 return refusal;
+
+            // A reply is confirmed before anything is made durable, and refused whole when what
+            // it answers cannot be found: a message the agent reads without knowing what it
+            // answers is a different message. The conversation is the caller's own by now, and
+            // the lookup is by conversation, so another conversation's event id reads as unknown.
+            ReplyTarget? replyTarget = null;
+            if (body.ReplyToEventId is { } replyTo)
+            {
+                replyTarget = await store.FindReplyTargetAsync(id, replyTo, ct);
+                if (replyTarget is null)
+                    return Error(ProtocolErrorCode.ReplyTargetNotFound, StatusCodes.Status400BadRequest);
+            }
 
             var result = await store.AcceptSubmissionAsync(new AcceptSubmissionRequest
             {
@@ -384,13 +409,14 @@ public static class ConversationEndpoints
                 CommandKind = kind,
                 CommandPayloadJson = CommandPayload(
                     kind, caller, id, body.SubmissionId!, body.IdempotencyKey, body.Text,
-                    body.ReplyToEventId, attachmentIds),
+                    body.ReplyToEventId, attachmentIds, replyTarget),
                 AttachmentIds = attachmentIds.Count > 0 ? attachmentIds : null,
 
                 // #305. Every refusal above returns before this point, so a submission that is not
                 // durable has no transcript entry — an over-cap 413, an idempotency 409 and a
                 // malformed 400 all leave the conversation exactly as they found it.
                 TranscriptText = body.Text,
+                ReplyToEventId = body.ReplyToEventId,
             }, ct);
 
             return result.Outcome switch
@@ -446,7 +472,12 @@ public static class ConversationEndpoints
         if (!ProtocolVersion.IsSupported(body.Protocol))
             return Error(ProtocolErrorCode.UnsupportedProtocol, StatusCodes.Status400BadRequest);
 
-        if (body.ContentType is null || body.ByteSize is null || body.Sha256 is null)
+        // An image (the default) or any other file. Nothing else is a kind.
+        var isFile = string.Equals(body.Kind, AttachmentFiles.FileKind, StringComparison.Ordinal);
+
+        // An image must say which of the four types it is, because that is checked against its
+        // bytes. A file's declared type is not needed and is never used: see AttachmentFiles.
+        if ((body.ContentType is null && !isFile) || body.ByteSize is null || body.Sha256 is null)
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
         // 64 lowercase hex, checked here so a malformed digest is a client error rather than an
@@ -454,9 +485,9 @@ public static class ConversationEndpoints
         if (!IsLowerHexDigest(body.Sha256))
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
-        // v1 carries images only. A `document` reservation would reserve bytes nothing downstream
-        // can render, so it is refused with the same code an unaccepted image type gets.
-        if (body.Kind is not (null or "image"))
+        // `image` (or nothing, which a client from before files existed sends) and `file`. Any other
+        // word is refused with the same code an unaccepted image type gets.
+        if (body.Kind is not (null or "image") && !isFile)
             return Error(ProtocolErrorCode.UnsupportedMediaType, StatusCodes.Status415UnsupportedMediaType);
 
         // 32 CSPRNG bytes, base64url. The one moment this value exists outside the client.
@@ -475,8 +506,10 @@ public static class ConversationEndpoints
                 // Derived from the device record, never from the body — the same rule every other
                 // authenticated route here follows.
                 PrincipalId = caller.PrincipalId,
-                Kind = AttachmentKind.Image,
-                ContentType = body.ContentType,
+                Kind = isFile ? AttachmentKind.Other : AttachmentKind.Image,
+
+                // A file's declared type goes no further than this line.
+                ContentType = isFile ? AttachmentFiles.GenericContentType : body.ContentType!,
                 ByteSize = body.ByteSize.Value,
                 Sha256 = body.Sha256.ToLowerInvariant(),
                 FileName = body.FileName,
@@ -690,7 +723,7 @@ public static class ConversationEndpoints
     private static string CommandPayload(
         string kind, AuthenticatedPrincipal caller, string conversationId, string submissionId,
         string? idempotencyKey, string text, string? replyToEventId,
-        IReadOnlyList<string> attachmentIds) =>
+        IReadOnlyList<string> attachmentIds, ReplyTarget? replyTarget = null) =>
         JsonSerializer.Serialize(new
         {
             kind,
@@ -711,8 +744,29 @@ public static class ConversationEndpoints
                 text,
                 replyToEventId,
                 attachments = attachmentIds.Count > 0 ? attachmentIds : null,
+
+                // What the reply answers, in a few words, for the agent's prompt: the agent holds
+                // no map from event ids to text and no route to read one. Null when the message
+                // answers nothing, so that command is the envelope it always was.
+                replyTo = ReplyQuote(replyTarget),
             },
         }, FleetProtocolJson.Options);
+
+    /// <summary>
+    /// The start of the replied-to message and who wrote it. A pointer, not a second copy: the
+    /// message is already in the conversation the agent is in.
+    /// </summary>
+    private static object? ReplyQuote(ReplyTarget? target)
+    {
+        if (target is null) return null;
+
+        var text = target.Text;
+        var truncated = text.Length > ProtocolLimits.MaxReplyQuoteChars;
+        if (truncated)
+            text = text[..Fleet.Shared.TextTruncation.SafeCutIndex(text, ProtocolLimits.MaxReplyQuoteChars)];
+
+        return new { from = target.FromUser ? "user" : "agent", text, truncated = truncated ? true : (bool?)null };
+    }
 
     private static string CancelPayload(
         AuthenticatedPrincipal caller, string conversationId, string submissionId, string scope) =>

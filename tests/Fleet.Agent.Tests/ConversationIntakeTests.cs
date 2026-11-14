@@ -222,10 +222,84 @@ public class ConversationIntakeTests : IDisposable
         Assert.Contains($"[channel: {ClientChannel} conversation={open.ConversationId}]", prompt);
         Assert.DoesNotContain("[channel: dm", prompt);
         Assert.DoesNotContain("telegram_message_id", prompt);
-        // replyToEventId is an EVENT id, not text — Phase 0 carries it in the identity for the
-        // client's own threading and does not resolve it into the prompt.
-        Assert.DoesNotContain("Replying to", prompt);
+        // replyToEventId is an EVENT id, not text. The agent cannot turn one into words, so an id
+        // that arrives without the chat service's quote puts nothing about a reply in the prompt.
+        Assert.DoesNotContain("replying to", prompt, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("hello there", prompt);
+    }
+
+    // ── files that are not pictures ───────────────────────────────────────────
+
+    /// <summary>
+    /// A file reaches the model as a line naming where the agent's tools can open it, after the
+    /// person's words, in the words the Telegram path uses; a message that was only a file is that
+    /// line alone.
+    /// </summary>
+    [Theory]
+    [InlineData("summarise this", "summarise this\n[document attachment: /workspace/attachments/conv-A.pdf]\n[file attachment: /workspace/attachments/conv-B.csv]")]
+    [InlineData("", "[document attachment: /workspace/attachments/conv-A.pdf]\n[file attachment: /workspace/attachments/conv-B.csv]")]
+    public async Task Files_ReachThePromptAsPathsTheAgentMayOpen(string text, string expected)
+    {
+        var harness = Build();
+        var open = harness.Intake.Open(OpenPayload());
+
+        await harness.Intake.SubmitAsync(open.RuntimeKey, text, documents:
+        [
+            new MessageDocument("A", "application/pdf", 10, null) { FilePath = "/workspace/attachments/conv-A.pdf" },
+            new MessageDocument("B", "application/octet-stream", 10, null) { FilePath = "/workspace/attachments/conv-B.csv" },
+        ]);
+
+        var prompt = await WaitForPromptAsync(harness);
+        Assert.Contains(expected, prompt);
+    }
+
+    // ── replies ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A reply reaches the model as the person's words after a line saying what they answer, with
+    /// the start of that message quoted line by line — so nothing in the quotation can be read as
+    /// the beginning of the new message.
+    /// </summary>
+    [Fact]
+    public async Task AReply_PutsWhatItAnswersAheadOfThePersonsWords_QuotedLineByLine()
+    {
+        var harness = Build();
+        var open = harness.Intake.Open(OpenPayload());
+
+        await harness.Intake.SubmitAsync(open.RuntimeKey, "yes, do that", replyToEventId: "e_123",
+            replyQuote: new ConversationIntake.ReplyQuote(FromUser: false, Text: "I can turn each row into a card.\nWant a PR?", Truncated: false));
+
+        var prompt = await WaitForPromptAsync(harness);
+
+        Assert.Contains(
+            "[The user is replying to an earlier message of yours in this chat:]\n> I can turn each row into a card.\n> Want a PR?\n\nyes, do that",
+            prompt);
+        Assert.DoesNotContain("telegram_message_id", prompt);
+        Assert.DoesNotContain("reply_to_message_id", prompt);
+    }
+
+    [Fact]
+    public void AReplyQuote_SaysWhoseMessageItWas_MarksACut_AndBoundsWhatItRepeats()
+    {
+        Assert.Equal("plain", ConversationIntake.WithReplyQuote("plain", null));
+
+        Assert.StartsWith(
+            "[The user is replying to an earlier message of their own in this chat:]\n> the first one […]\n\n",
+            ConversationIntake.WithReplyQuote("again", new ConversationIntake.ReplyQuote(true, "the first one", Truncated: true)));
+
+        // A message that was pictures only has no words to quote, and says so.
+        Assert.Equal(
+            "[The user is replying to an earlier message of their own in this chat, which had no text.]\n\nthis one",
+            ConversationIntake.WithReplyQuote("this one", new ConversationIntake.ReplyQuote(true, "  ", false)));
+
+        // Bounded here as well as at the chat service: a pointer, not a second copy.
+        var longQuote = ConversationIntake.WithReplyQuote(
+            "ok", new ConversationIntake.ReplyQuote(false, new string('x', ProtocolLimits.MaxReplyQuoteChars * 3), false));
+        Assert.Contains("> " + new string('x', ProtocolLimits.MaxReplyQuoteChars) + " […]\n\nok", longQuote);
+        Assert.DoesNotContain(new string('x', ProtocolLimits.MaxReplyQuoteChars + 1), longQuote);
+
+        // Every line of the quotation is marked, whatever line endings it came with.
+        Assert.Contains("> a\n> b\n> c\n\n", ConversationIntake.WithReplyQuote("ok", new ConversationIntake.ReplyQuote(false, "a\r\nb\rc", false)));
     }
 
     // ── AC47 / Constraint 8: the command surface stays unreachable ─────────────
@@ -357,7 +431,7 @@ public class ConversationIntakeTests : IDisposable
         var notice = Assert.Single(harness.Drain(), e => e.Kind == ConversationEventKind.TurnNotice);
         var text = notice.PayloadAs<TurnNoticePayload>()!.Text;
 
-        Assert.Contains("2 images", text, StringComparison.Ordinal);
+        Assert.Contains("2 files", text, StringComparison.Ordinal);
         Assert.DoesNotContain("/", text, StringComparison.Ordinal);
         Assert.DoesNotContain("attachment_", text, StringComparison.Ordinal);
     }

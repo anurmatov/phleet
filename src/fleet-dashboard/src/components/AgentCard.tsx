@@ -53,6 +53,8 @@ interface AgentCardProps {
   onBgCancel: (taskId: string) => void
   onViewLogs: () => void
   onEditConfig: () => void
+  /** Opens this agent's chat thread. Absent for an agent that has chat off. */
+  onChat?: () => void
   onToggleTask: (key: string) => void
   onCopyContainer: (name: string) => void
   highlightedEntityId: string | null
@@ -87,6 +89,7 @@ export default function AgentCard({
   onBgCancel,
   onViewLogs,
   onEditConfig,
+  onChat,
   onToggleTask,
   onCopyContainer,
   highlightedEntityId,
@@ -176,6 +179,9 @@ export default function AgentCard({
             onClick={onCancel}
             disabled={!agent.currentTask || cs === 'cancelling'}
           >{cs === 'cancelling' ? busy : <Icon name="cancel" />}</button>
+          {onChat && (
+            <button className="icon-btn" title="Chat" aria-label="Chat" onClick={onChat}><Icon name="chat" /></button>
+          )}
           <button
             className={`icon-btn${logViewerOpen ? ' active' : ''}`}
             title="Logs" aria-label="Logs"
@@ -397,6 +403,7 @@ export default function AgentCard({
 
           {/* The same actions with their names, for a phone, where the row has no room for them. */}
           <div className="agent-row-detail-actions">
+            {onChat && <button className="btn btn-s" title="Chat" onClick={onChat}><Icon name="chat" size={16} />Chat</button>}
             <button className="btn btn-s" title="Logs" onClick={onViewLogs}><Icon name="logs" size={16} />Logs</button>
             <button className="btn btn-s" onClick={onEditConfig}>
               <Icon name="settings" size={16} />{isEditingConfig ? 'Close config' : 'Edit config'}

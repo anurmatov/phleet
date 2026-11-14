@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Fleet.Comms.Auth;
 using Fleet.Comms.Contracts;
+using Fleet.Conversations.Contracts;
 using Fleet.Protocol;
 using Fleet.Shared;
 
@@ -101,6 +102,32 @@ public sealed class ChatRouteTests
             await host.Client.SendAsync(Bearer(new HttpRequestMessage(HttpMethod.Get, "/v1/conversations"), theirs)));
 
         Assert.Empty(other.Conversations);
+    }
+
+    /// <summary>
+    /// A list of threads carries a line of each: who wrote the newest message and how it starts.
+    /// A thread with nothing said has no such key at all, which is what the list always sent.
+    /// </summary>
+    [Fact]
+    public async Task The_list_carries_each_threads_newest_message_and_omits_it_when_there_is_none()
+    {
+        var store = new FakeConversationStore();
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var bare = await (await host.Client.SendAsync(
+            Bearer(new HttpRequestMessage(HttpMethod.Get, "/v1/conversations"), token))).Content.ReadAsStringAsync();
+        Assert.DoesNotContain("lastMessage", bare, StringComparison.Ordinal);
+
+        store.LastMessage = new ConversationLastMessage { FromUser = false, Text = "Three issues are open.", Truncated = false };
+        var said = await (await host.Client.SendAsync(
+            Bearer(new HttpRequestMessage(HttpMethod.Get, "/v1/conversations"), token))).Content.ReadAsStringAsync();
+        Assert.Contains("\"lastMessage\":{\"from\":\"agent\",\"text\":\"Three issues are open.\"}", said, StringComparison.Ordinal);
+
+        store.LastMessage = new ConversationLastMessage { FromUser = true, Text = "and", Truncated = true };
+        var cut = await (await host.Client.SendAsync(
+            Bearer(new HttpRequestMessage(HttpMethod.Get, "/v1/conversations"), token))).Content.ReadAsStringAsync();
+        Assert.Contains("\"lastMessage\":{\"from\":\"user\",\"text\":\"and\",\"truncated\":true}", cut, StringComparison.Ordinal);
     }
 
     // ── every write checks the chat switch (MUST NOT 5) ──────────────────────

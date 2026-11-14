@@ -213,6 +213,20 @@ internal sealed class TurnRun(
         if (progress.IsProcessExit)
             _processExitResult = true;
 
+        // What the model wrote before this tool call, for a client to show while the turn runs
+        // (#286). Published ahead of the tool it preceded. A client event only: Telegram shows
+        // what it always did. Check-ins are left out for the reason their tool lines are — the
+        // turn may end IDLE, and a line of narration would be the only thing it ever said.
+        if (progress.Narration is { Length: > 0 } narration
+            && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch))
+        {
+            var (messageText, messageTruncated) = ProtocolSanitizer.SanitizeAndBound(
+                narration, ProtocolLimits.MaxMessageTextChars, _attachmentDir);
+            if (!string.IsNullOrWhiteSpace(messageText) && !ProtocolSanitizer.IsIdleMarker(messageText))
+                PublishEvent(chatId, ConversationEventKind.TurnMessage, _identity,
+                    new TurnMessagePayload { Text = messageText, Truncated = messageTruncated ? true : null });
+        }
+
         if (progress.EventType == "warning" && progress.IsSignificant)
         {
             // User-facing warning (e.g. provider capability notice) — deliver immediately

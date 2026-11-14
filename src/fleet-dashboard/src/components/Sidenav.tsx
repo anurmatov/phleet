@@ -12,6 +12,8 @@ interface SidenavProps {
   /** Runs waiting for a person. Shown on Workflows in place of its count when there are any. */
   attentionWorkflowCount: number
   unreadAlertCount: number
+  /** Chat threads that moved on since this browser showed them. */
+  unreadChatCount: number
   reprovisionAllState: ReprovisionAllState
   reprovisionAllMsg: string
   onReprovisionAll: () => void
@@ -32,7 +34,7 @@ interface SidenavProps {
  * what agents are told, what runs on its own, and the settings.
  */
 export default function Sidenav({
-  activeView, onNavigate, counts, attentionWorkflowCount, unreadAlertCount,
+  activeView, onNavigate, counts, attentionWorkflowCount, unreadAlertCount, unreadChatCount,
   reprovisionAllState, reprovisionAllMsg,
   onReprovisionAll, onReprovisionAllConfirm, onReprovisionAllCancel,
   onNewAgent, wsStatus, lastUpdated, navOpen, onNavClose,
@@ -40,6 +42,11 @@ export default function Sidenav({
   function badge(view: ActiveView) {
     if (view === 'workflows' && attentionWorkflowCount > 0) {
       return <span className="sidenav-badge sidenav-badge-attention" title="Waiting for you">{attentionWorkflowCount}</span>
+    }
+    if (view === 'chat') {
+      return unreadChatCount > 0
+        ? <span className="sidenav-badge sidenav-badge-new" title="Threads with new activity">{unreadChatCount}</span>
+        : null
     }
     if (view === 'alerts') {
       return unreadAlertCount > 0

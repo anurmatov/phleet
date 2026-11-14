@@ -70,6 +70,11 @@ public sealed class CodexExecutor : IAgentExecutor
     // turn/completed (turn.items is always empty on the real wire protocol).
     // Reset at the start of every new turn and cleared on process stop.
     private string _currentTurnAssistantText = "";
+    // The latest completed assistant message of the running turn that nothing has followed yet.
+    // A tool item starting after it proves it was a mid-turn message, and that item's event carries
+    // it out as AgentProgress.Narration. The turn's last message is never followed by a tool, so
+    // the answer is never sent this way (#286).
+    private string? _pendingNarration;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
     private volatile bool _turnHasFinalAnswerPhase;
@@ -243,6 +248,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 _turnHasFinalAnswerPhase = false;
                 _lastTurnUsage = null;
                 _currentTurnAssistantText = "";
+                _pendingNarration = null;
             }
             catch (RpcErrorException ex)
             {
@@ -420,6 +426,7 @@ public sealed class CodexExecutor : IAgentExecutor
             await SendRequestAsync(ThreadShellCommandMethod, shellParams, ct);
             _lastTurnUsage = null;
             _currentTurnAssistantText = "";
+            _pendingNarration = null;
         }
         catch (RpcErrorException ex)
         {
@@ -1274,10 +1281,19 @@ public sealed class CodexExecutor : IAgentExecutor
             return null;
         }
 
+        // A tool after an assistant message: the message was mid-turn text, and leaves with this event.
+        string? narration = null;
+        if (itemType is "commandExecution" or "mcpToolCall" or "dynamicToolCall")
+        {
+            narration = _pendingNarration;
+            _pendingNarration = null;
+        }
+
         AgentProgress? progress = itemType switch
         {
             "commandExecution" => new AgentProgress
             {
+                Narration = narration,
                 EventType = "tool_use",
                 Summary = $"Using {item?["command"]?.GetValue<string>() ?? "command"}",
                 ToolName = item?["command"]?.GetValue<string>(),
@@ -1286,6 +1302,7 @@ public sealed class CodexExecutor : IAgentExecutor
             },
             "mcpToolCall" => new AgentProgress
             {
+                Narration = narration,
                 EventType = "tool_use",
                 Summary = $"Using {item?["tool"]?.GetValue<string>() ?? "mcp tool"}",
                 ToolName = item?["tool"]?.GetValue<string>(),
@@ -1294,6 +1311,7 @@ public sealed class CodexExecutor : IAgentExecutor
             },
             "dynamicToolCall" => new AgentProgress
             {
+                Narration = narration,
                 EventType = "tool_use",
                 Summary = $"Using {item?["tool"]?.GetValue<string>() ?? "tool"}",
                 ToolName = item?["tool"]?.GetValue<string>(),
@@ -1332,6 +1350,11 @@ public sealed class CodexExecutor : IAgentExecutor
             var assistantText = item?["text"]?.GetValue<string>();
             if (assistantText is not null)
                 _currentTurnAssistantText = assistantText;
+            // A message the model declared its final answer is never narration, whatever follows.
+            _pendingNarration = string.IsNullOrWhiteSpace(assistantText)
+                || string.Equals(phase, "final_answer", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : assistantText;
             return null;
         }
 
@@ -1359,6 +1382,7 @@ public sealed class CodexExecutor : IAgentExecutor
         if (@params["turn"] is not JsonObject turn)
         {
             _currentTurnAssistantText = "";
+            _pendingNarration = null;
             return new AgentProgress
             {
                 EventType = "result",
@@ -1375,6 +1399,7 @@ public sealed class CodexExecutor : IAgentExecutor
             ? ExtractAssistantText(turn)
             : _currentTurnAssistantText;
         _currentTurnAssistantText = "";
+        _pendingNarration = null;
         var durationMs = turn["durationMs"]?.GetValue<int?>() ?? 0;
         var stats = _lastTurnUsage is null
             ? new ExecutionStats { DurationMs = durationMs }
@@ -1582,6 +1607,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 if (method == "turn/completed")
                 {
                     _currentTurnAssistantText = "";
+                    _pendingNarration = null;
                     return DrainOutcome.Completed;
                 }
             }
@@ -1625,6 +1651,7 @@ public sealed class CodexExecutor : IAgentExecutor
         _turnHasFinalAnswerPhase = false;
         _lastTurnUsage = null;
         _currentTurnAssistantText = "";
+        _pendingNarration = null;
         _messageCount = 0;
     }
 

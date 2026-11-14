@@ -12,10 +12,11 @@
 import {
   AGENT_UNAVAILABLE, BACKOFF_RESET_MS, DEFAULT_LIMITS, LIVENESS_TIMEOUT_MS, PONG_FRAME,
   cancelBody, closeAction, conversationPath, errorCode, eventsUrl, failureAction, newIdentifier, openBody,
-  parseFrame, readAcceptedSeq, readCatchUp, readLimits, readOpen, reconnectDelayMs, sendProblem, streamUrl,
-  submitBody, utf8Bytes,
+  parseFrame, readAcceptedSeq, readCatchUp, readLimits, readOpen, readReservation, reconnectDelayMs, reserveBody,
+  sendProblem, streamUrl, submitBody, uploadProblem, utf8Bytes, MAX_ATTACHMENTS,
 } from './chatProtocol.ts'
-import type { ChatLimits, FailureAction, Refusal, WireEvent } from './chatProtocol'
+import type { AttachmentRef, ChatLimits, FailureAction, Refusal, WireEvent } from './chatProtocol'
+import { sha256Hex } from './sha256.ts'
 import { applyEvents, applyGap, emptyTranscript, isTurnRunning, type Transcript } from './chatTranscript.ts'
 
 /** A stream as the connection uses it. The component adapts a browser WebSocket to this. */
@@ -55,13 +56,34 @@ export type StopReason =
   /** A refusal asking again cannot change. */
   | 'refused'
 
+/** A file picked for a message, ready to go up: the bytes the chat service will get. */
+export interface OutgoingFile {
+  /** This page's own name for it, for a list key and for taking it back out. */
+  id: string
+  fileName: string
+  /** A picture the model is shown, or a file the agent opens with its tools. */
+  kind: 'image' | 'file'
+  contentType: string
+  bytes: Uint8Array
+  /** Something an `<img>` can show while the bytes are only here, when it is a picture. */
+  previewUrl: string | null
+  /** The chat service's id for it once it has gone up and been checked. */
+  attachmentId: string | null
+}
+
 /** A message this page sent, until the transcript shows it. */
 export interface PendingSend {
   submissionId: string
   text: string
+  /** The files that go with it, in the order they were picked. */
+  files: OutgoingFile[]
+  /** The message it answers, when it answers one: its event id, and how to show it until the thread does. */
+  replyTo?: { key: string; who: 'you' | 'agent'; text: string } | null
   status: 'sending' | 'sent' | 'failed'
   /** The seq the message takes in the conversation, once the chat service has said. */
   acceptedSeq: number | null
+  /** Where the conversation stood when this was sent: the message itself can only come after. */
+  sentAfterSeq?: number
   problem: string | null
   canRetry: boolean
 }
@@ -82,6 +104,8 @@ export interface ChatState {
   stopping: boolean
   /** A Stop that could not be sent, in words. */
   notice: string | null
+  /** The chat service said it takes no files: the composer stops offering them. */
+  filesOff: boolean
 }
 
 /** A hard stop on paging, so an answer that always says `hasMore` cannot spin the page. */
@@ -113,7 +137,7 @@ export class ChatConnection {
     this.newId = deps.newId ?? (() => newIdentifier())
     this.state = retained ? { ...retained, phase: 'connecting', stopping: false } : {
       phase: 'connecting', connectedOnce: false, stopReason: null, problem: null, conversationId: null,
-      transcript: emptyTranscript(), pending: [], limits: DEFAULT_LIMITS, stopping: false, notice: null,
+      transcript: emptyTranscript(), pending: [], limits: DEFAULT_LIMITS, stopping: false, notice: null, filesOff: false,
     }
   }
 
@@ -358,14 +382,17 @@ export class ChatConnection {
     return !this.disposed && this.state.conversationId !== null && this.state.phase !== 'stopped'
   }
 
-  /** Send a message. Returns why it was not sent, or null. */
-  send(text: string): string | null {
+  /** Send a message, with any files picked for it. Returns why it was not sent, or null. */
+  send(text: string, files: readonly OutgoingFile[] = [], replyTo: PendingSend['replyTo'] = null): string | null {
     if (!this.canSend()) return 'Not connected yet.'
-    if (text.trim() === '') return 'Type a message first.'
+    if (text.trim() === '' && files.length === 0) return 'Type a message first.'
     if (utf8Bytes(text) > this.state.limits.inboundTextBytes) return 'This message is too long to send.'
+    if (files.length > MAX_ATTACHMENTS) return `A message carries at most ${MAX_ATTACHMENTS} files.`
 
     const pending: PendingSend = {
-      submissionId: this.newId(), text, status: 'sending', acceptedSeq: null, problem: null, canRetry: false,
+      submissionId: this.newId(), text, files: [...files], status: 'sending', acceptedSeq: null, problem: null, canRetry: false,
+      ...(replyTo ? { replyTo } : {}),
+      sentAfterSeq: this.state.transcript.lastSeq,
     }
     this.update({ pending: [...this.state.pending, pending] })
     void this.post(pending.submissionId)
@@ -386,14 +413,35 @@ export class ChatConnection {
   }
 
   private async post(submissionId: string): Promise<void> {
-    const pending = this.state.pending.find(p => p.submissionId === submissionId)
     const conversationId = this.state.conversationId
-    if (!pending || !conversationId) return
+    if (!this.state.pending.some(p => p.submissionId === submissionId) || !conversationId) return
+
+    // Files first, one at a time. One that went up on an earlier try keeps its id and is not sent
+    // again, so a retry costs only what failed.
+    for (;;) {
+      const file = this.state.pending.find(p => p.submissionId === submissionId)?.files.find(f => f.attachmentId === null)
+      if (!file) break
+      const result = await this.upload(conversationId, file)
+      if (this.disposed) return
+      if (typeof result !== 'string') {
+        const problem = uploadProblem(result)
+        if (problem.unsupported) this.update({ filesOff: true })
+        this.patchPending(submissionId, { status: 'failed', problem: problem.message, canRetry: problem.canRetry })
+        return
+      }
+      this.patchFiles(submissionId, f => (f.id === file.id ? { ...f, attachmentId: result } : f))
+    }
+
+    const pending = this.state.pending.find(p => p.submissionId === submissionId)
+    if (!pending) return
+    const attachments: AttachmentRef[] = pending.files.map(f => ({
+      attachmentId: f.attachmentId!, kind: f.kind, contentType: f.contentType, byteSize: f.bytes.length, fileName: f.fileName,
+    }))
 
     const answer = await this.request(`${conversationPath(conversationId)}/submissions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(submitBody(pending.submissionId, pending.text)),
+      body: JSON.stringify(submitBody(pending.submissionId, pending.text, attachments, pending.replyTo?.key ?? null)),
     })
     if (this.disposed) return
 
@@ -415,11 +463,55 @@ export class ChatConnection {
     }
 
     const refusal: Refusal = { httpStatus: answer.status, code: errorCode(answer.body) }
+    if (attachments.length > 0 && (refusal.code === 'attachment_not_found' || refusal.code === 'unsupported_attachments')) {
+      // The chat service no longer holds a file this message names (its window ran out, or files
+      // were switched off). Nothing was sent; a retry sends the files up again.
+      const problem = uploadProblem(refusal)
+      if (problem.unsupported) this.update({ filesOff: true })
+      this.patchFiles(submissionId, f => ({ ...f, attachmentId: null }))
+      this.patchPending(submissionId, { status: 'failed', problem: `Not sent. ${problem.message}`, canRetry: problem.canRetry })
+      return
+    }
     const problem = sendProblem(refusal)
     this.patchPending(submissionId, { status: 'failed', problem: problem.message, canRetry: problem.canRetry })
     if (refusal.code === 'conversation_not_found' && this.state.phase !== 'stopped') {
       this.onRefusal('reopen', 'The conversation was not found.')
     }
+  }
+
+  /**
+   * Put one file up: reserve a place for it, then send the bytes with the one-time token the
+   * reservation gave. Answers the chat service's id for it, or why it did not go up.
+   */
+  private async upload(conversationId: string, file: OutgoingFile): Promise<string | Refusal> {
+    const reserved = await this.request(`${conversationPath(conversationId)}/attachments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reserveBody({
+        kind: file.kind, contentType: file.contentType, byteSize: file.bytes.length, sha256: sha256Hex(file.bytes), fileName: file.fileName,
+      })),
+    })
+    const reservation = reserved.status === 200 || reserved.status === 201 ? readReservation(reserved.body) : null
+    if (!reservation) {
+      // An answer that says yes and cannot be read is a broken answer: worth one more try.
+      const status = reserved.status === 200 || reserved.status === 201 ? 502 : reserved.status
+      return { httpStatus: status, code: errorCode(reserved.body) }
+    }
+
+    const sent = await this.request(reservation.uploadUrl, {
+      method: 'PUT',
+      // The token is this upload's own credential and goes nowhere but this request.
+      headers: { Authorization: `Bearer ${reservation.uploadToken}`, 'Content-Type': file.contentType },
+      body: file.bytes as BodyInit,
+    })
+    if (sent.status === 200 || sent.status === 201) return reservation.attachmentId
+    return { httpStatus: sent.status, code: errorCode(sent.body) }
+  }
+
+  private patchFiles(submissionId: string, change: (file: OutgoingFile) => OutgoingFile): void {
+    this.update({
+      pending: this.state.pending.map(p => (p.submissionId === submissionId ? { ...p, files: p.files.map(change) } : p)),
+    })
   }
 
   private patchPending(submissionId: string, patch: Partial<PendingSend>): void {
@@ -489,4 +581,30 @@ function describe(action: FailureAction, refusal: Refusal): string {
         : refusal.httpStatus === 200 ? 'The chat service sent an answer this page cannot read.'
         : `The chat service is not available (HTTP ${refusal.httpStatus}).`
   }
+}
+
+/**
+ * The sends to draw under the thread: all of them, except one the thread is already showing.
+ *
+ * The chat service writes a message into the conversation before it answers the request that sent
+ * it, so the stream can deliver the message while its send is still unanswered. For that moment
+ * the page holds it twice, and nothing yet says they are one (the answer's `acceptedSeq` is what
+ * does). Drawing both would show the message doubled until the answer lands. So a send still
+ * waiting for its answer is left out while the thread holds a message of the person's with the
+ * same words that arrived after it was sent. Each such message hides at most one send, oldest
+ * first, so two identical messages sent in a row still show as two.
+ *
+ * This decides only what is drawn for that moment. The send itself is settled by its answer.
+ */
+export function pendingToShow(transcript: Transcript, pending: readonly PendingSend[]): PendingSend[] {
+  const claimed = new Set<string>()
+  return pending.filter(p => {
+    if (p.status !== 'sending' || p.sentAfterSeq === undefined) return true
+    const arrived = transcript.entries.find(e =>
+      e.type === 'you' && e.seq > p.sentAfterSeq! && e.text === p.text
+      && e.attachments.length === p.files.length && !claimed.has(e.key))
+    if (!arrived) return true
+    claimed.add(arrived.key)
+    return false
+  })
 }

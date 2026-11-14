@@ -201,6 +201,93 @@ public class ClaudeExecutorTerminalResultTests
         Assert.Equal("FINAL-ANSWER", final.FinalResult);
     }
 
+    // ── mid-turn messages (#286) ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Text is a mid-turn message only once a tool call has followed it, and it leaves on that
+    /// tool call's event. The last text, which nothing follows but the result, is the answer and
+    /// is never sent as narration, so no text reaches a client twice.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_TextFollowedByAToolCall_LeavesAsNarrationOnThatCall_AndTheAnswerDoesNot()
+    {
+        var events = await RunEventsAsync(
+            TextAssistant("I will read the file first."),
+            ToolUseAssistant(),
+            TextAssistant("Now the tests."),
+            ToolUseAssistant(),
+            TextAssistant("FINAL-ANSWER"),
+            new ClaudeStreamEvent { Type = "result", Result = "FINAL-ANSWER", NumTurns = 1 });
+
+        Assert.Equal(
+            ["I will read the file first.", "Now the tests."],
+            events.Where(e => e.Narration is not null).Select(e => e.Narration));
+        Assert.All(events.Where(e => e.Narration is not null), e => Assert.Equal("Bash", e.ToolName));
+        Assert.DoesNotContain(events, e => e.Narration == "FINAL-ANSWER");
+        Assert.Equal("FINAL-ANSWER", Assert.Single(events, e => e.FinalResult is not null).FinalResult);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_TextInTheSameMessageAsTheToolCall_IsNarrationToo_AfterAnyHeldText()
+    {
+        var events = await RunEventsAsync(
+            TextAssistant("Held from the message before."),
+            new ClaudeStreamEvent
+            {
+                Type = "assistant",
+                Message = new ClaudeMessage
+                {
+                    Content =
+                    [
+                        new ClaudeContentBlock { Type = "text", Text = "Written beside the call." },
+                        new ClaudeContentBlock { Type = "tool_use", Name = "Bash", Id = "toolu-call" },
+                    ],
+                },
+            },
+            ToolUseAssistant(),
+            new ClaudeStreamEvent { Type = "result", Result = "done", NumTurns = 1 });
+
+        Assert.Equal(
+            ["Held from the message before.\n\nWritten beside the call."],
+            events.Where(e => e.Narration is not null).Select(e => e.Narration));
+    }
+
+    /// <summary>
+    /// A nested (subagent) tool call or text says nothing about the parent turn's text: it neither
+    /// carries narration out nor becomes narration.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_NestedEvents_NeitherTakeNorBecomeNarration()
+    {
+        var nestedCall = ToolUseAssistant();
+        nestedCall.ParentToolUseId = "toolu-nested";
+
+        var events = await RunEventsAsync(
+            TextAssistant("PARENT-TEXT"),
+            nestedCall,
+            TextAssistant("NESTED-TEXT", parentToolUseId: "toolu-nested"),
+            ToolUseAssistant(),
+            new ClaudeStreamEvent { Type = "result", Result = "done", NumTurns = 1 });
+
+        var narrated = Assert.Single(events, e => e.Narration is not null);
+        Assert.Equal("PARENT-TEXT", narrated.Narration);
+    }
+
+    /// <summary>Text that was the last thing before the result does not leak into the next turn as narration.</summary>
+    [Fact]
+    public async Task ExecuteAsync_TheAnswerOfOneTurn_IsNotNarrationInTheNext()
+    {
+        using var harness = new ExecutorHarness();
+        await harness.RunTurnAsync(
+            TextAssistant("FIRST-TURN-ANSWER"),
+            new ClaudeStreamEvent { Type = "result", Result = "FIRST-TURN-ANSWER", NumTurns = 1 });
+        var second = await harness.RunTurnAsync(
+            ToolUseAssistant(),
+            new ClaudeStreamEvent { Type = "result", Result = "second", NumTurns = 1 });
+
+        Assert.DoesNotContain(second, e => e.Narration is not null);
+    }
+
     private static ClaudeStreamEvent ToolUseAssistant() =>
         new()
         {

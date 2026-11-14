@@ -218,6 +218,68 @@ public class CodexExecutorTests
         Assert.False(final.IsErrorResult);
     }
 
+    // ── mid-turn messages (#286) ─────────────────────────────────────────────
+
+    // A message is mid-turn text only once a tool item has started after it, and it leaves on that
+    // item's event. The turn's last message is the answer and is never sent as narration.
+    [Fact]
+    public async Task StreamTurn_MessageFollowedByATool_LeavesAsNarrationOnThatTool_AndTheAnswerDoesNot()
+    {
+        var executor = CreateExecutor();
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        await channel.Writer.WriteAsync(TurnStarted("turn-1"));
+        await channel.Writer.WriteAsync(ItemCompleted("turn-1", "agentMessage", "Checking the build first."));
+        await channel.Writer.WriteAsync(ToolStarted("turn-1", "dotnet build"));
+        await channel.Writer.WriteAsync(ToolStarted("turn-1", "dotnet test"));
+        await channel.Writer.WriteAsync(ItemCompleted("turn-1", "agentMessage", "The build is green."));
+        await channel.Writer.WriteAsync(TurnCompletedNoItems("turn-1"));
+        channel.Writer.TryComplete();
+
+        var progress = await CollectAsync(executor.StreamTurnForTests("turn-1"));
+
+        var narrated = Assert.Single(progress, p => p.Narration is not null);
+        Assert.Equal("Checking the build first.", narrated.Narration);
+        Assert.Equal("dotnet build", narrated.ToolName);
+        Assert.Equal("The build is green.", progress.Last(p => p.FinalResult is not null).FinalResult);
+    }
+
+    // A message the model declared its final answer is never narration, whatever follows it.
+    [Fact]
+    public async Task StreamTurn_ADeclaredFinalAnswer_IsNeverNarration()
+    {
+        var executor = CreateExecutor();
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        var final = ItemCompleted("turn-1", "agentMessage", "This is the answer.");
+        final["params"]!["item"]!["phase"] = "final_answer";
+        await channel.Writer.WriteAsync(TurnStarted("turn-1"));
+        await channel.Writer.WriteAsync(final);
+        await channel.Writer.WriteAsync(ToolStarted("turn-1", "true"));
+        await channel.Writer.WriteAsync(TurnCompletedNoItems("turn-1"));
+        channel.Writer.TryComplete();
+
+        var progress = await CollectAsync(executor.StreamTurnForTests("turn-1"));
+
+        Assert.DoesNotContain(progress, p => p.Narration is not null);
+        Assert.Equal("This is the answer.", progress.Last(p => p.FinalResult is not null).FinalResult);
+    }
+
+    private static JsonObject ToolStarted(string turnId, string command) =>
+        new()
+        {
+            ["method"] = "item/started",
+            ["params"] = new JsonObject
+            {
+                ["turnId"] = turnId,
+                ["item"] = new JsonObject { ["type"] = "commandExecution", ["command"] = command },
+            },
+        };
+
     // Fallback: when no item/completed(agentMessage) was received, use turn.items.
     // This matches the test fixture shape and guards against future protocol changes.
     [Fact]

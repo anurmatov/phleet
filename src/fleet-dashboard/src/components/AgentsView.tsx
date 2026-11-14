@@ -27,6 +27,9 @@ interface AgentsViewProps {
   highlightedEntityId: string | null
   onClearHighlight: () => void
   onNewAgent: () => void
+  /** The agents that can be chatted with, by name. */
+  chatAgents: ReadonlySet<string>
+  onChat: (agentName: string) => void
   /** What is still to be set up, shown under the title while there is anything. */
   banner?: React.ReactNode
 }
@@ -34,7 +37,7 @@ interface AgentsViewProps {
 export default function AgentsView({
   sorted, actions, configAgent, logViewer, onViewLogs, onEditConfig,
   workflowByAgent, workflows, agentByWorkflow, workflowActions,
-  highlightedEntityId, onClearHighlight, onNewAgent, banner,
+  highlightedEntityId, onClearHighlight, onNewAgent, banner, chatAgents, onChat,
 }: AgentsViewProps) {
   const {
     expandedAgent, taskHistory, historyLoading, expandedTasks, copiedContainer,
@@ -163,6 +166,7 @@ export default function AgentsView({
             onBgCancel={(taskId) => onBgCancel(agent.agentName, taskId)}
             onViewLogs={() => onViewLogs(agent.agentName)}
             onEditConfig={() => onEditConfig(agent.agentName)}
+            onChat={chatAgents.has(agent.agentName) ? () => onChat(agent.agentName) : undefined}
             onToggleTask={onToggleTask}
             onCopyContainer={onCopyContainer}
             highlightedEntityId={highlightedEntityId}

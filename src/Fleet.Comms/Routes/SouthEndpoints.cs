@@ -203,6 +203,12 @@ public static class SouthEndpoints
                     if (row is null || row.State is not (AttachmentState.Sealed or AttachmentState.Bound))
                         return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status404NotFound);
 
+                    // A file that is not an image goes only to an agent that said it takes them. One
+                    // built before files would give it to the model as a picture and fail the turn;
+                    // "not available" is something it already knows how to say.
+                    if (row.Kind != AttachmentKind.Image && !http.Request.Headers.ContainsKey(AttachmentFiles.AcceptsFilesHeader))
+                        return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status404NotFound);
+
                     var bytes = attachments.OpenRead(attachmentId);
 
                     // The row is authoritative; the volume disagreeing with it is the gone state, not
@@ -210,6 +216,12 @@ public static class SouthEndpoints
                     // unavailable image rather than answering as though none was sent.
                     if (bytes is null)
                         return Error(ProtocolErrorCode.AttachmentGone, StatusCodes.Status410Gone);
+
+                    // What the agent names its copy of a file with, so its tools know what they are
+                    // opening: the name's extension when it is on the list, `.bin` otherwise. An
+                    // image is named from its sniffed type by the agent and needs none.
+                    if (row.Kind != AttachmentKind.Image)
+                        http.Response.Headers[AttachmentFiles.ExtensionHeader] = AttachmentFiles.SafeExtension(row.FileName);
 
                     // The SNIFFED type from the row. There is no other type in this system.
                     return Results.Stream(bytes, row.ContentType);

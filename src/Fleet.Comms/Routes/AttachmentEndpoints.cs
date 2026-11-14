@@ -144,6 +144,33 @@ public static class AttachmentEndpoints
             return await RejectAndDelete(store, files, attachmentId, "digest_mismatch", ct);
         }
 
+        // A file that is not an image is stored without being read: no sniff, no pixel bound. Its
+        // recorded type is this service's own choice from the bytes, never the client's word.
+        if (row.Kind != AttachmentKind.Image)
+        {
+            var fileType = AttachmentFiles.LooksLikePdf(write.Prefix)
+                ? AttachmentFiles.PdfContentType
+                : AttachmentFiles.GenericContentType;
+
+            var fileSealed = await store.SealAttachmentAsync(new SealAttachmentRequest
+            {
+                AttachmentId = attachmentId,
+                ByteSize = write.ByteSize,
+                Sha256 = write.Sha256,
+                SniffedContentType = fileType,
+            }, ct);
+
+            if (!fileSealed)
+                return Error(ProtocolErrorCode.AttachmentNotFound, StatusCodes.Status409Conflict);
+
+            return Json(new SealAttachmentResponse
+            {
+                AttachmentId = attachmentId,
+                ContentType = fileType,
+                ByteSize = write.ByteSize,
+            }, StatusCodes.Status201Created);
+        }
+
         var sniffed = ImageSniffer.Sniff(write.Prefix);
 
         // The DECLARED type is not what is recorded, and a declared/sniffed disagreement fails the
@@ -246,7 +273,11 @@ public static class AttachmentEndpoints
 
         var headers = http.Response.Headers;
         headers["X-Content-Type-Options"] = "nosniff";
-        headers["Content-Disposition"] = "attachment";
+        // Always saved, never shown in place. The name is offered only in its reduced form, and
+        // percent-encoded, so nothing a client typed can end the header or start another.
+        headers["Content-Disposition"] = AttachmentFiles.SafeDownloadName(row.FileName) is { } saveAs
+            ? $"attachment; filename*=UTF-8''{Uri.EscapeDataString(saveAs)}"
+            : "attachment";
         headers["Cache-Control"] = "private, no-store";
         headers["Content-Security-Policy"] = "default-src 'none'; sandbox";
 

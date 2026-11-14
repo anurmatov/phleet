@@ -298,7 +298,7 @@ public sealed class ConversationSouthConsumerTests
             harness.Drain(), e => e.Kind == ConversationEventKind.TurnNotice);
 
         var text = notice.PayloadAs<TurnNoticePayload>()!.Text;
-        Assert.Contains("2 images", text, StringComparison.Ordinal);
+        Assert.Contains("2 files", text, StringComparison.Ordinal);
 
         // A count and nothing else — no id, no path, no transport reason (Constraints 4 and 5).
         Assert.DoesNotContain("01JATTACHMENT", text, StringComparison.Ordinal);
@@ -348,6 +348,28 @@ public sealed class ConversationSouthConsumerTests
             consumerTag: "ct", deliveryTag: 1, redelivered: false,
             exchange: "fleet.conversations", routingKey: "example-agent",
             properties: properties, body: body);
+    }
+
+    /// <summary>
+    /// The chat service's quote of what a reply answers binds from the command, and a command
+    /// written before the field existed binds exactly as it did.
+    /// </summary>
+    [Fact]
+    public void ACommand_CarriesWhatAReplyAnswers_AndAnOlderCommandCarriesNone()
+    {
+        var reply = System.Text.Json.JsonSerializer.Deserialize<ConversationSouthConsumer.CommandEnvelope>(
+            """
+            {"kind":"submission.create","conversationId":"c","submissionId":"s",
+             "payload":{"text":"do that","replyToEventId":"01JEVENT000000000000000001",
+                        "replyTo":{"from":"agent","text":"Want a PR?","truncated":true}}}
+            """)!;
+        Assert.Equal("agent", reply.Payload!.ReplyTo!.From);
+        Assert.Equal("Want a PR?", reply.Payload.ReplyTo.Text);
+        Assert.True(reply.Payload.ReplyTo.Truncated);
+
+        var older = System.Text.Json.JsonSerializer.Deserialize<ConversationSouthConsumer.CommandEnvelope>(
+            """{"kind":"submission.create","payload":{"text":"hello","replyToEventId":null}}""")!;
+        Assert.Null(older.Payload!.ReplyTo);
     }
 
     private static BasicDeliverEventArgs Delivery(string? kind, string? messageId = MessageId)

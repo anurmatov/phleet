@@ -37,13 +37,17 @@ public static class JournalMcp
     /// </param>
     public static void AddServices(
         IServiceCollection services, JournalReadGrants grants, JournalRuntimeStats stats,
-        Func<IServiceProvider, IJournalReadStore> store, TimeProvider? time = null, IReadOnlySet<long>? excluded = null)
+        Func<IServiceProvider, IJournalReadStore> store, TimeProvider? time = null, IReadOnlySet<long>? excluded = null,
+        Func<IServiceProvider, IChatHistoryReadStore>? chatHistory = null)
     {
         services.AddHttpContextAccessor();
         services.AddSingleton(new JournalTurnBindings(time ?? TimeProvider.System));
         services.AddSingleton(provider => new JournalBindingScope(
             provider.GetRequiredService<JournalTurnBindings>(), excluded ?? new HashSet<long>()));
         services.AddSingleton(store);
+        // The first-party chat's own transcript, read beside the Telegram journal. Where a host
+        // gives none (a test of the journal alone), the tools answer that nothing is there.
+        services.AddSingleton(chatHistory ?? (_ => NoChatHistory.Instance));
         services.AddSingleton(grants);
         services.AddSingleton(stats);
 
@@ -54,7 +58,20 @@ public static class JournalMcp
                 Version = "1",
             })
             .WithHttpTransport(options => options.Stateless = true)
-            .WithTools<JournalReadTools>();
+            .WithTools<JournalReadTools>()
+            .WithTools<ChatHistoryTools>();
+    }
+
+    /// <summary>A chat with nothing in it, for a host composed without the conversation store.</summary>
+    private sealed class NoChatHistory : IChatHistoryReadStore
+    {
+        public static readonly NoChatHistory Instance = new();
+
+        public Task<ChatHistoryPage> SearchAsync(string agentName, ChatHistoryQuery query, CancellationToken ct = default) =>
+            Task.FromResult(new ChatHistoryPage([], null));
+
+        public Task<ChatHistoryMessage?> GetAsync(string agentName, string eventId, CancellationToken ct = default) =>
+            Task.FromResult<ChatHistoryMessage?>(null);
     }
 
     /// <summary>Maps the endpoint. Call after <see cref="JournalAuth.Use"/>.</summary>

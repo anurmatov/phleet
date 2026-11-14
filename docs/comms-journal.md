@@ -12,8 +12,8 @@ replayable after a restart. The journal is the durable, queryable record.
 
 Later slices added capture inside the agent runtime (slice 2), media bytes (slice 4), and
 tool-initiated sends and the read tools (slice 5, below). Still not in the journal: copies,
-projection of first-party client conversations, edits and deletions, backfill, and a metrics
-exporter.
+projection of first-party client conversations (an agent reads that transcript through the chat
+history tools below instead), edits and deletions, backfill, and a metrics exporter.
 
 ## The listener
 
@@ -652,6 +652,44 @@ arguments alone. Scope is re-applied on every page. One traversal guarantees:
 | G2 | A message committed, in scope and matching both at traversal start and when the page covering its key is read is returned exactly once |
 | G3 | A message that becomes visible mid-traversal (a delayed commit, a late spool drain with an old `sent_at`, a new observer row, a transcript that now matches `query`) is returned at most once, and only if its key is still ahead of the cursor |
 | G4 | A record is shown as it stood when its page was read, and is never re-sent after a later update |
+
+## Chat history tools (first-party chat)
+
+The journal records Telegram. What people say to an agent through the dashboard and the phone app
+is not in it: that transcript lives in the conversation event store. Two more read tools on the
+same MCP server let an agent read that transcript where it is, so an agent granted both sets can
+look in either place:
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `search_chat_messages` | `query?` (2–256 chars, a substring matched without regard to case), `from?` (`user`\|`agent`), `since?`, `until?`, `limit` 1–50 (default 20), `cursor?` | `{items, next_cursor}`, newest first; each item is `message_id`, `conversation_id`, `from`, `kind`, `sent_at`, `text_preview` (600 chars), `text_truncated` |
+| `get_chat_message` | `message_id` | the same fields with the whole `text` |
+
+- **Scope is the calling agent, applied inside every query.** The reader is the read token's
+  subject, never an argument. An agent reads conversations on the `client` channel whose agent it
+  is, and no other agent's. A subject in `Comms__Journal__ReadAllSubjects` is all-scope for
+  Telegram only; its chat is its own. Another agent's message and one that does not exist answer
+  with the same bytes (`{"error":"not_found"}`).
+- **A message is something someone said**: the person's `submission.text`, and the agent's
+  `turn.final`, `turn.message` and `turn.recovered_answer`. Progress, notices and acknowledgements
+  are never returned.
+- **It reads the transcript, it does not copy it.** No schema change, no projection into the
+  journal, and no change to retention: what can be found is what the event store still holds
+  (durable events, 30 days by default, `Comms__Conversations__DurableEventRetention`). Search is a
+  bounded substring scan over the caller's own conversations, not the journal's full-text index;
+  `%` and `_` in a query match themselves.
+- **Granted like every journal tool**: explicitly, per agent, by an enabled tool row
+  (`mcp__fleet-comms-journal__search_chat_messages`, `mcp__fleet-comms-journal__get_chat_message`)
+  on an agent that has the `fleet-comms-journal` endpoint. No template carries them and nothing
+  grants them automatically. They need the journal listener, so `FLEET_COMMS_JOURNAL_ENABLED=true`,
+  and a provider that sends MCP headers (Claude and Codex; not Gemini).
+- **Not bound to a turn.** Like `search_messages`, they answer from any turn the agent runs,
+  including a Telegram group turn. Today there is one principal, the owner, so the chat an agent
+  can read is the owner's with that agent; treat the grant as "this agent may quote that chat
+  wherever it is talking".
+- A cursor pages the search it came from: one issued for other filters is `invalid_cursor`. No
+  text, query or token is logged or put on a metric label; calls are counted under
+  `fleet.journal.read` with the tool's own name and a fixed result code.
 
 ## Retention, purge and deletion semantics
 

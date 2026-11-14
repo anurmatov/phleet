@@ -190,8 +190,9 @@ public static class ConversationMetrics
 
     // ── read tools (#394) ─────────────────────────────────────────────────────
     //
-    // `tool` here is one of the journal's OWN three read tools — `search_messages`, `get_message`,
-    // `get_conversation` — a fixed set this assembly defines. It is not the tool name an agent's turn
+    // `tool` here is one of the read tools the journal's MCP server serves — `search_messages`,
+    // `get_message`, `get_conversation`, and the chat history pair `search_chat_messages` and
+    // `get_chat_message` — a fixed set the server defines. It is not the tool name an agent's turn
     // called, which the rule at the top of this class keeps off every label.
 
     /// <summary>

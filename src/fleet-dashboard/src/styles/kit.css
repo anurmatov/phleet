@@ -129,13 +129,9 @@ textarea { resize: vertical; }
 .config-actions, .config-save-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .config-save-row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .config-related-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.config-mcp-list { display: flex; flex-direction: column; gap: 4px; }
-.config-mcp-item { display: flex; gap: 10px; font-size: var(--fs-s); }
-.config-mcp-name { min-width: 90px; font-weight: 500; }
-.config-mcp-url { color: var(--text-2); font-family: var(--mono); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 
 .config-panel { margin-top: 10px; padding: 14px 0 4px; border-top: 1px solid var(--border); }
-.config-panel-title, .config-section-label {
+.config-section-label {
   margin-bottom: 10px;
   color: var(--text-3);
   font-size: var(--fs-2xs);
@@ -144,22 +140,7 @@ textarea { resize: vertical; }
   text-transform: uppercase;
 }
 .config-section-label { margin: 16px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
-.config-advanced-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: var(--control);
-  margin: 12px 0 4px;
-  border: none;
-  border-top: 1px solid var(--border);
-  background: none;
-  color: var(--text-2);
-  font-size: var(--fs-m);
-  text-align: left;
-}
-.config-advanced-toggle:hover { color: var(--text); }
-.config-advanced-indicator, .config-section-count {
+.config-section-count {
   padding: 1px 7px;
   border-radius: var(--r-pill);
   background: var(--warn-soft);
@@ -198,7 +179,7 @@ textarea { resize: vertical; }
 /* Centred over the page on a desk. On a phone a dialog is a sheet that comes up from the
    bottom edge and takes the width of the screen. */
 
-.config-modal-overlay, .swf-overlay, .signal-modal-backdrop, .instructions-modal-overlay {
+.config-modal-overlay, .swf-overlay, .signal-modal-backdrop {
   position: fixed;
   z-index: 500;
   inset: 0;
@@ -209,7 +190,7 @@ textarea { resize: vertical; }
   background: var(--scrim);
   animation: fade-in 0.15s ease-out;
 }
-.config-modal, .swf-modal, .signal-modal, .instructions-modal {
+.config-modal, .swf-modal, .signal-modal {
   display: flex;
   flex-direction: column;
   width: min(560px, 100%);
@@ -222,10 +203,9 @@ textarea { resize: vertical; }
   animation: sheet-in 0.18s ease-out;
 }
 .config-modal-sectioned { width: min(920px, 100%); height: min(780px, calc(100dvh - 48px)); }
-.instructions-modal { width: min(1100px, 100%); }
 .signal-modal { gap: 14px; width: min(460px, 100%); padding: 20px; overflow-y: auto; }
 
-.config-modal-header, .swf-header, .instructions-modal-header {
+.config-modal-header, .swf-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -234,7 +214,7 @@ textarea { resize: vertical; }
   padding: 12px 12px 12px 20px;
   border-bottom: 1px solid var(--border);
 }
-.config-modal-title, .swf-title, .instructions-modal-title {
+.config-modal-title, .swf-title {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -245,7 +225,7 @@ textarea { resize: vertical; }
 }
 .signal-modal-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: var(--fs-xl); font-weight: 600; }
 .signal-modal-wf { color: var(--text-2); font-size: var(--fs-s); font-weight: 400; }
-.config-modal-body, .swf-body, .instructions-modal-body { flex: 1; min-height: 0; padding: 18px 20px; overflow-y: auto; }
+.config-modal-body, .swf-body { flex: 1; min-height: 0; padding: 18px 20px; overflow-y: auto; }
 .swf-body { display: flex; flex-direction: column; gap: 10px; }
 .config-modal-footer, .swf-footer {
   display: flex;
@@ -295,11 +275,11 @@ textarea { resize: vertical; }
 @keyframes sheet-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 720px) {
-  .config-modal-overlay, .swf-overlay, .signal-modal-backdrop, .instructions-modal-overlay {
+  .config-modal-overlay, .swf-overlay, .signal-modal-backdrop {
     align-items: flex-end;
     padding: 0;
   }
-  .config-modal, .swf-modal, .signal-modal, .instructions-modal {
+  .config-modal, .swf-modal, .signal-modal {
     width: 100%;
     max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
     padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -523,15 +503,6 @@ textarea { resize: vertical; }
 .wfd-validation-item.blocking { background: var(--danger-soft); color: var(--danger); }
 .wfd-validation-item.warning { background: var(--warn-soft); color: var(--warn); }
 .wfd-validation-ok { margin-top: 8px; font-size: var(--fs-s); }
-.wfd-tpl-vars { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.wfd-tpl-chip {
-  padding: 2px 8px;
-  border-radius: var(--r-pill);
-  background: var(--purple-soft);
-  color: var(--purple);
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-}
 .instruction-picker { display: flex; flex-direction: column; gap: 8px; }
 
 @media (max-width: 899px) {
@@ -879,11 +850,6 @@ input[type='file']::file-selector-button {
 .setup-validation-count { color: var(--danger); font-size: var(--fs-s); }
 .setup-masked-field { display: flex; align-items: center; gap: 8px; }
 .setup-masked-value { flex: 1; color: var(--text-2); font-size: var(--fs-m); letter-spacing: 0.05em; }
-.setup-restart-errors { margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--warn-line); border-radius: var(--r-m); background: var(--warn-soft); font-size: var(--fs-s); }
-.setup-restart-errors__title { margin-bottom: 6px; color: var(--warn); font-weight: 600; }
-.setup-restart-errors__row { color: var(--text-2); }
-.setup-restart-errors__footer { margin-top: 8px; }
-.setup-restart-errors__footer a { color: var(--warn); font-size: var(--fs-xs); }
 
 /* ── Starting a workflow, making a schedule ──────────────────────────────── */
 

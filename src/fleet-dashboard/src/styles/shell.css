@@ -170,14 +170,6 @@ div.sidenav-action { display: flex; align-items: center; color: var(--text-2); }
 }
 
 .app-header-brand { display: none; align-items: center; gap: 10px; min-width: 0; }
-.app-header-title {
-  overflow: hidden;
-  font-size: var(--fs-2xl);
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .header-search-desktop {
   position: relative;

@@ -135,7 +135,6 @@ code, pre, kbd, samp { font-family: var(--mono); }
 .only-phone { display: none !important; }
 @media (max-width: 899px) {
   .only-phone { display: inline-flex !important; }
-  .only-desktop { display: none !important; }
 }
 
 /* ── Menus ───────────────────────────────────────────────────────────────── */

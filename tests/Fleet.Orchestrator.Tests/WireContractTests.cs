@@ -233,6 +233,23 @@ public sealed class WireContractTests
             names);
     }
 
+    /// <summary>
+    /// A PR run owns two technical phases, <c>technical-stalled</c> and <c>merge-hold</c>: it waits
+    /// on its own timers there and reads no signal. A signal is offered, announced by push and
+    /// counted in the badge only in a phase a registered signal names, so neither phase may appear
+    /// here, and no signal of that workflow may be offered in every phase.
+    /// </summary>
+    [Fact]
+    public void No_signal_is_offered_in_a_phase_the_pr_run_owns()
+    {
+        string[] owned = ["technical-stalled", "merge-hold"];
+
+        Assert.All(SignalRegistry.Get("UwePrImplementationWorkflow")!, signal => Assert.NotNull(signal.ValidPhases));
+        Assert.DoesNotContain(
+            SignalRegistry.All.Values.SelectMany(signals => signals).SelectMany(signal => signal.ValidPhases ?? []),
+            phase => owned.Contains(phase, StringComparer.OrdinalIgnoreCase));
+    }
+
     // ── the journal token, minted here and verified by the chat service ──────────────────────────
 
     private const string KeyOne = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";

@@ -10,7 +10,7 @@ import {
 import { ChatConnection, type ChatDeps, type ChatState, type OutgoingFile } from '../chatConnection'
 import { agoLabel, foldTrail, formatElapsed, isTurnRunning, type Quoted, type Transcript } from '../chatTranscript'
 import { agentStanding, isUnread } from '../chatActivity'
-import { browserJpegEncoder, prepareFile } from '../chatFiles'
+import { browserJpegEncoder, prepareFile, sizeLabel } from '../chatFiles'
 import { chatActivity, useChatActivity } from '../hooks/useChatActivity'
 import { useTick } from '../hooks/useTick'
 import type { AgentState } from '../types'
@@ -362,17 +362,20 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
     if (picked.length === 0) return
     if (state?.filesOff) { setComposerError('This deployment has files in chat switched off.'); return }
     const room = MAX_ATTACHMENTS - files.length - preparing
-    if (room <= 0) { setComposerError(`A message carries at most ${MAX_ATTACHMENTS} pictures.`); return }
+    if (room <= 0) { setComposerError(`A message carries at most ${MAX_ATTACHMENTS} files.`); return }
     const taken = picked.slice(0, room)
-    let problem = picked.length > room ? `A message carries at most ${MAX_ATTACHMENTS} pictures; the rest were left out.` : ''
+    let problem = picked.length > room ? `A message carries at most ${MAX_ATTACHMENTS} files; the rest were left out.` : ''
     setPreparing(n => n + taken.length)
     const added: OutgoingFile[] = []
     for (const file of taken) {
       const prepared = await prepareFile(file, browserJpegEncoder)
       if (prepared.ok) {
         added.push({
-          id: newIdentifier(), fileName: prepared.fileName, contentType: prepared.contentType, bytes: prepared.bytes,
-          previewUrl: URL.createObjectURL(new Blob([prepared.bytes as BlobPart], { type: prepared.contentType })),
+          id: newIdentifier(), fileName: prepared.fileName, kind: prepared.kind, contentType: prepared.contentType, bytes: prepared.bytes,
+          // Only a picture is shown before it is sent; a file is named.
+          previewUrl: prepared.kind === 'image'
+            ? URL.createObjectURL(new Blob([prepared.bytes as BlobPart], { type: prepared.contentType }))
+            : null,
           attachmentId: null,
         })
       } else {
@@ -458,7 +461,7 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
             <Icon name="chevronDown" size={16} />{fresh ? 'New messages' : 'Latest'}
           </button>
         )}
-        {dragging && <div className="chat-drop" aria-hidden="true">Drop pictures to attach them</div>}
+        {dragging && <div className="chat-drop" aria-hidden="true">Drop files to attach them</div>}
       </div>
 
       {state.notice && (
@@ -484,8 +487,10 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
         {(files.length > 0 || preparing > 0) && (
           <div className="chat-draft-files">
             {files.map(f => (
-              <span key={f.id} className="chat-draft-file">
-                {f.previewUrl && <img src={f.previewUrl} alt={f.fileName} />}
+              <span key={f.id} className={`chat-draft-file${f.previewUrl ? '' : ' chat-draft-file--named'}`}>
+                {f.previewUrl
+                  ? <img src={f.previewUrl} alt={f.fileName} />
+                  : <><Icon name="file" size={18} /><span className="chat-draft-name" title={f.fileName}>{f.fileName}</span><span className="chat-draft-size">{sizeLabel(f.bytes.length)}</span></>}
                 <button type="button" className="chat-draft-remove" aria-label={`Remove ${f.fileName}`} title="Remove"
                   onClick={() => setFiles(files.filter(x => x.id !== f.id))}>
                   <Icon name="close" size={12} />
@@ -499,10 +504,10 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
           {!state.filesOff && (
             <>
               <button type="button" className="icon-btn chat-attach" disabled={!canAttach}
-                onClick={() => picker.current?.click()} aria-label="Attach pictures" title="Attach pictures">
+                onClick={() => picker.current?.click()} aria-label="Attach files" title="Attach files">
                 <Icon name="attach" />
               </button>
-              <input ref={picker} type="file" accept="image/*" multiple hidden id="chat-file-picker"
+              <input ref={picker} type="file" multiple hidden id="chat-file-picker"
                 onChange={event => {
                   const picked = Array.from(event.target.files ?? [])
                   event.target.value = ''
@@ -530,7 +535,7 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
         </div>
       )}
       <div className="chat-composer-hint">
-        Enter to send, Shift+Enter for a new line.{!state.filesOff && ' Paste or drop pictures to attach them.'}
+        Enter to send, Shift+Enter for a new line.{!state.filesOff && ' Paste or drop files to attach them.'}
       </div>
     </section>
   )

@@ -653,7 +653,7 @@ test('navigation retains an unconfirmed send and retries only with its original 
 // ── files ───────────────────────────────────────────────────────────────────
 
 function picture(id: string, bytes: number[]): OutgoingFile {
-  return { id, fileName: `${id}.png`, contentType: 'image/png', bytes: new Uint8Array(bytes), previewUrl: null, attachmentId: null }
+  return { id, fileName: `${id}.png`, kind: 'image', contentType: 'image/png', bytes: new Uint8Array(bytes), previewUrl: null, attachmentId: null }
 }
 
 /** A chat service that takes files: each reservation gets the next id, `A1`, `A2`, … */
@@ -801,4 +801,16 @@ test('a reply to a message the conversation no longer holds fails for good: send
   await settle()
   assert.equal(c.last().pending[0].status, 'failed')
   assert.equal(c.last().pending[0].canRetry, false)
+})
+
+test('a file that is not a picture is reserved and named as a file', async () => {
+  const server = fileService()
+  const c = await live(server)
+  const notes: OutgoingFile = {
+    id: 'n', fileName: 'notes.pdf', kind: 'file', contentType: 'application/pdf', bytes: new Uint8Array([1, 2]), previewUrl: null, attachmentId: null,
+  }
+  c.chat.send('read this', [notes])
+  await settle()
+  assert.equal((server.callsTo('POST', /\/attachments$/)[0].body as { kind: string }).kind, 'file')
+  assert.deepEqual((server.callsTo('POST', /\/submissions$/)[0].body as { attachments: unknown }).attachments, [{ attachmentId: 'A1', kind: 'file' }])
 })

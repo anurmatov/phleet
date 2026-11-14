@@ -39,7 +39,13 @@ public sealed partial class MySqlConversationStore
         if (request.ByteSize <= 0 || request.ByteSize > ProtocolLimits.MaxAttachmentBytes)
             return new ReserveAttachmentResult { Outcome = ReserveOutcome.TooLarge };
 
-        if (!ProtocolLimits.AcceptedAttachmentTypes.Contains(request.ContentType))
+        // An image is one of the four types. Anything else is a file, and a file's row never holds
+        // a type a client named: the caller passes the generic one or this refuses.
+        var typeAccepted = request.Kind == AttachmentKind.Image
+            ? ProtocolLimits.AcceptedAttachmentTypes.Contains(request.ContentType)
+            : string.Equals(request.ContentType, AttachmentFiles.GenericContentType, StringComparison.Ordinal);
+
+        if (!typeAccepted)
             return new ReserveAttachmentResult { Outcome = ReserveOutcome.UnsupportedType };
 
         await using var connection = await OpenAsync(ct);

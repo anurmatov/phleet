@@ -93,7 +93,7 @@ public sealed class ConversationSouthClient
     /// misbehaving origin cannot make this allocate without limit.
     /// </para>
     /// </remarks>
-    public async Task<(byte[] Bytes, string ContentType)?> FetchAttachmentAsync(
+    public async Task<(byte[] Bytes, string ContentType, string? Extension)?> FetchAttachmentAsync(
         string attachmentId, CancellationToken ct)
     {
         var path = $"/attachments/{attachmentId}/content";
@@ -137,7 +137,13 @@ public sealed class ConversationSouthClient
         // The type the SERVICE sniffed. Nothing here re-decides it.
         var contentType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
 
-        return (buffer.ToArray(), contentType);
+        // Present for a file that is not an image; absent for an image and from a chat service
+        // older than files. Whatever arrives is checked against the list before it names anything.
+        var extension = response.Headers.TryGetValues(AttachmentFiles.ExtensionHeader, out var values)
+            ? AttachmentFiles.KnownExtensionOrUnknown(values.FirstOrDefault())
+            : null;
+
+        return (buffer.ToArray(), contentType, extension);
     }
 
     /// <summary>

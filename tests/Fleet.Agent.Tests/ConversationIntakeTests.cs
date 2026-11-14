@@ -228,6 +228,31 @@ public class ConversationIntakeTests : IDisposable
         Assert.Contains("hello there", prompt);
     }
 
+    // ── files that are not pictures ───────────────────────────────────────────
+
+    /// <summary>
+    /// A file reaches the model as a line naming where the agent's tools can open it, after the
+    /// person's words, in the words the Telegram path uses; a message that was only a file is that
+    /// line alone.
+    /// </summary>
+    [Theory]
+    [InlineData("summarise this", "summarise this\n[document attachment: /workspace/attachments/conv-A.pdf]\n[file attachment: /workspace/attachments/conv-B.csv]")]
+    [InlineData("", "[document attachment: /workspace/attachments/conv-A.pdf]\n[file attachment: /workspace/attachments/conv-B.csv]")]
+    public async Task Files_ReachThePromptAsPathsTheAgentMayOpen(string text, string expected)
+    {
+        var harness = Build();
+        var open = harness.Intake.Open(OpenPayload());
+
+        await harness.Intake.SubmitAsync(open.RuntimeKey, text, documents:
+        [
+            new MessageDocument("A", "application/pdf", 10, null) { FilePath = "/workspace/attachments/conv-A.pdf" },
+            new MessageDocument("B", "application/octet-stream", 10, null) { FilePath = "/workspace/attachments/conv-B.csv" },
+        ]);
+
+        var prompt = await WaitForPromptAsync(harness);
+        Assert.Contains(expected, prompt);
+    }
+
     // ── replies ───────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -406,7 +431,7 @@ public class ConversationIntakeTests : IDisposable
         var notice = Assert.Single(harness.Drain(), e => e.Kind == ConversationEventKind.TurnNotice);
         var text = notice.PayloadAs<TurnNoticePayload>()!.Text;
 
-        Assert.Contains("2 images", text, StringComparison.Ordinal);
+        Assert.Contains("2 files", text, StringComparison.Ordinal);
         Assert.DoesNotContain("/", text, StringComparison.Ordinal);
         Assert.DoesNotContain("attachment_", text, StringComparison.Ordinal);
     }

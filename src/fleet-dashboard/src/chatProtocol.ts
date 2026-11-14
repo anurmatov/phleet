@@ -327,9 +327,9 @@ export function isImageAttachment(attachment: Pick<AttachmentRef, 'kind' | 'cont
   return attachment.kind === 'image' || IMAGE_TYPES.includes(attachment.contentType)
 }
 
-export function reserveBody(file: { contentType: string; byteSize: number; sha256: string; fileName: string }) {
+export function reserveBody(file: { kind: 'image' | 'file'; contentType: string; byteSize: number; sha256: string; fileName: string }) {
   return {
-    protocol: PROTOCOL, kind: 'image', contentType: file.contentType, byteSize: file.byteSize,
+    protocol: PROTOCOL, kind: file.kind, contentType: file.contentType, byteSize: file.byteSize,
     sha256: file.sha256, fileName: file.fileName,
   }
 }
@@ -367,7 +367,7 @@ export function uploadProblem(refusal: Refusal): { message: string; canRetry: bo
     return { message: 'A file is too large for the chat service.', canRetry: false, unsupported: false }
   }
   if (httpStatus === 415 || code === 'unsupported_media_type') {
-    return { message: 'The chat service does not take this kind of file.', canRetry: false, unsupported: false }
+    return { message: 'The chat service does not take this kind of file. An older one takes pictures only.', canRetry: false, unsupported: false }
   }
   if (code === 'attachment_limit') return { message: 'The chat service is holding too many files just now.', canRetry: false, unsupported: false }
   if (httpStatus === 422) return { message: 'The chat service could not read a file as the type it claims to be.', canRetry: false, unsupported: false }

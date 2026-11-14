@@ -61,6 +61,8 @@ export interface OutgoingFile {
   /** This page's own name for it, for a list key and for taking it back out. */
   id: string
   fileName: string
+  /** A picture the model is shown, or a file the agent opens with its tools. */
+  kind: 'image' | 'file'
   contentType: string
   bytes: Uint8Array
   /** Something an `<img>` can show while the bytes are only here, when it is a picture. */
@@ -430,7 +432,7 @@ export class ChatConnection {
     const pending = this.state.pending.find(p => p.submissionId === submissionId)
     if (!pending) return
     const attachments: AttachmentRef[] = pending.files.map(f => ({
-      attachmentId: f.attachmentId!, kind: 'image', contentType: f.contentType, byteSize: f.bytes.length, fileName: f.fileName,
+      attachmentId: f.attachmentId!, kind: f.kind, contentType: f.contentType, byteSize: f.bytes.length, fileName: f.fileName,
     }))
 
     const answer = await this.request(`${conversationPath(conversationId)}/submissions`, {
@@ -483,7 +485,7 @@ export class ChatConnection {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(reserveBody({
-        contentType: file.contentType, byteSize: file.bytes.length, sha256: sha256Hex(file.bytes), fileName: file.fileName,
+        kind: file.kind, contentType: file.contentType, byteSize: file.bytes.length, sha256: sha256Hex(file.bytes), fileName: file.fileName,
       })),
     })
     const reservation = reserved.status === 200 || reserved.status === 201 ? readReservation(reserved.body) : null

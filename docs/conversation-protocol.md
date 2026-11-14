@@ -638,7 +638,8 @@ payload text.
 
 Durable storage, outbox and consumer-claim; client authentication and device registration; push
 delivery; object storage and download capability URLs for attachments; outbound (agent-produced)
-attachments; voice, video and arbitrary documents; routing out-of-process MCP sends back through the
+attachments; voice and video as media a model is given (any file travels as a file: see
+`docs/first-party-api.md` §5.1); routing out-of-process MCP sends back through the
 runtime; WebRTC; client UI; multi-human context isolation. Each of those consumes the contracts
 defined here; none is designed here.
 

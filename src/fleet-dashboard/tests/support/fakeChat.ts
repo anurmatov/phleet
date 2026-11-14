@@ -22,7 +22,7 @@ export class FakeChat {
   /** Whether the chat service has the file routes. */
   filesOn = true
   private sockets: Record<string, WebSocketRoute> = {}
-  private uploads: Record<string, { contentType: string; byteSize: number; fileName: string }> = {}
+  private uploads: Record<string, { kind: string; contentType: string; byteSize: number; fileName: string }> = {}
   private reserved = 0
 
   writes(method: string, match: RegExp): ChatCall[] {
@@ -86,7 +86,7 @@ export class FakeChat {
       m = path.match(/^\/v1\/conversations\/c-([^/]+)\/submissions$/)
       if (method === 'POST' && m) {
         const sent = body as { submissionId: string; text: string; replyToEventId?: string; attachments?: Array<{ attachmentId: string }> }
-        const attachments = (sent.attachments ?? []).map(a => ({ attachmentId: a.attachmentId, kind: 'image', ...this.uploads[a.attachmentId] }))
+        const attachments = (sent.attachments ?? []).map(a => ({ attachmentId: a.attachmentId, ...this.uploads[a.attachmentId] }))
         const seq = this.push(m[1], 'submission.text', sent.submissionId, {
           text: sent.text, ...(attachments.length ? { attachments } : {}), ...(sent.replyToEventId ? { replyToEventId: sent.replyToEventId } : {}),
         })
@@ -97,9 +97,12 @@ export class FakeChat {
       m = path.match(/^\/v1\/conversations\/[^/]+\/attachments$/)
       if (method === 'POST' && m) {
         if (!this.filesOn) return route.fulfill({ status: 404, body: '' })
-        const wanted = body as { contentType: string; byteSize: number; fileName: string }
+        const wanted = body as { kind: string; contentType: string; byteSize: number; fileName: string }
         const attachmentId = `att-${++this.reserved}`
-        this.uploads[attachmentId] = { contentType: wanted.contentType, byteSize: wanted.byteSize, fileName: wanted.fileName }
+        // As the chat service records them: a picture keeps its type, a file never keeps the one it claimed.
+        this.uploads[attachmentId] = wanted.kind === 'file'
+          ? { kind: 'other', contentType: 'application/octet-stream', byteSize: wanted.byteSize, fileName: wanted.fileName }
+          : { kind: 'image', contentType: wanted.contentType, byteSize: wanted.byteSize, fileName: wanted.fileName }
         return json(201, { attachmentId, uploadUrl: `/v1/attachments/${attachmentId}/content`, uploadToken: `token-${attachmentId}`, maxBytes: 8388608 })
       }
       m = path.match(/^\/v1\/attachments\/([^/]+)\/content$/)

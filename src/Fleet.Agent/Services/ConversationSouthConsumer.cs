@@ -461,6 +461,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
                     replyToEventId: envelope.Payload?.ReplyToEventId,
                     submissionId: owned.SubmissionId,
                     images: fetched.Images,
+                    documents: fetched.Documents,
                     replyQuote: envelope.Payload?.ReplyTo is { } quoted
                         ? new ConversationIntake.ReplyQuote(
                             FromUser: string.Equals(quoted.From, "user", StringComparison.Ordinal),

@@ -298,7 +298,7 @@ public sealed class ConversationSouthConsumerTests
             harness.Drain(), e => e.Kind == ConversationEventKind.TurnNotice);
 
         var text = notice.PayloadAs<TurnNoticePayload>()!.Text;
-        Assert.Contains("2 images", text, StringComparison.Ordinal);
+        Assert.Contains("2 files", text, StringComparison.Ordinal);
 
         // A count and nothing else — no id, no path, no transport reason (Constraints 4 and 5).
         Assert.DoesNotContain("01JATTACHMENT", text, StringComparison.Ordinal);

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { WireEvent } from './chatProtocol'
 import {
-  GAP_TEXT, agoLabel, applyEvents, applyGap, dayKey, dayLabel, emptyTranscript, excerpt, foldTrail, formatElapsed, isTurnRunning,
+  GAP_TEXT, agoLabel, applyEvents, attachmentWords, applyGap, dayKey, dayLabel, emptyTranscript, excerpt, foldTrail, formatElapsed, isTurnRunning,
   quotedBy, replyNote, statusLabel, type Transcript,
 } from './chatTranscript.ts'
 
@@ -341,4 +341,14 @@ test('a reply knows what it answers: the agent’s words, the person’s own, pi
 
   assert.equal(excerpt('x'.repeat(200)).length, 141)
   assert.equal(excerpt('  spaced \n\n out  '), 'spaced out')
+})
+
+test('a message that was only files is named by what they are', () => {
+  const image = { attachmentId: 'a', kind: 'image', contentType: 'image/png', byteSize: 1, fileName: 'a.png' }
+  const file = { attachmentId: 'b', kind: 'other', contentType: 'application/pdf', byteSize: 1, fileName: 'b.pdf' }
+  assert.equal(attachmentWords([]), '')
+  assert.equal(attachmentWords([image]), 'A picture')
+  assert.equal(attachmentWords([image, image]), '2 pictures')
+  assert.equal(attachmentWords([file]), 'A file')
+  assert.equal(attachmentWords([image, file]), '2 files')
 })

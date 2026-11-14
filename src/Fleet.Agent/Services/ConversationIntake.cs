@@ -185,7 +185,8 @@ public sealed class ConversationIntake
         long runtimeKey, string text,
         string? replyToEventId = null, string? submissionId = null,
         IReadOnlyList<MessageImage>? images = null,
-        ReplyQuote? replyQuote = null)
+        ReplyQuote? replyQuote = null,
+        IReadOnlyList<MessageDocument>? documents = null)
     {
         var reference = _registry.Lookup(runtimeKey);
         if (reference is null)
@@ -206,6 +207,14 @@ public sealed class ConversationIntake
         // the same words, after a line saying which earlier message they answer.
         var said = text;
         text = WithReplyQuote(text, replyQuote);
+
+        // Files that are not pictures reach the agent as paths it may open, in the same words the
+        // Telegram path uses. Pictures are left as they were: the model is shown them directly.
+        if (documents is { Count: > 0 })
+        {
+            var hints = AttachmentSweeper.BuildHints([], documents);
+            if (hints.Length > 0) text = text.Length > 0 ? $"{text}\n{hints}" : hints;
+        }
 
         // Buffer in memory exactly as the DM path does, so a cold executor still gets context.
         // SaveBuffers skips reserved keys, so this never reaches disk.
@@ -252,7 +261,7 @@ public sealed class ConversationIntake
 
         return await _taskManager.StartTask(
             runtimeKey, prompt, Display(said), isSessionTask: true,
-            source: TaskSource.UserMessage, images: images, userId: 0, identity: identity,
+            source: TaskSource.UserMessage, images: images, documents: documents, userId: 0, identity: identity,
             priority: primary ? TaskPriority.PrimaryHuman : TaskPriority.Routine,
             steeringEligible: primary,
             coldStartTask: coldStartPrompt);
@@ -323,8 +332,8 @@ public sealed class ConversationIntake
             new TurnNoticePayload
             {
                 Text = unavailable == 1
-                    ? "An image sent with this message is unavailable and was not included."
-                    : $"{unavailable} images sent with this message are unavailable and were not "
+                    ? "A file sent with this message is unavailable and was not included."
+                    : $"{unavailable} files sent with this message are unavailable and were not "
                       + "included.",
             });
     }

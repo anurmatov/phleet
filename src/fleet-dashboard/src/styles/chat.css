@@ -528,6 +528,18 @@ a.chat-file:hover { border-color: var(--border-strong); background: var(--surfac
 }
 .chat-draft-file img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
 .chat-draft-file--preparing { width: auto; padding: 0 12px; }
+.chat-draft-file--named {
+  grid-auto-flow: column;
+  justify-content: start;
+  gap: 8px;
+  width: auto;
+  max-width: 240px;
+  padding: 0 12px;
+  color: var(--text);
+  font-size: var(--fs-xs);
+}
+.chat-draft-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-draft-size { color: var(--text-3); }
 .chat-draft-remove {
   position: absolute;
   top: -7px;

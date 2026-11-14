@@ -13,7 +13,7 @@
 //   running turn never receives a terminal naming it; closing it any other way leaves it working
 //   forever.
 
-import { readAttachments } from './chatProtocol.ts'
+import { isImageAttachment, readAttachments } from './chatProtocol.ts'
 import type { AttachmentRef, Gap, WireEvent } from './chatProtocol'
 
 export type SubmissionStatus =
@@ -377,7 +377,14 @@ export function quotedBy(entry: Entry, byKey: ReadonlyMap<string, Entry>): Quote
   const target = byKey.get(entry.replyTo)
   if (!target || target.type === 'system') return { key: entry.replyTo, who: 'agent', text: '' }
   const words = target.text.trim() !== '' ? target.text
-    : target.type === 'you' && target.attachments.length > 0 ? (target.attachments.length === 1 ? 'A picture' : `${target.attachments.length} pictures`)
+    : target.type === 'you' ? attachmentWords(target.attachments)
     : ''
   return { key: target.key, who: target.type, text: excerpt(words) }
+}
+
+/** A message that was only files, in words: `A picture`, `3 pictures`, `A file`, `2 files`. Empty for none. */
+export function attachmentWords(attachments: readonly AttachmentRef[]): string {
+  if (attachments.length === 0) return ''
+  const noun = attachments.every(isImageAttachment) ? 'picture' : 'file'
+  return attachments.length === 1 ? `A ${noun}` : `${attachments.length} ${noun}s`
 }

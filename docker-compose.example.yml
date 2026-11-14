@@ -585,6 +585,16 @@ services:
       - Comms__Conversations__EphemeralEventRetention=${FLEET_COMMS_EPHEMERAL_RETENTION:-1.00:00:00}
       - Comms__Conversations__DurableEventRetention=${FLEET_COMMS_DURABLE_RETENTION:-30.00:00:00}
       - Comms__Conversations__OutboxRetention=${FLEET_COMMS_OUTBOX_RETENTION:-1.00:00:00}
+      # ── Files in chat (pictures and any other file) ───────────────────────────
+      # Where the bytes of what people attach are kept, inside this container; the volume below
+      # puts it on the host so it outlives a recreate. Needs the conversation feature; without it
+      # the routes do not exist. The service bounds it: 8 MiB a file, 256 MiB a conversation,
+      # 2 GiB in all, and a file goes when the message it was sent with ages out.
+      #
+      # Set FLEET_COMMS_ATTACHMENT_ROOT to an empty value to turn files off: the phone app and the
+      # dashboard then say so instead of offering them. (No colon in the default below on
+      # purpose: only an UNSET variable takes the default, an empty one stays empty.)
+      - Comms__AttachmentRootPath=${FLEET_COMMS_ATTACHMENT_ROOT-/var/lib/fleet-comms/attachments}
       # ── Conversation journal (opt-in, needs the conversation feature) ────────
       # Off unless FLEET_COMMS_JOURNAL_ENABLED=true. Its listener is on the Docker network only and
       # is NEVER in the `ports:` block above: publishers are containers on fleet-net. The workflow
@@ -612,6 +622,8 @@ services:
       - Comms__Media__Bucket=${FLEET_COMMS_MEDIA_BUCKET:-comms-journal}
       - Comms__Media__AccessKey=${FLEET_COMMS_MEDIA_ACCESS_KEY:-}
       - Comms__Media__SecretKey=${FLEET_COMMS_MEDIA_SECRET_KEY:-}
+    volumes:
+      - ${FLEET_BASE_DIR}/comms-attachments:/var/lib/fleet-comms/attachments
     mem_limit: 512m
     restart: unless-stopped
     healthcheck:

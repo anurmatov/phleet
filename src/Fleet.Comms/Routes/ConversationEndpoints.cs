@@ -464,7 +464,12 @@ public static class ConversationEndpoints
         if (!ProtocolVersion.IsSupported(body.Protocol))
             return Error(ProtocolErrorCode.UnsupportedProtocol, StatusCodes.Status400BadRequest);
 
-        if (body.ContentType is null || body.ByteSize is null || body.Sha256 is null)
+        // An image (the default) or any other file. Nothing else is a kind.
+        var isFile = string.Equals(body.Kind, AttachmentFiles.FileKind, StringComparison.Ordinal);
+
+        // An image must say which of the four types it is, because that is checked against its
+        // bytes. A file's declared type is not needed and is never used: see AttachmentFiles.
+        if ((body.ContentType is null && !isFile) || body.ByteSize is null || body.Sha256 is null)
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
         // 64 lowercase hex, checked here so a malformed digest is a client error rather than an
@@ -472,9 +477,9 @@ public static class ConversationEndpoints
         if (!IsLowerHexDigest(body.Sha256))
             return Error(ProtocolErrorCode.UnsupportedKind, StatusCodes.Status400BadRequest);
 
-        // v1 carries images only. A `document` reservation would reserve bytes nothing downstream
-        // can render, so it is refused with the same code an unaccepted image type gets.
-        if (body.Kind is not (null or "image"))
+        // `image` (or nothing, which a client from before files existed sends) and `file`. Any other
+        // word is refused with the same code an unaccepted image type gets.
+        if (body.Kind is not (null or "image") && !isFile)
             return Error(ProtocolErrorCode.UnsupportedMediaType, StatusCodes.Status415UnsupportedMediaType);
 
         // 32 CSPRNG bytes, base64url. The one moment this value exists outside the client.
@@ -493,8 +498,10 @@ public static class ConversationEndpoints
                 // Derived from the device record, never from the body — the same rule every other
                 // authenticated route here follows.
                 PrincipalId = caller.PrincipalId,
-                Kind = AttachmentKind.Image,
-                ContentType = body.ContentType,
+                Kind = isFile ? AttachmentKind.Other : AttachmentKind.Image,
+
+                // A file's declared type goes no further than this line.
+                ContentType = isFile ? AttachmentFiles.GenericContentType : body.ContentType!,
                 ByteSize = body.ByteSize.Value,
                 Sha256 = body.Sha256.ToLowerInvariant(),
                 FileName = body.FileName,

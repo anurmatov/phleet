@@ -771,6 +771,24 @@ test('chat: a picture is reserved, sent up with its own token, named by the mess
   expect(chat.writes('POST', /\/submissions$/)[0].body).toMatchObject({ text: '', attachments: [{ attachmentId: 'att-1', kind: 'image' }] })
 })
 
+test('chat: a file that is not a picture goes up as a file and is shown as a link that saves it', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha')
+  await page.locator('#chat-file-picker').setInputFiles({ name: 'notes.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.7 notes') })
+  // Named, not drawn, before it is sent.
+  await expect(page.locator('.chat-draft-file--named')).toContainText('notes.pdf')
+  await page.getByLabel('Message Alpha').fill('read this')
+  await page.getByRole('button', { name: 'Send' }).click()
+
+  const link = page.locator('.chat-row--you a.chat-file')
+  await expect(link).toContainText('notes.pdf')
+  expect(chat.writes('POST', /\/attachments$/)[0].body).toMatchObject({ kind: 'file', fileName: 'notes.pdf', byteSize: 14 })
+  expect(chat.writes('POST', /\/submissions$/)[0].body).toMatchObject({ text: 'read this', attachments: [{ attachmentId: 'att-1', kind: 'file' }] })
+  await expect(link).toHaveAttribute('href', '/v1/attachments/att-1/content')
+  await expect(link).toHaveAttribute('download', 'notes.pdf')
+  // It is never drawn in the page.
+  await expect(page.locator('.chat-row--you .chat-picture')).toHaveCount(0)
+})
+
 test('chat: a deployment with files off says so once and stops offering them; the words are kept', async ({ page }) => {
   const { chat } = await openChat(page, 'chat/alpha', c => { c.filesOn = false })
   await page.getByLabel('Message Alpha').fill('look at this')
@@ -778,7 +796,7 @@ test('chat: a deployment with files off says so once and stops offering them; th
   await page.getByRole('button', { name: 'Send' }).click()
 
   await expect(page.locator('.chat-meta--error')).toContainText('files in chat switched off')
-  await expect(page.getByRole('button', { name: 'Attach pictures' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Attach files' })).toHaveCount(0)
   // Nothing was sent without its picture, and the failed message can be taken back out.
   expect(chat.writes('POST', /\/submissions$/)).toHaveLength(0)
   await expect(page.locator('.chat-bubble--failed')).toHaveText('You: look at this')

@@ -1,3 +1,4 @@
+using Fleet.Protocol;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
 using Microsoft.Extensions.Logging;
@@ -41,15 +42,24 @@ public sealed class ConversationAttachmentFetcher(
     ILogger<ConversationAttachmentFetcher> logger)
 {
     /// <summary>What one dispatch's attachments resolved to.</summary>
-    /// <param name="Images">Everything that was fetched. May be shorter than what was asked for.</param>
+    /// <param name="Images">Every picture that was fetched. May be shorter than what was asked for.</param>
+    /// <param name="Documents">
+    /// Every other file that was fetched and written to disk: the agent opens these with its own
+    /// tools, from the path. A file that could not be written is counted in <paramref name="Unavailable"/>,
+    /// because without a path there is nothing to hand the agent.
+    /// </param>
     /// <param name="Unavailable">
     /// How many could not be fetched. Non-zero means the caller owes the client a
     /// <c>turn.notice</c> — the turn still runs with its text, and it must never answer as though no
     /// image was sent (MUST NOT / AC-29).
     /// </param>
-    public sealed record Fetched(IReadOnlyList<MessageImage> Images, int Unavailable)
+    public sealed record Fetched(
+        IReadOnlyList<MessageImage> Images, int Unavailable, IReadOnlyList<MessageDocument>? Files = null)
     {
         public static readonly Fetched None = new([], 0);
+
+        /// <summary>Never null: the files, or none.</summary>
+        public IReadOnlyList<MessageDocument> Documents { get; } = Files ?? [];
     }
 
     /// <summary>
@@ -73,6 +83,7 @@ public sealed class ConversationAttachmentFetcher(
         if (attachmentIds.Count == 0) return Fetched.None;
 
         var images = new List<MessageImage>(attachmentIds.Count);
+        var documents = new List<MessageDocument>();
         var unavailable = 0;
 
         foreach (var attachmentId in attachmentIds)
@@ -94,7 +105,20 @@ public sealed class ConversationAttachmentFetcher(
                     continue;
                 }
 
-                images.Add(Persist(attachmentId, fetched.Value.Bytes, fetched.Value.ContentType));
+                // One of the four image types is a picture for the model. Everything else is a file
+                // for its tools, and the type that decides is the one the service read from the bytes.
+                if (ProtocolLimits.AcceptedAttachmentTypes.Contains(fetched.Value.ContentType))
+                {
+                    images.Add(Persist(attachmentId, fetched.Value.Bytes, fetched.Value.ContentType));
+                }
+                else if (PersistFile(attachmentId, fetched.Value.Bytes, fetched.Value.ContentType, fetched.Value.Extension) is { } file)
+                {
+                    documents.Add(file);
+                }
+                else
+                {
+                    unavailable++;
+                }
             }
             catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -105,7 +129,42 @@ public sealed class ConversationAttachmentFetcher(
             }
         }
 
-        return new Fetched(images, unavailable);
+        return new Fetched(images, unavailable, documents);
+    }
+
+    /// <summary>
+    /// Write a file that is not an image beside the other attachments, for the agent's tools.
+    /// </summary>
+    /// <remarks>
+    /// Named by the attachment's id and an extension from the chat service's list, never by the
+    /// name the person's device gave it. Null when there is no directory or the write failed: a
+    /// file has no in-memory form to fall back on, so it is reported as unavailable.
+    /// </remarks>
+    private MessageDocument? PersistFile(string attachmentId, byte[] bytes, string contentType, string? extension)
+    {
+        var directory = telegram.Value.AttachmentDir;
+        if (string.IsNullOrWhiteSpace(directory)) return null;
+
+        // A PDF is known from its bytes, whatever it was called; anything else takes the listed
+        // extension the service sent, or `.bin`.
+        var suffix = string.Equals(contentType, AttachmentFiles.PdfContentType, StringComparison.Ordinal)
+            ? ".pdf"
+            : AttachmentFiles.KnownExtensionOrUnknown(extension);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, $"conv-{attachmentId}{suffix}");
+            File.WriteAllBytes(path, bytes);
+
+            return new MessageDocument(attachmentId, contentType, bytes.LongLength, FileName: null) { FilePath = path };
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(
+                "conversation file could not be persisted: {Error}", e.GetType().Name);
+            return null;
+        }
     }
 
     /// <summary>

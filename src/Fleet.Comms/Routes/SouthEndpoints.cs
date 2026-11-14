@@ -211,6 +211,12 @@ public static class SouthEndpoints
                     if (bytes is null)
                         return Error(ProtocolErrorCode.AttachmentGone, StatusCodes.Status410Gone);
 
+                    // What the agent names its copy of a file with, so its tools know what they are
+                    // opening: the name's extension when it is on the list, `.bin` otherwise. An
+                    // image is named from its sniffed type by the agent and needs none.
+                    if (row.Kind != AttachmentKind.Image)
+                        http.Response.Headers[AttachmentFiles.ExtensionHeader] = AttachmentFiles.SafeExtension(row.FileName);
+
                     // The SNIFFED type from the row. There is no other type in this system.
                     return Results.Stream(bytes, row.ContentType);
                 });

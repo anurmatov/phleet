@@ -1,10 +1,11 @@
 // Getting a picked, pasted or dropped file into the shape the chat service takes.
 //
-// The chat service accepts JPEG, PNG, GIF and WebP up to a size limit and refuses everything else
-// when a place is reserved for it. A picture already in one of those types and under the limit goes
-// as it is (a screenshot stays a sharp PNG). Any other picture the browser can read (HEIC from a
+// The chat service takes two kinds of thing, each up to a size limit. A picture is JPEG, PNG, GIF
+// or WebP: the model is shown it. A picture already in one of those types and under the limit goes
+// as it is (a screenshot stays a sharp PNG); any other picture the browser can read (HEIC from a
 // phone, a huge photo) is drawn again as a JPEG, scaled down and squeezed until it fits, the same
-// as the phone app does.
+// as the phone app does. Anything else is a file: its bytes go as they are, and the agent opens it
+// with its own tools. A picture this browser cannot draw goes as a file too, rather than not at all.
 //
 // The decisions are plain functions `node --test` can run; drawing needs a browser and is passed in.
 
@@ -25,9 +26,12 @@ export interface PickedFile {
   size: number
 }
 
+/** What the chat service is told a file is: a picture for the model, or a file for the agent's tools. */
+export type FileKind = 'image' | 'file'
+
 export type FilePlan =
   /** Send the bytes as they are. */
-  | { type: 'as-is' }
+  | { type: 'as-is'; kind: FileKind }
   /** Draw it again as a JPEG. */
   | { type: 'reencode' }
   /** Not something chat can carry. */
@@ -36,11 +40,12 @@ export type FilePlan =
 /** What to do with a picked file. */
 export function planFile(file: PickedFile, maxBytes: number = MAX_FILE_BYTES): FilePlan {
   if (file.size === 0) return { type: 'refuse', problem: `“${file.name}” is empty.` }
-  if (IMAGE_TYPES.includes(file.type)) return file.size <= maxBytes ? { type: 'as-is' } : { type: 'reencode' }
+  if (IMAGE_TYPES.includes(file.type)) return file.size <= maxBytes ? { type: 'as-is', kind: 'image' } : { type: 'reencode' }
   // A type the browser may still be able to draw (HEIC in Safari, BMP, AVIF). SVG is left out: it
-  // is a document that can carry script, and drawing one to send as a photo is nobody's intent.
+  // is a document, and it goes as the file it is rather than as a drawing of itself.
   if (file.type.startsWith('image/') && file.type !== 'image/svg+xml') return { type: 'reencode' }
-  return { type: 'refuse', problem: `“${file.name}” is not a picture. Chat takes pictures only.` }
+  if (file.size > maxBytes) return { type: 'refuse', problem: `“${file.name}” is too large to send (${sizeLabel(file.size)}; the limit is ${sizeLabel(maxBytes)}).` }
+  return { type: 'as-is', kind: 'file' }
 }
 
 /** The size a picture is drawn at so its longer side is at most `maxSide`. Never larger than it is. */
@@ -67,7 +72,7 @@ export function sizeLabel(bytes: number): string {
 export type JpegEncoder = (file: Blob, size: (width: number, height: number) => { width: number; height: number }, quality: number) => Promise<Uint8Array | null>
 
 export type Prepared =
-  | { ok: true; fileName: string; contentType: string; bytes: Uint8Array }
+  | { ok: true; kind: FileKind; fileName: string; contentType: string; bytes: Uint8Array }
   | { ok: false; problem: string }
 
 /** The bytes to send for a picked file, or why it cannot be sent. */
@@ -78,17 +83,26 @@ export async function prepareFile(
 ): Promise<Prepared> {
   const plan = planFile(file, maxBytes)
   if (plan.type === 'refuse') return { ok: false, problem: plan.problem }
-  if (plan.type === 'as-is') {
+  const asItIs = async (kind: FileKind): Promise<Prepared> => {
     try {
-      return { ok: true, fileName: file.name || 'image', contentType: file.type, bytes: new Uint8Array(await file.arrayBuffer()) }
+      return {
+        ok: true, kind, fileName: file.name || (kind === 'image' ? 'image' : 'file'),
+        contentType: file.type || 'application/octet-stream', bytes: new Uint8Array(await file.arrayBuffer()),
+      }
     } catch {
       return { ok: false, problem: `“${file.name}” could not be read.` }
     }
   }
+  if (plan.type === 'as-is') return asItIs(plan.kind)
+
   for (const quality of JPEG_QUALITIES) {
     const bytes = await encode(file as unknown as Blob, (w, h) => scaledSize(w, h), quality)
-    if (!bytes) return { ok: false, problem: `“${file.name}” is not a picture this browser can read.` }
-    if (bytes.length <= maxBytes) return { ok: true, fileName: jpegName(file.name), contentType: 'image/jpeg', bytes }
+    if (!bytes) {
+      // A picture this browser cannot draw (HEIC outside Safari) still goes, as the file it is.
+      return file.size <= maxBytes ? asItIs('file')
+        : { ok: false, problem: `“${file.name}” is too large to send, and this browser cannot make it smaller.` }
+    }
+    if (bytes.length <= maxBytes) return { ok: true, kind: 'image', fileName: jpegName(file.name), contentType: 'image/jpeg', bytes }
   }
   return { ok: false, problem: `“${file.name}” is too large to send, even made smaller.` }
 }

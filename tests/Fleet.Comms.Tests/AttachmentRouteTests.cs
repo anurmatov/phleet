@@ -424,6 +424,148 @@ public sealed class AttachmentRouteTests : IAsyncDisposable
         Assert.Contains("no-store", response.Headers.CacheControl?.ToString() ?? "");
     }
 
+    // ── files that are not images ────────────────────────────────────────────
+
+    private static Task<HttpResponseMessage> ReserveFileAsync(
+        NorthTestHost host, string bearer, string conversationId, object body)
+    {
+        var request = new HttpRequestMessage(
+            HttpMethod.Post, $"/v1/conversations/{conversationId}/attachments")
+        {
+            Content = JsonContent.Create(body, options: FleetProtocolJson.Options),
+        };
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {bearer}");
+        return host.Client.SendAsync(request);
+    }
+
+    /// <summary>
+    /// A file is reserved as a file, and the type the client declared for it goes no further than
+    /// the route: the store is handed the generic type, whatever was claimed.
+    /// </summary>
+    [Theory]
+    [InlineData("text/html")]
+    [InlineData("image/png")]
+    [InlineData(null)]
+    public async Task Reserve_AFile_NeverRecordsTheTypeTheClientDeclared(string? declared)
+    {
+        var store = new FakeConversationStore
+        {
+            NextReserve = new ReserveAttachmentResult
+            {
+                Outcome = ReserveOutcome.Reserved, AttachmentId = Id("F1"),
+                ExpiresAt = DateTimeOffset.UtcNow + ProtocolLimits.AttachmentUploadWindow,
+            },
+        };
+        await using var host = await StartAsync(store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var response = await ReserveFileAsync(host, token, store.ConversationId, new
+        {
+            protocol = ProtocolVersion.Current, kind = "file", contentType = declared,
+            byteSize = 12, sha256 = new string('a', 64), fileName = "notes.html",
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var reserved = Assert.Single(store.Reservations);
+        Assert.Equal(AttachmentKind.Other, reserved.Kind);
+        Assert.Equal(AttachmentFiles.GenericContentType, reserved.ContentType);
+    }
+
+    /// <summary>`image` (or nothing) and `file` are the kinds. Any other word reserves nothing.</summary>
+    [Theory]
+    [InlineData("video")]
+    [InlineData("document")]
+    [InlineData("FILE")]
+    public async Task Reserve_AnUnknownKind_IsRefusedAndReservesNothing(string kind)
+    {
+        var store = new FakeConversationStore();
+        await using var host = await StartAsync(store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var response = await ReserveFileAsync(host, token, store.ConversationId, new
+        {
+            protocol = ProtocolVersion.Current, kind, contentType = "application/pdf",
+            byteSize = 12, sha256 = new string('a', 64), fileName = "a.pdf",
+        });
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.Empty(store.Reservations);
+    }
+
+    /// <summary>An image still has to say which of the four types it is.</summary>
+    [Fact]
+    public async Task Reserve_AnImageWithNoDeclaredType_IsStillRefused()
+    {
+        var store = new FakeConversationStore();
+        await using var host = await StartAsync(store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var response = await ReserveFileAsync(host, token, store.ConversationId, new
+        {
+            protocol = ProtocolVersion.Current, kind = "image", byteSize = 12, sha256 = new string('a', 64),
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Empty(store.Reservations);
+    }
+
+    /// <summary>
+    /// A file's bytes are stored without being read and sealed under a type this service chose:
+    /// HTML is sealed as the generic type, never as something a browser would run, and a PDF is
+    /// known from its first bytes rather than its name.
+    /// </summary>
+    [Theory]
+    [InlineData("<!DOCTYPE html><script>alert(1)</script>", "application/octet-stream")]
+    [InlineData("%PDF-1.7 the rest of a pdf", "application/pdf")]
+    [InlineData("plain words", "application/octet-stream")]
+    public async Task Upload_AFile_IsSealedUnderATypeTheServiceChose(string content, string expectedType)
+    {
+        var store = new FakeConversationStore();
+        await using var host = await StartAsync(store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var bytes = Encoding.UTF8.GetBytes(content);
+        var (id, uploadToken) = await ReserveFor(host, store, bytes, token, declaredType: AttachmentFiles.GenericContentType);
+        store.Attachments[id] = store.Attachments[id] with { Kind = AttachmentKind.Other, FileName = "page.html" };
+
+        var upload = await UploadAsync(host, id, uploadToken, bytes);
+
+        Assert.Equal(HttpStatusCode.Created, upload.StatusCode);
+        Assert.Equal(expectedType, Assert.Single(store.Seals).SniffedContentType);
+        Assert.Equal(expectedType, (await ReadAsync(upload)).GetProperty("contentType").GetString());
+        Assert.True(File.Exists(PathFor(id)));
+    }
+
+    /// <summary>
+    /// A file is always saved, never shown in place, and the name offered for it is the reduced
+    /// one: no path, nothing that could end the header, percent-encoded.
+    /// </summary>
+    [Theory]
+    [InlineData("Q3 report.pdf", "attachment; filename*=UTF-8''Q3%20report.pdf")]
+    [InlineData("../../etc/passwd", "attachment; filename*=UTF-8''passwd")]
+    [InlineData("a\"; filename=\"evil.html", "attachment; filename*=UTF-8''a%20filename%3Devil.html")]
+    [InlineData("отчёт.txt", "attachment; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82.txt")]
+    [InlineData("\r\n", "attachment")]
+    public async Task Download_AFile_IsSavedUnderAReducedName_WithTheHardeningHeaders(string fileName, string expected)
+    {
+        var store = new FakeConversationStore();
+        await using var host = await StartAsync(store);
+        var (_, _, token) = await host.EnrolledDeviceAsync();
+
+        var bytes = Encoding.UTF8.GetBytes("<script>alert(1)</script>");
+        var (id, uploadToken) = await ReserveFor(host, store, bytes, token, declaredType: AttachmentFiles.GenericContentType);
+        store.Attachments[id] = store.Attachments[id] with { Kind = AttachmentKind.Other, FileName = fileName };
+        await UploadAsync(host, id, uploadToken, bytes);
+
+        var response = await DownloadAsync(host, id, token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(AttachmentFiles.GenericContentType, response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(expected, Header(response, "Content-Disposition"));
+        Assert.Equal("nosniff", Header(response, "X-Content-Type-Options"));
+        Assert.Equal("default-src 'none'; sandbox", Header(response, "Content-Security-Policy"));
+    }
+
     // ── submit-side bounds, refused before any transaction ───────────────────
 
     /// <summary>AC-6 — a list naming the same id twice is malformed, not a missing attachment.</summary>

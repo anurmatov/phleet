@@ -3,7 +3,7 @@ import AgentMarkdown from './AgentMarkdown'
 import CopyButton from './CopyButton'
 import Icon from './Icon'
 import {
-  dayKey, dayLabel, excerpt, quotedBy, statusLabel, timeLabel, type Entry, type Quoted, type SubmissionStatus,
+  attachmentWords, dayKey, dayLabel, excerpt, quotedBy, statusLabel, timeLabel, type Entry, type Quoted, type SubmissionStatus,
 } from '../chatTranscript'
 import { attachmentContentPath, isImageAttachment, type AttachmentRef } from '../chatProtocol'
 import { sizeLabel } from '../chatFiles'
@@ -83,7 +83,7 @@ const EntryRow = memo(function EntryRow({ entry, label, quoted, onReply, agentLa
   agentLabel: string
 }) {
   if (entry.type === 'you') {
-    const words = entry.text.trim() !== '' ? entry.text : entry.attachments.length === 1 ? 'A picture' : `${entry.attachments.length} pictures`
+    const words = entry.text.trim() !== '' ? entry.text : attachmentWords(entry.attachments)
     return (
       <div className="chat-row chat-row--you" id={entryElementId(entry.key)}>
         {quoted && <Quote quoted={quoted} agentLabel={agentLabel} />}

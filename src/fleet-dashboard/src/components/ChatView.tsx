@@ -7,7 +7,7 @@ import {
   MAX_ATTACHMENTS, loadClientInstanceId, newIdentifier, pickAgent, readChatAgents, shouldSendOnKey, sizeNote, utf8Bytes,
   wsBaseFor, type ChatAgent,
 } from '../chatProtocol'
-import { ChatConnection, type ChatDeps, type ChatState, type OutgoingFile } from '../chatConnection'
+import { ChatConnection, pendingToShow, type ChatDeps, type ChatState, type OutgoingFile } from '../chatConnection'
 import { agoLabel, foldTrail, formatElapsed, isTurnRunning, type Quoted, type Transcript } from '../chatTranscript'
 import { agentStanding, isUnread } from '../chatActivity'
 import { browserJpegEncoder, prepareFile, sizeLabel } from '../chatFiles'
@@ -452,7 +452,7 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
               </p>
             </div>
           )}
-          <ChatTranscript entries={state.transcript.entries} status={state.transcript.status} pending={state.pending}
+          <ChatTranscript entries={state.transcript.entries} status={state.transcript.status} pending={pendingToShow(state.transcript, state.pending)}
             onRetry={id => chat?.retry(id)} onDiscard={id => chat?.discard(id)} onReply={canSend ? startReply : undefined} agentLabel={agent.displayName} />
           {running && <Working name={agent.displayName} transcript={state.transcript} />}
         </div>

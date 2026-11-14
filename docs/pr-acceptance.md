@@ -47,8 +47,9 @@ approval, one for a human approval). In `off`, read only the actual head, every
 CI page and diff paths. Skip body hashing, design lookup, plans, receipts, prior
 rounds, owner and capability-map checks. Ignore missing/malformed acceptance
 tokens. After a delegated approval, unchanged head plus successful CI routes to
-MERGE and anything else invalidates the approval, as before. After a human
-approval the same re-pin feeds the merge check described under
+MERGE and anything else invalidates the approval, as before; that re-pin step
+and its instruction are the ones that shipped before the holds. After a human
+approval a re-pin with the CI read tokens feeds the merge check described under
 "Holds and the technical stall". The required acceptance subtree is unchanged.
 The plan/receipt/lease sections below apply only in `required` mode. Empty JSON
 strings have an explicit off case because the engine default filter only covers
@@ -312,7 +313,9 @@ starts only after verified merge and retains issue/reviewer/preparation inputs.
 ## PIN evidence and routing
 
 The configured CTO performs a read-only PIN, bounded to 15 minutes, with
-`REQUIRE_ACCEPTANCE` on every PIN and post-approval repin. Off-mode PIN emits
+`REQUIRE_ACCEPTANCE` on every PIN and post-approval repin. A delegated
+approval's re-pin is asked for the tokens it was always asked for (no CI_READ,
+no CI_DETAIL); the other four are asked for these. Off-mode PIN emits
 only HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS. Required-mode PIN emits
 PR, HEAD_OID, IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS, PLAN, PLAN_SHA256,
 MAX_DURATION, WAIT_SECONDS, PRE_STAGES, POST_STAGES, OWNER, PRIOR_RECEIPTS,
@@ -497,6 +500,30 @@ throughout: one consensus round, one gate visit. When the passes are spent the
 run stalls with `merge_held`; back from the stall it checks once more without
 waiting, and stalls again if still held.
 
+A merge that stays held while CI stays green is bounded by the 60 delivery
+passes, not by the stall's 720 minutes, because every stall's first read is
+green and resumes. With the approval given in the first delivery pass, which is
+the longest case:
+
+| step | count | time |
+|---|---|---|
+| hold after approval | 12 passes | 60 minutes |
+| stall, resumed by its first read | 30 | 180 minutes each, 5400 minutes |
+| check after a stall (re-pin and preflight, no wait) | 29 | none |
+| total | | 5460 minutes: 91 hours |
+
+In those 91 hours the configured CTO gets 30 stall notices, one every three
+hours, and takes 144 turns in all: the 30 notices, 30 probes, 42 re-pins and 42
+preflights. No merge command is issued. The run then ends Failed with
+`delivery_passes_exhausted` and the usual exhaustion notice; the waiter is told
+`cancelled` and the PR stays open. An approval given in delivery pass P leaves
+half of the remaining passes, rounded up, for stalls: (60 − P) / 2. If CI is
+not green at a stall's first read the stall lasts longer: it resumes at its
+second, third or fourth read (360, 540 or 720 minutes), so 30 stalls that each
+resume at the fourth read take 21,660 minutes with the hold, 361 hours; a stall
+whose fourth read is not green ends the run as TIMEOUT instead. The times do
+not include the turns themselves.
+
 **Merge turn.** `phase4_merge` is a plain delegate with `noRedelivery`, no
 continuation retries, a status variable and `ignoreFailure`; no step above it
 sets `ignoreFailure`. Its instruction is the pinned command and nothing else
@@ -512,6 +539,13 @@ with `head_changed` invalidates; anything else ends Failed with
 back to the preflight, the hold or the turn within the same gate visit; a new
 command needs a new review, a new gate visit and a new approval.
 
+A cancelled run sends no merge command. A cancellation that arrives during a
+re-pin or the preflight is swallowed by that step's `ignoreFailure`, leaves no
+answer, counts as held and ends at the hold's timer. At the merge turn the
+engine ends the run itself: a `noRedelivery` step is not entered by a cancelled
+run and its `ignoreFailure` does not swallow a cancellation, so the outcome
+does not depend on the sleep that happens to follow the first unanswered read.
+
 Not covered:
 
 - Nothing wakes the run when CI finishes. It learns of a result at its next
@@ -522,15 +556,17 @@ Not covered:
 - Who owns the change after it merged is not decided here.
 - `noRedelivery` bounds what the bridge sends, not what the agent executes; see
   `docs/durable-delegation.md`.
-- The delegated path is unchanged on purpose: `phase4_merge_pinned` keeps
-  continuation retries and the five-minute re-send, and a re-pin that is not
-  green after a delegated approval still invalidates it.
+- The delegated path is unchanged on purpose: `merge_repin` and
+  `phase4_merge_pinned` are the steps that shipped before, instruction text
+  included. The pinned merge keeps continuation retries and the five-minute
+  re-send, and a re-pin that is not green after a delegated approval still
+  invalidates it.
 - The pause after merge-gate feedback (`post_feedback_human_review_signal`) is
   not preceded by a probe.
 - PIN itself is unchanged: a PIN that reports no head still invalidates, and a
   PIN turn that fails still leaves the previous report in place.
-- A merge that stays held with green CI alternates stall and check until the 60
-  delivery passes are spent; each stall sends its one notice.
+- A merge that stays held with green CI is not ended early: it alternates stall
+  and check for up to 91 hours and 30 notices, as counted above.
 
 ## Child lease, stages and cancellation cleanup
 

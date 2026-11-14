@@ -173,8 +173,8 @@ public sealed class DurableDelegationLocalTests : IClassFixture<LocalTemporalFix
         },
     };
 
-    private static RelayMessage Reply(string taskId, string text) =>
-        new(0, Agent, text, DateTimeOffset.UtcNow, RelayMessageType.Response, TaskId: taskId);
+    private static RelayMessage Reply(string taskId, string text, string? executionId = null) =>
+        new(0, Agent, text, DateTimeOffset.UtcNow, RelayMessageType.Response, TaskId: taskId, ExecutionId: executionId);
 
     private static async Task WaitForAsync(Func<Task<bool>> condition, string what, int seconds = 30)
     {
@@ -242,7 +242,8 @@ public sealed class DurableDelegationLocalTests : IClassFixture<LocalTemporalFix
             await Task.Delay(TimeSpan.FromSeconds(1));
             Assert.True(await IsRunningAsync(handle));
 
-            Assert.True(await second.Listener.TryRouteReplyAsync(Reply(taskId, "[status: completed] the agent's answer")));
+            Assert.True(await second.Listener.TryRouteReplyAsync(Reply(
+                taskId, "[status: completed] the agent's answer", await DurableHarness.ExecutionIdAsync(second.Durable, taskId))));
 
             await handle.GetResultAsync<object?>();
             Assert.Empty((await second.Durable.SnapshotAsync()).Pending);
@@ -332,7 +333,8 @@ public sealed class DurableDelegationLocalTests : IClassFixture<LocalTemporalFix
         await Task.Delay(TimeSpan.FromSeconds(8));
         Assert.True(await IsRunningAsync(handle));
 
-        Assert.True(await bridge.Listener.TryRouteReplyAsync(Reply($"{id}/probe", "[status: completed] still here")));
+        Assert.True(await bridge.Listener.TryRouteReplyAsync(Reply(
+            $"{id}/probe", "[status: completed] still here", await DurableHarness.ExecutionIdAsync(bridge.Durable, $"{id}/probe"))));
         Assert.Equal("completed:still here", await handle.GetResultAsync());
     }
 

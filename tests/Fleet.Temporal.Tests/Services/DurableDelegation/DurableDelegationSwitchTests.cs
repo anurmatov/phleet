@@ -169,8 +169,9 @@ public sealed class DurableDelegationSwitchTests
         Options.Create(new RabbitMqOptions()), registry, Substitute.For<ITemporalClientFactory>(),
         NullLogger<TemporalRelayListener>.Instance, durable);
 
-    private static RelayMessage Reply(string taskId, string text = "[status: completed] all done", string type = RelayMessageType.Response) =>
-        new(0, Agent, text, DateTimeOffset.UtcNow, type, TaskId: taskId);
+    private static RelayMessage Reply(
+        string taskId, string text = "[status: completed] all done", string type = RelayMessageType.Response, string? executionId = null) =>
+        new(0, Agent, text, DateTimeOffset.UtcNow, type, TaskId: taskId, ExecutionId: executionId);
 
     [Fact]
     public async Task SwitchedOff_AReplyGoesToTheRegistry_AndAnUnknownOneIsStillAnOrphan()
@@ -194,7 +195,8 @@ public sealed class DurableDelegationSwitchTests
         var registry = new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance);
         var listener = Listener(registry, h.Service);
 
-        Assert.True(await listener.TryRouteReplyAsync(Reply("wf/task-1", "[status: failed] could not do it")));
+        Assert.True(await listener.TryRouteReplyAsync(
+            Reply("wf/task-1", "[status: failed] could not do it", executionId: await h.ExecutionIdAsync("wf/task-1"))));
 
         Assert.Equal(("wf/task-1", new AgentTaskResult("could not do it", "failed")), Assert.Single(h.Gateway.Completed));
         // The second copy belongs to nothing any more: an orphan, nacked as before.
@@ -209,7 +211,8 @@ public sealed class DurableDelegationSwitchTests
         await h.StartAsync(DurableHarness.Start("wf/task-1"));
         var listener = Listener(new TaskCompletionRegistry(NullLogger<TaskCompletionRegistry>.Instance), h.Service);
 
-        Assert.True(await listener.TryRouteReplyAsync(Reply("wf/task-1", "half of it", RelayMessageType.PartialResponse)));
+        Assert.True(await listener.TryRouteReplyAsync(
+            Reply("wf/task-1", "half of it", RelayMessageType.PartialResponse, await h.ExecutionIdAsync("wf/task-1"))));
         await h.SettleAsync();
 
         Assert.Empty(h.Gateway.Completed);
@@ -253,5 +256,11 @@ public sealed class DurableDelegationSwitchTests
         Assert.Matches(@"(?m)^unset .*\bFLEET_DURABLE_DELEGATION_ENABLED\b", upgrade);
         Assert.Matches("\"DurableDelegation\": \\{\\s+\"Enabled\": false", Read("src/Fleet.Temporal/appsettings.json"));
         Assert.False(new DurableDelegationOptions().Enabled);
+
+        // Strict about answers unless an operator says otherwise.
+        Assert.True(new DurableDelegationOptions().RequireAnswerExecutionId);
+        Assert.Matches("\"RequireAnswerExecutionId\": true", Read("src/Fleet.Temporal/appsettings.json"));
+        Assert.Contains("docs/durable-delegation.md", Read(".env.example"));
+        Assert.Contains("Upgrade every agent image first", Read(".env.example"));
     }
 }

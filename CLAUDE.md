@@ -440,8 +440,10 @@ task only when the id it keeps with the task-id reservation is equal. A cancel w
 matched by task id as before, and the in-process path sends none. Answers are fenced the same way:
 `RelayCompletionPublisher` reads the task's id while its completion is raised and writes it on the
 answer, and `TryHandleReplyAsync` accepts an answer for a record that has an id only when the ids
-are equal (another id: acked, logged, nothing changed; no id: accepted with a warning unless
-`DurableDelegation__RequireAnswerExecutionId`). For an agent or orchestrator from
+are equal (another id, or none: acked, logged, nothing changed). ⚠️ So every agent image must be
+upgraded BEFORE `FLEET_DURABLE_DELEGATION_ENABLED=true`: an older agent's answers name no execution
+and its delegations end by timeout. `DurableDelegation__RequireAnswerExecutionId=false` (default
+`true`) accepts id-less answers by task id and reopens the stale-answer hole for older agents. For an agent or orchestrator from
 before the id the bridge still orders its sends: no directive while a cancel for the same task id
 is owed, unfinished, or ended without a 2xx less than 30 s ago (`Fenced`, `PriorCancels`,
 `PublishNotBefore`). The service is registered before

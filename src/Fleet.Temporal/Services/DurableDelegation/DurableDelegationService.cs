@@ -403,8 +403,9 @@ public sealed class DurableDelegationService : BackgroundService
     /// <item>The answer names the record's execution: it is the record's.</item>
     /// <item>The answer names another execution: it is a predecessor's, arriving late.</item>
     /// <item>The answer names none: the agent is from before the id, or its task was started by a
-    /// directive that carried none. Accepted with a warning unless
-    /// <see cref="DurableDelegationOptions.RequireAnswerExecutionId"/> is set; see there.</item>
+    /// directive that carried none. Not accepted, unless
+    /// <see cref="DurableDelegationOptions.RequireAnswerExecutionId"/> has been turned off; see
+    /// there.</item>
     /// </list>
     ///
     /// Identifiers only in the log, never the answer.
@@ -425,13 +426,13 @@ public sealed class DurableDelegationService : BackgroundService
         if (_options.RequireAnswerExecutionId)
         {
             _logger.LogWarning(
-                "Answer for taskId={TaskId} from {Sender} names no execution and DurableDelegation:RequireAnswerExecutionId is set; it is not accepted for execution {ExecutionId}",
+                "Answer for taskId={TaskId} from {Sender} names no execution and is not accepted for execution {ExecutionId}. An agent image from before execution ids sends its answers this way: upgrade the agent, or set DurableDelegation:RequireAnswerExecutionId=false to accept them by task id",
                 taskId, sender ?? "unknown", record.ExecutionId);
             return false;
         }
 
         _logger.LogWarning(
-            "Answer for taskId={TaskId} from {Sender} names no execution (an agent from before execution ids?); accepted for execution {ExecutionId} by task id alone",
+            "Answer for taskId={TaskId} from {Sender} names no execution (an agent from before execution ids?); accepted for execution {ExecutionId} by task id alone because DurableDelegation:RequireAnswerExecutionId is false",
             taskId, sender ?? "unknown", record.ExecutionId);
         return true;
     }

@@ -361,7 +361,8 @@ services:
       - TemporalBridge__OrchestratorUrl=http://fleet-orchestrator:3600
       # #488: notify FLEET_CTO_AGENT when a workflow closes Failed/TimedOut (off by default).
       - WorkflowFailureNotifier__Enabled=${FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED:-false}
-      # Delegations that survive a restart of this service (off by default). See docs/durable-delegation.md.
+      # Delegations that survive a restart of this service (off by default). Upgrade every agent
+      # image before turning it on. See docs/durable-delegation.md.
       - DurableDelegation__Enabled=${FLEET_DURABLE_DELEGATION_ENABLED:-false}
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}

@@ -101,7 +101,8 @@ public sealed class DurableDelegationSlowRelayTests
         // A reply that needs a continuation is settled without waiting for the continuation.
         Assert.Equal(
             DurableReplyOutcome.Continued,
-            await h.Service.TryHandleReplyAsync("wf-1/continued", new AgentTaskResult("part one", "incomplete"), default)
+            await h.Service.TryHandleReplyAsync("wf-1/continued", new AgentTaskResult("part one", "incomplete"), default,
+                    await h.ExecutionIdAsync("wf-1/continued"))
                 .WaitAsync(Promptly));
         // The continuation and the three re-sends that were due are made, and hang.
         await DurableHarness.WaitForAsync(() => h.Relay.Started.Count == 8, "the continuation and the re-sends were started");
@@ -234,7 +235,8 @@ public sealed class DurableDelegationSlowRelayTests
 
         Assert.Equal(
             DurableReplyOutcome.Completed,
-            await h.Service.TryHandleReplyAsync("wf-1/review", Done, default).WaitAsync(Promptly));
+            await h.Service.TryHandleReplyAsync("wf-1/review", Done, default, await h.ExecutionIdAsync("wf-1/review"))
+                .WaitAsync(Promptly));
         Assert.Empty(await h.PendingAsync());
 
         reSendMayFinish.SetResult();

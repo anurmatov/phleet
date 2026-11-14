@@ -124,15 +124,23 @@ accepts an answer for a durable record only when that id is the record's:
 |---|---|---|
 | has an id | names that id | accepted |
 | has an id | names another id | not accepted. It is a predecessor's answer. The message is acknowledged and logged with identifiers only; the record is not completed or continued, nothing is added to a partial answer and nothing is kept for Temporal |
-| has an id | names none | accepted, by task id, with a warning each time. See below |
+| has an id | names none | not accepted, the same way. See below |
 | has none (written before the id) | anything | accepted by task id, as before |
 
-An answer without an id comes from an agent from before the id, or from a task that was started by
-a directive without one. The bridge cannot tell an older agent from a newer one by an answer, and
-refusing would leave every delegation to an older agent to run out its budget, so it accepts.
-**For those agents the hole is still open: a predecessor's late answer can be taken for its
-successor's.** When every agent echoes the id, set `DurableDelegation__RequireAnswerExecutionId=true`
-and such an answer is refused like one that names another execution.
+An answer without an id comes from an agent on an image from before the id, or from a task that was
+started by a directive without one. The bridge cannot tell which from an answer, so it does not
+guess: by default (`DurableDelegation__RequireAnswerExecutionId=true`) the answer is refused. An
+answer is then never matched by task id alone.
+
+**This sets the rollout order: upgrade every agent image first, then turn durable delegation on.**
+A delegation to an agent on an older image is never answered in a way the bridge accepts. It does
+not complete, and ends when its budget runs out, as it does when an agent never answers. The log
+names the task and the agent each time an answer is refused for this reason.
+
+Setting `DurableDelegation__RequireAnswerExecutionId=false` restores the lenient behaviour: an
+answer without an id is accepted by task id, with a warning each time. That keeps older agents
+working, and for them it reopens the hole this closes: a predecessor's late answer can be taken for
+its successor's.
 
 The in-memory path (switch off, or a delegation that is not a durable record) matches an answer by
 task id and ignores the field.
@@ -145,8 +153,8 @@ off.
 | bridge | orchestrator | agent | what happens |
 |---|---|---|---|
 | new, switch on | new | new | the id is compared; a cancel reaches only its own execution, however late |
-| new, switch on | new | old | the agent ignores the field and the parameter and matches by task id. The bridge's order and 30-second hold are the protection, as before; a cancel delayed longer than that can still stop a successor |
-| new, switch on | old | new or old | the orchestrator drops the parameter, so the agent matches by task id: the same as the row above |
+| new, switch on | new | old | **not supported by default.** The agent's answers name no execution and are refused, so its delegations end by timeout. Cancels are matched by task id, with the bridge's order and 30-second hold as the only protection. With `RequireAnswerExecutionId=false` the answers are accepted by task id and the stale-answer hole is open for this agent |
+| new, switch on | old | new | answers are accepted (the agent names the execution). Cancels lose the parameter at the orchestrator and are matched by task id, protected by the order and the hold only |
 | old, or switch off (in-process path) | any | new | no id is sent. Directives and cancels are handled exactly as before, by task id |
 | new, record written before the id | any | any | the record has no id and is not given one; it sends what it always sent, broadcast fallback included |
 
@@ -159,7 +167,9 @@ What this still does not cover:
 - A directive that is dropped as a repeat does not change whose task it is. If a second delegation's
   directive arrives while the first one's task is still running, the task keeps the first id, and
   the second delegation's cancel does not stop it.
-- An answer from an agent that does not echo the id is matched by task id alone, as described above.
+- For the same reason the second delegation does not get the first one's answer: it names the first
+  execution. The second delegation's directive is sent again every five minutes, and is taken up
+  once the first task has ended.
 - The in-process wait (switch off) is unchanged. It sends its cancel by task id with no ordering,
   so the same late cancel can stop a successor there. The agent-side check makes fixing that a
   matter of sending an id from the activity.
@@ -181,7 +191,7 @@ log says `relay sends are held` and `relay sends resumed`, once each.
 | `FLEET_DURABLE_DELEGATION_ENABLED` → `DurableDelegation__Enabled` | `false` | off: the in-process wait, exactly as before |
 | `DurableDelegation__StateFile` | `/var/lib/fleet-temporal-bridge/pending-delegations.json` | the records; empty keeps them in memory, which survives nothing |
 | `DurableDelegation__TickSeconds` | `15` | seconds between passes; keep it well under the shortest heartbeat timeout |
-| `DurableDelegation__RequireAnswerExecutionId` | `false` | `true` refuses an answer that names no execution for a delegation that has one; turn it on only when every agent echoes the id |
+| `DurableDelegation__RequireAnswerExecutionId` | `true` | an answer that names no execution is refused for a delegation that has one, so every agent must be on an image that names it. `false` accepts such answers by task id and reopens the stale-answer hole for older agents |
 
 Fresh setup writes the key as `false`; upgrade adds it only when it is missing. The state directory
 is the one the workflow failure notifier already uses (`${FLEET_BASE_DIR}/temporal-bridge`).
@@ -234,15 +244,22 @@ Differences from the in-process wait, all deliberate:
 ## Rollout
 
 1. Merge and deploy with the key `false`. Nothing changes.
-2. Pick a moment with no delegation in flight: no `ConsensusReviewWorkflow` running and no UWE run
+2. **Upgrade every agent image, and the orchestrator, before going further.** An agent on an image
+   from before execution ids answers without one, and its delegations then end by timeout (see "An
+   answer and the execution it came from"). Reprovision the agents and check each is on the new
+   image. If an agent cannot be upgraded yet, either leave the feature off or set
+   `DurableDelegation__RequireAnswerExecutionId=false` and accept what that reopens.
+3. Pick a moment with no delegation in flight: no `ConsensusReviewWorkflow` running and no UWE run
    inside a delegate step. **The restart that turns the feature on loses delegations in flight**,
    because they were started by the old process and exist only in its memory. This is the last
    restart the old rule applies to.
-3. Set `FLEET_DURABLE_DELEGATION_ENABLED=true` in `.env` and recreate `fleet-temporal-bridge`.
-4. Check the log line `Durable delegation is on: state …` and that `/pending-delegations` reports
+4. Set `FLEET_DURABLE_DELEGATION_ENABLED=true` in `.env` and recreate `fleet-temporal-bridge`.
+5. Check the log line `Durable delegation is on: state …` and that `/pending-delegations` reports
    `enabled: true, durable: true`.
-5. Start a workflow that delegates, confirm it appears in `/pending-delegations`, restart the
-   bridge, and confirm it is still there and completes when the agent answers.
+6. Start a workflow that delegates, confirm it appears in `/pending-delegations`, restart the
+   bridge, and confirm it is still there and completes when the agent answers. A delegation that
+   stays pending while the log says an answer `names no execution and is not accepted` is an agent
+   that was not upgraded.
 
 ## Rollback
 

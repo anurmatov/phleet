@@ -17,8 +17,8 @@ namespace Fleet.Temporal.Tests.Services.DurableDelegation;
 /// <list type="table">
 /// <item><term>record has an id, answer names it</term><description>accepted</description></item>
 /// <item><term>record has an id, answer names another</term><description>not accepted</description></item>
-/// <item><term>record has an id, answer names none</term><description>accepted with a warning;
-/// not accepted when <c>RequireAnswerExecutionId</c> is set</description></item>
+/// <item><term>record has an id, answer names none</term><description>not accepted; accepted
+/// with a warning when <c>RequireAnswerExecutionId</c> is turned off</description></item>
 /// <item><term>record has no id (written before it existed)</term><description>accepted by task
 /// id, whatever the answer names</description></item>
 /// <item><term>in-memory path (switch off, or no durable record)</term><description>by task id;
@@ -47,15 +47,15 @@ public sealed class DurableDelegationAnswerCompatibilityTests
     }
 
     /// <summary>
-    /// An agent from before the id answers without one. Refusing that would leave every
-    /// delegation to such an agent to run out its budget, so by default it is accepted, by task id
-    /// as before, and the log says so each time, with identifiers only. This is the remaining
-    /// risk for older agents: their late answer can still be taken for a successor's.
+    /// With the option turned off an answer that names no execution is accepted, by task id as
+    /// before, and the log says so each time, with identifiers only. That keeps an agent from
+    /// before the id working, and reopens the hole for it: its late answer can be taken for a
+    /// successor's.
     /// </summary>
     [Fact]
-    public async Task AnAnswerThatNamesNoExecution_IsAcceptedWithAWarning_ByDefault()
+    public async Task AnAnswerThatNamesNoExecution_IsAcceptedWithAWarning_WhenTheOptionIsTurnedOff()
     {
-        using var h = new DurableHarness();
+        using var h = new DurableHarness(configure: o => o.RequireAnswerExecutionId = false);
         var id = await StartAsync(h);
         h.Log.Lines.Clear();
 
@@ -70,21 +70,46 @@ public sealed class DurableDelegationAnswerCompatibilityTests
     }
 
     /// <summary>
-    /// Once every agent echoes the id an operator can say so, and an answer without one is then
-    /// treated like an answer from another execution. The bridge does not decide this by itself:
-    /// an answer does not say how old the agent is.
+    /// The default. An answer that names no execution is treated like an answer from another
+    /// execution: acknowledged, logged with identifiers only, and nothing changes. An agent on an
+    /// image from before the id answers this way, which is why every agent is upgraded before
+    /// durable delegation is turned on: a delegation to such an agent ends by timeout.
     /// </summary>
     [Fact]
-    public async Task AnAnswerThatNamesNoExecution_IsNotAccepted_WhenTheOperatorRequiresOne()
+    public async Task AnAnswerThatNamesNoExecution_IsNotAccepted_ByDefault()
     {
-        using var h = new DurableHarness(configure: o => o.RequireAnswerExecutionId = true);
+        Assert.True(new DurableDelegationOptions().RequireAnswerExecutionId);
+        using var h = new DurableHarness();
         var id = await StartAsync(h);
+        h.Log.Lines.Clear();
 
-        Assert.Equal(DurableReplyOutcome.OtherExecution, await h.ReplyAsync(TaskId, Done));
+        Assert.Equal(
+            DurableReplyOutcome.OtherExecution,
+            await h.Service.TryHandleReplyAsync(TaskId, new AgentTaskResult("ANSWER-TEXT", "completed"), default, executionId: null, sender: Agent));
         // Settled for the listener too: acknowledged, and not offered to anything else.
         Assert.True(await Listener(h.Service).TryRouteReplyAsync(Answer(null)));
         Assert.Empty(h.Gateway.Completed);
         Assert.Equal("waiting", Assert.Single(await h.PendingAsync()).State);
+        Assert.Equal(2, h.Log.Lines.Count);
+        Assert.All(h.Log.Lines, line =>
+        {
+            Assert.StartsWith("Warning:", line);
+            Assert.Contains($"taskId={TaskId} from {Agent} names no execution and is not accepted for execution {id}", line);
+            Assert.DoesNotContain("ANSWER-TEXT", line);
+        });
+
+        // Its budget is all that is left: the activity fails as it does when an agent never answers.
+        h.Clock.Advance(TimeSpan.FromSeconds(601));
+        await h.TickAsync();
+        Assert.IsType<TimeoutException>(Assert.Single(h.Gateway.Failed).Failure);
+    }
+
+    /// <summary>The same delegation, answered by an agent that names the execution.</summary>
+    [Fact]
+    public async Task AnAnswerThatNamesTheExecution_IsAccepted_ByDefault()
+    {
+        using var h = new DurableHarness();
+        var id = await StartAsync(h);
 
         Assert.True(await Listener(h.Service).TryRouteReplyAsync(Answer(id)));
         Assert.Equal((TaskId, Done), Assert.Single(h.Gateway.Completed));
@@ -117,7 +142,7 @@ public sealed class DurableDelegationAnswerCompatibilityTests
     [InlineData("some-execution")]
     public async Task ARecordFromBeforeTheId_AcceptsAnAnswerByTaskId(string? answerExecutionId)
     {
-        using var h = new DurableHarness(configure: o => o.RequireAnswerExecutionId = true);
+        using var h = new DurableHarness();
         await h.StartAsync(DurableHarness.Start());
         var file = File.ReadAllText(h.StateFile);
         var stripped = Regex.Replace(file, "\\s*\"ExecutionId\": \"[0-9a-f]{32}\",", "");

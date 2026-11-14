@@ -416,11 +416,31 @@ internal sealed class DurableHarness : IDisposable
     }
 
     /// <summary>An agent's reply, and then everything the relay lane had to send because of it.</summary>
+    /// <summary>
+    /// The agent's answer to the delegation pending under this task id, naming the execution the
+    /// directive named, as an agent that knows execution ids does.
+    /// </summary>
     public async Task<DurableReplyOutcome> ReplyAsync(string taskId, AgentTaskResult result)
     {
-        var outcome = await Service.TryHandleReplyAsync(taskId, result, default);
+        var outcome = await Service.TryHandleReplyAsync(taskId, result, default, await ExecutionIdAsync(taskId));
         await SettleAsync();
         return outcome;
+    }
+
+    public Task<string?> ExecutionIdAsync(string taskId) => ExecutionIdAsync(Service, taskId);
+
+    /// <summary>
+    /// The execution id of the delegation pending under a task id (or under the task id a
+    /// continuation belongs to); null when nothing is pending there or it has none. Read by name,
+    /// so that these tests also build against the bridge as it was before records had one.
+    /// </summary>
+    public static async Task<string?> ExecutionIdAsync(DurableDelegationService service, string taskId)
+    {
+        var root = DurableDelegationService.RootOf(taskId);
+        var pending = (await service.SnapshotAsync()).Pending.FirstOrDefault(p => p.TaskId == taskId || p.TaskId == root);
+        return pending is null
+            ? null
+            : typeof(PendingDelegationView).GetProperty("ExecutionId")?.GetValue(pending) is string { Length: > 0 } id ? id : null;
     }
 
     /// <summary>

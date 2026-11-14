@@ -35,9 +35,9 @@ public sealed record BridgeCancelAnswer(bool Cancelled, string TaskId, string Ex
     public static BridgeCancelAnswer From(string taskId, string executionId, BridgeCancelOutcome outcome) =>
         new(outcome == BridgeCancelOutcome.Cancelled, taskId, executionId, outcome switch
         {
-            BridgeCancelOutcome.Cancelled => "cancelled",
-            BridgeCancelOutcome.NotFound => "not_found",
-            BridgeCancelOutcome.OtherExecution => "other_execution",
-            _ => "no_execution_id",
+            BridgeCancelOutcome.Cancelled => TaskCancel.Outcome.Cancelled,
+            BridgeCancelOutcome.NotFound => TaskCancel.Outcome.NotFound,
+            BridgeCancelOutcome.OtherExecution => TaskCancel.Outcome.OtherExecution,
+            _ => TaskCancel.Outcome.NoExecutionId,
         });
 }

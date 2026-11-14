@@ -210,7 +210,7 @@ public sealed class ConversationSouthConsumer : BackgroundService
             CommandExchange, ExchangeType.Direct, durable: true, autoDelete: false, cancellationToken: ct);
         await _channel.QueueDeclareAsync(
             QueueName, durable: true, exclusive: false, autoDelete: false,
-            arguments: new Dictionary<string, object?> { ["x-queue-type"] = "quorum" },
+            arguments: ConversationBroker.CommandQueueArguments(),
             cancellationToken: ct);
         await _channel.QueueBindAsync(QueueName, CommandExchange, routingKey: _agentName, cancellationToken: ct);
 
@@ -221,12 +221,13 @@ public sealed class ConversationSouthConsumer : BackgroundService
     }
 
     /// <summary>
-    /// The per-agent inbound queue and the exchange it is bound to. The same literals as the chat
-    /// service's <c>ConversationBroker</c>, which this assembly may not reference (#303 MUST NOT 14).
+    /// The per-agent inbound queue and the exchange it is bound to: the one definition the chat
+    /// service declares them from too. It lives in <c>Fleet.Contracts</c> because this assembly may
+    /// not reference the chat service's (#303 MUST NOT 14).
     /// </summary>
-    private string QueueName => $"fleet.conversations.inbound.{_agentName}";
+    private string QueueName => ConversationBroker.CommandQueue(_agentName);
 
-    private const string CommandExchange = "fleet.conversations";
+    private const string CommandExchange = ConversationBroker.CommandExchange;
 
     // ── one delivery ─────────────────────────────────────────────────────────
 

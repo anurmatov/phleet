@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Fleet.Conversations.Journal;
+namespace Fleet.Contracts;
 
 /// <summary>
 /// Journal publisher tokens: <c>cj1.&lt;purpose&gt;.&lt;subject&gt;.&lt;mac&gt;</c>, where

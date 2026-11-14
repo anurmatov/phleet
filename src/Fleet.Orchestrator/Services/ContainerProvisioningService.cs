@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
@@ -32,6 +33,9 @@ public sealed class ContainerProvisioningService(
     private readonly AgentFileRenderer _renderer = new(scopeFactory, config, journalTokens, logger);
     private readonly AgentFileWriter _writer = new(logger);
 
+    /// <summary>The <c>Provisioning</c> section as configuration holds it now.</summary>
+    private ProvisioningOptions Options => ProvisioningOptions.From(config);
+
     public async Task<ProvisionPreview> PreviewAsync(string agentName, CancellationToken ct = default)
     {
         using var scope = scopeFactory.CreateScope();
@@ -53,8 +57,7 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionPreview.NotFound(agentName);
 
-        var envFile = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
-        var envValues = LoadEnvFile(envFile);
+        var envValues = LoadEnvFile(Options.EnvFilePath);
 
         // A preview mints nothing: a bound key shows a fixed marker where a provision puts a placeholder.
         var bindings = await db.SecretBindings.AsNoTracking().ToListAsync(ct);
@@ -83,13 +86,10 @@ public sealed class ContainerProvisioningService(
     private ContainerSpec BuildDesiredSpec(
         Agent agent, Dictionary<string, string> envValues, IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets)
     {
-        var whisperServiceUrl = config["Provisioning:WhisperServiceUrl"] ?? "";
-        var kokoroServiceUrl  = config["Provisioning:KokoroServiceUrl"]  ?? "";
-        var baseDir = config["Provisioning:BaseDir"]
-            ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
-
+        var options = Options;
         return ContainerSpecBuilder.Build(
-            agent, envValues, bindings, secrets, baseDir, whisperServiceUrl, kokoroServiceUrl, config["Provisioning:AgentImage"]);
+            agent, envValues, bindings, secrets, options.RequireBaseDir(),
+            options.WhisperServiceUrl, options.KokoroServiceUrl, options.AgentImage);
     }
 
     // ── live provisioning ──────────────────────────────────────────────────────
@@ -196,10 +196,9 @@ public sealed class ContainerProvisioningService(
                     $"container '{agent.ContainerName}' already exists — deprovision first or use reprovision_agent");
         }
 
-        var envFile   = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
-        var baseDir   = config["Provisioning:BaseDir"]
-            ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
-        var envValues = LoadEnvFile(envFile);
+        var options   = Options;
+        var baseDir   = options.RequireBaseDir();
+        var envValues = LoadEnvFile(options.EnvFilePath);
         var ctoAgentName = CtoAgentSetting.Resolve(envValues, config);
 
         if (ProvisioningFaults.DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
@@ -278,8 +277,9 @@ public sealed class ContainerProvisioningService(
             "Provisioning '{Agent}' container='{Container}' image='{Image}'",
             agentName, agent.ContainerName, spec.Image);
 
-        var logMaxSize = config["Provisioning:ContainerLogMaxSize"];
-        var logMaxFile = config["Provisioning:ContainerLogMaxFile"];
+        var options = Options;
+        var logMaxSize = options.ContainerLogMaxSize;
+        var logMaxFile = options.ContainerLogMaxFile;
 
         // The forwarder must know the new placeholders before the container that holds them starts,
         // and must forget the previous container's: record their hashes, then rewrite its state.
@@ -658,7 +658,7 @@ public sealed class ContainerProvisioningService(
         var resolvedName = containerName;
         if (json is null)
         {
-            var project = config["Provisioning:ComposeProject"] ?? "fleet";
+            var project = Options.ComposeProject;
             var composeName = $"{project}-{containerName}-1";
             json = await docker.InspectContainerAsync(composeName, ct);
             if (json is not null)
@@ -719,7 +719,7 @@ public sealed class ContainerProvisioningService(
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
         return agent is null
             ? null
-            : ProvisioningFaults.DescribeCodexServerUrlFault(agent, LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env"));
+            : ProvisioningFaults.DescribeCodexServerUrlFault(agent, LoadEnvFile(Options.EnvFilePath));
     }
 
     /// <summary>

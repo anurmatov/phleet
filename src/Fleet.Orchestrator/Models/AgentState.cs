@@ -1,56 +1,6 @@
 namespace Fleet.Orchestrator.Models;
 
 /// <summary>
-/// Message published by fleet agents on the fleet.orchestrator topic exchange.
-/// Routing key: "heartbeat" or "registration".
-/// </summary>
-/// <remarks>
-/// <c>PlanSha256</c> (#460): the harness plan the agent started with, sent on registration and every
-/// heartbeat. Null from an image that predates it.
-/// </remarks>
-public sealed record AgentHeartbeat(
-    string AgentName,
-    string Status,
-    DateTimeOffset Timestamp,
-    string? CurrentTask = null,
-    string? CurrentTaskId = null,
-    string? Version = null,
-    string? Endpoint = null,
-    string? Role = null,
-    string? Model = null,
-    string? ContainerName = null,
-    string[]? Capabilities = null,
-    int QueuedCount = 0,
-    QueuedMessageInfo[]? QueuedMessages = null,
-    BackgroundTaskSummary[]? BackgroundTasks = null,
-    JournalHeartbeat? Journal = null,
-    int PriorityQueuedCount = 0,
-    string? PlanSha256 = null);
-
-/// <summary>
-/// Optional journal health emitted by S2 agents. Null means an older agent and is displayed as n/a.
-/// </summary>
-public sealed record JournalHeartbeat(
-    bool Enabled,
-    int SpoolDepth,
-    long? OldestAgeSeconds,
-    long Dropped,
-    int Dead,
-    int AuthFailed,
-    int BindingFailed = 0);
-
-/// <summary>Snapshot of a queued message waiting to be processed by an agent.</summary>
-public sealed record QueuedMessageInfo(string Preview, string Source, DateTimeOffset QueuedAt, bool Priority = false);
-
-/// <summary>Summary of an active background subagent task, included in heartbeat messages.</summary>
-public sealed record BackgroundTaskSummary(
-    string TaskId,
-    string Description,
-    string TaskType,
-    int ElapsedSeconds,
-    string? Summary);
-
-/// <summary>
 /// In-memory snapshot of a known agent's last heartbeat, with computed staleness state.
 /// </summary>
 public sealed class AgentState

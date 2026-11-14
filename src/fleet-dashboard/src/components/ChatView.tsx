@@ -9,7 +9,7 @@ import {
 } from '../chatProtocol'
 import { ChatConnection, pendingToShow, type ChatDeps, type ChatState, type OutgoingFile } from '../chatConnection'
 import { agoLabel, foldTrail, formatElapsed, isTurnRunning, type Quoted, type Transcript } from '../chatTranscript'
-import { agentStanding, isUnread } from '../chatActivity'
+import { agentStanding, isUnread, threadPreview } from '../chatActivity'
 import { browserJpegEncoder, prepareFile, sizeLabel } from '../chatFiles'
 import { chatActivity, useChatActivity } from '../hooks/useChatActivity'
 import { useTick } from '../hooks/useTick'
@@ -169,12 +169,16 @@ export default function ChatView({ initialAgent, fleetAgents, onOpenAgent }: {
           const standing = agentStanding(fleetAgents[a.agentName])
           const thread = activity.threads[a.agentName]
           const unread = a.agentName !== selected && isUnread(thread, activity.seen[a.agentName])
-          const caption = standing?.text ?? (a.displayName !== a.agentName ? a.agentName : '')
+          // A line of the thread where there is one; otherwise how the agent is doing. The dot
+          // says how it is doing either way, and the words for that are one hover away.
+          const caption = threadPreview(thread) ?? standing?.text ?? (a.displayName !== a.agentName ? a.agentName : '')
           return (
             <button key={a.agentName}
               className={`chat-agent${a.agentName === selected ? ' active' : ''}${unread ? ' chat-agent--unread' : ''}`}
-              onClick={() => choose(a.agentName)} aria-current={a.agentName === selected ? 'true' : undefined}>
+              onClick={() => choose(a.agentName)} aria-current={a.agentName === selected ? 'true' : undefined}
+              title={standing?.text}>
               <span className={`dot dot-${standing?.dot ?? 'grey'}`} aria-hidden="true" />
+              {standing && <span className="chat-sr-only">{standing.text}. </span>}
               <span className="chat-agent-text">
                 <span className="chat-agent-name">{a.displayName}</span>
                 {caption && <span className="chat-agent-caption">{caption}</span>}
@@ -268,7 +272,13 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
     const entries = connection.current?.current.transcript.entries ?? []
     let at: number | null = null
     for (let i = entries.length - 1; i >= 0 && at === null; i--) at = entries[i].at
-    chatActivity().noteThread(agent.agentName, conversationId, lastSeq, at)
+    // The thread's newest message, for its line in the list: what someone said, not a notice.
+    let said: { fromUser: boolean; text: string } | undefined
+    for (let i = entries.length - 1; i >= 0 && !said; i--) {
+      const entry = entries[i]
+      if (entry.type !== 'system') said = { fromUser: entry.type === 'you', text: entry.text }
+    }
+    chatActivity().noteThread(agent.agentName, conversationId, lastSeq, at, said)
     if (document.visibilityState === 'visible') chatActivity().markSeen(agent.agentName, lastSeq)
   }, [agent.agentName, conversationId, lastSeq])
   useEffect(() => {

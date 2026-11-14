@@ -281,8 +281,10 @@ export function chatAnswer(method: string, path: string, body: unknown): unknown
     return {
       protocol: PROTOCOL,
       conversations: [
-        { conversationId: 'c-acto', agent: 'acto', externalRef: 'main', nextSeq: chatHistory.length + 1, retainedFloorSeq: 1, lastActivityAt: minutesAgo(1) },
-        { conversationId: 'c-adev', agent: 'adev', externalRef: 'main', nextSeq: 12, retainedFloorSeq: 1, lastActivityAt: minutesAgo(190) },
+        { conversationId: 'c-acto', agent: 'acto', externalRef: 'main', nextSeq: chatHistory.length + 1, retainedFloorSeq: 1, lastActivityAt: minutesAgo(1),
+          lastMessage: { from: 'user', text: 'Yes, and check the Credentials page for the same thing.' } },
+        { conversationId: 'c-adev', agent: 'adev', externalRef: 'main', nextSeq: 12, retainedFloorSeq: 1, lastActivityAt: minutesAgo(190),
+          lastMessage: { from: 'agent', text: 'PR #415 is up: the agent list is redrawn and the tests pass.' } },
       ],
     }
   }

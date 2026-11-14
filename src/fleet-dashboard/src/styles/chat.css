@@ -666,8 +666,10 @@ a.chat-file:hover { border-color: var(--border-strong); background: var(--surfac
 .chat-markdown td { padding: 4px 10px; border: 1px solid var(--border); text-align: left; }
 
 /* A notice that rises from the bottom edge would sit on the composer and its Send button. While
-   Chat is open, notices come down from under the header instead. */
-.app-layout:has(.app-main--chat) .toast-area {
+   a thread is open, notices come down from under the header instead. With only the list on screen
+   (a phone, before a thread is chosen) the bottom is free and the top is the first row, so they
+   stay where they are everywhere else. */
+.app-layout:has(.chat-view--thread) .toast-area {
   top: calc(var(--header) + 12px + env(safe-area-inset-top, 0px));
   bottom: auto;
 }

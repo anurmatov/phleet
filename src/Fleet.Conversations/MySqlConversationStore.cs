@@ -240,22 +240,62 @@ public sealed partial class MySqlConversationStore : IConversationStore
         await using var connection = await OpenAsync(ct);
         await using var command = new MySqlCommand(
             """
-            SELECT id, principal_id, agent_name, external_ref, next_seq, retained_floor_seq, last_activity_at
-            FROM conversations
-            WHERE principal_id = @principal AND channel_id = @channel AND agent_name <> ''
-            ORDER BY last_activity_at DESC, id DESC
+            SELECT c.id, c.principal_id, c.agent_name, c.external_ref, c.next_seq, c.retained_floor_seq,
+                   c.last_activity_at, m.kind,
+                   LEFT(JSON_UNQUOTE(JSON_EXTRACT(m.payload_json, '$.text')), @preview),
+                   CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(m.payload_json, '$.text')))
+            FROM conversations c
+            -- The newest message of each conversation, found by walking its events back from the
+            -- end along the primary key and stopping at the first one that is a message. What
+            -- lies between the end and a message is a turn's progress, which is pruned after a
+            -- day, so the walk is short. A scalar subquery rather than a lateral join, which
+            -- older 8.0 servers do not have.
+            LEFT JOIN conversation_events m
+                   ON m.conversation_id = c.id
+                  AND m.seq = (
+                        SELECT x.seq
+                        FROM conversation_events x
+                        WHERE x.conversation_id = c.id AND x.kind IN (@k0, @k1, @k2, @k3)
+                        ORDER BY x.seq DESC
+                        LIMIT 1)
+            WHERE c.principal_id = @principal AND c.channel_id = @channel AND c.agent_name <> ''
+            ORDER BY c.last_activity_at DESC, c.id DESC
             LIMIT @limit
             """, connection);
         command.Parameters.AddWithValue("@principal", principalId);
         command.Parameters.AddWithValue("@channel", channelId);
         command.Parameters.AddWithValue("@limit", Math.Max(1, limit));
+        command.Parameters.AddWithValue("@preview", ConversationLastMessage.MaxChars);
+
+        var kinds = ReplyTarget.Kinds.Order(StringComparer.Ordinal).ToArray();
+        for (var i = 0; i < 4; i++)
+            command.Parameters.AddWithValue($"@k{i}", kinds[i]);
 
         var result = new List<ConversationSummary>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            if (string.Equals(reader.GetString(1), principalId, StringComparison.Ordinal))
-                result.Add(ReadSummary(reader));
+            if (!string.Equals(reader.GetString(1), principalId, StringComparison.Ordinal))
+                continue;
+
+            var summary = ReadSummary(reader);
+            if (!reader.IsDBNull(7))
+            {
+                var kind = reader.GetString(7);
+                var text = reader.IsDBNull(8) ? string.Empty : reader.GetString(8);
+                var length = reader.IsDBNull(9) ? 0 : reader.GetInt64(9);
+                summary = summary with
+                {
+                    LastMessage = new ConversationLastMessage
+                    {
+                        FromUser = string.Equals(kind, ConversationEventKind.SubmissionText, StringComparison.Ordinal),
+                        Text = text,
+                        Truncated = length > ConversationLastMessage.MaxChars,
+                    },
+                };
+            }
+
+            result.Add(summary);
         }
 
         return result;

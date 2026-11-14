@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ChatActivityStore, SEEN_KEY, agentStanding, isUnread, readSeen, unreadAgents } from './chatActivity.ts'
+import { ChatActivityStore, SEEN_KEY, agentStanding, isUnread, readSeen, threadPreview, unreadAgents } from './chatActivity.ts'
 import { PROTOCOL } from './chatProtocol.ts'
 
 class MemoryStorage {
@@ -140,4 +140,27 @@ test('how an agent is doing: offline first, then its task, then stale, then idle
   assert.equal(agentStanding({ effectiveStatus: 'stale', currentTask: null })?.dot, 'yellow')
   assert.equal(agentStanding({ effectiveStatus: 'idle', currentTask: '  ' })?.text, 'Idle')
   assert.equal(agentStanding({ effectiveStatus: 'busy', currentTask: 'x'.repeat(200) })?.text.length, 'Working: '.length + 91)
+})
+
+test('a thread’s line in the list: its newest message, marked when it is the person’s own', async () => {
+  const s = service(twoAgents, list(
+    { ...thread('acto', 5), lastMessage: { from: 'agent', text: 'Three issues\n are   open.' } },
+    { ...thread('adev', 3), lastMessage: { from: 'user', text: '' } },
+  ))
+  const store = new ChatActivityStore({ fetch: s.fetch, storage: null })
+  await store.refresh()
+  const threads = store.snapshot().threads
+
+  assert.equal(threadPreview(threads.acto), 'Three issues are open.')
+  assert.equal(threadPreview(threads.adev), 'You: Sent a file')
+  assert.equal(threadPreview(undefined), null)
+  assert.equal(threadPreview({ conversationId: 'c', agent: 'a', nextSeq: 1, lastActivityAt: null }), null)
+  assert.equal(threadPreview({ conversationId: 'c', agent: 'a', nextSeq: 1, lastActivityAt: null, lastMessage: { fromUser: false, text: 'x'.repeat(400) } })!.length, 161)
+
+  // The thread on screen moves on: its line follows what was just said, and a move with nothing
+  // said (progress) keeps the line it had.
+  store.noteThread('acto', 'c-acto', 9, null, { fromUser: true, text: 'thanks' })
+  assert.equal(threadPreview(store.snapshot().threads.acto), 'You: thanks')
+  store.noteThread('acto', 'c-acto', 12, null)
+  assert.equal(threadPreview(store.snapshot().threads.acto), 'You: thanks')
 })

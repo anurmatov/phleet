@@ -696,9 +696,11 @@ test('chat: a thread that moved on is marked in the navigation and the list; ope
   await page.locator('.sidenav-item', { hasText: 'Chat' }).click()
   await expect(chatAgent(page, 'Beta').locator('.chat-agent-new')).toBeVisible()
   await expect(chatAgent(page, 'Alpha').locator('.chat-agent-new')).toHaveCount(0)
-  // How each agent is doing, from the fleet.
-  await expect(chatAgent(page, 'Beta').locator('.chat-agent-caption')).toHaveText('Working: Implement the review step')
-  await expect(chatAgent(page, 'Alpha').locator('.chat-agent-caption')).toHaveText('Idle')
+  // A line of each thread, and how each agent is doing, from the fleet, one hover away.
+  await expect(chatAgent(page, 'Beta').locator('.chat-agent-caption')).toHaveText('answer two')
+  await expect(chatAgent(page, 'Alpha').locator('.chat-agent-caption')).toHaveText('answer one')
+  await expect(chatAgent(page, 'Beta')).toHaveAttribute('title', 'Working: Implement the review step')
+  await expect(chatAgent(page, 'Alpha')).toHaveAttribute('title', 'Idle')
 
   await chatAgent(page, 'Beta').click()
   await expect(page.locator('.chat-bubble--agent')).toHaveText(/answer two/)

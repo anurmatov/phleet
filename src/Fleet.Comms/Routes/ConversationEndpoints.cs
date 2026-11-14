@@ -188,6 +188,14 @@ public static class ConversationEndpoints
                     NextSeq = row.NextSeq,
                     RetainedFloorSeq = row.RetainedFloorSeq,
                     LastActivityAt = row.LastActivityAt,
+                    LastMessage = row.LastMessage is { } last
+                        ? new ConversationListLastMessage
+                        {
+                            From = last.FromUser ? "user" : "agent",
+                            Text = last.Text,
+                            Truncated = last.Truncated ? true : null,
+                        }
+                        : null,
                 }).ToList(),
             }, StatusCodes.Status200OK);
         });

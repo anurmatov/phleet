@@ -118,6 +118,52 @@ public sealed class ChatHistoryReadStoreTests(MySqlFixture fixture)
         Assert.Equal(["Is the Minimum Width fixed?"], await Texts(All() with { Until = noon }));
     }
 
+    // ── the list of threads ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// A list of threads shows a line of each: the start of its newest message and who wrote it.
+    /// A turn's progress is not a message, so a thread whose agent is still working shows what
+    /// the person last said; a thread in which nothing was said shows nothing.
+    /// </summary>
+    [Fact]
+    public async Task The_list_carries_the_start_of_each_threads_newest_message()
+    {
+        var principal = "p-" + Ulid.NewUlid().ToLowerInvariant();
+        async Task<string> Open(string agent) =>
+            (await _store.OpenConversationAsync(new OpenConversationRequest
+            {
+                ChannelId = "client", ExternalRef = "conv-" + Ulid.NewUlid(), PrincipalId = principal, AgentName = agent,
+            })).ConversationId;
+
+        var answered = await Open("agent-answered");
+        await WriteAsync(answered, ConversationEventKind.SubmissionText, "what is open?", 1);
+        await WriteAsync(answered, ConversationEventKind.TurnStarted, "", 2);
+        await WriteAsync(answered, ConversationEventKind.TurnFinal, new string('x', ConversationLastMessage.MaxChars + 25), 3);
+
+        var working = await Open("agent-working");
+        await WriteAsync(working, ConversationEventKind.SubmissionText, "and closed?", 4);
+        await WriteAsync(working, ConversationEventKind.TurnStarted, "", 5);
+        await WriteAsync(working, ConversationEventKind.TurnProgress, "", 6);
+
+        var silent = await Open("agent-silent");
+
+        var listed = (await _store.ListConversationsAsync("client", principal, 50)).ToDictionary(c => c.ConversationId);
+
+        Assert.Equal(3, listed.Count);
+        Assert.False(listed[answered].LastMessage!.FromUser);
+        Assert.Equal(new string('x', ConversationLastMessage.MaxChars), listed[answered].LastMessage!.Text);
+        Assert.True(listed[answered].LastMessage!.Truncated);
+
+        Assert.True(listed[working].LastMessage!.FromUser);
+        Assert.Equal("and closed?", listed[working].LastMessage!.Text);
+        Assert.False(listed[working].LastMessage!.Truncated);
+
+        Assert.Null(listed[silent].LastMessage);
+
+        // Reading one conversation by id does not carry it: only a list asks for it.
+        Assert.Null((await _store.FindConversationAsync(answered, principal))!.LastMessage);
+    }
+
     [Fact]
     public async Task Pages_do_not_overlap_and_end_with_no_next()
     {

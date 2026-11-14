@@ -269,10 +269,17 @@ Authorization: Bearer <token>
   "protocol": "fleet.conversation.v1",
   "conversations": [
     { "conversationId": "c_4Jd8Ls2w", "agent": "builder", "externalRef": "main",
-      "nextSeq": 41, "retainedFloorSeq": 12, "lastActivityAt": "2026-11-12T10:00:00+00:00" }
+      "nextSeq": 41, "retainedFloorSeq": 12, "lastActivityAt": "2026-11-12T10:00:00+00:00",
+      "lastMessage": { "from": "agent", "text": "Three issues are open." } }
   ]
 }
 ```
+
+`lastMessage` is the start of the conversation's newest message (at most 160 characters; `truncated:
+true` when there was more) and who wrote it, `user` or `agent`. A message is what someone said —
+`submission.text`, `turn.final`, `turn.message`, `turn.recovered_answer` — so a thread whose agent
+is still working shows the person's last message. The key is omitted for a conversation in which
+nothing has been said or everything said has aged out, which is the shape the list always had.
 
 **Open or resume a conversation.** `agent` is the agent's unique name, as
 `GET /api/chat/agents` lists it, and must accept chat now (`409 agent_unavailable` otherwise). The

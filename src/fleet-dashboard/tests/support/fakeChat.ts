@@ -67,10 +67,15 @@ export class FakeChat {
       }
       if (method === 'GET' && path === '/v1/conversations') {
         return json(200, {
-          conversations: Object.entries(this.events).map(([conversationId, list]) => ({
-            conversationId, agent: conversationId.slice(2), externalRef: 'main', nextSeq: list.length + 1, retainedFloorSeq: 1,
-            lastActivityAt: new Date().toISOString(),
-          })),
+          conversations: Object.entries(this.events).map(([conversationId, list]) => {
+            // The newest thing someone said, as the chat service finds it: not progress, not a notice.
+            const said = [...list].reverse().find(e => ['submission.text', 'turn.final', 'turn.message'].includes(e.kind as string))
+            return {
+              conversationId, agent: conversationId.slice(2), externalRef: 'main', nextSeq: list.length + 1, retainedFloorSeq: 1,
+              lastActivityAt: new Date().toISOString(),
+              ...(said ? { lastMessage: { from: said.kind === 'submission.text' ? 'user' : 'agent', text: (said.payload as { text: string }).text } } : {}),
+            }
+          }),
         })
       }
       if (method === 'POST' && path === '/v1/conversations') {

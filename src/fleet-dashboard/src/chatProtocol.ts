@@ -260,6 +260,8 @@ export interface ThreadSummary {
   nextSeq: number
   /** When the thread last moved, in epoch milliseconds, or null. */
   lastActivityAt: number | null
+  /** The start of the thread's newest message and who wrote it, where the chat service says. */
+  lastMessage?: { fromUser: boolean; text: string }
 }
 
 /**
@@ -277,7 +279,11 @@ export function readThreads(body: unknown): Record<string, ThreadSummary> | null
     const nextSeq = count(fields?.nextSeq)
     if (!agent || !conversationId || nextSeq === null || fields?.externalRef !== THREAD_REF) continue
     const at = Date.parse(text(fields?.lastActivityAt))
-    threads[agent] = { conversationId, agent, nextSeq, lastActivityAt: Number.isFinite(at) ? at : null }
+    const last = record(fields?.lastMessage)
+    threads[agent] = {
+      conversationId, agent, nextSeq, lastActivityAt: Number.isFinite(at) ? at : null,
+      ...(last && typeof last.text === 'string' ? { lastMessage: { fromUser: last.from === 'user', text: last.text } } : {}),
+    }
   }
   return threads
 }

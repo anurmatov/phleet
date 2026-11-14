@@ -66,8 +66,12 @@ internal sealed class FakeConversationStore : IConversationStore
         });
     }
 
+    /// <summary>The newest message of the one conversation, as a list would be given it.</summary>
+    public ConversationLastMessage? LastMessage { get; set; }
+
     private ConversationSummary Summary() => new()
     {
+        LastMessage = LastMessage,
         ConversationId = ConversationId,
         AgentName = AgentName,
         ExternalRef = "main-thread",

@@ -113,6 +113,34 @@ public sealed record ConversationSummary
     public required ulong NextSeq { get; init; }
     public required ulong RetainedFloorSeq { get; init; }
     public required DateTimeOffset LastActivityAt { get; init; }
+
+    /// <summary>
+    /// The newest message of the conversation, for a list that shows a line of each thread. Read
+    /// only where a list is asked for; null on every other read, and for a conversation in which
+    /// nothing has been said or everything said has aged out.
+    /// </summary>
+    public ConversationLastMessage? LastMessage { get; init; }
+}
+
+/// <summary>
+/// The start of a conversation's newest message, and who wrote it.
+/// </summary>
+/// <remarks>
+/// A message is one of the kinds a reply may point at (<see cref="ReplyTarget.Kinds"/>): what the
+/// person said and what the agent said. Progress, notices and acknowledgements are not messages,
+/// so a turn that is still running shows the person's last message until the agent says something.
+/// </remarks>
+public sealed record ConversationLastMessage
+{
+    /// <summary>How much of the message a list is given.</summary>
+    public const int MaxChars = 160;
+
+    public required bool FromUser { get; init; }
+
+    /// <summary>At most <see cref="MaxChars"/> characters. Empty for a message that was files only.</summary>
+    public required string Text { get; init; }
+
+    public required bool Truncated { get; init; }
 }
 
 /// <summary>

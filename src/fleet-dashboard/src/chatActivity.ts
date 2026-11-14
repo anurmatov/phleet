@@ -130,14 +130,20 @@ export class ChatActivityStore {
     this.set({ threads })
   }
 
-  /** The thread this page shows live has reached `lastSeq`. */
-  noteThread(agent: string, conversationId: string, lastSeq: number, at: number | null): void {
+  /** The thread this page shows live has reached `lastSeq`, and this is its newest message. */
+  noteThread(
+    agent: string, conversationId: string, lastSeq: number, at: number | null, lastMessage?: ThreadSummary['lastMessage'],
+  ): void {
     const held = this.state.threads[agent]
     if (held && held.conversationId === conversationId && held.nextSeq > lastSeq) return
+    const newest = lastMessage ?? (held?.conversationId === conversationId ? held.lastMessage : undefined)
     this.set({
       threads: {
         ...this.state.threads,
-        [agent]: { conversationId, agent, nextSeq: lastSeq + 1, lastActivityAt: at ?? held?.lastActivityAt ?? null },
+        [agent]: {
+          conversationId, agent, nextSeq: lastSeq + 1, lastActivityAt: at ?? held?.lastActivityAt ?? null,
+          ...(newest ? { lastMessage: newest } : {}),
+        },
       },
     })
   }
@@ -206,4 +212,19 @@ export function agentStanding(agent: { effectiveStatus: string; currentTask: str
   if (task) return { dot: 'green', text: `Working: ${task.length > 90 ? `${task.slice(0, 90)}…` : task}`, down: false }
   if (agent.effectiveStatus === 'stale') return { dot: 'yellow', text: 'Not heard from lately', down: false }
   return { dot: 'green', text: 'Idle', down: false }
+}
+
+/** How much of a message a list shows. The chat service sends no more than this either. */
+const PREVIEW_CHARS = 160
+
+/**
+ * A thread's newest message as one line for a list: the person's own messages are marked as
+ * theirs, and a message that was files only is said to be that. Null when the thread has none.
+ */
+export function threadPreview(thread: ThreadSummary | undefined): string | null {
+  const last = thread?.lastMessage
+  if (!last) return null
+  const line = last.text.replace(/\s+/g, ' ').trim()
+  const words = line === '' ? 'Sent a file' : line.length > PREVIEW_CHARS ? `${line.slice(0, PREVIEW_CHARS)}…` : line
+  return last.fromUser ? `You: ${words}` : words
 }

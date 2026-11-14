@@ -60,4 +60,22 @@ public sealed class DurableDelegationWiringTests
         Assert.Same(durable, DurableOf(provider.GetRequiredService<TemporalRelayListener>()));
         Assert.Same(durable, DurableOf(scope.ServiceProvider.GetRequiredService<DelegateToAgentActivity>()));
     }
+
+    /// <summary>
+    /// The activity's clock is an optional constructor parameter too, there for tests. The bridge
+    /// registers none, and the wait then runs on the system clock as it always did.
+    /// </summary>
+    [Fact]
+    public async Task TheActivity_RunsOnTheSystemClock_WhenTheContainerRegistersNone()
+    {
+        var stateFile = Path.Combine(Path.GetTempPath(), "durable-wiring-" + Guid.NewGuid().ToString("N"), "pending.json");
+        await using var provider = BridgeServices(stateFile);
+        await using var scope = provider.CreateAsyncScope();
+
+        var activity = scope.ServiceProvider.GetRequiredService<DelegateToAgentActivity>();
+
+        Assert.Same(
+            TimeProvider.System,
+            activity.GetType().GetField("_time", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(activity));
+    }
 }

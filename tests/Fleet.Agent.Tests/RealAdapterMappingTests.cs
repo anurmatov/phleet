@@ -70,7 +70,7 @@ public class RealAdapterMappingTests
     ///
     /// <para><b>What is deliberately NOT asserted, and why.</b> An earlier revision also required
     /// every heartbeat to be sequenced BEFORE the final terminal. That is not true.
-    /// <c>TaskManager</c> cancels the typing loop in <c>ProcessTask</c>'s <c>finally</c>, which
+    /// <c>TaskManager</c> cancels the typing loop in <c>TurnRun.RunAsync</c>'s <c>finally</c>, which
     /// runs after every terminal publish, so a heartbeat landing in that window legitimately takes
     /// a later <c>seq</c> than the terminal. It is unsound by construction — found by reading
     /// <c>TaskManager</c> rather than by watching it fail — and it is the same defect class as the
@@ -90,7 +90,7 @@ public class RealAdapterMappingTests
 
         Assert.True(observed.TypingHeartbeats > 0);
 
-        // The one ordering fact here that IS causal: the typing loop is started inside ProcessTask,
+        // The one ordering fact here that IS causal: the typing loop is started inside TurnRun.RunAsync,
         // which only runs after registration has published turn.started, so no heartbeat can
         // precede it.
         foreach (var heartbeat in ordered.Where(MatrixCells.IsTypingHeartbeat))

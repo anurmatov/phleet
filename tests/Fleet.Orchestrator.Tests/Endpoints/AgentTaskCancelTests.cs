@@ -113,7 +113,7 @@ public sealed class AgentTaskCancelTests
     }
 
     /// <summary>
-    /// The route is declared in Program.cs, which a test cannot host, so its two lines are read
+    /// The route is declared in AgentTaskCancelEndpoints.cs, which a test cannot host, so its two lines are read
     /// from the source: the parameter is optional and comes from the query, and the route waits
     /// for the forward before it answers. The bridge treats a 2xx as "the agent has dealt with
     /// it", which is only true while that wait is there.
@@ -123,9 +123,9 @@ public sealed class AgentTaskCancelTests
     {
         var root = new DirectoryInfo(AppContext.BaseDirectory);
         while (root is not null && !File.Exists(Path.Combine(root.FullName, "Fleet.sln"))) root = root.Parent;
-        var program = File.ReadAllText(Path.Combine(root!.FullName, "src/Fleet.Orchestrator/Program.cs"));
+        var program = File.ReadAllText(Path.Combine(root!.FullName, "src/Fleet.Orchestrator/Endpoints/AgentTaskCancelEndpoints.cs"));
         var from = program.IndexOf("app.MapPost(\"/api/agents/{name}/cancel/{**taskId}\"", StringComparison.Ordinal);
-        var route = program[from..program.IndexOf("\n});", from, StringComparison.Ordinal)];
+        var route = program[from..program.IndexOf("\n        });", from, StringComparison.Ordinal)];
 
         Assert.Contains("(string name, string taskId, string? executionId, ", route);
         Assert.Contains("return await AgentTaskCancel.ForwardAsync(", route);

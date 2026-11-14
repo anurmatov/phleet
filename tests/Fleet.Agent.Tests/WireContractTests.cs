@@ -124,9 +124,9 @@ public sealed class WireContractTests
         var (relay, _, consumer) = await ConnectedRelayAsync(shortName: "receiver");
         await using var _ = relay;
         var received = new List<(long ChatId, string Sender, string Text, string Type, string? CorrelationId,
-            string? TaskId, string? WorkflowId, string? SignalName)>();
-        relay.MessageReceived += (chatId, from, text, kind, correlation, task, workflow, signal) =>
-            received.Add((chatId, from, text, kind, correlation, task, workflow, signal));
+            string? TaskId, string? WorkflowId, string? SignalName, string? ExecutionId)>();
+        relay.MessageReceived += (chatId, from, text, kind, correlation, task, workflow, signal, execution) =>
+            received.Add((chatId, from, text, kind, correlation, task, workflow, signal, execution));
 
         await DeliverAsync(consumer(), WireGolden.SampleBytes(sample));
 
@@ -137,6 +137,7 @@ public sealed class WireContractTests
         Assert.Equal(taskId, message.TaskId);
         Assert.Equal(workflowId, message.WorkflowId);
         Assert.Equal(signalName, message.SignalName);
+        Assert.Null(message.ExecutionId);
 
         using var document = JsonDocument.Parse(WireGolden.Sample(sample));
         Assert.Equal(document.RootElement.GetProperty("Text").GetString(), message.Text);

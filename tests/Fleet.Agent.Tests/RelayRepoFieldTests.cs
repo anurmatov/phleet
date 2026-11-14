@@ -29,10 +29,13 @@ public class RelayRepoFieldTests
         // its handlers does not: nothing downstream of the relay can route by it.
         var handler = typeof(GroupRelayService).GetEvent(nameof(GroupRelayService.MessageReceived))!
             .EventHandlerType!.GetMethod("Invoke")!;
-        Assert.Equal(8, handler.GetParameters().Length);
+        Assert.Equal(9, handler.GetParameters().Length);
         Assert.Equal(
             [typeof(long), typeof(string), typeof(string), typeof(string), typeof(string), typeof(string),
-             typeof(string), typeof(string)],
+             typeof(string), typeof(string), typeof(string)],
             handler.GetParameters().Select(p => p.ParameterType));
+        var receiver = typeof(GroupBehavior).GetMethod(nameof(GroupBehavior.OnRelayMessage))!;
+        Assert.Equal("executionId", receiver.GetParameters()[8].Name);
+        Assert.DoesNotContain(receiver.GetParameters(), p => p.Name == "repo");
     }
 }

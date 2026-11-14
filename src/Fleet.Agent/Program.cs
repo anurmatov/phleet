@@ -13,6 +13,14 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
+// `prepare <verb>`: the one-shot mode entrypoint.sh calls before it starts the agent. It reads the
+// generated configuration through the same options the host binds and never builds a host.
+if (args.Length > 0 && args[0] == Fleet.Agent.Prepare.EntrypointPrepare.Command)
+{
+    Environment.ExitCode = Fleet.Agent.Prepare.EntrypointPrepare.Run(args[1..], Console.Out, Console.Error);
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddAgentCoreServices(builder.Configuration);
@@ -93,7 +101,13 @@ if (!isCliMode)
 
     var startedAt = DateTimeOffset.UtcNow;
 
-    app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+    // `status` and the 200 never depend on the relay: a broker outage must not restart agents.
+    // `relay` is extra, for whoever is looking: disabled, connecting, connected or retrying.
+    app.MapGet("/health", (IServiceProvider sp) => Results.Ok(new
+    {
+        status = "ok",
+        relay = sp.GetService<GroupRelayService>()?.State ?? GroupRelayService.States.Disabled,
+    }));
 
     app.MapPost("/cancel", async (IServiceProvider sp) =>
     {

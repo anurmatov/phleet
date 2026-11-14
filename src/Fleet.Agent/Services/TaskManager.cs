@@ -28,6 +28,64 @@ public sealed class TaskManager
     private const int MaxQueueDepth = DispatchQueue.MaxQueueDepth;
     private const int MaxQueuedPartsPerEntry = QueuedMessage.MaxParts;
 
+    /// <summary>
+    /// The one gate for "is a turn running?". The agent is busy exactly when a turn is registered
+    /// in <see cref="_chatTasks"/>, and every change to that goes through here:
+    /// <list type="bullet">
+    /// <item>an admission decides under the gate and, in the same hold, either registers its turn
+    /// or puts its message in the queue;</item>
+    /// <item>a finishing turn leaves the running set and the next queued entry's turn is registered
+    /// in one hold (<see cref="HandOver"/>).</item>
+    /// </list>
+    /// So two admissions cannot both find the agent idle, an arrival cannot start ahead of work
+    /// already queued, and there is no moment at which nothing is registered while the slot is
+    /// still taken: what <see cref="HasRunningTasks"/>, <see cref="GetOrchestratorStatus"/> and
+    /// <c>/status</c> report is what an admission decides on.
+    /// </summary>
+    /// <remarks>
+    /// Lock order, outermost first: <c>RunningTask.TurnDispatchLock</c> → <c>_admissionGate</c> →
+    /// <c>lock (RunningTask.PrimaryMessageIds)</c> → <c>DispatchQueue._gate</c> →
+    /// <c>QueuedMessage.QueueDispatchLock</c>. Only state changes happen under the gate: no await,
+    /// no sink send, no subscriber callback, and never a turn. The one exception is
+    /// <c>submission.accepted</c> for a message that was queued, which is published in the same hold
+    /// as the enqueue (see <see cref="ReportDisposition"/>): publication is a non-blocking hand-off to
+    /// the event pump, and outside the hold the entry could be claimed and its turn started first.
+    /// </remarks>
+    private readonly Lock _admissionGate = new();
+
+    /// <summary>
+    /// Executor turns in flight that this manager did not start: the warmup ping and a
+    /// <c>/run</c> command. They go straight to the executor, whose own lock keeps them from
+    /// overlapping a task's turn, so a registered turn may still be waiting for that lock while
+    /// one of them runs. A mid-turn injection made then would be written into the ping or the
+    /// command, and its answer would come out there, where nobody delivers it.
+    /// </summary>
+    private int _executorSideUses;
+
+    internal bool ExecutorBusyElsewhere => Volatile.Read(ref _executorSideUses) > 0;
+
+    /// <summary>
+    /// Marks an executor turn started outside this manager, for as long as the returned handle is
+    /// held. While any is held, messages for a running turn are not injected into it; they wait
+    /// for its end like any message that could not be injected.
+    /// </summary>
+    public IDisposable BeginExecutorSideUse()
+    {
+        Interlocked.Increment(ref _executorSideUses);
+        return new ExecutorSideUse(this);
+    }
+
+    private sealed class ExecutorSideUse(TaskManager owner) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                Interlocked.Decrement(ref owner._executorSideUses);
+        }
+    }
+
     // user-level index: userId → list of (chatId, taskId) for cross-chat cancel
     private readonly ConcurrentDictionary<long, List<(long ChatId, int TaskId)>> _userTasks = new();
 
@@ -75,6 +133,7 @@ public sealed class TaskManager
     internal int PrimaryDedupCountForTest => _primaryDedup.Count;
 
     internal Action? QueueEntryClaimedForTest { get; set; }
+    internal Action<string>? DispatchCheckpointForTest { get; set; }
     internal Action? QueueEntryDequeuedForBridgeCancelForTest { get; set; }
 
     /// <summary>
@@ -92,6 +151,16 @@ public sealed class TaskManager
 
     private readonly TurnBindingPublisher? _turnBindings;
 
+    /// <summary>The clock the stall watchdog runs on. A parameter so a test can move it.</summary>
+    private readonly TimeProvider _time;
+
+    /// <summary>
+    /// Starts the silence limit for one read of the executor's event stream. See
+    /// <see cref="TurnStallWatch"/>; <c>Agent:TurnStallTimeoutMinutes</c> = 0 disables it.
+    /// </summary>
+    private TurnStallWatch WatchForStall(CancellationToken turnToken) =>
+        new(TimeSpan.FromMinutes(_agentConfig.TurnStallTimeoutMinutes), turnToken, _time);
+
     public TaskManager(
         IOptions<AgentOptions> agentConfig,
         IAgentExecutor executor,
@@ -103,8 +172,10 @@ public sealed class TaskManager
         ConversationEventCounters? counters = null,
         IMessageSink? sink = null,
         TurnBindingPublisher? turnBindings = null,
-        QueueLaneCounter? queueCounter = null)
+        QueueLaneCounter? queueCounter = null,
+        TimeProvider? timeProvider = null)
     {
+        _time = timeProvider ?? TimeProvider.System;
         _queueCounter = queueCounter ?? new();
         _messageQueue = new DispatchQueue(_queueCounter);
         _turnBindings = turnBindings;
@@ -187,7 +258,7 @@ public sealed class TaskManager
         }
         try
         {
-            var outcome = await StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, skipPendingQueueCheck: false, identity: identity,
+            var outcome = await StartTaskCore(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity,
                 priority: priority, telegramMessageId: telegramMessageId, steeringEligible: steeringEligible);
             if (keyed && outcome is TaskDispatchOutcome.Dropped or TaskDispatchOutcome.QueueFull) _primaryDedup.Complete(chatId, telegramMessageId);
             return outcome;
@@ -195,6 +266,46 @@ public sealed class TaskManager
         catch { if (keyed) _primaryDedup.Complete(chatId, telegramMessageId); throw; }
     }
 
+
+    /// <summary>
+    /// <see cref="StartTask"/> for a caller that does not wait for the outcome: a transport
+    /// callback, a relay handler, a timer. The dispatch is still observed. If it throws, the
+    /// message is gone, and discarding the task meant it went without a line in the log.
+    /// </summary>
+    public void StartTaskDetached(long chatId, string task, string displayText, bool isSessionTask,
+        TaskSource source = TaskSource.UserMessage,
+        string? relaySender = null,
+        string? correlationId = null,
+        string? taskId = null,
+        IReadOnlyList<MessageImage>? images = null,
+        IReadOnlyList<MessageDocument>? documents = null,
+        long userId = 0,
+        ConversationIdentity? identity = null,
+        TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
+        bool steeringEligible = false)
+    {
+        var dispatch = StartTask(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
+            images, documents, userId, identity, priority, telegramMessageId, steeringEligible);
+        if (dispatch.IsCompletedSuccessfully) return;
+        _ = ObserveDetachedStartAsync(dispatch, chatId, source, taskId, correlationId is not null);
+    }
+
+    private async Task ObserveDetachedStartAsync(Task<TaskDispatchOutcome> dispatch, long chatId, TaskSource source,
+        string? taskId, bool hasCorrelationId)
+    {
+        try
+        {
+            await dispatch.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Identifiers only. The prompt and the display text can carry anything a person or
+            // another agent wrote, and neither belongs in a log.
+            TryLog(LogLevel.Error, ex,
+                "Task dispatch failed and the message was dropped (chat={ChatId}, source={Source}, taskId={TaskId}, hasCorrelationId={HasCorrelationId})",
+                chatId, source, taskId ?? "none", hasCorrelationId);
+        }
+    }
 
     private async Task<TaskDispatchOutcome> StartTaskCore(long chatId, string task, string displayText, bool isSessionTask,
         TaskSource source = TaskSource.UserMessage,
@@ -204,12 +315,8 @@ public sealed class TaskManager
         IReadOnlyList<MessageImage>? images = null,
         IReadOnlyList<MessageDocument>? documents = null,
         long userId = 0,
-        bool skipPendingQueueCheck = false,
-        bool skipDedupReservationAcquire = false,
         ConversationIdentity? identity = null,
-        IReadOnlyList<string>? mergedSubmissionIds = null,
         TaskPriority priority = TaskPriority.Routine, long telegramMessageId = 0,
-        IReadOnlyList<long>? primaryMessageIds = null,
         bool steeringEligible = false)
     {
         // A null identity means a caller that predates the seam — synthesize one from the runtime
@@ -219,10 +326,10 @@ public sealed class TaskManager
 
         var state = GetChatState(chatId);
 
-        // Dedup: ignore re-delivered bridge directives with the same taskId.
-        // DrainQueue passes skipDedupReservationAcquire=true because the reservation was
-        // already acquired when the task entered the queue and is still held.
-        if (!skipDedupReservationAcquire && taskId is not null && !_activeTaskIds.TryAdd(taskId, true))
+        // Dedup: ignore re-delivered bridge directives with the same taskId. A queued entry keeps
+        // the reservation it took here until its own turn ends; HandOver starts it without coming
+        // back through this method.
+        if (taskId is not null && !_activeTaskIds.TryAdd(taskId, true))
         {
             _logger.LogInformation("Duplicate taskId={TaskId} ignored (already in-flight)", taskId);
             return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
@@ -247,8 +354,7 @@ public sealed class TaskManager
                 {
                     lock (runningSession.PrimaryMessageIds) runningSession.PrimaryMessageIds.Add(telegramMessageId);
                 }
-                var delivered = await DeliverMidTurnMessageAsync(chatId, runningSession, message);
-                return ReportDisposition(chatId, identity, delivered);
+                return await DeliverMidTurnMessageAsync(chatId, runningSession, message);
             }
 
             if (source == TaskSource.CheckIn)
@@ -256,60 +362,129 @@ public sealed class TaskManager
                 if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
                 var message = new MidTurnMessage(task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
                     images, documents, userId, DateTimeOffset.UtcNow, identity, priority, telegramMessageId);
-                return ReportDisposition(chatId, identity, await DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false));
+                return await DeferUntilTurnEndAsync(chatId, runningSession, message, notifyUser: false);
             }
 
             if (source is TaskSource.Relay or TaskSource.Bridge)
                 _logger.LogInformation("Not injecting {Source} task into running conversational turn for chat {ChatId}; using normal capacity path", source, chatId);
         }
 
-        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity, priority: priority, telegramMessageId: telegramMessageId) with { PrimaryMessageIds = primaryMessageIds };
+        var queuedPart = CreateQueuedPart(task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, userId, identity: identity, priority: priority, telegramMessageId: telegramMessageId);
         // #406: only the router's verified-human flag makes a message eligible to steer a running
         // workflow turn, and only after it took today's queue path and was Queued.
         var steer = steeringEligible && source == TaskSource.UserMessage;
-        if (!skipPendingQueueCheck)
+
+        // Under the gate, with the acceptance published in the same hold: a claim of the pending
+        // entry is made under the gate too, so the entry cannot become a turn, and that turn
+        // cannot start emitting, before this submission has been accepted as queued.
+        PendingQueueResult pendingResult;
+        var pendingNotify = false;
+        var pendingEnqueued = false;
+        QueuedMessage? pendingEntry = null;
+        var pendingPosition = 0;
+        lock (_admissionGate)
         {
-            var pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
+            pendingResult = TryAppendToPendingQueue(chatId, queuedPart);
             if (pendingResult == PendingQueueResult.Merged)
             {
-                // Keep the taskId reservation — it covers the task's lifetime in the queue.
-                // DrainQueue will call StartTaskCore with skipDedupReservationAcquire=true,
-                // and the reservation is released by the finally block in Task.Run.
-                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
-                OnStatusChanged?.Invoke();
-                if (steer) await SteerRunningTurnAsync(chatId, userId, queuedPart, images, documents);
-                return ReportDisposition(chatId, identity, TaskDispatchOutcome.Queued);
+                ReportDisposition(chatId, identity, TaskDispatchOutcome.Queued);
             }
-
-            if (pendingResult == PendingQueueResult.EnqueueFresh)
+            else if (pendingResult == PendingQueueResult.EnqueueFresh && source != TaskSource.CheckIn)
             {
-                if (source == TaskSource.CheckIn)
+                pendingNotify = source != TaskSource.DebouncedGroupBatch && BusyNoticeApplies(chatId, source);
+                pendingEnqueued = _messageQueue.TryEnqueue(chatId, queuedPart, out pendingEntry, out pendingPosition);
+                if (pendingEnqueued)
                 {
-                    // Check-ins are dropped rather than queued behind user work.
-                    if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
-                    _logger.LogDebug("Check-in skipped — agent already has a pending queued entry for chat {ChatId}", chatId);
-                    return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
+                    if (BusyNoticeDue(chatId, pendingNotify, deferNotice: steer)) pendingEntry!.BusyNoticeSent = true;
+                    ReportDisposition(chatId, identity, TaskDispatchOutcome.Queued);
                 }
-                var notifyUser = source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch)
-                    && BusyNoticeApplies(chatId, source);
-                var enqueued = EnqueueFreshMessage(chatId, queuedPart, notifyUser,
-                    completeBridgeOnDrop: true, out var entry, out var position, deferNotice: steer);
-                // Release the reservation only when enqueue failed — a queued task keeps it.
-                if (!enqueued && taskId is not null)
-                    _activeTaskIds.TryRemove(taskId, out _);
-                if (enqueued && steer)
-                    await SteerAndNotifyAsync(chatId, userId, queuedPart, images, documents, entry!, position,
-                        notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0));
-                return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
             }
+        }
+
+        if (pendingResult == PendingQueueResult.Merged)
+        {
+            // Keep the taskId reservation — it covers the task's lifetime in the queue, and
+            // is released by the teardown of the turn that HandOver starts for the entry.
+            _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.MergedIntoQueue);
+            OnStatusChanged?.Invoke();
+            if (steer) await SteerRunningTurnAsync(chatId, userId, queuedPart, images, documents);
+            return TaskDispatchOutcome.Queued;
+        }
+
+        if (pendingResult == PendingQueueResult.EnqueueFresh)
+        {
+            if (source == TaskSource.CheckIn)
+            {
+                // Check-ins are dropped rather than queued behind user work.
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                _logger.LogDebug("Check-in skipped — agent already has a pending queued entry for chat {ChatId}", chatId);
+                return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
+            }
+            AfterEnqueue(pendingEnqueued, chatId, queuedPart, pendingNotify, completeBridgeOnDrop: true,
+                pendingEntry, pendingPosition, deferNotice: steer);
+            if (!pendingEnqueued)
+            {
+                // Release the reservation only when enqueue failed — a queued task keeps it.
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                return ReportDisposition(chatId, identity, TaskDispatchOutcome.QueueFull);
+            }
+            if (steer)
+                await SteerAndNotifyAsync(chatId, userId, queuedPart, images, documents, pendingEntry!, pendingPosition,
+                    pendingNotify && !(_agentConfig.SuppressToolMessages && chatId < 0));
+            return TaskDispatchOutcome.Queued;
         }
 
         // Each agent has one persistent executor process and the executor's send lock is
         // held for a full turn. A second "concurrent" turn would just block behind that
         // lock while bypassing queue notices and coalescing, so the runtime is explicitly
         // one-at-a-time until executors can actually interleave turns.
-        var hasRunningTask = _chatTasks.Values.Any(s => s.Count > 0);
-        if (hasRunningTask)
+        var start = new TurnStart(chatId, task, displayText, isSessionTask, source, relaySender, correlationId, taskId,
+            images, documents, userId, identity, MergedSubmissionIds: null,
+            PrimaryMessageIds: priority == TaskPriority.PrimaryHuman && telegramMessageId > 0 ? [telegramMessageId] : []);
+        RegisteredTurn? registered = null;
+        var busy = false;
+        var enqueued = false;
+        var notifyUser = false;
+        QueuedMessage? entry = null;
+        var position = 0;
+        try
+        {
+            lock (_admissionGate)
+            {
+                busy = AnyTurnRunning();
+                if (!busy)
+                {
+                    DispatchCheckpointForTest?.Invoke("admission_idle");
+                    registered = RegisterTurnLocked(start);
+                }
+                else if (source != TaskSource.CheckIn)
+                {
+                    // DebouncedGroupBatch (different-chat) and all other sources go to the global FIFO.
+                    // DebouncedGroupBatch must NOT use DeferUntilTurnEndAsync — that is reserved for
+                    // CheckIn. The FIFO preserves ordering with other queued work.
+                    // DebouncedGroupBatch is silent: sending "I'm busy" for automated group checks is noise.
+                    // So is a chat message queued behind that chat's own turn (#369).
+                    notifyUser = source != TaskSource.DebouncedGroupBatch && BusyNoticeApplies(chatId, source);
+                    // Enqueued in the same hold as the busy decision: the turn that made the agent
+                    // busy cannot hand over before this entry is in the queue.
+                    enqueued = _messageQueue.TryEnqueue(chatId, queuedPart, out entry, out position);
+                    if (enqueued)
+                    {
+                        if (BusyNoticeDue(chatId, notifyUser, deferNotice: steer)) entry!.BusyNoticeSent = true;
+                        // Accepted as queued before the gate is released: once it is, the entry can
+                        // be claimed and its turn can start, and that must come after this.
+                        ReportDisposition(chatId, identity, TaskDispatchOutcome.Queued);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+            throw;
+        }
+
+        if (busy)
         {
             // Check-ins silently skip when at capacity instead of queuing
             if (source == TaskSource.CheckIn)
@@ -319,62 +494,124 @@ public sealed class TaskManager
                 return ReportDisposition(chatId, identity, TaskDispatchOutcome.Dropped);
             }
 
-            // DebouncedGroupBatch (different-chat) and all other sources go to the global FIFO.
-            // DebouncedGroupBatch must NOT use DeferUntilTurnEndAsync — that is reserved for
-            // CheckIn. The FIFO preserves ordering with other queued work.
-            // DebouncedGroupBatch is silent: sending "I'm busy" for automated group checks is noise.
-            // So is a chat message queued behind that chat's own turn (#369).
-            var notifyUser = source != TaskSource.DebouncedGroupBatch && BusyNoticeApplies(chatId, source);
-            var enqueued = EnqueueFreshMessage(chatId, queuedPart, notifyUser,
-                completeBridgeOnDrop: true, out var entry, out var position, deferNotice: steer);
-            // Release the reservation only when enqueue failed — a queued task keeps it.
-            if (!enqueued && taskId is not null)
-                _activeTaskIds.TryRemove(taskId, out _);
-            if (enqueued && steer)
+            AfterEnqueue(enqueued, chatId, queuedPart, notifyUser, completeBridgeOnDrop: true, entry, position, deferNotice: steer);
+            if (!enqueued)
+            {
+                // Release the reservation only when enqueue failed — a queued task keeps it.
+                if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+                return ReportDisposition(chatId, identity, TaskDispatchOutcome.QueueFull);
+            }
+            if (steer)
                 await SteerAndNotifyAsync(chatId, userId, queuedPart, images, documents, entry!, position,
                     notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0));
-            return ReportDisposition(chatId, identity, enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull);
+            // Already reported, under the gate.
+            return TaskDispatchOutcome.Queued;
         }
 
-        // Exception safety: if anything between here and Task.Run fires throws, release the
-        // reservation so the same taskId can be retried. The Task.Run finally block handles
-        // the release once the task has been handed off successfully.
+        LaunchTurn(start, registered!);
+        return TaskDispatchOutcome.Ran;
+    }
+
+    private bool AnyTurnRunning() => _chatTasks.Values.Any(s => s.Count > 0);
+
+    /// <summary>Everything a turn is started with, whether it runs at once or comes off the queue.</summary>
+    private sealed record TurnStart(
+        long ChatId, string Task, string DisplayText, bool IsSessionTask, TaskSource Source,
+        string? RelaySender, string? CorrelationId, string? TaskId,
+        IReadOnlyList<MessageImage>? Images, IReadOnlyList<MessageDocument>? Documents, long UserId,
+        ConversationIdentity Identity, IReadOnlyList<string>? MergedSubmissionIds, IReadOnlyList<long> PrimaryMessageIds);
+
+    /// <summary>A turn that is in the running set. Its task may not have been started yet.</summary>
+    private sealed record RegisteredTurn(ChatTaskState State, RunningTask Running, CancellationTokenSource Cts, ConversationIdentity Identity);
+
+    /// <summary>
+    /// Puts a turn in the running set. Called with <see cref="_admissionGate"/> held and only when
+    /// no turn is running. From here on the agent is busy for every observer and every admission.
+    /// </summary>
+    private RegisteredTurn RegisterTurnLocked(TurnStart start)
+    {
+        var state = GetChatState(start.ChatId);
+        var cts = new CancellationTokenSource();
+        var running = state.Add(start.DisplayText, cts, start.IsSessionTask, start.UserId, bridgeTaskId: start.TaskId, source: start.Source);
         try
         {
-        var cts = new CancellationTokenSource();
-        var running = state.Add(displayText, cts, isSessionTask, userId, bridgeTaskId: taskId, source: source);
-
-        // TurnId is minted ONCE, here at registration, and lives on the RunningTask. Every event
-        // this turn emits derives from this identity via `with` rather than rebuilding it.
-        var turnIdentity = identity.WithTurn(Guid.NewGuid().ToString("N"));
-        running.Identity = turnIdentity;
-        var keys = primaryMessageIds ?? (priority == TaskPriority.PrimaryHuman && telegramMessageId > 0 ? [telegramMessageId] : []);
-        foreach (var key in keys) { running.PrimaryMessageIds.Add(key); _primaryDedup.Dispatched(chatId, key); }
-        if (mergedSubmissionIds is { Count: > 0 })
-        {
-            // A coalesced entry is ONE turn answering SEVERAL submissions. Without this list the
-            // merged submissions would never terminate on the client.
-            running.MergedSubmissionIds.AddRange(
-                mergedSubmissionIds.Where(id => !string.Equals(id, identity.SubmissionId, StringComparison.Ordinal)));
+            // TurnId is minted ONCE, here at registration, and lives on the RunningTask. Every event
+            // this turn emits derives from this identity via `with` rather than rebuilding it.
+            var turnIdentity = start.Identity.WithTurn(Guid.NewGuid().ToString("N"));
+            running.Identity = turnIdentity;
+            foreach (var key in start.PrimaryMessageIds)
+            {
+                lock (running.PrimaryMessageIds) running.PrimaryMessageIds.Add(key);
+                _primaryDedup.Dispatched(start.ChatId, key);
+            }
+            if (start.MergedSubmissionIds is { Count: > 0 })
+            {
+                // A coalesced entry is ONE turn answering SEVERAL submissions. Without this list the
+                // merged submissions would never terminate on the client.
+                running.ReplaceMergedSubmissionIds(
+                    start.MergedSubmissionIds.Where(id => !string.Equals(id, start.Identity.SubmissionId, StringComparison.Ordinal)));
+            }
+            return new RegisteredTurn(state, running, cts, turnIdentity);
         }
-        PublishEvent(chatId, ConversationEventKind.TurnStarted, turnIdentity, new TurnStartedPayload());
-
-        // Register in user-level index for cross-chat cancel
-        if (userId != 0)
+        catch
         {
-            var userList = _userTasks.GetOrAdd(userId, _ => []);
-            lock (userList) userList.Add((chatId, running.Id));
+            // A half-registered turn left in the running set would keep the agent busy forever.
+            state.Remove(running.Id);
+            cts.Dispose();
+            throw;
         }
+    }
 
-        // Notify orchestrator immediately that agent is now busy
-        OnStatusChanged?.Invoke();
+    /// <summary>
+    /// Announces a registered turn and starts its task. If anything here throws before the task
+    /// exists, the turn leaves the running set again and the queue is offered the slot.
+    /// </summary>
+    private void LaunchTurn(TurnStart start, RegisteredTurn registered)
+    {
+        var (state, running, cts, turnIdentity) = registered;
+        var (chatId, taskId, userId, source) = (start.ChatId, start.TaskId, start.UserId, start.Source);
+        try
+        {
+            PublishEvent(chatId, ConversationEventKind.TurnStarted, turnIdentity, new TurnStartedPayload());
+
+            // Register in user-level index for cross-chat cancel
+            if (userId != 0)
+            {
+                var userList = _userTasks.GetOrAdd(userId, _ => []);
+                lock (userList) userList.Add((chatId, running.Id));
+            }
+
+            // Notify orchestrator immediately that agent is now busy
+            OnStatusChanged?.Invoke();
+
+            // Accepted BEFORE the turn's task exists. A client sees turn.started, then
+            // submission.accepted, then the turn's own events, and relies on that order. Published
+            // after Task.Run, the acceptance raced the turn: on a busy machine the turn's first
+            // progress events could be out before it.
+            ReportDisposition(chatId, turnIdentity, TaskDispatchOutcome.Ran);
+
+            // Only now may a message for this chat be delivered into the turn. Until its task
+            // exists the executor has not been given the turn, so an injection would go nowhere
+            // the turn could answer from; such a message takes the queue path instead.
+            running.Launched = true;
+        }
+        catch
+        {
+            // Release unconditionally: an exception here means the turn was registered but never
+            // ran — without TryRemove the taskId leaks permanently.
+            if (taskId is not null) _activeTaskIds.TryRemove(taskId, out _);
+            cts.Dispose();
+            HandOver(state, running.Id);
+            throw;
+        }
 
         _ = Task.Run(async () =>
         {
             var bindingSequence = _turnBindings?.BeginTurn(chatId, source);
             try
             {
-                await ProcessTask(chatId, running.Id, task, displayText, isSessionTask, source, relaySender, correlationId, taskId, images, documents, turnIdentity, cts.Token);
+                await ProcessTask(chatId, running.Id, start.Task, start.DisplayText, start.IsSessionTask, source, start.RelaySender,
+                    start.CorrelationId, taskId, start.Images, start.Documents, turnIdentity, cts.Token);
             }
             catch (Exception ex)
             {
@@ -382,13 +619,17 @@ public sealed class TaskManager
             }
             finally
             {
+                try
+                {
                 if (bindingSequence is { } sequence) _turnBindings?.EndTurn(sequence);
                 await running.TurnDispatchLock.WaitAsync();
                 try
                 {
+                    // Closed, but still in the running set: the turn keeps counting as running
+                    // until HandOver below takes it out and, in the same step, either starts the
+                    // next queued entry or leaves the agent idle.
                     running.Closed = true;
                     DrainInboxToGlobalQueue(chatId, running);
-                    state.Remove(running.Id);
                     lock (running.PrimaryMessageIds)
                         foreach (var key in running.PrimaryMessageIds)
                             if (!_messageQueue.Snapshot().Any(e => e.ChatId == chatId && e.Parts.Any(p => KeysOfPart(p).Contains(key))))
@@ -427,24 +668,19 @@ public sealed class TaskManager
                     lock (userList) userList.RemoveAll(e => e.ChatId == chatId && e.TaskId == running.Id);
                 }
                 cts.Dispose();
-                // Notify orchestrator immediately that agent is now idle (or next queued task starts)
-                OnStatusChanged?.Invoke();
-                // Drain one message from the queue — fire-and-forget via StartTask
-                DrainQueue();
+                }
+                catch (Exception ex)
+                {
+                    TryLog(LogLevel.Error, ex, "Teardown of task #{TaskId} for chat {ChatId} failed part-way", running.Id, chatId);
+                }
+                finally
+                {
+                    // On every path, including a teardown that threw: a finished turn that stayed in
+                    // the running set would refuse every later message.
+                    HandOver(state, running.Id);
+                }
             }
         });
-
-        return ReportDisposition(chatId, turnIdentity, TaskDispatchOutcome.Ran);
-        } // end exception-safety try
-        catch
-        {
-            // Release unconditionally: skipDedupReservationAcquire governs acquisition, not release.
-            // On drain re-entry (skipDedupReservationAcquire=true) an exception here means the task
-            // was dequeued but never ran — without TryRemove the taskId leaks permanently.
-            if (taskId is not null)
-                _activeTaskIds.TryRemove(taskId, out _);
-            throw;
-        }
     }
 
     public async Task HandleStop(long chatId)
@@ -771,7 +1007,7 @@ public sealed class TaskManager
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
             var ids = new List<string>();
-            foreach (var id in ((string[])[identity.SubmissionId, .. running.MergedSubmissionIds]))
+            foreach (var id in ((string[])[identity.SubmissionId, .. running.SnapshotMergedSubmissionIds()]))
             {
                 if (!string.IsNullOrEmpty(id) && seen.Add(id))
                     ids.Add(id);
@@ -843,8 +1079,12 @@ public sealed class TaskManager
         async Task DeliverInjectedTurnAnswersAsync(int injectedCount)
         {
             if (injectedCount <= 0) return;
-            await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, ct))
+            using var injectedStall = WatchForStall(ct);
+            try
             {
+            await foreach (var extra in _executor.ReadInjectedTurnAnswersAsync(injectedCount, injectedStall.Token))
+            {
+                injectedStall.Touch();
                 if (extra.FinalResult is not { Length: > 0 } text || ProtocolSanitizer.IsIdleMarker(text))
                     continue;
 
@@ -866,6 +1106,14 @@ public sealed class TaskManager
                 PublishEvent(chatId, ConversationEventKind.TurnRecoveredAnswer, identity,
                     new TurnRecoveredAnswerPayload { Text = extraText, Truncated = extraTruncated ? true : null });
             }
+            }
+            catch (OperationCanceledException) when (injectedStall.Stalled)
+            {
+                // The turn's own answer is already delivered. Only this extra answer is given up on.
+                _logger.LogError(
+                    "Task #{TaskId} for chat {ChatId}: no executor event for {Minutes} minutes while reading the answer to an injected message; stopped waiting for it",
+                    taskId, chatId, (int)injectedStall.Timeout.TotalMinutes);
+            }
         }
 
         // #406: a steering copy that ran as its own Claude turn produced an answer that belongs to
@@ -877,13 +1125,25 @@ public sealed class TaskManager
             var steerCount = state.Get(taskId)?.SteerCount ?? 0;
             if (steerCount <= 0 || processExitResult) return;
             var read = 0;
+            using var steerStall = WatchForStall(ct);
+            try
             {
-                await foreach (var _ in _executor.ReadInjectedTurnAnswersAsync(steerCount, ct))
+                await foreach (var _ in _executor.ReadInjectedTurnAnswersAsync(steerCount, steerStall.Token))
                 {
+                    steerStall.Touch();
                     read++;
                     _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.SteerAnswerDiscarded);
                     _logger.LogInformation("Task #{TaskId}: discarded the answer to a steering message that ran as its own turn", taskId);
                 }
+            }
+            catch (OperationCanceledException) when (steerStall.Stalled)
+            {
+                // The executor stopped its process when the read was cancelled, so no late answer
+                // can follow: nothing to guard the next turn against.
+                _logger.LogError(
+                    "Task #{TaskId} for chat {ChatId}: no executor event for {Minutes} minutes while discarding a steering answer; stopped waiting for it",
+                    taskId, chatId, (int)steerStall.Timeout.TotalMinutes);
+                return;
             }
             // A steering own turn that did not start in time may still finish before the next send;
             // its text then arrives as that turn's leading recovered_answer, tagged `user`.
@@ -892,6 +1152,9 @@ public sealed class TaskManager
 
         // Grab the inbox for this task to receive mid-execution messages
         var inboxReader = state.Get(taskId)?.Inbox.Reader;
+
+        // The silence limit for the executor read in flight; a fresh one for every read.
+        TurnStallWatch? stall = null;
 
         try
         {
@@ -905,10 +1168,25 @@ public sealed class TaskManager
                 // #406: this executor turn consumes the late-result guard whatever its first event is.
                 var steeringResidue = Interlocked.Exchange(ref _steeringResidue, 0) == 1;
                 var firstEvent = true;
-                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, ct))
+                stall?.Dispose();
+                stall = WatchForStall(ct);
+                await foreach (var progress in _executor.ExecuteAsync(currentTask, currentImages, currentDocuments, stall.Token))
                 {
+                    stall.Touch();
                     var guardsThisEvent = steeringResidue && firstEvent;
                     firstEvent = false;
+                    // Generic provider recovery has no original conversation/submission owner.
+                    // Segment tags describe provenance, not ownership. Suppress before even a
+                    // recovered FinalResult can enter this client's completion text or sinks.
+                    // Scoped injected answers use DeliverInjectedTurnAnswersAsync instead.
+                    if (progress.EventType == "recovered_answer"
+                        && identity.ChannelId == ConversationSouthAdapter.ClientChannel)
+                    {
+                        _injectionCounter.Increment(_agentConfig.Provider,
+                            InjectionOutcomeCounter.UnownedClientRecoverySuppressed);
+                        continue;
+                    }
+
                     if (isSessionTask && progress.SessionId is not null)
                         _sessions.SetSession(chatId, progress.SessionId);
 
@@ -993,6 +1271,11 @@ public sealed class TaskManager
                             });
                     }
                 }
+
+                // The read is over. The watch must not outlive it: a timer that ran out later, while
+                // the answer is being delivered, would make an unrelated cancellation look like a stall.
+                stall.Dispose();
+                stall = null;
 
                 var completingTask = state.Get(taskId);
                 if (completingTask is not null)
@@ -1140,12 +1423,9 @@ public sealed class TaskManager
                         if (completingTask is not null)
                         {
                             completingTask.Identity = identity;
-                            completingTask.MergedSubmissionIds.Clear();
-                            foreach (var mergedId in payload.MergedSubmissionIds ?? [])
-                            {
-                                if (!string.Equals(mergedId, identity.SubmissionId, StringComparison.Ordinal))
-                                    completingTask.MergedSubmissionIds.Add(mergedId);
-                            }
+                            var continuationSubmission = identity.SubmissionId;
+                            completingTask.ReplaceMergedSubmissionIds((payload.MergedSubmissionIds ?? [])
+                                .Where(mergedId => !string.Equals(mergedId, continuationSubmission, StringComparison.Ordinal)));
                             // A continuation turn has not published its terminal event yet, so the
                             // reaper must be armed again for it.
                             completingTask.TerminalPublished = false;
@@ -1305,6 +1585,21 @@ public sealed class TaskManager
                     });
             }
         }
+        catch (OperationCanceledException) when (stall is { Stalled: true })
+        {
+            // Nobody cancelled this turn: the executor yielded nothing for the whole limit, so the
+            // watchdog cancelled its read, and the executor's own cancel path has stopped the
+            // provider process. Reported as a failure, never as "Task cancelled.", with a fixed
+            // message that carries the limit and nothing else. The session is kept: the next
+            // message resumes it.
+            var errorMsg = TurnStallTimeout.FailureMessage(stall.Timeout);
+            _logger.LogError(
+                "Task #{TaskId} for chat {ChatId} stalled: no executor event for {Minutes} minutes; turn stopped (source={Source}, provider={Provider})",
+                taskId, chatId, (int)stall.Timeout.TotalMinutes, source, _agentConfig.Provider);
+            await SendWithStatsAsync($"{Prefix()}{errorMsg}");
+            OnTaskCompleted?.Invoke(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
+            PublishTerminalError(chatId, taskId, identity, ProtocolErrorCode.ExecutorError);
+        }
         catch (OperationCanceledException)
         {
             _logger.LogInformation("Task #{TaskId} cancelled for chat {ChatId}", taskId, chatId);
@@ -1331,6 +1626,7 @@ public sealed class TaskManager
         }
         finally
         {
+            stall?.Dispose();
             await typingCts.CancelAsync();
             await typingTask;
         }
@@ -1342,7 +1638,9 @@ public sealed class TaskManager
         // State is already scoped by the runtime chat key. Never deliver a human correction
         // into a workflow, check-in or /new turn, even when it uses a conversational session.
         // /new arrivals remain queued, as do messages arriving during a /new turn.
-        running = state.Snapshot().FirstOrDefault(t => t.IsSessionTask
+        // Nor into a turn whose task has not been started yet (RunningTask.Launched): a message
+        // that arrives in that instant takes the queue path, as it did before the turn registered.
+        running = state.Snapshot().FirstOrDefault(t => t.IsSessionTask && t.Launched
             && t.Source is TaskSource.UserMessage or TaskSource.DebouncedGroupBatch)!;
         return running is not null;
     }
@@ -1355,7 +1653,7 @@ public sealed class TaskManager
     private bool TryGetSteerableTurn(out RunningTask running)
     {
         var candidates = _chatTasks.Values.SelectMany(s => s.Snapshot())
-            .Where(t => t.Source is TaskSource.Relay or TaskSource.Bridge && t.IsSessionTask && !t.Closed)
+            .Where(t => t.Source is TaskSource.Relay or TaskSource.Bridge && t.IsSessionTask && !t.Closed && t.Launched)
             .Take(2).ToList();
         if (candidates.Count > 1)
             _logger.LogWarning("Human steering skipped: more than one running Relay or Bridge turn");
@@ -1380,6 +1678,7 @@ public sealed class TaskManager
             if (running.Closed) outcome = "closed";
             else if (running.SteeringOwner is { } owner && owner != (chatId, userId)) outcome = "refused_other_human";
             else if (running.SteerCount >= MaxMidTurnInjectionsPerTurn) outcome = "cap";
+            else if (ExecutorBusyElsewhere) outcome = "executor_busy_elsewhere";
             else
             {
                 var attachments = (images?.Count ?? 0) + (documents?.Count ?? 0);
@@ -1439,9 +1738,39 @@ public sealed class TaskManager
         return kept.Count > 0 ? string.Join("\n", kept) : null;
     }
 
+    /// <summary>
+    /// Delivers a message that arrived while its chat's turn is running, and reports how it was
+    /// accepted.
+    /// </summary>
+    /// <remarks>
+    /// The acceptance is published while the turn's dispatch lock is still held. Every way the
+    /// submission can then show up in a turn's events needs that lock first: the running turn
+    /// takes it before it finishes or starts a continuation, and the drain below is run only after
+    /// the acceptance is out. Published by the caller after this returned, it could follow the
+    /// turn it was accepted into.
+    /// </remarks>
     private async Task<TaskDispatchOutcome> DeliverMidTurnMessageAsync(long chatId, RunningTask running, MidTurnMessage message)
     {
+        DispatchCheckpointForTest?.Invoke("mid_turn_delivery");
         await running.TurnDispatchLock.WaitAsync();
+        try
+        {
+            var outcome = await DeliverMidTurnUnderLockAsync(chatId, running, message);
+            ReportDisposition(chatId, message.Identity, outcome);
+            // The closed turn may already have handed over, on an empty queue. Then nothing is
+            // left to start this entry, so try here; it does nothing while any turn, that closed
+            // one included, is still in the running set.
+            if (outcome == TaskDispatchOutcome.Queued && running.Closed) DrainQueue();
+            return outcome;
+        }
+        finally
+        {
+            running.TurnDispatchLock.Release();
+        }
+    }
+
+    private async Task<TaskDispatchOutcome> DeliverMidTurnUnderLockAsync(long chatId, RunningTask running, MidTurnMessage message)
+    {
         try
         {
             if (running.Closed)
@@ -1458,6 +1787,16 @@ public sealed class TaskManager
                 return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: false);
             }
 
+            if (ExecutorBusyElsewhere)
+            {
+                // The executor's live turn may be the warmup ping or a /run command, not this one.
+                _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
+                _logger.LogInformation(
+                    "Mid-turn injection skipped for chat {ChatId}: the executor is running a turn started outside the task queue; queued for turn-end delivery",
+                    chatId);
+                return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: false);
+            }
+
             var result = await _executor.TryInjectMessageAsync(FormatInjectedMessage(message.Task),
                 message.Images, message.Documents, running.Cts.Token);
 
@@ -1470,11 +1809,8 @@ public sealed class TaskManager
                 // The injected message's answer arrives inside THIS turn's terminal event, so its
                 // submission id has to ride along in mergedSubmissionIds — otherwise the client
                 // sees submission.accepted{injected} and then nothing, forever.
-                if (message.Identity is { } injectedIdentity
-                    && !running.MergedSubmissionIds.Contains(injectedIdentity.SubmissionId))
-                {
-                    running.MergedSubmissionIds.Add(injectedIdentity.SubmissionId);
-                }
+                if (message.Identity is { } injectedIdentity)
+                    running.AddMergedSubmissionId(injectedIdentity.SubmissionId);
                 _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.Injected);
                 _logger.LogInformation("Injected mid-turn message into running task #{TaskId} for chat {ChatId}", running.Id, chatId);
                 return TaskDispatchOutcome.Injected;
@@ -1495,10 +1831,6 @@ public sealed class TaskManager
             _logger.LogWarning(ex, "Mid-turn injection failed for chat {ChatId}; queued for turn-end delivery", chatId);
             return await EnqueueForTurnEndAsync(chatId, running, message, notifyUser: BusyNoticeApplies(chatId, message.Source));
         }
-        finally
-        {
-            running.TurnDispatchLock.Release();
-        }
     }
 
 
@@ -1512,7 +1844,12 @@ public sealed class TaskManager
             // task has sent its own terminal response and DrainQueue runs.
             var enqueued = EnqueueMessage(chatId, message, notifyUser);
             if (enqueued) _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DegradedToQueue);
-            return enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
+            var outcome = enqueued ? TaskDispatchOutcome.Queued : TaskDispatchOutcome.QueueFull;
+            // Accepted before any drain, for the reason given on DeliverMidTurnMessageAsync.
+            ReportDisposition(chatId, message.Identity, outcome);
+            // Same as a message that found its turn closed: that turn's drain may already be behind us.
+            if (enqueued && running.Closed) DrainQueue();
+            return outcome;
         }
         finally
         {
@@ -1612,10 +1949,27 @@ public sealed class TaskManager
     private bool EnqueueFreshMessage(long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop) =>
         EnqueueFreshMessage(chatId, part, notifyUser, completeBridgeOnDrop, out _, out _);
 
+    /// <summary>
+    /// Enqueues outside the admission gate, for callers that already know a turn is running or a
+    /// handoff is in flight: a turn-end fallback or an overflow under the running turn's dispatch
+    /// lock, or a message that found a pending entry it could not join. A caller that cannot know
+    /// that (the turn it holds may already have gone) follows up with <see cref="DrainQueue"/>.
+    /// </summary>
     private bool EnqueueFreshMessage(long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop,
         out QueuedMessage? queued, out int queuePos, bool deferNotice = false)
     {
-        if (!_messageQueue.TryEnqueue(chatId, part, out queued, out queuePos))
+        var enqueued = _messageQueue.TryEnqueue(chatId, part, out queued, out queuePos);
+        return AfterEnqueue(enqueued, chatId, part, notifyUser, completeBridgeOnDrop, queued, queuePos, deferNotice);
+    }
+
+    private bool BusyNoticeDue(long chatId, bool notifyUser, bool deferNotice) =>
+        !deferNotice && notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0);
+
+    /// <summary>Logs, notices and callbacks for an enqueue attempt that has already been decided.</summary>
+    private bool AfterEnqueue(bool enqueued, long chatId, QueuedMessagePart part, bool notifyUser, bool completeBridgeOnDrop,
+        QueuedMessage? queued, int queuePos, bool deferNotice)
+    {
+        if (!enqueued)
         {
             _logger.LogWarning("Message queue full ({Max}) — dropping incoming task from chat {ChatId}", MaxQueueDepth, chatId);
             _injectionCounter.Increment(_agentConfig.Provider, InjectionOutcomeCounter.DroppedAtQueueCap);
@@ -1634,9 +1988,9 @@ public sealed class TaskManager
 
         _logger.LogInformation("Message queued (position {Pos}) for chat {ChatId}; queue entries={EntryCount}, max parts per entry={MaxParts}",
             queuePos, chatId, _messageQueue.Count, MaxQueuedPartsPerEntry);
-        if (!deferNotice && notifyUser && !(_agentConfig.SuppressToolMessages && chatId < 0))
+        if (BusyNoticeDue(chatId, notifyUser, deferNotice))
         {
-            queued.BusyNoticeSent = true;
+            queued!.BusyNoticeSent = true;
             _ = _sink.SendTextByOriginAsync(chatId, $"I'm busy right now — your message is queued (position {queuePos}). I'll get to it once my current task finishes.", OriginOf(part.Source));
         }
         OnStatusChanged?.Invoke();
@@ -1881,9 +2235,9 @@ public sealed class TaskManager
     /// </summary>
     public async Task CancelAllAsync()
     {
-        // Drain the queue FIRST so that when cancelling running tasks triggers DrainQueue,
-        // there is nothing left to dequeue and no queued reservation is accidentally promoted
-        // to a running reservation before we release it.
+        // Drain the queue FIRST so that when cancelling running tasks triggers their hand-over,
+        // there is nothing left to dequeue and no queued task id reservation is accidentally
+        // promoted to a running one before we release it.
         foreach (var msg in _messageQueue.Clear())
             foreach (var part in msg.Parts)
             {
@@ -1891,8 +2245,8 @@ public sealed class TaskManager
                 foreach (var key in KeysOfPart(part)) _primaryDedup.Complete(msg.ChatId, key);
             }
 
-        // Cancel all running tasks (their finally blocks will call DrainQueue, which now finds
-        // an empty queue and returns immediately).
+        // Cancel all running tasks (their finally blocks hand over, find an empty queue and
+        // leave the agent idle).
         //
         // Reason is `operator`: this method's only caller is the operator HTTP cancel endpoint.
         // Host stop does NOT reach here — ProcessTask runs on the per-task CancellationTokenSource
@@ -1911,35 +2265,104 @@ public sealed class TaskManager
         _logger.LogInformation("CancelAll: all running tasks cancelled and queue cleared");
     }
 
-    /// <summary>Dequeues one message and starts it if capacity is available.</summary>
-    private void DrainQueue()
+    /// <summary>
+    /// Starts the next queued entry if no turn is running. For an enqueue that could not know
+    /// whether a turn was still there to hand over to it.
+    /// </summary>
+    private void DrainQueue() => HandOver(finishedState: null, finishedTaskId: 0);
+
+    /// <summary>
+    /// The one step in which the slot changes hands: the finished turn (if any) leaves the running
+    /// set and, in the same hold of the gate, the next queued entry's turn is registered. Either a
+    /// turn is registered when the gate is released, or the agent is idle and the next admission
+    /// runs at once. No newcomer can get in between, and no observer can see the agent idle while
+    /// queued work is about to start.
+    /// </summary>
+    private void HandOver(ChatTaskState? finishedState, int finishedTaskId)
     {
-        if (_messageQueue.IsEmpty) return;
-        if (!_messageQueue.TryDequeue(out var queued)) return;
+        while (true)
+        {
+            QueuedMessage? queued = null;
+            TurnStart? start = null;
+            RegisteredTurn? registered = null;
+            Exception? fault = null;
+            var turnLeft = finishedState is not null;
+            lock (_admissionGate)
+            {
+                finishedState?.Remove(finishedTaskId);
+                finishedState = null;
+                if (!AnyTurnRunning() && _messageQueue.TryDequeue(out queued))
+                {
+                    try
+                    {
+                        // Identity and the merged-submission list must survive the queue. Without them the turn
+                        // runs under a freshly synthesized identity, so the submission that produced
+                        // submission.accepted{queued} never receives a terminal event and a client waits forever.
+                        var payload = WithSteeredPrefix(queued).BuildPayload(DateTimeOffset.Now);
+                        start = new TurnStart(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
+                            payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
+                            payload.Images, payload.Documents, payload.UserId,
+                            payload.Identity ?? SynthesizeIdentity(queued.ChatId, payload.Source),
+                            payload.MergedSubmissionIds,
+                            queued.Parts.SelectMany(KeysOfPart).Distinct().ToArray());
+                        registered = RegisterTurnLocked(start);
+                    }
+                    catch (Exception ex)
+                    {
+                        fault = ex;
+                    }
+                }
+            }
 
-        QueueEntryClaimedForTest?.Invoke();
+            if (queued is null)
+            {
+                // Notify orchestrator immediately that agent is now idle. Only when a turn actually
+                // left: a drain attempt that found nothing to do has changed nothing.
+                if (turnLeft)
+                {
+                    try { OnStatusChanged?.Invoke(); }
+                    catch (Exception ex) { TryLog(LogLevel.Error, ex, "A status subscriber threw after a turn ended"); }
+                }
+                return;
+            }
 
-        var payload = WithSteeredPrefix(queued).BuildPayload(DateTimeOffset.Now);
+            if (fault is null)
+            {
+                try
+                {
+                    QueueEntryClaimedForTest?.Invoke();
 
-        _logger.LogInformation("Queue dispatch lane={lane} reason={reason} chat={chat} parts={parts} waitedMs={waitedMs}",
-            queued.Priority == TaskPriority.PrimaryHuman ? "priority" : "routine", "queue_drain",
-            queued.ChatId, queued.PartCount, Math.Max(0, (DateTimeOffset.Now - queued.QueuedAt).TotalMilliseconds));
-        if (queued.BusyNoticeSent)
-            _ = _sink.SendTextByOriginAsync(queued.ChatId, "Now processing your queued message...", OriginOf(queued.Source));
-        OnStatusChanged?.Invoke();
+                    _logger.LogInformation("Queue dispatch lane={lane} reason={reason} chat={chat} parts={parts} waitedMs={waitedMs}",
+                        queued.Priority == TaskPriority.PrimaryHuman ? "priority" : "routine", "queue_drain",
+                        queued.ChatId, queued.PartCount, Math.Max(0, (DateTimeOffset.Now - queued.QueuedAt).TotalMilliseconds));
+                    if (queued.BusyNoticeSent)
+                        _ = _sink.SendTextByOriginAsync(queued.ChatId, "Now processing your queued message...", OriginOf(queued.Source));
 
-        // Identity and the merged-submission list must survive the queue. Without them the turn
-        // runs under a freshly synthesized identity, so the submission that produced
-        // submission.accepted{queued} never receives a terminal event and a client waits forever.
-        _ = StartTaskCore(queued.ChatId, payload.Task, payload.DisplayText, payload.IsSessionTask,
-            payload.Source, payload.RelaySender, payload.CorrelationId, payload.TaskId,
-            payload.Images, payload.Documents, payload.UserId,
-            skipPendingQueueCheck: true, skipDedupReservationAcquire: true,
-            identity: payload.Identity, mergedSubmissionIds: payload.MergedSubmissionIds,
-            priority: queued.Priority,
-            primaryMessageIds: queued.Parts.SelectMany(KeysOfPart).Distinct().ToArray());
+                    LaunchTurn(start!, registered!);
+                    RemovePendingIndexIfCurrent(queued);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    fault = ex;
+                    // LaunchTurn takes its own turn out of the running set when it fails; a failure
+                    // before it (the hook, the log line) leaves that to us. Both are safe to repeat.
+                    lock (_admissionGate) registered!.State.Remove(registered.Running.Id);
+                    registered.Cts.Dispose();
+                }
+            }
 
-        RemovePendingIndexIfCurrent(queued);
+            // The entry was claimed and cannot start. It is gone, so release what it held and go
+            // round again for the next one instead of leaving queued work with nothing to start it.
+            TryLog(LogLevel.Error, fault, "Queued entry for chat {ChatId} ({Source}, {Parts} part(s)) could not be started and was dropped",
+                queued.ChatId, queued.Source, queued.PartCount);
+            foreach (var part in queued.Parts)
+            {
+                if (part.TaskId is not null) _activeTaskIds.TryRemove(part.TaskId, out _);
+                foreach (var key in KeysOfPart(part)) _primaryDedup.Complete(queued.ChatId, key);
+            }
+            _messageQueue.RemovePendingIfCurrent(queued);
+        }
     }
 
     /// <summary>Returns a snapshot of the current queue for heartbeat/status reporting.</summary>

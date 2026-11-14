@@ -97,7 +97,7 @@ public sealed class EpicDriverStateService(IServiceScopeFactory scopes, IEpicGra
                                     var gate = d.GateVisit.Split(':')[0];
                                     var result = await service.DryRunDecideAsync(grant.Id,
                                         new(ns, s.WorkflowId, gate, "approved", d.GateVisit, d.ReviewRef,
-                                            "https://example.com/review", config["FLEET_CTO_AGENT"]), childCt);
+                                            "https://example.com/review", CtoAgentSetting.Resolve(config)), childCt);
                                     eligibility = result.Result == "eligible" ? "eligible" : result.Reason ?? "unknown";
                                     if (eligibility is "eligible" or "visibility_unknown") break;
                                 }

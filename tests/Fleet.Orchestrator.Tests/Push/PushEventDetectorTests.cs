@@ -52,6 +52,41 @@ public class PushEventDetectorTests
             agents: [Agent("builder", TimeSpan.FromHours(1))]));
     }
 
+    [Fact]
+    public void WhatIsAlreadyTrueInANamespaceSeenLate_IsNotAnnounced()
+    {
+        var (detector, _) = NewDetector();
+        var now = DateTimeOffset.UtcNow;
+
+        // Temporal was unreachable when the orchestrator started: the first look covers nothing.
+        Assert.Empty(detector.Observe([], [], [], now, gateNamespaces: [], failureNamespaces: []));
+
+        // It comes back, with a gate that has waited since yesterday and a run that failed an hour
+        // ago. Neither is news, exactly as after a restart.
+        var failed = Run("pr-7", status: "Failed", phase: null);
+        Assert.Empty(detector.Observe([Run()], [failed], [], now, gateNamespaces: ["fleet"], failureNamespaces: ["fleet"]));
+
+        // From here the namespace is known, and what changes in it is announced.
+        var later = detector.Observe(
+            [Run(), Run("pr-43", pr: 43)], [failed, Run("pr-8", status: "Failed", phase: null)], [], now,
+            gateNamespaces: ["fleet"], failureNamespaces: ["fleet"]);
+        Assert.Equal(2, later.Count);
+    }
+
+    [Fact]
+    public void ANamespaceCoveredByGatesButNotYetByFailures_IsSeededSeparately()
+    {
+        var (detector, _) = NewDetector();
+        var now = DateTimeOffset.UtcNow;
+        detector.Observe([], [], [], now, gateNamespaces: ["fleet"], failureNamespaces: []);
+
+        var failed = Run("pr-7", status: "Failed", phase: null);
+        var messages = detector.Observe([Run()], [failed], [], now, gateNamespaces: ["fleet"], failureNamespaces: ["fleet"]);
+
+        // The gate is new in a namespace already watched; the failure list is seen for the first time.
+        Assert.Equal("Merge approval waiting", Assert.Single(messages).Title);
+    }
+
     // ── Gates ────────────────────────────────────────────────────────────────────────────────
 
     [Fact]

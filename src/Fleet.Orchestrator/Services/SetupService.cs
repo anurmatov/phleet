@@ -12,12 +12,10 @@ namespace Fleet.Orchestrator.Services;
 /// <summary>
 /// Handles post-install setup: reading setup status, atomic .env writes,
 /// Telegram/GitHub credential validation.
-/// Shared SemaphoreSlim(1,1) ensures only one setup operation runs at a time.
+/// Every .env write goes through <see cref="EnvFile"/>, which holds the one write lock.
 /// </summary>
 public sealed class SetupService
 {
-    private static readonly SemaphoreSlim _lock = new(1, 1);
-
     // Known-weak default values that count as "not configured"
     private static readonly HashSet<string> WeakDefaults = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -198,24 +196,8 @@ public sealed class SetupService
         await AtomicWriteEnvAsync(new Dictionary<string, string> { [key] = value });
     }
 
-    public async Task DeleteEnvVarAsync(string key)
-    {
-        var lines = File.Exists(_envFilePath)
-            ? await File.ReadAllLinesAsync(_envFilePath)
-            : Array.Empty<string>();
-
-        var updated = lines.Where(line =>
-        {
-            var t = line.Trim();
-            if (t.StartsWith('#') || !t.Contains('=')) return true;
-            var k = t[..t.IndexOf('=')].Trim();
-            return !k.Equals(key, StringComparison.Ordinal);
-        }).ToArray();
-
-        var tmpPath = _envFilePath + ".tmp";
-        await File.WriteAllLinesAsync(tmpPath, updated);
-        File.Move(tmpPath, _envFilePath, overwrite: true);
-    }
+    public Task DeleteEnvVarAsync(string key) =>
+        EnvFile.EditAsync(_envFilePath, lines => EnvFile.Remove(lines, key));
 
     public string? RevealEnvVar(string key)
     {
@@ -363,84 +345,19 @@ public sealed class SetupService
 
     private async Task AtomicWriteEnvAsync(Dictionary<string, string> updates)
     {
-        var lines = File.Exists(_envFilePath)
-            ? await File.ReadAllLinesAsync(_envFilePath)
-            : [];
-
-        var updated = UpsertEnvLines(lines, updates);
-
-        var tmpPath = _envFilePath + ".tmp";
         try
         {
-            await File.WriteAllLinesAsync(tmpPath, updated);
-            File.Move(tmpPath, _envFilePath, overwrite: true);
+            await EnvFile.EditAsync(_envFilePath, lines => EnvFile.Upsert(lines, updates));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Leave .tmp in place for debugging
             throw new InvalidOperationException(
                 $"Could not atomically write .env — check disk space and file permissions: {ex.Message}", ex);
         }
     }
 
-    internal static string[] UpsertEnvLines(string[] lines, Dictionary<string, string> updates)
-    {
-        // Validate: no newlines in values
-        foreach (var (k, v) in updates)
-        {
-            if (v.Contains('\n') || v.Contains('\r'))
-                throw new ArgumentException($"Value for {k} contains a newline character — not allowed in .env files");
-        }
-
-        var result = new List<string>(lines.Length + updates.Count);
-        var written = new HashSet<string>(StringComparer.Ordinal);
-
-        // Track last index of each key to handle duplicate-key case (keep last)
-        var lastIndex = new Dictionary<string, int>(StringComparer.Ordinal);
-        for (var i = 0; i < lines.Length; i++)
-        {
-            var trimmed = lines[i].Trim();
-            if (trimmed.StartsWith('#') || !trimmed.Contains('=')) continue;
-            var key = trimmed[..trimmed.IndexOf('=')].Trim();
-            lastIndex[key] = i;
-        }
-
-        for (var i = 0; i < lines.Length; i++)
-        {
-            var trimmed = lines[i].Trim();
-            if (trimmed.StartsWith('#') || !trimmed.Contains('='))
-            {
-                result.Add(lines[i]);
-                continue;
-            }
-
-            var eqIdx = trimmed.IndexOf('=');
-            var key = trimmed[..eqIdx].Trim();
-
-            // Skip duplicate keys that will be overwritten by the last occurrence
-            if (lastIndex.TryGetValue(key, out var last) && last != i)
-                continue;
-
-            if (updates.TryGetValue(key, out var newVal))
-            {
-                result.Add($"{key}={newVal}");
-                written.Add(key);
-            }
-            else
-            {
-                result.Add(lines[i]);
-            }
-        }
-
-        // Append any keys from updates not yet written
-        foreach (var (k, v) in updates)
-        {
-            if (!written.Contains(k))
-                result.Add($"{k}={v}");
-        }
-
-        return result.ToArray();
-    }
+    internal static string[] UpsertEnvLines(string[] lines, Dictionary<string, string> updates) =>
+        EnvFile.Upsert(lines, updates);
 
     // ── CTO token key resolution ──────────────────────────────────────────────
 
@@ -553,21 +470,8 @@ public sealed class SetupService
         _ => true
     };
 
-    private static Dictionary<string, string> LoadEnvFile(string path)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (!File.Exists(path)) return result;
-        foreach (var line in File.ReadAllLines(path))
-        {
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith('#') || !trimmed.Contains('=')) continue;
-            var idx = trimmed.IndexOf('=');
-            var key = trimmed[..idx].Trim();
-            var val = trimmed[(idx + 1)..].Trim().Trim('"');
-            result[key] = val;
-        }
-        return result;
-    }
+    // Throws when the file is there and cannot be read: the callers above say so in their own way.
+    private static Dictionary<string, string> LoadEnvFile(string path) => EnvFile.ReadOrThrow(path);
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────

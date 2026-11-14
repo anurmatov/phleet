@@ -16,6 +16,13 @@ ENV_FILE="$FLEET_BASE_DIR/.env"
 # a service on an address they did not configure, with .env saying otherwise.
 # Unset them here: .env is the record of the decision.
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY
+# Likewise the host address of the ports that take no credential: a stale export of 0.0.0.0 would
+# publish Temporal, fleet-memory and fleet-bridge to the network with .env saying loopback.
+unset FLEET_INTERNAL_BIND_ADDRESS
+# And the Qdrant release. An operator stepping up one minor at a time saves the intermediate release
+# in .env; an exported FLEET_QDRANT_VERSION left over from an earlier step would start a different
+# one, and Qdrant storage does not survive a skipped minor.
+unset FLEET_QDRANT_VERSION
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
@@ -41,6 +48,7 @@ unset FLEET_COMMS_MEDIA_ENDPOINT FLEET_COMMS_MEDIA_BUCKET FLEET_COMMS_MEDIA_BACK
       FLEET_COMMS_MEDIA_STORE FLEET_COMMS_SEAWEEDFS_SIGNING_KEY
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+source "$SCRIPT_DIR/scripts/lib/qdrant-upgrade.sh"
 
 COMPOSE_EXAMPLE="$SCRIPT_DIR/docker-compose.example.yml"
 COMPOSE_FILE="$FLEET_BASE_DIR/docker-compose.yml"
@@ -150,6 +158,21 @@ case "$MEDIA_STORE" in
     fi
     ;;
 esac
+
+# Qdrant, like the MinIO check above: before anything is stopped, while the old container can still
+# be read. The compose file pins a release and FLEET_QDRANT_VERSION in .env may name another; either
+# way the release the next start WOULD run is checked against the one this host runs now. Setting
+# the variable is not a way past this. The target is Compose's own answer for the definition, env
+# file and profiles the `up` below uses ($COMPOSE_NEXT becomes $COMPOSE_FILE in the same directory),
+# never a second reading of .env.
+QDRANT_TARGET=$(qdrant_target_version "$FLEET_BASE_DIR" "$COMPOSE_PROJECT" "$COMPOSE_NEXT" "${COMMS_PROFILE_ARGS[@]}")
+QDRANT_SEEN=$(qdrant_observe "$COMPOSE_PROJECT")
+if ! QDRANT_DECISION=$(qdrant_upgrade_decision "$QDRANT_SEEN" "$QDRANT_TARGET"); then
+  fail "Qdrant: this upgrade is refused ($QDRANT_DECISION). Compose target: ${QDRANT_TARGET:-unknown}"
+  qdrant_refusal_message "$QDRANT_DECISION" "$QDRANT_SEEN" "$QDRANT_TARGET" "$COMPOSE_PROJECT"
+  exit 1
+fi
+ok "Qdrant release check passed ($QDRANT_DECISION). Compose target: ${QDRANT_TARGET:-unknown}"
 
 if docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | head -1 | grep -q .; then
   # `--profile comms` on down too, so an enabled service is actually stopped. When disabling, the
@@ -336,6 +359,15 @@ else
       exit 1
     }
   fi
+fi
+
+# Said once per upgrade until the operator records a choice: these four used to be reachable from
+# other machines.
+# Any assignment Compose would read counts as a choice (a leading blank, `export`, a repeat), so this
+# never says "loopback" over a line that opens the ports. It states the default, not this host's state.
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?FLEET_INTERNAL_BIND_ADDRESS[[:space:]]*=' "$ENV_FILE"; then
+  warn "Ports 7233, 8080, 3100 and 3300 (Temporal, its UI, fleet-memory, fleet-bridge) are published on 127.0.0.1 only by default."
+  warn "  From another machine use an SSH tunnel, or set FLEET_INTERNAL_BIND_ADDRESS in .env: docs/upgrading/internal-ports-loopback.md"
 fi
 
 echo

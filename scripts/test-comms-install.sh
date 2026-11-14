@@ -6,7 +6,7 @@ DIR=$(mktemp -d)
 trap 'rm -rf "$DIR"' EXIT
 mkdir -p "$DIR/scripts/lib" "$DIR/fleet" "$DIR/bin"
 cp "$ROOT/setup.sh" "$ROOT/upgrade.sh" "$DIR/"
-cp "$ROOT/scripts/lib/comms-profiles.sh" "$DIR/scripts/lib/"
+cp "$ROOT"/scripts/lib/*.sh "$DIR/scripts/lib/"
 cp "$ROOT/docker-compose.example.yml" "$DIR/"
 export CALLS="$DIR/calls"
 cat > "$DIR/bin/docker" <<'MOCK'
@@ -15,6 +15,8 @@ printf '%s\n' "$*" >> "$CALLS"
 case "$*" in
   info) exit 0 ;;
   'image inspect minio/'*) exit 1 ;;
+  # No Qdrant container or storage: the release check (scripts/test-qdrant-upgrade.sh) has nothing to refuse.
+  'container inspect qdrant'*|'volume inspect '*) exit 1 ;;
   *'ps --quiet'*) echo running ;;
   'inspect -f'*) echo healthy ;;
 esac
@@ -194,7 +196,7 @@ echo 'PASS pinned image pull failure leaves lifecycle untouched'
 FRESH="$DIR/fresh"
 mkdir -p "$FRESH/scripts/lib" "$DIR/home/.gemini" "$DIR/previews"
 cp "$ROOT/setup.sh" "$ROOT/.env.example" "$ROOT/docker-compose.example.yml" "$FRESH/"
-cp "$ROOT/scripts/lib/comms-profiles.sh" "$FRESH/scripts/lib/"
+cp "$ROOT"/scripts/lib/*.sh "$FRESH/scripts/lib/"
 printf '%s\n' '{"refresh_token":"synthetic-fixture-token"}' > "$DIR/home/.gemini/oauth_creds.json"
 cp "$FRESH/.env.example" "$DIR/example-before"
 : > "$CALLS"

@@ -21,6 +21,18 @@ public sealed class RunningTask
     public Channel<MidTurnMessage> Inbox { get; } = Channel.CreateUnbounded<MidTurnMessage>(
         new UnboundedChannelOptions { SingleReader = true });
 
+    /// <summary>
+    /// Set once the turn's task is about to be started. A turn is registered, and counts as
+    /// running, slightly before that; a message for its chat is delivered into it only from here.
+    /// </summary>
+    public bool Launched
+    {
+        get => Volatile.Read(ref _launched);
+        set => Volatile.Write(ref _launched, value);
+    }
+
+    private bool _launched;
+
     /// <summary>Serializes the live/closed decision against turn completion.</summary>
     public SemaphoreSlim TurnDispatchLock { get; } = new(1, 1);
 
@@ -69,5 +81,38 @@ public sealed class RunningTask
     /// Submission ids this turn is answering beyond its own, accumulated from coalesced queue
     /// parts and mid-turn injections. Carried on the single terminal event.
     /// </summary>
-    public List<string> MergedSubmissionIds { get; } = [];
+    /// <remarks>
+    /// Guarded by its own lock, never exposed as a list: a mid-turn delivery appends on the caller's
+    /// thread while the turn's own thread reads the ids for a terminal event, and the cancel path
+    /// does that read without the dispatch lock.
+    /// </remarks>
+    private readonly List<string> _mergedSubmissionIds = [];
+
+    /// <summary>The merged submission ids, in the order they were added.</summary>
+    public IReadOnlyList<string> SnapshotMergedSubmissionIds()
+    {
+        lock (_mergedSubmissionIds) return [.. _mergedSubmissionIds];
+    }
+
+    /// <summary>Adds an id unless it is already there. Returns whether it was added.</summary>
+    public bool AddMergedSubmissionId(string id)
+    {
+        lock (_mergedSubmissionIds)
+        {
+            if (_mergedSubmissionIds.Contains(id)) return false;
+            _mergedSubmissionIds.Add(id);
+            return true;
+        }
+    }
+
+    /// <summary>Replaces the whole set, for a continuation turn that answers different submissions.</summary>
+    public void ReplaceMergedSubmissionIds(IEnumerable<string> ids)
+    {
+        lock (_mergedSubmissionIds)
+        {
+            _mergedSubmissionIds.Clear();
+            foreach (var id in ids)
+                if (!_mergedSubmissionIds.Contains(id)) _mergedSubmissionIds.Add(id);
+        }
+    }
 }

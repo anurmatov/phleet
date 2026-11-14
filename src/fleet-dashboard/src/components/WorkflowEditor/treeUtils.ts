@@ -26,7 +26,6 @@ export function ensureIds(step: AnyStep): AnyStep {
 
 /** Strip editor-only fields before serializing to JSON */
 export function stripIds(step: AnyStep): AnyStep {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { _id, ...rest } = step
   const s = { ...rest } as AnyStep
   if (s.steps) s.steps = s.steps.map(stripIds)

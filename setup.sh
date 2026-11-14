@@ -89,6 +89,13 @@ unset FLEET_COMMS_CONVERSATIONS_ENABLED FLEET_COMMS_CONVERSATION_DB \
       FLEET_COMMS_MYSQL_ROOT_PASSWORD FLEET_COMMS_CLAIM_RETENTION \
       FLEET_COMMS_MYSQL_DDL_PASSWORD FLEET_COMMS_MYSQL_RUNTIME_PASSWORD
 unset FLEET_COMMS_ENABLED FLEET_COMMS_BIND FLEET_COMMS_TRUST_PROXY
+# Likewise the host address of the ports that take no credential: a stale export of 0.0.0.0 would
+# publish Temporal, fleet-memory and fleet-bridge to the network with .env saying loopback.
+unset FLEET_INTERNAL_BIND_ADDRESS
+# And the Qdrant release. An operator stepping up one minor at a time saves the intermediate release
+# in .env; an exported FLEET_QDRANT_VERSION left over from an earlier step would start a different
+# one, and Qdrant storage does not survive a skipped minor.
+unset FLEET_QDRANT_VERSION
 unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
       FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION \
       FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS
@@ -107,6 +114,7 @@ SEED_EXAMPLE="$SCRIPT_DIR/seed.example.json"
 COMPOSE_PROJECT="fleet"
 
 source "$SCRIPT_DIR/scripts/lib/comms-profiles.sh"
+source "$SCRIPT_DIR/scripts/lib/qdrant-upgrade.sh"
 COMMS_DRY_RUN=$DRY_RUN
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1069,6 +1077,19 @@ if $SKIP_SERVICES; then
   warn "Skipping services (--skip-services)"
 else
   if ! $DRY_RUN; then
+    # qdrant-check:begin (scripts/test-qdrant-upgrade.sh runs the lines between the two markers)
+    # Re-running setup on a host that already runs Qdrant recreates it on the pinned release. The
+    # same check upgrade.sh makes, before anything starts; a fresh host has nothing to check. The
+    # target is Compose's own answer for exactly the `up` below, never a second reading of .env.
+    _qdrant_target=$(qdrant_target_version "$FLEET_BASE_DIR" "$COMPOSE_PROJECT" "$COMPOSE_FILE" "${COMMS_PROFILE_ARGS[@]}")
+    _qdrant_seen=$(qdrant_observe "$COMPOSE_PROJECT")
+    if ! _qdrant_decision=$(qdrant_upgrade_decision "$_qdrant_seen" "$_qdrant_target"); then
+      fail "Qdrant: starting the stack is refused ($_qdrant_decision). Compose target: ${_qdrant_target:-unknown}"
+      qdrant_refusal_message "$_qdrant_decision" "$_qdrant_seen" "$_qdrant_target" "$COMPOSE_PROJECT"
+      exit 1
+    fi
+    ok "Qdrant release check passed ($_qdrant_decision). Compose target: ${_qdrant_target:-unknown}"
+    # qdrant-check:end
     case "$_media_store" in
       seaweedfs)
         (cd "$FLEET_BASE_DIR" && docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file .env --profile comms-media-seaweedfs pull comms-seaweedfs) \

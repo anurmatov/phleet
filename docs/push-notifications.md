@@ -76,6 +76,8 @@ is off. The notification goes out at once rather than on the next 30-second pass
 - **Nothing is announced at start-up.** The first look after the orchestrator starts only records
   what is already true, so a restart does not re-announce every gate that has been waiting since
   yesterday. The cost: something that happened while the orchestrator was down is not announced.
+  The same applies to a Temporal namespace that was unreachable at start-up: the orchestrator
+  keeps trying it, and the first look after it connects only records what is already waiting.
 - **A run someone cancelled or terminated is not a failure.** Whoever stopped it already knows.
 - **An agent stopped through the API is not "down".** The orchestrator sees a stopped agent and a
   crashed one the same way, so `POST /api/agents/{name}/stop` records that the stop was asked for,

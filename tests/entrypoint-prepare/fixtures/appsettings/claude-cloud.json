@@ -1,0 +1,26 @@
+{
+  "Agent": {
+    "Name": "example-dev",
+    "ContainerName": "fleet-example-dev",
+    "Role": "developer",
+    "Model": "opus",
+    "Provider": "claude",
+    "Projects": ["example"],
+    "AllowedTools": ["Bash(git *)", "mcp__alpha__memory_get", "mcp__alpha__memory_search", "mcp__gamma__send"],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ShortName": "dev",
+    "Effort": null,
+    "CodexSandboxMode": null,
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "InstructionOrder": ["_base", "developer"]
+  },
+  "Telegram": {
+    "AllowedUserIds": [],
+    "AllowedGroupIds": [],
+    "SendOnly": false
+  }
+}

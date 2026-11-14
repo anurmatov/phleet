@@ -1,0 +1,22 @@
+<Project>
+
+  <!--
+    Settings every project in the repository shares. A project file states only what is its own.
+
+    MUST NOT add a PackageReference, ProjectReference or GlobalPackageReference here or in
+    Directory.Packages.props. ProtocolDependencyTests and ContractsDependencyTests read the project
+    files to prove Fleet.Protocol and Fleet.Conversations.Contracts carry no dependency; a reference
+    added here would reach every project without appearing in any of them.
+    BuildPropsDependencyTests fails on one.
+
+    Every .NET Dockerfile copies this file and Directory.Packages.props into the build stage before
+    `dotnet restore`. A Dockerfile that copies only `src/` restores with no target framework and no
+    package versions. The same tests fail on one that does.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

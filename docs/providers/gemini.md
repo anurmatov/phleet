@@ -20,7 +20,7 @@ Fleet supports Google Gemini as an AI provider via the `gemini` CLI in headless 
 
 - **No session persistence in headless mode** ([gemini-cli #13924](https://github.com/google-gemini/gemini-cli/issues/13924), [PR #23414](https://github.com/google-gemini/gemini-cli/pull/23414)). The system prompt is re-sent via `GEMINI_SYSTEM_MD` on every task. There is no `--resume` shortcut available in v0.40.1; once upstream lands persistent session support in headless mode, phleet can revisit this.
 - **No native PDF content blocks.** PDFs are passed as `@<path>` filesystem references (hint: `[document attachment: /path]` injected into task text); the agent reads from disk via Read/Bash tools. Compare to claude's `type: "document"` content blocks, which embed the full PDF in the model's context window.
-- **HTTP/SSE MCP transport only.** The gemini CLI does not support stdio-transport MCP servers. `entrypoint.sh` filters them out automatically when generating `~/.gemini/settings.json` from `.generated/.mcp.json`.
+- **HTTP/SSE MCP transport only.** The gemini CLI does not support stdio-transport MCP servers. They are filtered out automatically when `~/.gemini/settings.json` is generated from `.generated/.mcp.json` at container start (`entrypoint.sh` calls the agent binary's `prepare config`).
 - **OAuth-only auth.** `GEMINI_API_KEY` and `GOOGLE_API_KEY` are explicitly fail-fast'd in `entrypoint.sh`. The agent must mount `~/.gemini/oauth_creds.json` read-write (google-auth-library refreshes tokens in-place). A personal Google account is required.
 
 ## Setup with fleet
@@ -46,8 +46,8 @@ gemini --output-format stream-json -m <model> --yolo
 ## MCP tools
 
 The gemini CLI only supports HTTP/SSE MCP transport. stdio-transport servers are
-automatically skipped when `entrypoint.sh` generates `~/.gemini/settings.json`
-from `.generated/.mcp.json`.
+automatically skipped when `~/.gemini/settings.json` is generated from
+`.generated/.mcp.json` at container start (`entrypoint.sh` → `dotnet Fleet.Agent.dll prepare config`).
 
 ## Attachments
 
@@ -88,7 +88,7 @@ Token refresh is handled on two levels:
 **Agent starts but cannot call MCP tools**
 - Check `~/.gemini/settings.json` inside the container (run `docker exec -it <container> cat /root/.gemini/settings.json`).
   It should contain an `mcpServers` block generated from `.generated/.mcp.json`.
-  If missing, the entrypoint.sh gemini block may have failed — check `docker logs <container>`.
+  If missing, the entrypoint's `prepare config` step may have failed — check `docker logs <container>` for a `WARN:` line.
 
 **`gemini credentials not found` error on container start**
 - Run `gemini auth` on the host, then re-run `./setup.sh`.

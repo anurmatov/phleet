@@ -2,10 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>Fleet.Agent</RootNamespace>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,9 +33,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.8.0-preview.1" />
-    <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
-    <PackageReference Include="Telegram.Bot" Version="22.10.2" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+    <PackageReference Include="RabbitMQ.Client" />
+    <PackageReference Include="Telegram.Bot" />
   </ItemGroup>
 
 </Project>

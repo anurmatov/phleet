@@ -14,45 +14,88 @@ public sealed class TemporalClientRegistry(
     ILogger<TemporalClientRegistry> logger) : IEpicDriverTemporal, IWorkflowSignalClient
 {
     private readonly TemporalOptions _opts = opts.Value;
-    private Dictionary<string, ITemporalClient>? _clients;
+
+    // The namespaces connected so far. Replaced, never changed in place, so a caller that holds one
+    // keeps a consistent view. Null until the first attempt.
+    private volatile Dictionary<string, ITemporalClient>? _clients;
     private readonly SemaphoreSlim _initLock = new(1, 1);
+    private readonly HashSet<string> _warned = new(StringComparer.OrdinalIgnoreCase);
+    private long _retryAtTicks;
+
+    /// <summary>
+    /// How long a namespace that did not connect is left alone before the next attempt, so a
+    /// Temporal that is down is asked twice a minute, not once per request.
+    /// </summary>
+    internal static readonly TimeSpan RetryCooldown = TimeSpan.FromSeconds(30);
+
+    /// <summary>Connects to one namespace. Replaced in tests.</summary>
+    internal Func<string, string, Task<ITemporalClient>> Connect { get; init; } = async (address, ns) =>
+        await TemporalClient.ConnectAsync(new TemporalClientConnectOptions(address) { Namespace = ns });
+
+    internal TimeProvider Time { get; init; } = TimeProvider.System;
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_opts.Address);
 
+    /// <summary>
+    /// The clients for every configured namespace that is connected. A namespace that failed to
+    /// connect is not given up on: it is tried again by a later call, once
+    /// <see cref="RetryCooldown"/> has passed, so the set can grow. Do not keep the result across
+    /// calls that should see a namespace come back.
+    /// </summary>
     public async Task<IReadOnlyDictionary<string, ITemporalClient>> GetClientsAsync(CancellationToken ct = default)
     {
-        if (_clients is not null) return _clients;
+        var current = _clients;
+        if (current is not null && !ShouldConnect(current)) return current;
 
         await _initLock.WaitAsync(ct);
         try
         {
-            if (_clients is not null) return _clients;
+            current = _clients;
+            if (current is not null && !ShouldConnect(current)) return current;
 
-            var clients = new Dictionary<string, ITemporalClient>(StringComparer.OrdinalIgnoreCase);
+            var next = current is null
+                ? new Dictionary<string, ITemporalClient>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, ITemporalClient>(current, StringComparer.OrdinalIgnoreCase);
+            var failed = false;
             foreach (var ns in _opts.Namespaces)
             {
+                if (next.ContainsKey(ns)) continue;
                 try
                 {
-                    clients[ns] = await TemporalClient.ConnectAsync(new TemporalClientConnectOptions(_opts.Address)
-                    {
-                        Namespace = ns
-                    });
-                    logger.LogDebug("Connected to Temporal namespace '{Namespace}'", ns);
+                    next[ns] = await Connect(_opts.Address, ns);
+                    if (_warned.Remove(ns))
+                        logger.LogInformation("Connected to Temporal namespace '{Namespace}' after earlier failures", ns);
+                    else
+                        logger.LogDebug("Connected to Temporal namespace '{Namespace}'", ns);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogWarning(ex, "Failed to connect to Temporal namespace '{Namespace}' — skipping", ns);
+                    failed = true;
+                    // Said once with its cause; the retries that follow would repeat it every cooldown.
+                    if (_warned.Add(ns))
+                        logger.LogWarning(ex,
+                            "Failed to connect to Temporal namespace '{Namespace}' — retrying every {Cooldown}s while it is asked for",
+                            ns, RetryCooldown.TotalSeconds);
+                    else
+                        logger.LogDebug("Temporal namespace '{Namespace}' still not reachable ({Error})", ns, ex.GetType().Name);
                 }
             }
 
-            _clients = clients;
-            return _clients;
+            if (failed)
+                Volatile.Write(ref _retryAtTicks, (Time.GetUtcNow() + RetryCooldown).UtcTicks);
+            _clients = next;
+            return next;
         }
         finally
         {
             _initLock.Release();
         }
     }
+
+    /// <summary>A configured namespace is not connected, and its cooldown has passed.</summary>
+    private bool ShouldConnect(Dictionary<string, ITemporalClient> current) =>
+        _opts.Namespaces.Any(ns => !current.ContainsKey(ns))
+        && Time.GetUtcNow().UtcTicks >= Volatile.Read(ref _retryAtTicks);
 
     public async Task<ITemporalClient?> GetClientAsync(string @namespace, CancellationToken ct = default)
     {
@@ -150,10 +193,20 @@ public sealed class TemporalClientRegistry(
     /// Returns workflows that closed with Failed, Terminated, or Canceled status within the given window.
     /// Returns empty list if Temporal is not configured or the query fails.
     /// </summary>
-    public async Task<List<Models.WorkflowSummary>> ListRecentFailuresAsync(TimeSpan window, CancellationToken ct = default)
+    public async Task<List<Models.WorkflowSummary>> ListRecentFailuresAsync(TimeSpan window, CancellationToken ct = default) =>
+        (await ListRecentFailuresByNamespaceAsync(window, ct)).Runs;
+
+    /// <summary>
+    /// <see cref="ListRecentFailuresAsync"/>, with the namespaces the answer covers: those that
+    /// were connected and whose query completed. A namespace missing from that list was not
+    /// looked at, which is not the same as having no failures.
+    /// </summary>
+    public async Task<(List<Models.WorkflowSummary> Runs, IReadOnlyList<string> Namespaces)> ListRecentFailuresByNamespaceAsync(
+        TimeSpan window, CancellationToken ct = default)
     {
         var clients = await GetClientsAsync(ct);
         var results = new List<Models.WorkflowSummary>();
+        var covered = new List<string>();
         var since = DateTimeOffset.UtcNow - window;
         var sinceStr = since.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
         var query = $"(ExecutionStatus=\"Failed\" OR ExecutionStatus=\"Terminated\" OR ExecutionStatus=\"Canceled\") AND CloseTime >= \"{sinceStr}\"";
@@ -173,6 +226,7 @@ public sealed class TemporalClientRegistry(
                         Status:       wf.Status.ToString(),
                         StartTime:    wf.StartTime));
                 }
+                covered.Add(ns);
             }
             catch (Exception ex)
             {
@@ -180,7 +234,7 @@ public sealed class TemporalClientRegistry(
             }
         }
 
-        return results;
+        return (results, covered);
     }
 
     /// <summary>

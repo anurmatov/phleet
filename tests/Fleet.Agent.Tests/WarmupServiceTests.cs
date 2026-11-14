@@ -74,6 +74,33 @@ public class WarmupServiceTests
             e.Level == LogLevel.Error && e.Message.Contains("boom"));
     }
 
+    [Fact]
+    public async Task ThePing_IsMarkedAsAnExecutorTurnTheTaskQueueDidNotStart()
+    {
+        // While the ping runs, the task queue must not inject a real message into it.
+        var executor = new HangingExecutor();
+        var manager = new TaskManager(
+            Microsoft.Extensions.Options.Options.Create(new AgentOptions { Name = "agent1", Role = "r", WorkDir = "/tmp" }),
+            executor, new SessionManager(), Microsoft.Extensions.Logging.Abstractions.NullLogger<TaskManager>.Instance);
+        using var service = new WarmupService(executor, warmupTimeoutSeconds: 1, new CapturingLogger<WarmupService>(),
+            startupDelay: TimeSpan.Zero, taskManager: manager);
+        Assert.False(manager.ExecutorBusyElsewhere);
+
+        await service.StartAsync(CancellationToken.None);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        var seenBusy = false;
+        while (!service.ExecuteTask!.IsCompleted && DateTime.UtcNow < deadline)
+        {
+            seenBusy |= manager.ExecutorBusyElsewhere;
+            if (seenBusy) break;
+            await Task.Delay(5);
+        }
+        await RunTask(service.ExecuteTask!);
+
+        Assert.True(seenBusy);
+        Assert.False(manager.ExecutorBusyElsewhere);
+    }
+
     private static Task RunTask(Task task) =>
         task.WaitAsync(TimeSpan.FromSeconds(10));
 

@@ -122,7 +122,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
 
     // ── Scoped counts and privacy ───────────────────────────────────────────
 
-    [Fact]
+    [LinuxFact]
     public async Task MemoryStats_counts_only_readable_parsed_records_by_directory_type()
     {
         var output = await Tool(Acl(populate: new() { ["agent1"] = ["project-a"] })).GetStatsAsync(default);
@@ -132,7 +132,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
         await _embedding.DidNotReceiveWithAnyArgs().EmbedAsync(default!, default);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task MemoryStats_hidden_project_additions_and_deletions_leave_visible_totals_unchanged()
     {
         var tool = Tool(Acl(populate: new() { ["agent1"] = ["project-a"] }));
@@ -147,7 +147,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
         Assert.Equal(StatsRecords.ProjectA, await tool.GetStatsAsync(default));
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task MemoryStats_no_visible_records_report_zero_rows_and_both_headings()
     {
         var output = await Tool(Acl(populate: new() { ["agent2"] = ["project-c"] }), "agent2").GetStatsAsync(default);
@@ -157,7 +157,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
     }
 
     // The existing CanRead decides every record: no new no-project, public or wildcard interpretation.
-    [Fact]
+    [LinuxFact]
     public async Task MemoryStats_uses_the_existing_acl_decision_for_no_project_and_wildcard_rows()
     {
         Assert.Equal(StatsRecords.Expected(3, 1, ("learning", 2), ("decision", 1)),
@@ -185,7 +185,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
 
     // Ordinary removals apply after the existing successful refresh, not on the next request; a later failed refresh keeps
     // the populated (stale) scoped cache. Refreshes are driven directly instead of waiting for the five-minute timer.
-    [Fact]
+    [LinuxFact]
     public async Task MemoryStats_ordinary_removal_applies_after_a_successful_refresh_and_a_failed_refresh_keeps_the_cache()
     {
         var acl = Acl(populate: new() { ["agent1"] = ["project-a"] });
@@ -221,7 +221,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
 
     // ── Files: malformed, absent, linked, special and failures ───────────────
 
-    [Fact]
+    [LinuxFact]
     public async Task MemoryStats_malformed_and_unframed_files_and_subdirectories_are_left_out_unnamed()
     {
         File.WriteAllText(Path.Combine(Root, "learning", "2026-01-01_aaaaaaaa_plain.md"), "plain text, no frontmatter\n");
@@ -237,7 +237,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
             Assert.DoesNotContain(name, output);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task MemoryStats_only_an_observed_absent_type_or_archive_directory_counts_zero()
     {
         Directory.Delete(Path.Combine(Root, "decision"), true);
@@ -333,7 +333,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
 
     // A type or archive directory replaced after its handle is open (by a link to outside records, or by a new
     // directory) never redirects the scan: it lists and reads the directory it opened, and nothing outside counts.
-    [Theory]
+    [LinuxTheory]
     [InlineData("learning", "link")]
     [InlineData("learning", "directory")]
     [InlineData("_archived", "link")]

@@ -66,7 +66,8 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
                     Source = AgentProjectAccessSource.Manual,
                 });
                 await db.SaveChangesAsync();
-                await configService.PublishAclChangedAsync();
+                if (!await configService.TryPublishAclChangedAsync())
+                    return LiveDelivery.AccessNotDelivered($"access to project '{proj}' for agent '{agentName}'");
 
                 var all = await db.AgentProjectAccess
                     .Where(x => x.AgentName == agentName)
@@ -89,7 +90,8 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
 
                 db.AgentProjectAccess.Remove(row);
                 await db.SaveChangesAsync();
-                await configService.PublishAclChangedAsync();
+                if (!await configService.TryPublishAclChangedAsync())
+                    return LiveDelivery.AccessNotDelivered($"the removal of project '{proj}' from agent '{agentName}'");
 
                 var all = await db.AgentProjectAccess
                     .Where(x => x.AgentName == agentName)
@@ -113,7 +115,8 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
                         Source = AgentProjectAccessSource.Manual,
                     });
                     await db.SaveChangesAsync();
-                    await configService.PublishAclChangedAsync();
+                    if (!await configService.TryPublishAclChangedAsync())
+                        return LiveDelivery.AccessNotDelivered($"wildcard access for agent '{agentName}'");
                 }
                 return $"Agent '{agentName}' now has wildcard access (*) — can read all memory projects.";
             }
@@ -127,7 +130,8 @@ public sealed class ManageAgentProjectAccessTool(IServiceScopeFactory scopeFacto
 
                 db.AgentProjectAccess.Remove(row);
                 await db.SaveChangesAsync();
-                await configService.PublishAclChangedAsync();
+                if (!await configService.TryPublishAclChangedAsync())
+                    return LiveDelivery.AccessNotDelivered($"the removal of wildcard access from agent '{agentName}'");
 
                 var remaining = await db.AgentProjectAccess
                     .Where(x => x.AgentName == agentName)

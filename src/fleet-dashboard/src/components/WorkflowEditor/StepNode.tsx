@@ -6,8 +6,6 @@ import { CSS } from '@dnd-kit/utilities'
 import type { AnyStep, StepPath, ValidationError } from './editorTypes'
 import { STEP_COLORS, CONTAINER_TYPES } from './editorTypes'
 import { stepSummary, isBranchCaseTerminal } from './validation'
-import { makeStep } from './stepDefaults'
-import { genId } from './treeUtils'
 import type { StepType } from './editorTypes'
 
 const STEP_TYPES_LIST: StepType[] = [

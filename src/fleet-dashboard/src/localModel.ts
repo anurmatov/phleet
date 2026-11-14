@@ -94,14 +94,6 @@ export function switchProvider(edits: LocalModelEdits, next: string): LocalModel
   return next === 'gemini' ? { ...patch, localBaseUrl: '', contextWindow: '' } : patch
 }
 
-export function createFormProviderPatch(
-  form: { provider: string; effort: string }, next: string,
-): { provider: string; model: string; effort?: string; localBaseUrl?: string; contextWindow?: string } {
-  const patch = { provider: next, model: PROVIDER_DEFAULT_MODEL[next] ?? '' }
-  if (next === form.provider) return patch
-  return patch
-}
-
 export function localModelSuggestions(provider: string): LocalModelSuggestion[] {
   return LOCAL_MODEL_SUGGESTIONS.filter(s => (s.harnesses as string[]).includes(provider))
 }

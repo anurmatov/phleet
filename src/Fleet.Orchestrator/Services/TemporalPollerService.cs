@@ -29,19 +29,30 @@ public sealed class TemporalPollerService(
         logger.LogInformation("TemporalPollerService starting, address={Address}, namespaces={Ns}",
             _opts.Address, string.Join(',', _opts.Namespaces));
 
-        var clients = await clientRegistry.GetClientsAsync(ct);
-
-        if (clients.Count == 0)
-        {
-            logger.LogWarning("No Temporal namespaces reachable — workflow poller stopping");
-            return;
-        }
+        var waiting = false;
 
         while (!ct.IsCancellationRequested)
         {
             try
             {
+                // Asked for on every pass: a namespace that was down when this started, or all of
+                // them, joins as soon as the registry connects it.
+                var clients = await clientRegistry.GetClientsAsync(ct);
+
+                if (clients.Count == 0)
+                {
+                    if (!waiting)
+                        logger.LogWarning("No Temporal namespaces reachable — workflow poller waiting for one");
+                    waiting = true;
+                    await Task.Delay(TimeSpan.FromSeconds(_opts.PollIntervalSeconds), ct).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                    continue;
+                }
+                if (waiting)
+                    logger.LogInformation("Temporal reachable — workflow poller resuming with namespaces={Ns}", string.Join(',', clients.Keys));
+                waiting = false;
+
                 var workflows = new List<WorkflowSummary>();
+                var covered = new List<string>();
 
                 foreach (var (ns, client) in clients)
                 {
@@ -91,6 +102,7 @@ public sealed class TemporalPollerService(
                                 Phase:        phase,
                                 GateRef:      gateRef));
                         }
+                        covered.Add(ns);
                     }
                     catch (Exception ex) when (!ct.IsCancellationRequested)
                     {
@@ -98,7 +110,7 @@ public sealed class TemporalPollerService(
                     }
                 }
 
-                var changed = store.Update(workflows);
+                var changed = store.Update(workflows, covered);
                 if (changed)
                 {
                     logger.LogDebug("Workflow snapshot updated: {Count} running workflows", workflows.Count);

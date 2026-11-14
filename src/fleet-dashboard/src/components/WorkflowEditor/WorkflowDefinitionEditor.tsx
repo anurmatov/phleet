@@ -3,13 +3,13 @@ import type { AnyStep, StepPath, ViewMode, ValidationError } from './editorTypes
 import { deserializeStep, serializeStep, ensureIds } from './treeUtils'
 import { makeStep } from './stepDefaults'
 import { validateTree } from './validation'
-import { apiFetch } from '../../utils'
+import { apiGet, apiSend } from '../../utils'
 import StepPalette from './StepPalette'
 import StepCanvas from './StepCanvas'
 import JsonPreview from './JsonPreview'
 import StepConfigPanel from './StepConfigPanel'
 import type { StepType } from './editorTypes'
-import type { WorkflowTypeInfo } from '../../types'
+import type { WorkflowDefinitionDetail, WorkflowTypeInfo } from '../../types'
 
 interface WorkflowDefinitionEditorProps {
   /** null = new definition */
@@ -49,8 +49,7 @@ export default function WorkflowDefinitionEditor({ defName, onBack, onSaved, wor
   useEffect(() => {
     if (isNew) return
     setLoading(true)
-    apiFetch(`/api/workflow-definitions/${defName}`)
-      .then(r => r.json())
+    apiGet<WorkflowDefinitionDetail>(`/api/workflow-definitions/${defName}`)
       .then(data => {
         const parsedRoot = deserializeStep(data.definition)
         setRoot(parsedRoot)
@@ -90,25 +89,14 @@ export default function WorkflowDefinitionEditor({ defName, onBack, onSaved, wor
       const definition = serializeStep(root)
       const name = isNew ? newName.trim() : defName!
       if (isNew) {
-        const res = await apiFetch('/api/workflow-definitions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, namespace: meta.namespace, taskQueue: meta.taskQueue, description: meta.description, definition }),
-        })
-        if (!res.ok) throw new Error(await res.text())
+        await apiSend('/api/workflow-definitions', 'POST', { name, namespace: meta.namespace, taskQueue: meta.taskQueue, description: meta.description, definition })
         setSaveState('success')
         setSaveMsg('Created!')
         setIsDirty(false)
         onSaved(name)
       } else {
-        const res = await apiFetch(`/api/workflow-definitions/${defName}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ definition, description: meta.description, namespace: meta.namespace, taskQueue: meta.taskQueue }),
-        })
-        if (!res.ok) throw new Error(await res.text())
-        const updated = await res.json()
-        setMeta(m => ({ ...m, version: updated.version ?? m.version + 1 }))
+        const updated = await apiSend<{ version?: number } | null>(`/api/workflow-definitions/${defName}`, 'PUT', { definition, description: meta.description, namespace: meta.namespace, taskQueue: meta.taskQueue })
+        setMeta(m => ({ ...m, version: updated?.version ?? m.version + 1 }))
         setSaveState('success')
         setSaveMsg(`Saved v${meta.version + 1}`)
         setIsDirty(false)

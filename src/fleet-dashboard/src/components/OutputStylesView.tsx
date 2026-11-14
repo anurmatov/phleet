@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { OutputStyleDetail } from '../types'
-import { apiFetch } from '../utils'
+import { apiGet, apiSend } from '../utils'
 import FieldHint from './FieldHint'
 
 type ActionState = 'idle' | 'pending' | 'success' | 'error'
@@ -72,8 +72,7 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
 
   function load() {
     setLoading(true)
-    apiFetch('/api/output-styles')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    apiGet<OutputStyleDetail[]>('/api/output-styles')
       .then((data: OutputStyleDetail[]) => setStyles(data))
       .catch(() => setStyles([]))
       .finally(() => setLoading(false))
@@ -98,6 +97,9 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
       document.getElementById(`output-style-${initialStyle}`)
         ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
     })
+    // One-shot, guarded by the ref above. `open` is a new function on every render; listing it
+    // would re-run this each render for nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialStyle, styles])
 
   /** Expands a style, seeding its editor buffer from the row on first open. */
@@ -116,25 +118,10 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
   // The server derives `description` from the body's frontmatter, so the error text it returns is
   // the only place the frontmatter rules are stated — surface it verbatim rather than a generic
   // "save failed".
-  async function errorText(res: Response): Promise<string> {
-    try {
-      const data = await res.json()
-      return data?.error ?? `HTTP ${res.status}`
-    } catch {
-      return `HTTP ${res.status}`
-    }
-  }
-
   async function handleSave(name: string) {
     setSaveState(prev => ({ ...prev, [name]: 'pending' }))
     try {
-      const res = await apiFetch(`/api/output-styles/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body: edits[name] ?? '' }),
-      })
-      if (!res.ok) throw new Error(await errorText(res))
-      const data = await res.json()
+      const data = await apiSend<{ message?: string } | null>(`/api/output-styles/${encodeURIComponent(name)}`, 'PUT', { body: edits[name] ?? '' })
       setSaveState(prev => ({ ...prev, [name]: 'success' }))
       setSaveMsg(prev => ({ ...prev, [name]: data?.message ?? 'Saved' }))
       load()
@@ -163,9 +150,8 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
     setDeleteConfirm(prev => ({ ...prev, [name]: false }))
     setDeleteState(prev => ({ ...prev, [name]: 'pending' }))
     try {
-      const res = await apiFetch(`/api/output-styles/${encodeURIComponent(name)}`, { method: 'DELETE' })
       // A 409 here is the guard doing its job — the message names the agents still assigned.
-      if (!res.ok) throw new Error(await errorText(res))
+      await apiSend(`/api/output-styles/${encodeURIComponent(name)}`, 'DELETE')
       setDeleteState(prev => ({ ...prev, [name]: 'success' }))
       setDeleteMsg(prev => ({ ...prev, [name]: 'Deleted' }))
       if (expanded === name) setExpanded(null)
@@ -187,8 +173,7 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
     const key = `${styleName}:${agentName}`
     setReprovState(prev => ({ ...prev, [key]: 'pending' }))
     try {
-      const res = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, { method: 'POST' })
-      if (!res.ok) throw new Error(await errorText(res))
+      await apiSend(`/api/agents/${encodeURIComponent(agentName)}/reprovision`, 'POST')
       setReprovState(prev => ({ ...prev, [key]: 'success' }))
       setReprovMsg(prev => ({ ...prev, [key]: `${agentName} reprovisioned` }))
       setTimeout(() => setReprovState(prev => ({ ...prev, [key]: 'idle' })), 4000)
@@ -205,12 +190,7 @@ export default function OutputStylesView({ initialStyle = '', onStylesChanged }:
     if (!nameValid || !newBody.trim()) return
     setNewFormState('pending')
     try {
-      const res = await apiFetch('/api/output-styles', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName, body: newBody }),
-      })
-      if (!res.ok) throw new Error(await errorText(res))
+      await apiSend('/api/output-styles', 'POST', { name: newName, body: newBody })
       setNewFormState('success')
       setNewFormMsg('Created')
       setNewName('')

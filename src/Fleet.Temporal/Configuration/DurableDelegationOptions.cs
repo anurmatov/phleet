@@ -28,4 +28,21 @@ public sealed class DurableDelegationOptions
     /// a delegation with (90 seconds today).
     /// </summary>
     public int TickSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// What to do with an answer that names no execution when the delegation it is for has an
+    /// execution id.
+    /// <para>
+    /// An agent from before the id sends every answer that way, so by default (false) such an
+    /// answer is accepted, with a warning: refusing it would leave every delegation to an older
+    /// agent to run out its budget. The cost is that for those agents an answer is still matched
+    /// by task id alone, and a predecessor's late answer can be taken for its successor's.
+    /// </para>
+    /// <para>
+    /// Set to true once every agent echoes the id. An answer without one is then refused, like an
+    /// answer that names another execution. The bridge cannot tell an older agent from a newer one
+    /// by an answer, so it does not decide this for itself.
+    /// </para>
+    /// </summary>
+    public bool RequireAnswerExecutionId { get; set; }
 }

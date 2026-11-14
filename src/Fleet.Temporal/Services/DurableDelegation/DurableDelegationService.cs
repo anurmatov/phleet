@@ -324,7 +324,13 @@ public sealed class DurableDelegationService : BackgroundService
     /// Offers an agent reply to the pending delegations. <see cref="DurableReplyOutcome.NotPending"/>
     /// means it belongs to none of them and the caller treats it as it always did.
     /// </summary>
-    public async Task<DurableReplyOutcome> TryHandleReplyAsync(string taskId, AgentTaskResult result, CancellationToken ct)
+    /// <param name="executionId">
+    /// The execution id the agent put on the answer: the one its task carried. Null when it put
+    /// none.
+    /// </param>
+    /// <param name="sender">The agent that sent it, for the log.</param>
+    public async Task<DurableReplyOutcome> TryHandleReplyAsync(
+        string taskId, AgentTaskResult result, CancellationToken ct, string? executionId = null, string? sender = null)
     {
         if (!Enabled) return DurableReplyOutcome.NotPending;
 
@@ -333,6 +339,12 @@ public sealed class DurableDelegationService : BackgroundService
         {
             if (!_store.TryGet(taskId, out var record) && !_store.TryGet(RootOf(taskId), out record))
                 return DurableReplyOutcome.NotPending;
+
+            // Before anything is read from the answer or written to the record: whose answer is
+            // it? A later attempt of a step has the task id its predecessor had, so the task id
+            // finds the record and the execution id says whether the answer belongs to it.
+            if (!AnswerBelongsTo(record, taskId, executionId, sender))
+                return DurableReplyOutcome.OtherExecution;
 
             if (!string.Equals(taskId, record.CurrentTaskId, StringComparison.Ordinal))
             {
@@ -378,6 +390,50 @@ public sealed class DurableDelegationService : BackgroundService
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Whether an answer is for this record's own execution. An answer that is not is left
+    /// entirely alone: it does not complete the record, is not added to a partial answer, does not
+    /// start a continuation and is not kept for Temporal.
+    ///
+    /// <list type="bullet">
+    /// <item>The record has no execution id (it was written before the id existed): the task id
+    /// is all there is, as before.</item>
+    /// <item>The answer names the record's execution: it is the record's.</item>
+    /// <item>The answer names another execution: it is a predecessor's, arriving late.</item>
+    /// <item>The answer names none: the agent is from before the id, or its task was started by a
+    /// directive that carried none. Accepted with a warning unless
+    /// <see cref="DurableDelegationOptions.RequireAnswerExecutionId"/> is set; see there.</item>
+    /// </list>
+    ///
+    /// Identifiers only in the log, never the answer.
+    /// </summary>
+    private bool AnswerBelongsTo(PendingDelegation record, string taskId, string? executionId, string? sender)
+    {
+        if (string.IsNullOrEmpty(record.ExecutionId)) return true;
+        if (string.Equals(executionId, record.ExecutionId, StringComparison.Ordinal)) return true;
+
+        if (!string.IsNullOrEmpty(executionId))
+        {
+            _logger.LogWarning(
+                "Answer for taskId={TaskId} from {Sender} names execution {AnswerExecutionId}; the pending delegation is execution {ExecutionId}. It is another attempt's answer and is not accepted",
+                taskId, sender ?? "unknown", executionId, record.ExecutionId);
+            return false;
+        }
+
+        if (_options.RequireAnswerExecutionId)
+        {
+            _logger.LogWarning(
+                "Answer for taskId={TaskId} from {Sender} names no execution and DurableDelegation:RequireAnswerExecutionId is set; it is not accepted for execution {ExecutionId}",
+                taskId, sender ?? "unknown", record.ExecutionId);
+            return false;
+        }
+
+        _logger.LogWarning(
+            "Answer for taskId={TaskId} from {Sender} names no execution (an agent from before execution ids?); accepted for execution {ExecutionId} by task id alone",
+            taskId, sender ?? "unknown", record.ExecutionId);
+        return true;
     }
 
     /// <summary>

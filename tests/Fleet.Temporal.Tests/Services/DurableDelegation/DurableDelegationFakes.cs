@@ -377,10 +377,13 @@ internal sealed class DurableHarness : IDisposable
     public DurableDelegationService Service { get; private set; }
 
     private readonly IDelegationRelay? _relayInstead;
+    private readonly Action<DurableDelegationOptions>? _configure;
 
     /// <param name="relay">Used in place of <see cref="Relay"/>: the real relay over a recording wire.</param>
-    public DurableHarness(bool enabled = true, IDelegationRelay? relay = null)
+    /// <param name="configure">Changes the options every service of this harness is built with.</param>
+    public DurableHarness(bool enabled = true, IDelegationRelay? relay = null, Action<DurableDelegationOptions>? configure = null)
     {
+        _configure = configure;
         Directory = Path.Combine(Path.GetTempPath(), "durable-delegation-" + Guid.NewGuid().ToString("N"));
         System.IO.Directory.CreateDirectory(Directory);
         Gateway.Clock = Clock;
@@ -391,9 +394,12 @@ internal sealed class DurableHarness : IDisposable
     /// <summary>A new service instance reading the same file: what a bridge restart is.</summary>
     public DurableDelegationService Restart(bool enabled = true) => Service = Build(enabled);
 
-    private DurableDelegationService Build(bool enabled) => new(
-        Options.Create(new DurableDelegationOptions { Enabled = enabled, StateFile = StateFile }),
-        Gateway, _relayInstead ?? Relay, Log, Clock);
+    private DurableDelegationService Build(bool enabled)
+    {
+        var options = new DurableDelegationOptions { Enabled = enabled, StateFile = StateFile };
+        _configure?.Invoke(options);
+        return new DurableDelegationService(Options.Create(options), Gateway, _relayInstead ?? Relay, Log, Clock);
+    }
 
     /// <summary>A delegation started the way the activity starts one.</summary>
     public async Task StartAsync(DelegationStart start)

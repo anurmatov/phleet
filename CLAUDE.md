@@ -437,7 +437,11 @@ stays owed in the record. A retried step reuses its task id, so each record has 
 and every cancel (optional `?executionId=` on the orchestrator's and the agent's cancel routes;
 `AgentTaskCancel` forwards it), and the agent's `TaskManager.CancelBridgeExecutionAsync` stops a
 task only when the id it keeps with the task-id reservation is equal. A cancel without an id is
-matched by task id as before, and the in-process path sends none. For an agent or orchestrator from
+matched by task id as before, and the in-process path sends none. Answers are fenced the same way:
+`RelayCompletionPublisher` reads the task's id while its completion is raised and writes it on the
+answer, and `TryHandleReplyAsync` accepts an answer for a record that has an id only when the ids
+are equal (another id: acked, logged, nothing changed; no id: accepted with a warning unless
+`DurableDelegation__RequireAnswerExecutionId`). For an agent or orchestrator from
 before the id the bridge still orders its sends: no directive while a cancel for the same task id
 is owed, unfinished, or ended without a 2xx less than 30 s ago (`Fenced`, `PriorCancels`,
 `PublishNotBefore`). The service is registered before

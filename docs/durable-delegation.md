@@ -112,6 +112,31 @@ naming one execution. If the orchestrator cannot be reached (or `TemporalBridge_
 is not set) the cancel is not delivered: the agent finishes the work and its answer finds nothing
 waiting.
 
+#### An answer and the execution it came from
+
+The same holds in the other direction: an answer names its task id, and a predecessor's answer that
+arrives late has the task id its successor is waiting under. So the agent puts the execution id it
+keeps with a task on every answer it sends for that task (final, partial, failed, incomplete,
+idle), as the same optional `ExecutionId` field, written only when the task has one. The bridge
+accepts an answer for a durable record only when that id is the record's:
+
+| the record | the answer | what happens |
+|---|---|---|
+| has an id | names that id | accepted |
+| has an id | names another id | not accepted. It is a predecessor's answer. The message is acknowledged and logged with identifiers only; the record is not completed or continued, nothing is added to a partial answer and nothing is kept for Temporal |
+| has an id | names none | accepted, by task id, with a warning each time. See below |
+| has none (written before the id) | anything | accepted by task id, as before |
+
+An answer without an id comes from an agent from before the id, or from a task that was started by
+a directive without one. The bridge cannot tell an older agent from a newer one by an answer, and
+refusing would leave every delegation to an older agent to run out its budget, so it accepts.
+**For those agents the hole is still open: a predecessor's late answer can be taken for its
+successor's.** When every agent echoes the id, set `DurableDelegation__RequireAnswerExecutionId=true`
+and such an answer is refused like one that names another execution.
+
+The in-memory path (switch off, or a delegation that is not a durable record) matches an answer by
+task id and ignores the field.
+
 #### Services deploy separately
 
 Every part is optional on the wire, nothing was renamed, and nothing is sent while the switch is
@@ -134,8 +159,7 @@ What this still does not cover:
 - A directive that is dropped as a repeat does not change whose task it is. If a second delegation's
   directive arrives while the first one's task is still running, the task keeps the first id, and
   the second delegation's cancel does not stop it.
-- An answer is still matched by task id alone: an answer from a predecessor's execution completes
-  the successor.
+- An answer from an agent that does not echo the id is matched by task id alone, as described above.
 - The in-process wait (switch off) is unchanged. It sends its cancel by task id with no ordering,
   so the same late cancel can stop a successor there. The agent-side check makes fixing that a
   matter of sending an id from the activity.
@@ -157,6 +181,7 @@ log says `relay sends are held` and `relay sends resumed`, once each.
 | `FLEET_DURABLE_DELEGATION_ENABLED` → `DurableDelegation__Enabled` | `false` | off: the in-process wait, exactly as before |
 | `DurableDelegation__StateFile` | `/var/lib/fleet-temporal-bridge/pending-delegations.json` | the records; empty keeps them in memory, which survives nothing |
 | `DurableDelegation__TickSeconds` | `15` | seconds between passes; keep it well under the shortest heartbeat timeout |
+| `DurableDelegation__RequireAnswerExecutionId` | `false` | `true` refuses an answer that names no execution for a delegation that has one; turn it on only when every agent echoes the id |
 
 Fresh setup writes the key as `false`; upgrade adds it only when it is missing. The state directory
 is the one the workflow failure notifier already uses (`${FLEET_BASE_DIR}/temporal-bridge`).

@@ -216,4 +216,10 @@ public enum DurableReplyOutcome
 
     /// <summary>A repeat, or an answer to a directive this delegation has moved past. Nothing changed.</summary>
     Ignored,
+
+    /// <summary>
+    /// An answer from another execution of the same task id: a predecessor's, arriving late.
+    /// Nothing changed. It is settled all the same: nothing else is waiting for it either.
+    /// </summary>
+    OtherExecution,
 }

@@ -344,16 +344,21 @@ public sealed class TemporalRelayListener : IHostedService, IAsyncDisposable
     /// <para>
     /// A durable delegation (only when that is switched on) is asked first, because its record
     /// outlives this process and an in-memory registration does not. Anything but "not pending"
-    /// from it settles the message: completed, continued, recorded for a later pass, or a repeat
-    /// that changes nothing. Otherwise the in-memory registry is asked, as it always was.
+    /// from it settles the message: completed, continued, recorded for a later pass, a repeat
+    /// that changes nothing, or another execution's answer that is not accepted. Otherwise the
+    /// in-memory registry is asked, as it always was.
     /// </para>
     /// </summary>
     internal async Task<bool> TryRouteReplyAsync(RelayMessage message, CancellationToken ct = default)
     {
         var result = ParseAgentResult(message.Text, message.Type);
 
+        // The execution id an agent echoes on its answer goes to the durable record only. The
+        // in-memory registry below knows a delegation by its task id and nothing else, so there
+        // the field is ignored like any field it does not know.
         if (_durable is { Enabled: true }
-            && await _durable.TryHandleReplyAsync(message.TaskId!, result, ct) != DurableReplyOutcome.NotPending)
+            && await _durable.TryHandleReplyAsync(message.TaskId!, result, ct, message.ExecutionId, message.Sender)
+                != DurableReplyOutcome.NotPending)
         {
             return true;
         }

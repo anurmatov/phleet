@@ -20,9 +20,9 @@ public sealed class TemporalWorkflowTools(
     ILogger<TemporalWorkflowTools> logger)
 {
     private const string DefaultNamespace = "fleet";
-    private const string MergeApprovalSignal = "merge-approval";
-    private const string DesignApprovalSignal = "design-approval";
-    private const string DocReviewSignal = "doc-review";
+    private const string MergeApprovalSignal = GateSignal.MergeApproval;
+    private const string DesignApprovalSignal = GateSignal.DesignApproval;
+    private const string DocReviewSignal = GateSignal.DocReview;
     private const string ChangesRequestedDecision = "changes_requested";
     private const string ApprovedDecision = "approved";
     private const string GrantIdField = "GrantId";

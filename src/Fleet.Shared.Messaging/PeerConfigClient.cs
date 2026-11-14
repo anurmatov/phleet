@@ -93,7 +93,7 @@ public sealed class PeerConfigClient : IAsyncDisposable
         var configToken = Env("ORCHESTRATOR_CONFIG_TOKEN", "");
         var rabbitHost = Env("RABBITMQ_HOST", "") is { Length: > 0 } h ? h
             : ExtractRabbitHost(Env("RABBITMQ_URL", "amqp://rabbitmq:5672/"));
-        var rabbitExchange = Env("RABBITMQ_EXCHANGE", "fleet.orchestrator");
+        var rabbitExchange = Env("RABBITMQ_EXCHANGE", OrchestratorBroker.Exchange);
 
         var literalKeys = Env("PEER_CONFIG_KEYS", "")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -215,7 +215,7 @@ public sealed class PeerConfigClient : IAsyncDisposable
             cancellationToken: ct);
 
         await _rabbitChannel.QueueBindAsync(
-            queueName, _rabbitExchange, routingKey: "config.changed", cancellationToken: ct);
+            queueName, _rabbitExchange, routingKey: OrchestratorBroker.ConfigChanged, cancellationToken: ct);
 
         var consumer = new AsyncEventingBasicConsumer(_rabbitChannel);
         consumer.ReceivedAsync += OnConfigChangedReceived;
@@ -231,13 +231,11 @@ public sealed class PeerConfigClient : IAsyncDisposable
     {
         try
         {
-            var json = Encoding.UTF8.GetString(ea.Body.Span);
-            using var doc = JsonDocument.Parse(json);
-            var changedKeys = doc.RootElement
-                .GetProperty("changedKeys")
-                .EnumerateArray()
-                .Select(e => e.GetString() ?? "")
-                .ToList();
+            // A body without changedKeys throws here, like any other body this cannot read, and is
+            // logged below: an event that names no key is not one this peer can act on.
+            var changed = JsonSerializer.Deserialize<ConfigChangedEvent>(ea.Body.Span)
+                ?? throw new JsonException("config.changed carried no document");
+            var changedKeys = changed.ChangedKeys.Select(key => key ?? "").ToList();
 
             if (!Matches(changedKeys))
             {

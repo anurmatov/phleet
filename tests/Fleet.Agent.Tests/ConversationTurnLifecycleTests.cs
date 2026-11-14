@@ -76,7 +76,7 @@ public class ConversationTurnLifecycleTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (manager.HasRunningTasks(key))
             await Task.Delay(10, cts.Token);
-        // The terminal publish happens inside ProcessTask, which completes just before the task
+        // The terminal publish happens inside TurnRun.RunAsync, which completes just before the task
         // leaves the running set; give the finally block a beat to run the reaper check too.
         await Task.Delay(50, CancellationToken.None);
     }

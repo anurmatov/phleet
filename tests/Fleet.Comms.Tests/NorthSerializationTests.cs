@@ -223,6 +223,10 @@ public class NorthSerializationTests
 
                 // #530.
                 ProtocolErrorCode.AgentUnavailable,
+
+                // Appended for replies: the message a submission answers is not one of the
+                // conversation's.
+                ProtocolErrorCode.ReplyTargetNotFound,
             ],
             Enum.GetValues<ProtocolErrorCode>());
     }

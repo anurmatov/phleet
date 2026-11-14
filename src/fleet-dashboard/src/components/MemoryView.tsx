@@ -293,7 +293,7 @@ export default function MemoryView() {
               return (
                 <div key={project} className="memory-tree-project">
                   <button className="memory-tree-project-btn" onClick={() => toggleProject(project)}>
-                    <span className="memory-tree-arrow">{projExpanded ? '▾' : '▸'}</span>
+                    <span className={`memory-tree-arrow${projExpanded ? ' open' : ''}`}><Icon name="chevronRight" size={14} /></span>
                     <span className="memory-tree-project-name">{project}</span>
                     <span className="memory-tree-count">
                       {[...byType.values()].reduce((s, a) => s + a.length, 0)}
@@ -309,7 +309,7 @@ export default function MemoryView() {
                     return (
                       <div key={type} className="memory-tree-type">
                         <button className="memory-tree-type-btn" onClick={() => toggleType(typeKey)}>
-                          <span className="memory-tree-arrow">{typeExpanded ? '▾' : '▸'}</span>
+                          <span className={`memory-tree-arrow${typeExpanded ? ' open' : ''}`}><Icon name="chevronRight" size={14} /></span>
                           <span className="memory-tree-type-name">{type}</span>
                           <span className="memory-tree-count">{mems.length}</span>
                         </button>
@@ -339,7 +339,7 @@ export default function MemoryView() {
         <div className={`memory-stats-panel${statsCollapsed ? ' memory-stats-collapsed' : ''}`}>
           <div className="memory-stats-header">
             <button className="memory-stats-toggle-btn" onClick={() => setStatsCollapsed(c => !c)}>
-              <span className="memory-stats-chevron">{statsCollapsed ? '▸' : '▾'}</span>
+              <span className={`memory-stats-chevron${statsCollapsed ? '' : ' open'}`}><Icon name="chevronRight" size={14} /></span>
               <span className="memory-stats-title">
                 Read stats{statsSince ? ` · ${new Date(statsSince).toLocaleDateString()}` : ''}
               </span>

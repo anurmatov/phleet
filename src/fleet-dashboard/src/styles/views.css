@@ -62,7 +62,8 @@
   background: var(--accent-soft);
   color: var(--accent);
 }
-.memory-tree-arrow, .memory-stats-chevron { width: 14px; flex-shrink: 0; color: var(--text-3); font-size: var(--fs-xs); text-align: center; }
+.memory-tree-arrow, .memory-stats-chevron { display: inline-flex; flex-shrink: 0; color: var(--text-3); transition: transform 0.15s; }
+.memory-tree-arrow.open, .memory-stats-chevron.open { transform: rotate(90deg); }
 .memory-tree-count {
   margin-left: auto;
   padding: 1px 7px;

@@ -138,8 +138,8 @@ export default function CreateAgentModal({ create, agentNames, allInstructions }
           )}
           <p className="create-agent-hint">
             {templateName
-              ? <>The container will be <strong>provisioned automatically</strong> after creation. Use <strong>✎ config</strong> to adjust tools and MCP endpoints afterwards.</>
-              : <>After creating, use the <strong>✎ config</strong> button to set up tools, projects, MCP endpoints, and Telegram config. Then click <strong>↻ Provision</strong> on the agent card to start the container.</>
+              ? <>The container will be <strong>provisioned automatically</strong> after creation. Use <strong>Edit config</strong> on its row to adjust tools and MCP endpoints afterwards.</>
+              : <>After creating, use <strong>Edit config</strong> on its row to set up tools, projects, MCP endpoints, and Telegram config. Then press <strong>Reprovision</strong> on the row to start the container.</>
             }
           </p>
 

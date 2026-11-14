@@ -101,10 +101,10 @@
   font-variant-numeric: tabular-nums;
 }
 .sidenav-item.active .sidenav-badge { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
-.sidenav-badge-attention { background: var(--warn); color: #1d1300; }
-.sidenav-badge-alert { background: var(--danger); color: #fff; }
-.sidenav-item.active .sidenav-badge-attention { background: var(--warn); color: #1d1300; }
-.sidenav-item.active .sidenav-badge-alert { background: var(--danger); color: #fff; }
+.sidenav-badge-attention { background: var(--warn); color: var(--on-warn); }
+.sidenav-badge-alert { background: var(--danger); color: var(--on-danger); }
+.sidenav-item.active .sidenav-badge-attention { background: var(--warn); color: var(--on-warn); }
+.sidenav-item.active .sidenav-badge-alert { background: var(--danger); color: var(--on-danger); }
 
 .sidenav-foot {
   display: flex;
@@ -249,7 +249,7 @@ input.header-search-input {
   border: 2px solid var(--bg);
   border-radius: var(--r-pill);
   background: var(--danger);
-  color: #fff;
+  color: var(--on-danger);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -320,7 +320,7 @@ input.header-search-input {
     border: 2px solid var(--surface);
     border-radius: var(--r-pill);
     background: var(--warn);
-    color: #1d1300;
+    color: var(--on-warn);
     font-size: 10px;
     font-weight: 700;
     line-height: 1;

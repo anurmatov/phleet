@@ -482,13 +482,13 @@ public class DelegateToAgentActivityTests
     public void ActivitySignature_AppendsTheBudgetAndRepoAsOptionalTrailingParameters()
     {
         // Workflows bind activities BY NAME, so a signature change breaks them at runtime rather
-        // than at compile time. The budget and the repo (#347) therefore go last and optional:
-        // UWE's delegate step invokes "DelegateToAgent" with five positional payloads and must
-        // keep binding.
+        // than at compile time. The budget, the repo (#347) and noRedelivery therefore go last
+        // and optional: UWE's delegate step invokes "DelegateToAgent" with five positional
+        // payloads and must keep binding.
         var method = typeof(DelegateToAgentActivity).GetMethod(nameof(DelegateToAgentActivity.DelegateToAgentAsync))!;
         var parameters = method.GetParameters();
 
-        Assert.Equal(7, parameters.Length);
+        Assert.Equal(8, parameters.Length);
         Assert.Equal(typeof(string), parameters[0].ParameterType);   // agentName
         Assert.Equal(typeof(string), parameters[1].ParameterType);   // instruction
         Assert.Equal(typeof(string), parameters[2].ParameterType);   // taskId
@@ -496,14 +496,16 @@ public class DelegateToAgentActivityTests
         Assert.Equal(typeof(int),    parameters[4].ParameterType);   // maxIncompleteRetries
         Assert.Equal(typeof(int),    parameters[5].ParameterType);   // agentBudgetSeconds
         Assert.Equal(typeof(string), parameters[6].ParameterType);   // repo
+        Assert.Equal(typeof(bool),   parameters[7].ParameterType);   // noRedelivery
         Assert.Equal(typeof(Task<AgentTaskResult>), method.ReturnType);
 
         // The first three are mandatory and the rest carry defaults — this is what the Temporal
         // SDK turns into RequiredParameterCount, and it is why a five-payload caller still binds.
-        Assert.Equal([false, false, false, true, true, true, true],
+        Assert.Equal([false, false, false, true, true, true, true, true],
             parameters.Select(p => p.HasDefaultValue).ToArray());
         Assert.Equal(0, parameters[5].DefaultValue);   // 0 = "no explicit budget", not "no budget"
         Assert.Null(parameters[6].DefaultValue);       // no repo signal
+        Assert.Equal(false, parameters[7].DefaultValue); // re-sends and continuations as always
 
         // AgentTaskResult's shape is untouched.
         var resultProps = typeof(AgentTaskResult).GetProperties().Select(p => p.Name).ToHashSet();
@@ -521,7 +523,7 @@ public class DelegateToAgentActivityTests
         var method = typeof(DelegateToAgentActivity).GetMethod(nameof(DelegateToAgentActivity.DelegateToAgentAsync))!;
         var definition = Temporalio.Activities.ActivityDefinition.Create(method, _ => null);
 
-        Assert.Equal(7, definition.ParameterTypes.Count);
+        Assert.Equal(8, definition.ParameterTypes.Count);
         Assert.Equal(3, definition.RequiredParameterCount);
 
         // Workflows that schedule by name use the constant; it must be the name the worker registers.

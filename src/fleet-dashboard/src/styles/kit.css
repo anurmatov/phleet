@@ -101,6 +101,9 @@
 textarea { resize: vertical; }
 .instr-editor, .swf-input, .swf-textarea, .signal-modal-input, .signin-input { width: 100%; }
 .instr-editor, .swf-textarea, .config-textarea-mono { font-family: var(--mono); font-size: var(--fs-s); line-height: 1.55; }
+/* A field carries its look from the element rules in base.css; its class only keeps it inside
+   whatever holds it. */
+.config-input, .config-textarea { max-width: 100%; }
 .config-input-short { width: 100px; }
 .config-input-sm { width: 110px; }
 .config-input-url { flex: 1; min-width: 0; }

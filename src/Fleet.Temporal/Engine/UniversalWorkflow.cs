@@ -371,11 +371,27 @@ public class UniversalWorkflow
         // it — otherwise the approver-only guard below would be one JSON flag away from being
         // switched off (#280). A `fail` step is the definition saying the run must fail; an
         // ancestor's ignoreFailure must not undo that (#424).
-        catch (Exception ex) when (step.IgnoreFailure && !IsUnsuppressible(ex))
+        //
+        // A cancellation is not swallowed at a noRedelivery delegate either: its ignoreFailure
+        // is there to send every other failure on to a read-back, and a cancellation that went
+        // the same way would let the run carry on and end Completed. Every other step keeps the
+        // filter it had, so recorded histories replay.
+        catch (Exception ex) when (step.IgnoreFailure && !IsUnsuppressible(ex) && !IsCancellationAtNoRedelivery(step, ex))
         {
             return null;
         }
     }
+
+    /// <summary>
+    /// True for the cancellation of a cancelled run, at a <c>noRedelivery</c> delegate.
+    /// <see cref="ExecuteDelegateAsync"/> makes sure that is what such a step ends with once the
+    /// run has been cancelled, whatever its activity ended with. Reads the step first, so for
+    /// every other step neither the token nor the exception is looked at.
+    /// </summary>
+    private static bool IsCancellationAtNoRedelivery(StepDefinition step, Exception ex) =>
+        step is DelegateStep { NoRedelivery: true }
+        && Workflow.CancellationToken.IsCancellationRequested
+        && TemporalException.IsCanceledException(ex);
 
     // -------------------------------------------------------------------------
     // Composition
@@ -532,6 +548,13 @@ public class UniversalWorkflow
         if (step.StatusVar != null)
             SetVar(step.StatusVar, UnknownStatus);
 
+        // noRedelivery: a run that has already been cancelled sends nothing. An earlier step's
+        // ignoreFailure can have swallowed the cancellation, and the SDK would refuse to schedule
+        // the activity anyway, but only by failing it into this step's own ignoreFailure. Checked
+        // here, before anything is resolved, it is the cancellation itself. No command is emitted.
+        if (step.NoRedelivery)
+            Workflow.CancellationToken.ThrowIfCancellationRequested();
+
         var target = _template.ResolveString(step.Target);
         var instruction = await ResolveInstructionAsync(step);
         var taskId = DelegationTaskId(step);
@@ -543,19 +566,39 @@ public class UniversalWorkflow
         // below — schedules exactly the five arguments it always did, so recorded histories
         // replay and the activity input stays byte-identical. The parameters are positional, so
         // agentBudgetSeconds goes in as its default (0) to reach the repo slot.
-        var args = string.IsNullOrWhiteSpace(repo)
-            ? new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries }
-            : new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries, 0, repo };
+        //
+        // noRedelivery follows the same rule one slot further on: appended only when true, after
+        // an explicit budget of 0 and the repo (null when the step has none). A step without the
+        // field schedules the five or seven arguments it scheduled before the field existed.
+        var hasRepo = !string.IsNullOrWhiteSpace(repo);
+        var args = step.NoRedelivery
+            ? new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries, 0, hasRepo ? repo : null, true }
+            : !hasRepo
+                ? new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries }
+                : new object?[] { target, instruction, taskId, step.RetryOnIncomplete, step.MaxIncompleteRetries, 0, repo };
 
-        var result = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
-            DelegateToAgentActivity.ActivityName,
-            args,
-            new ActivityOptions
-            {
-                StartToCloseTimeout = timeout + TimeSpan.FromMinutes(2),
-                HeartbeatTimeout = TimeSpan.FromMinutes(2),
-                RetryPolicy = new() { MaximumAttempts = 1 }
-            });
+        AgentTaskResult result;
+        try
+        {
+            result = await Workflow.ExecuteActivityAsync<AgentTaskResult>(
+                DelegateToAgentActivity.ActivityName,
+                args,
+                new ActivityOptions
+                {
+                    StartToCloseTimeout = timeout + TimeSpan.FromMinutes(2),
+                    HeartbeatTimeout = TimeSpan.FromMinutes(2),
+                    RetryPolicy = new() { MaximumAttempts = 1 }
+                });
+        }
+        catch (Exception) when (step.NoRedelivery && Workflow.CancellationToken.IsCancellationRequested)
+        {
+            // Whatever the activity ended with, the run was cancelled while this step was out.
+            // It ends as that cancellation, which ExecuteStepAsync does not swallow here: a
+            // timeout that happened to land beside the cancel must not turn it into a failure
+            // the step's ignoreFailure sends on to the next step.
+            Workflow.CancellationToken.ThrowIfCancellationRequested();
+            throw;
+        }
 
         if (step.OutputVar != null)
             SetVar(step.OutputVar, ResolveOutputVar(result));

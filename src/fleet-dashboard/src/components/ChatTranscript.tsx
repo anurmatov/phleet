@@ -130,11 +130,12 @@ const EntryRow = memo(function EntryRow({ entry, label, quoted, onReply, agentLa
   return <div className={`chat-system chat-system--${entry.tone}`}>{entry.text}</div>
 })
 
-const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard, agentLabel }: {
+const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard, onRemoveReply, agentLabel }: {
   agentLabel: string
   pending: PendingSend
   onRetry: (submissionId: string) => void
   onDiscard: (submissionId: string) => void
+  onRemoveReply?: (submissionId: string) => void
 }) {
   const uploading = pending.files.some(f => f.attachmentId === null)
   return (
@@ -157,6 +158,9 @@ const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard, agent
       {pending.status === 'failed' && (
         <div className="chat-meta chat-meta--error" role="alert">
           <span>{pending.problem}</span>
+          {pending.canRemoveReply && onRemoveReply && (
+            <button type="button" className="chat-link-btn" onClick={() => onRemoveReply(pending.submissionId)}>Remove reply</button>
+          )}
           {pending.canRetry && (
             <button type="button" className="chat-link-btn" onClick={() => onRetry(pending.submissionId)}>Retry</button>
           )}
@@ -173,13 +177,14 @@ const PendingRow = memo(function PendingRow({ pending, onRetry, onDiscard, agent
  * are read as Markdown. A line names the day wherever the day changes.
  */
 export default function ChatTranscript({
-  entries, status, pending, onRetry, onDiscard, onReply, agentLabel = 'Agent', now = Date.now(),
+  entries, status, pending, onRetry, onDiscard, onRemoveReply, onReply, agentLabel = 'Agent', now = Date.now(),
 }: {
   entries: Entry[]
   status: Record<string, SubmissionStatus>
   pending: PendingSend[]
   onRetry: (submissionId: string) => void
   onDiscard: (submissionId: string) => void
+  onRemoveReply?: (submissionId: string) => void
   /** What the agent is called, for naming whose message a reply answers. */
   agentLabel?: string
   /** Start a reply to a message. Absent where replying is not offered. */
@@ -204,7 +209,8 @@ export default function ChatTranscript({
     <>
       {rows}
       {pending.map(p => (
-        <PendingRow key={`pending:${p.submissionId}`} pending={p} onRetry={onRetry} onDiscard={onDiscard} agentLabel={agentLabel} />
+        <PendingRow key={`pending:${p.submissionId}`} pending={p} onRetry={onRetry} onDiscard={onDiscard}
+          onRemoveReply={onRemoveReply} agentLabel={agentLabel} />
       ))}
     </>
   )

@@ -15,7 +15,7 @@ export const PIXEL = Buffer.from(
 )
 
 export class FakeChat {
-  agents = [{ agentName: 'alpha', displayName: 'Alpha' }, { agentName: 'beta', displayName: 'Beta' }]
+  agents = [{ agentName: 'alpha', displayName: 'Alpha', replySupported: true }, { agentName: 'beta', displayName: 'Beta', replySupported: true }]
   /** By conversation id (`c-<agent>`), in seq order. */
   events: Record<string, Array<Record<string, unknown>>> = {}
   calls: ChatCall[] = []

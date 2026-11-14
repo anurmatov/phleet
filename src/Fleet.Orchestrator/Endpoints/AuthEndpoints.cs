@@ -204,7 +204,8 @@ public static class AuthEndpoints
 
         app.MapPost(CheckPath, async (HttpContext http, [FromBody] CheckBody? body,
             [FromServices] JournalTokenService tokens, [FromServices] CallerAuthenticator authenticator,
-            [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+            [FromServices] IServiceScopeFactory scopes, [FromServices] AgentRegistry registry,
+            [FromServices] DockerService docker, CancellationToken ct) =>
         {
             var presented = CallerAuthenticator.BearerOf(http.Request.Headers.Authorization.FirstOrDefault());
             // 403, never 401: a 401 here means "the caller in the question is not signed in". A
@@ -242,6 +243,7 @@ public static class AuthEndpoints
             // agent. Answered for a verified caller alone, so the route says nothing about which
             // agents exist to anyone else. Null when no agent was named.
             bool? agentChatEnabled = null;
+            bool agentReplySupported = false;
             if (!string.IsNullOrEmpty(body.Agent))
             {
                 await using var scope = scopes.CreateAsyncScope();
@@ -256,6 +258,12 @@ public static class AuthEndpoints
                             .Select(a => a.Name)
                             .ToListAsync(ct))
                         .Any(name => string.Equals(name, body.Agent, StringComparison.Ordinal));
+                if (agentChatEnabled == true)
+                {
+                    var configured = await db!.Agents.AsNoTracking().Where(a => a.Name == body.Agent)
+                        .Select(a => a.ContainerName).FirstOrDefaultAsync(ct);
+                    agentReplySupported = await ChatAgents.SupportsReplyAsync(registry.Get(body.Agent), configured, docker, ct);
+                }
             }
 
             return Results.Ok(new
@@ -265,13 +273,15 @@ public static class AuthEndpoints
                 credentialId = caller.CredentialId,
                 kind = KindName(caller.Kind),
                 agentChatEnabled,
+                agentReplySupported,
             });
         });
 
         // ── which agents a person can chat with ──────────────────────────────
 
         app.MapGet("/api/chat/agents", async ([FromServices] JournalTokenService tokens,
-            [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+            [FromServices] IServiceScopeFactory scopes, [FromServices] AgentRegistry registry,
+            [FromServices] DockerService docker, CancellationToken ct) =>
         {
             await using var scope = scopes.CreateAsyncScope();
             var db = scope.ServiceProvider.GetService<Data.OrchestratorDbContext>();
@@ -281,19 +291,21 @@ public static class AuthEndpoints
             var rows = await db.Agents.AsNoTracking()
                 .Where(a => a.ChatEnabled)
                 .OrderBy(a => a.Name)
-                .Select(a => new { a.Name, a.DisplayName })
+                .Select(a => new { a.Name, a.DisplayName, a.ContainerName })
                 .ToListAsync(ct);
 
+            var agents = new List<object>();
+            foreach (var row in rows.Where(a => ChatAgents.IsUsableName(a.Name)))
+                agents.Add(new
+                {
+                    agentName = row.Name,
+                    displayName = string.IsNullOrWhiteSpace(row.DisplayName) ? row.Name : row.DisplayName,
+                    replySupported = await ChatAgents.SupportsReplyAsync(registry.Get(row.Name), row.ContainerName, docker, ct),
+                });
             return Results.Ok(new
             {
                 available = true,
-                agents = rows
-                    .Where(a => ChatAgents.IsUsableName(a.Name))
-                    .Select(a => new
-                    {
-                        agentName = a.Name,
-                        displayName = string.IsNullOrWhiteSpace(a.DisplayName) ? a.Name : a.DisplayName,
-                    }),
+                agents,
             });
         });
 

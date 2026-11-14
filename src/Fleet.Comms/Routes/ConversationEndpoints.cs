@@ -218,22 +218,24 @@ public static class ConversationEndpoints
     /// </remarks>
     private static async Task<IResult?> RefuseUnlessChatAsync(
         HttpContext http, ISignInCheck signIn, IConversationStore store, string id,
-        AuthenticatedPrincipal caller, CancellationToken ct)
+        AuthenticatedPrincipal caller, CancellationToken ct, bool requiresReply = false)
     {
         var conversation = await store.FindConversationAsync(id, caller.PrincipalId, ct);
         if (conversation is null)
             return Error(ProtocolErrorCode.ConversationNotFound, StatusCodes.Status404NotFound);
 
-        var answer = await NorthEndpoints.CheckAsync(http, signIn, conversation.AgentName, ct);
+        var answer = await NorthEndpoints.CheckAsync(http, signIn, conversation.AgentName, ct, fresh: requiresReply);
 
         // The same credential, asked again with the agent: it may have been revoked in between.
         if (answer?.Caller is null
             || !string.Equals(answer.Caller.PrincipalId, caller.PrincipalId, StringComparison.Ordinal))
             return Unauthorized();
 
-        return answer.AgentChatEnabled == true
-            ? null
-            : Error(ProtocolErrorCode.AgentUnavailable, StatusCodes.Status409Conflict);
+        if (answer.AgentChatEnabled != true)
+            return Error(ProtocolErrorCode.AgentUnavailable, StatusCodes.Status409Conflict);
+        return requiresReply && answer.AgentReplySupported != true
+            ? Error(ProtocolErrorCode.ReplyUnavailable, StatusCodes.Status409Conflict)
+            : null;
     }
 
     // ── catch-up ─────────────────────────────────────────────────────────────
@@ -381,7 +383,8 @@ public static class ConversationEndpoints
 
         return await GuardAsync(async () =>
         {
-            if (await RefuseUnlessChatAsync(http, signIn, store, id, caller, ct) is { } refusal)
+            if (await RefuseUnlessChatAsync(http, signIn, store, id, caller, ct,
+                    requiresReply: body.ReplyToEventId is not null) is { } refusal)
                 return refusal;
 
             // A reply is confirmed before anything is made durable, and refused whole when what

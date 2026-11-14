@@ -184,7 +184,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
             TelegramConnected: _connectionState.TelegramConnected,
             Journal: JournalFrom(_journal?.Snapshot(), _turnBindings?.BindingFailed == true),
             PriorityQueuedCount: queueSnapshot.Count(q => q.Priority == Models.TaskPriority.PrimaryHuman),
-            PlanSha256: _harness?.Plan?.PlanSha256);
+            PlanSha256: _harness?.Plan?.PlanSha256,
+            Capabilities: [SignIn.ChatReplyCapability]);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var props = new BasicProperties

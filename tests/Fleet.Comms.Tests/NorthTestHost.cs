@@ -56,7 +56,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
     public static async Task<NorthTestHost> StartAsync(
         bool? trustForwardedHeaders = null,
         Fleet.Conversations.Contracts.IConversationStore? conversations = null,
-        string? attachmentRoot = null)
+        string? attachmentRoot = null, ISignInCheck? issuer = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -100,7 +100,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
         var signIn = new FakeSignIn();
         var time = new TestTimeProvider();
 
-        builder.Services.AddSingleton<ISignInCheck>(signIn);
+        builder.Services.AddSingleton<ISignInCheck>(issuer ?? signIn);
         builder.Services.AddSingleton<TimeProvider>(time);
 
         var app = CommsApp.BuildNorthApp(builder);
@@ -113,7 +113,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
             throw new InvalidOperationException("The test clock was not the resolved TimeProvider.");
 
         if (conversations is not null
-            && !ReferenceEquals(app.Services.GetRequiredService<ISignInCheck>(), signIn))
+            && !ReferenceEquals(app.Services.GetRequiredService<ISignInCheck>(), issuer ?? signIn))
             throw new InvalidOperationException("The fake sign-in check was not the resolved ISignInCheck.");
 
         return new NorthTestHost(app, signIn, time, app.GetTestClient());
@@ -154,6 +154,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
 /// </summary>
 internal sealed class FakeSignIn : ISignInCheck
 {
+    public bool? ReplySupported { get; set; } = true;
     public const string Owner = "p_owner";
 
     private readonly ConcurrentDictionary<string, AuthenticatedPrincipal> _bearers = new(StringComparer.Ordinal);
@@ -221,7 +222,7 @@ internal sealed class FakeSignIn : ISignInCheck
         if (caller is null) return Task.FromResult(SignInAnswer.Refused);
 
         bool? chat = agent is null ? null : ChatAgents.TryGetValue(agent, out var on) && on;
-        return Task.FromResult(new SignInAnswer(SignInOutcome.Signed, caller, chat));
+        return Task.FromResult(new SignInAnswer(SignInOutcome.Signed, caller, chat, ReplySupported));
     }
 }
 

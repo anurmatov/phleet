@@ -236,6 +236,28 @@ public class ConversationRouteTests
 
     private const string ReplyTargetId = "01JREPLYTARGET000000000001";
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    public async Task A_reply_to_an_old_or_unknown_runtime_is_refused_before_accepting(bool? supported)
+    {
+        var store = new FakeConversationStore();
+        await using var host = await NorthTestHost.StartAsync(conversations: store);
+        var token = await AuthorizeAsync(host);
+        host.SignIn.ReplySupported = supported;
+        var response = await host.Client.SendAsync(Post(
+            $"/v1/conversations/{store.ConversationId}/submissions", token,
+            new { protocol = ProtocolVersion.Current, type = "create", submissionId = "s_1", text = "fix it", replyToEventId = ReplyTargetId }));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Empty(store.Accepted);
+        Assert.Contains(host.SignIn.Asked, question => question.Fresh);
+        var ordinary = await host.Client.SendAsync(Post(
+            $"/v1/conversations/{store.ConversationId}/submissions", token,
+            new { protocol = ProtocolVersion.Current, type = "create", submissionId = "s_2", text = "a new message" }));
+        Assert.Equal(HttpStatusCode.Created, ordinary.StatusCode);
+        Assert.Null(Assert.Single(store.Accepted).ReplyToEventId);
+    }
+
     /// <summary>
     /// A reply to a message of this conversation is accepted, the transcript entry is told what it
     /// answers, and the agent's command carries who wrote that message and how it starts — the

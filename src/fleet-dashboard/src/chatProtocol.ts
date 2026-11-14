@@ -133,6 +133,7 @@ export function streamUrl(wsBase: string, conversationId: string, clientInstance
 export interface ChatAgent {
   agentName: string
   displayName: string
+  replySupported?: boolean
 }
 
 export type ChatAgentsAnswer =
@@ -164,7 +165,8 @@ export function readChatAgents(httpStatus: number, body: unknown): ChatAgentsAns
     const agent = record(entry)
     const agentName = text(agent?.agentName)
     if (!agentName) continue
-    agents.push({ agentName, displayName: text(agent?.displayName) || agentName })
+    agents.push({ agentName, displayName: text(agent?.displayName) || agentName,
+      ...(agent?.replySupported === true ? { replySupported: true } : {}) })
   }
   return { status: 'ok', available: fields.available === true, agents }
 }
@@ -450,6 +452,9 @@ export function sendProblem(refusal: Refusal): { message: string; canRetry: bool
     return { message: `Not confirmed: the chat service is not available just now. ${safe}`, canRetry: true }
   }
   if (httpStatus === 401) return { message: 'This browser is signed out of chat. Reload the page to sign in.', canRetry: true }
+  if (code === 'reply_unavailable') {
+    return { message: 'Not sent: Reply is unavailable for this agent right now. Remove the reply to send this message without a quotation.', canRetry: false }
+  }
   if (code === 'agent_unavailable') {
     return { message: `${AGENT_UNAVAILABLE} Then retry.`, canRetry: true }
   }

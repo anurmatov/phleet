@@ -10,6 +10,9 @@ namespace Fleet.Shared;
 /// </remarks>
 public static class SignIn
 {
+    /// <summary>A running agent can consume the quoted target of a chat reply.</summary>
+    public const string ChatReplyCapability = "chat.reply-quote.v1";
+
     /// <summary>The cookie a signed-in browser carries. HttpOnly, SameSite=Strict.</summary>
     public const string SessionCookie = "fleet_session";
 

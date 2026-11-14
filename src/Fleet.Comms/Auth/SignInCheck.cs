@@ -36,7 +36,8 @@ public enum SignInOutcome
 /// Whether the agent named in the question accepts chat; null when no agent was named.
 /// </param>
 public sealed record SignInAnswer(
-    SignInOutcome Outcome, AuthenticatedPrincipal? Caller = null, bool? AgentChatEnabled = null)
+    SignInOutcome Outcome, AuthenticatedPrincipal? Caller = null, bool? AgentChatEnabled = null,
+    bool? AgentReplySupported = null)
 {
     public static readonly SignInAnswer Refused = new(SignInOutcome.Refused);
     public static readonly SignInAnswer Unavailable = new(SignInOutcome.Unavailable);
@@ -271,7 +272,8 @@ public sealed class OrchestratorSignInCheck : ISignInCheck, IDisposable
         return new SignInAnswer(
             SignInOutcome.Signed,
             new AuthenticatedPrincipal(principal, device, credential, IsBrowser: kind == "browser"),
-            chat);
+            chat,
+            root.TryGetProperty("agentReplySupported", out var reply) && reply.ValueKind == JsonValueKind.True);
     }
 
     private static string? StringOf(JsonElement root, string name) =>

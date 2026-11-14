@@ -139,7 +139,8 @@ public sealed class AgentRegistry
                 if (heartbeat.Role          is not null) existing.Role          = heartbeat.Role;
                 if (heartbeat.Model         is not null) existing.Model         = heartbeat.Model;
                 if (heartbeat.ContainerName is not null) existing.ContainerName = heartbeat.ContainerName;
-                if (heartbeat.Capabilities  is not null) existing.Capabilities  = heartbeat.Capabilities;
+                // A rollback to an old heartbeat must withdraw its former capabilities.
+                existing.Capabilities = heartbeat.Capabilities;
                 return existing;
             });
 
@@ -163,6 +164,11 @@ public sealed class AgentRegistry
 
     public AgentState? Get(string agentName) =>
         _agents.TryGetValue(agentName, out var state) ? state : null;
+
+    public void InvalidateReply(string agentName)
+    {
+        if (_agents.TryGetValue(agentName, out var state)) state.Capabilities = null;
+    }
 
     /// <summary>Removes an agent from the in-memory registry. Called after DB deletion to prevent ghost entries.</summary>
     public void Remove(string agentName) =>

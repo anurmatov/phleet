@@ -358,6 +358,17 @@ characters), ahead of the person's words; it holds no map from event ids to text
 cannot find the target among the events it holds (retention moved past it) shows the reply without
 the quotation.
 
+Reply is offered only for a live runtime advertising `chat.reply-quote.v1` in its existing
+heartbeat capabilities: `/api/chat/agents` reports `replySupported` for each agent.
+The issuer inspects the configured container and requires a running instance whose ID matches
+the report and whose current start precedes that report; a stop, replacement, or missing
+inspection cannot reuse an earlier capability.
+Comms freshly checks `agentReplySupported` with the issuer before accepting a reply, refusing
+missing or false capability with `409 reply_unavailable` without accepting the submission.
+The client keeps the unsent text and offers **Remove reply**, then **Retry** to explicitly send
+without a quotation; a refusal does not imply that ordinary chat needs enabling.
+Ordinary submissions retain their existing behavior for these targets, with Reply unavailable.
+
 **`acceptedSeq` is a catch-up floor.** It is the conversation's `next_seq` as read inside the accept
 transaction: **the first `seq` that any event about this submission can occupy**. Since #305 that is
 also the `seq` of a real event — the accept appends `submission.text`, the transcript entry carrying
@@ -538,6 +549,7 @@ appear inside a terminal event payload and have no status at all.
 | `attachment_gone` § | **410** | the row survives and its bytes do not |
 | `invalid_cursor` † | **400** | catch-up, cursor write |
 | `conversation_not_found` | **404** | every conversation-scoped route |
+| `reply_unavailable` (#581) | **409** | reply submission when the current runtime cannot prove quotation support; remove the quotation before retrying |
 | `agent_unavailable` (#530) | **409** | open, submit, cancel and attachment reservation, when the conversation's agent does not accept chat |
 | `idempotency_conflict` † | **409** | submissions |
 | `device_limit` ‡ | **409** | no longer produced here: device registration moved to the orchestrator (#530), which answers `409 device_limit` itself |

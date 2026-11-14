@@ -108,7 +108,7 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
         IServiceScopeFactory scopeFactory,
         ILogger<ConfigService> logger)
     {
-        _envFilePath = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
+        _envFilePath = ProvisioningOptions.From(config).EnvFilePath;
         _rabbitHost = rabbitOptions.Value.Host;
         _rabbitExchange = rabbitOptions.Value.Exchange;
         _scopeFactory = scopeFactory;

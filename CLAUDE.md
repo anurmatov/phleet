@@ -190,7 +190,7 @@ runbook: `docs/upgrading/remove-project-context-cards.md`.
 
 Off by default (`FLEET_SECRETS_ENABLED=false` → orchestrator `SecretProxy__Enabled`; selects the
 `secrets` compose profile). A `.env` key with a row in `secret_bindings` is a **bound secret** and is
-never written into a container: `ContainerProvisioningService.BuildEnv` skips it whatever else is
+never written into a container: `ContainerSpecBuilder.BuildEnv` skips it whatever else is
 true, and `SecretGrantPlanner.Plan` (the only place that decides delivery) gives the agent a
 placeholder (`SecretPlaceholders`, `fleet_placeholder_` + 43 base64url characters, minted on every
 provision, only its SHA-256 stored in `agent_env_refs.PlaceholderSha256`; the prefix must never take

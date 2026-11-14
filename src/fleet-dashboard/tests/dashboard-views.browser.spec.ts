@@ -321,7 +321,8 @@ test('live: a workflows message replaces the list', async ({ page }) => {
 
 test('live: a late workflow refresh cannot restore rows removed by the socket', async ({ page }) => {
   const fleet = await open(page, 'workflows')
-  await expect(page.locator('.app-footer-ws.app-ws-connected')).toBeVisible()
+  // Wait for the fixture socket, not the removed connected-state UI.
+  await expect.poll(() => fleet.socket).toBeTruthy()
   await expect(wfRow(page, 'BuildWorkflow')).toBeVisible()
   const stale = [...fleet.workflows]
   let releaseSnapshot!: () => void

@@ -6,7 +6,7 @@ secret network address: (none)
 env:
   ZAI_CODING_PLAN_API_KEY=synthetic-hosted-key
   RabbitMq__Host=rabbitmq
-  GIT_USER_NAME=Apm
+  GIT_USER_NAME=synthetic-codex-hosted
   GIT_USER_EMAIL=fleet-agent-codex-hosted@users.noreply.github.com
   GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
   Whisper__ServiceUrl=http://fleet-whisper:8080
@@ -41,7 +41,7 @@ POST /v1.41/containers/fleet-agent-codex-hosted/start
   "Env": [
     "ZAI_CODING_PLAN_API_KEY=synthetic-hosted-key",
     "RabbitMq__Host=rabbitmq",
-    "GIT_USER_NAME=Apm",
+    "GIT_USER_NAME=synthetic-codex-hosted",
     "GIT_USER_EMAIL=fleet-agent-codex-hosted@users.noreply.github.com",
     "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
     "Whisper__ServiceUrl=http://fleet-whisper:8080",
@@ -123,7 +123,7 @@ POST /v1.41/containers/fleet-agent-codex-hosted/start
     "GroupListenMode": "mention",
     "GroupDebounceSeconds": 15,
     "WarmupTimeoutSeconds": 60,
-    "ShortName": "",
+    "ShortName": "synthetic-codex-hosted",
     "ShowStats": true,
     "PrefixMessages": false,
     "FormattingMode": 0,

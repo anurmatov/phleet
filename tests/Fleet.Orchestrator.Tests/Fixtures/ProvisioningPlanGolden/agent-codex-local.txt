@@ -6,7 +6,7 @@ secret network address: (none)
 env:
   CODEX_OSS_BASE_URL=<secret>
   RabbitMq__Host=rabbitmq
-  GIT_USER_NAME=Aops
+  GIT_USER_NAME=synthetic-codex-local
   GIT_USER_EMAIL=fleet-agent-codex-local@users.noreply.github.com
   GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
   Whisper__ServiceUrl=http://fleet-whisper:8080
@@ -42,7 +42,7 @@ POST /v1.41/containers/fleet-agent-codex-local/start
   "Env": [
     "CODEX_OSS_BASE_URL=<secret>",
     "RabbitMq__Host=rabbitmq",
-    "GIT_USER_NAME=Aops",
+    "GIT_USER_NAME=synthetic-codex-local",
     "GIT_USER_EMAIL=fleet-agent-codex-local@users.noreply.github.com",
     "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
     "Whisper__ServiceUrl=http://fleet-whisper:8080",
@@ -127,7 +127,7 @@ POST /v1.41/containers/fleet-agent-codex-local/start
     "GroupListenMode": "mention",
     "GroupDebounceSeconds": 15,
     "WarmupTimeoutSeconds": 60,
-    "ShortName": "",
+    "ShortName": "synthetic-codex-local",
     "ShowStats": true,
     "PrefixMessages": false,
     "FormattingMode": 0,

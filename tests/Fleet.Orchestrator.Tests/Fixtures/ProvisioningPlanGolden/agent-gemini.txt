@@ -6,7 +6,7 @@ secret network address: (none)
 env:
   Telegram__BotToken=synthetic-gemini-bot-token
   RabbitMq__Host=rabbitmq
-  GIT_USER_NAME=Acto
+  GIT_USER_NAME=synthetic-gemini
   GIT_USER_EMAIL=fleet-agent-gemini@users.noreply.github.com
   GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
   Whisper__ServiceUrl=http://fleet-whisper:8080
@@ -41,7 +41,7 @@ POST /v1.41/containers/fleet-agent-gemini/start
   "Env": [
     "Telegram__BotToken=synthetic-gemini-bot-token",
     "RabbitMq__Host=rabbitmq",
-    "GIT_USER_NAME=Acto",
+    "GIT_USER_NAME=synthetic-gemini",
     "GIT_USER_EMAIL=fleet-agent-gemini@users.noreply.github.com",
     "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
     "Whisper__ServiceUrl=http://fleet-whisper:8080",
@@ -125,7 +125,7 @@ POST /v1.41/containers/fleet-agent-gemini/start
     "GroupListenMode": "mention",
     "GroupDebounceSeconds": 15,
     "WarmupTimeoutSeconds": 60,
-    "ShortName": "",
+    "ShortName": "synthetic-gemini",
     "ShowStats": true,
     "PrefixMessages": false,
     "FormattingMode": 0,

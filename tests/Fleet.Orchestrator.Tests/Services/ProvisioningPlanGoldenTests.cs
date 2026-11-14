@@ -259,7 +259,7 @@ public partial class ProvisioningPlanGoldenTests
 
             db.Agents.Add(new Agent
             {
-                Name = "agent-codex-local", DisplayName = "Agent Codex Local", Role = "devops",
+                Name = "agent-codex-local", DisplayName = "Agent Codex Local", Role = "devops", ShortName = "synthetic-codex-local",
                 Model = "ollama/qwen3.8:27b", Provider = "codex", LocalBaseUrl = LocalUrl,
                 ContextWindow = 65_536, ContainerName = "fleet-agent-codex-local", MemoryLimitMb = 1024,
                 CodexSandboxMode = "workspace-write", HarnessExtra = "history.persistence = \"save-all\"",
@@ -270,7 +270,7 @@ public partial class ProvisioningPlanGoldenTests
 
             db.Agents.Add(new Agent
             {
-                Name = "agent-codex-hosted", DisplayName = "Agent Codex Hosted", Role = "product-manager",
+                Name = "agent-codex-hosted", DisplayName = "Agent Codex Hosted", Role = "product-manager", ShortName = "synthetic-codex-hosted",
                 Model = "zai/glm-5.3", Provider = "codex", Effort = "high",
                 ContainerName = "fleet-agent-codex-hosted", MemoryLimitMb = 1024,
                 Tools = [Tool("Bash")],
@@ -279,7 +279,7 @@ public partial class ProvisioningPlanGoldenTests
 
             db.Agents.Add(new Agent
             {
-                Name = "agent-gemini", DisplayName = "Agent Gemini", Role = "co-cto",
+                Name = "agent-gemini", DisplayName = "Agent Gemini", Role = "co-cto", ShortName = "synthetic-gemini",
                 Model = "gemini-2.5-pro", Provider = "gemini",
                 ContainerName = "fleet-agent-gemini", MemoryLimitMb = 768, Image = "fleet:agent-pinned",
                 OutputStyle = StyleName, JournalEnabled = true, TelegramSendOnly = true,
@@ -291,7 +291,7 @@ public partial class ProvisioningPlanGoldenTests
 
             db.Agents.Add(new Agent
             {
-                Name = "agent-secret", DisplayName = "Agent Secret", Role = "developer",
+                Name = "agent-secret", DisplayName = "Agent Secret", Role = "developer", ShortName = "synthetic-secret",
                 Model = "claude-sonnet-5", Provider = "claude",
                 ContainerName = "fleet-agent-secret", MemoryLimitMb = 512,
                 EnvRefs = [Env(BoundKey), Env("PLAIN_SETTING")],

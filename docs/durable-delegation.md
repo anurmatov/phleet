@@ -62,31 +62,83 @@ does not return delays relay effects and nothing else. What that means in number
 
 ### A cancel and the execution it was meant for
 
-The agent knows a piece of work by its task id and by nothing else, and a later attempt of a step
-gets the task id its predecessor had. A cancel therefore stops whatever is running under that id
-when it arrives, and a cancel that has left the bridge cannot be called back. The bridge keeps the
-one thing it controls, which is order: **a directive is not published while a cancel for the same
-task id is owed, still out, or may still arrive.**
+A later attempt of a workflow step gets the task id its predecessor had, so a task id cannot say
+which attempt a cancel was for. Each durable delegation therefore has an **execution id**:
+
+- minted once, when the record is created, and kept in the state file (`ExecutionId`), so it is the
+  same after a bridge restart;
+- written on every directive published for the record, as the optional field `ExecutionId` of the
+  relay message: the first directive, a re-send, and a continuation. A continuation is a new task
+  on the agent (`…/incomplete-retry-N`) and the same delegation, so it carries the same id;
+- sent with every cancel issued for the record, as the optional query parameter `executionId` of
+  `POST /api/agents/{name}/cancel/{taskId}`. The orchestrator passes it on to the agent's
+  `POST /cancel/{taskId}` unchanged and returns the agent's answer as it came.
+
+The agent keeps the id with the task for as long as the task is queued or running, and applies a
+cancel that names an execution only to the task that carries the same id. Its answer echoes the id
+and says what happened, and every answer is final:
+
+| `outcome` | meaning |
+|---|---|
+| `cancelled` | the task was queued or running under that id and has been told to stop |
+| `not_found` | nothing is held under the task id: it finished, or never arrived |
+| `other_execution` | the task id now belongs to another execution; it was left alone |
+| `no_execution_id` | the task id is held by a task whose directive carried no id; it was left alone |
+
+A task without an id was started by the in-process path or by a bridge from before the id. It is
+not the execution a cancel with an id was issued for, so that cancel leaves it; a cancel without an
+id still stops it.
+
+The bridge also keeps the order it kept before: **a directive is not published while a cancel for
+the same task id is owed, still out, or may still arrive.**
 
 - A record that replaces another under its task id carries any cancel the predecessor still owed
-  (`PriorCancels` in the state file) and sends it, to the end, before its own directive.
+  (`PriorCancels` in the state file, with the predecessor's execution id) and sends it, to the end,
+  before its own directive.
 - While any cancel call for the task id is unfinished, or any call made for the predecessor, the
-  directive waits. The activity is not kept waiting for this: the record is written, Temporal is
-  told the activity completes later, and the record is heartbeated like any other.
+  directive waits. The activity is not kept waiting for this.
 - The cancel goes bridge → orchestrator → agent over HTTP, and each waits for the next to answer.
-  A 2xx from the orchestrator therefore means the agent has applied the cancel, and the directive
-  follows at once. Any other end (an error, a call that was stopped, the `/cancel all` broadcast
-  used when the orchestrator cannot be reached) leaves open whether it will still arrive, and
-  directives for that task id are held for 30 seconds (`PublishNotBefore` in the state file).
+  A 2xx therefore means the agent has dealt with the cancel, and the directive follows at once.
+  Any other end leaves open whether it will still arrive, and directives for that task id are held
+  for 30 seconds (`PublishNotBefore` in the state file).
 
-What this does not give. The 30 seconds come from the orchestrator's ten-second limit on its call
-to the agent; they are a bound taken from the other services' timeouts, not a proof. Nothing in a
-cancel says which execution it was for, so a cancel delayed for longer than that somewhere between
-the orchestrator and the agent would still stop a successor. Closing that needs the cancel and the
-directive to carry an execution id the agent compares, which is a change to the agent. Two things
-are older than durable delegation and unchanged by it: the `/cancel all` fallback stops every task
-the agent has, and the in-process wait (switch off) sends its cancel by task id with no ordering
-at all.
+With an agent that compares ids the order is not what protects a successor; it is what makes the
+predecessor's work stop before the successor's begins. With an agent that does not, it is the only
+protection there is.
+
+A delegation that has an execution id is never cancelled by the `/cancel all` broadcast. That
+fallback stops every task the agent has, whenever the agent reads it, which is the opposite of
+naming one execution. If the orchestrator cannot be reached (or `TemporalBridge__OrchestratorUrl`
+is not set) the cancel is not delivered: the agent finishes the work and its answer finds nothing
+waiting.
+
+#### Services deploy separately
+
+Every part is optional on the wire, nothing was renamed, and nothing is sent while the switch is
+off.
+
+| bridge | orchestrator | agent | what happens |
+|---|---|---|---|
+| new, switch on | new | new | the id is compared; a cancel reaches only its own execution, however late |
+| new, switch on | new | old | the agent ignores the field and the parameter and matches by task id. The bridge's order and 30-second hold are the protection, as before; a cancel delayed longer than that can still stop a successor |
+| new, switch on | old | new or old | the orchestrator drops the parameter, so the agent matches by task id: the same as the row above |
+| old, or switch off (in-process path) | any | new | no id is sent. Directives and cancels are handled exactly as before, by task id |
+| new, record written before the id | any | any | the record has no id and is not given one; it sends what it always sent, broadcast fallback included |
+
+The bridge cannot tell which row it is in when a cancel call fails, so it always keeps the hold. It
+can tell on a 2xx: an answer without `executionId` means the id was not compared, and the bridge
+logs that.
+
+What this still does not cover:
+
+- A directive that is dropped as a repeat does not change whose task it is. If a second delegation's
+  directive arrives while the first one's task is still running, the task keeps the first id, and
+  the second delegation's cancel does not stop it.
+- An answer is still matched by task id alone: an answer from a predecessor's execution completes
+  the successor.
+- The in-process wait (switch off) is unchanged. It sends its cancel by task id with no ordering,
+  so the same late cancel can stop a successor there. The agent-side check makes fixing that a
+  matter of sending an id from the activity.
 
 ### At start-up
 

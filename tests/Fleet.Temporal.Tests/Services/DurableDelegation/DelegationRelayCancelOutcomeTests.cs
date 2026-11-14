@@ -156,13 +156,20 @@ public sealed class DelegationRelayCancelOutcomeTests
         }
 
         var orchestrator = Handler("Fleet.Orchestrator", "MapPost(\"/api/agents/{name}/cancel/{**taskId}\"");
-        Assert.Contains("await client.PostAsync(agentUrl, null)", orchestrator);
-        Assert.Contains("response.IsSuccessStatusCode", orchestrator);
+        Assert.Contains("return await AgentTaskCancel.ForwardAsync(", orchestrator);
         Assert.DoesNotContain("Task.Run", orchestrator);
         Assert.DoesNotContain("_ =", orchestrator);
 
+        var forward = File.ReadAllText(Path.Combine(root!.FullName, "src/Fleet.Orchestrator/Endpoints/AgentTaskCancel.cs"));
+        Assert.Contains("var response = await client.PostAsync(agentUrl, null);", forward);
+        Assert.Contains("response.IsSuccessStatusCode", forward);
+        Assert.DoesNotContain("Task.Run", forward);
+        Assert.DoesNotContain("_ =", forward);
+
+        // With an execution id and without: both are applied before the agent answers.
         var agent = Handler("Fleet.Agent", "MapPost(\"/cancel/{**taskId}\"");
         Assert.Contains("await taskManager.CancelByBridgeTaskIdAsync(decoded)", agent);
+        Assert.Contains("await taskManager.CancelBridgeExecutionAsync(decoded, executionId)", agent);
         Assert.DoesNotContain("Task.Run", agent);
     }
 }

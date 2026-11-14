@@ -196,6 +196,9 @@ public sealed class DurableDelegationService : BackgroundService
             Attempt = start.Attempt,
             TaskToken = Convert.ToBase64String(start.TaskToken),
             Agent = start.Agent,
+            // Minted here, once. Every directive and every cancel for this record carries it, and
+            // it is in the file before anything is sent.
+            ExecutionId = Guid.NewGuid().ToString("N"),
             CurrentInstruction = start.Instruction,
             Repo = start.Repo,
             BudgetSeconds = (int)Math.Ceiling(start.Budget.TotalSeconds),
@@ -222,9 +225,15 @@ public sealed class DurableDelegationService : BackgroundService
                 // arrive whenever it does: this record carries it and sends it first.
                 record.PriorCancels.AddRange(prior.PriorCancels);
                 if (prior.CancelRequested && !prior.CancelSent
-                    && !record.PriorCancels.Any(p => p.Agent == prior.Agent && p.TaskId == prior.CurrentTaskId))
+                    && !record.PriorCancels.Any(p =>
+                        p.Agent == prior.Agent && p.TaskId == prior.CurrentTaskId && p.ExecutionId == prior.ExecutionId))
                 {
-                    record.PriorCancels.Add(new PriorCancel { Agent = prior.Agent, TaskId = prior.CurrentTaskId });
+                    // With the predecessor's execution id, not this record's: it is the
+                    // predecessor's work that is to stop.
+                    record.PriorCancels.Add(new PriorCancel
+                    {
+                        Agent = prior.Agent, TaskId = prior.CurrentTaskId, ExecutionId = prior.ExecutionId,
+                    });
                 }
 
                 // And a hold the predecessor was under is still a hold.
@@ -847,6 +856,7 @@ public sealed class DurableDelegationService : BackgroundService
             // The cancel a predecessor owed, addressed as the predecessor would have addressed it.
             snapshot.Agent = prior.Agent;
             snapshot.CurrentTaskId = prior.TaskId;
+            snapshot.ExecutionId = prior.ExecutionId;
 
             // The predecessor's own call for it may still be out; one is enough.
             if (_sends.Values.Any(c => c.IsCancel && SameTarget(c.Snapshot, snapshot))) return null;
@@ -866,7 +876,8 @@ public sealed class DurableDelegationService : BackgroundService
 
     private static bool SameTarget(PendingDelegation a, PendingDelegation b) =>
         string.Equals(a.Agent, b.Agent, StringComparison.Ordinal)
-        && string.Equals(a.CurrentTaskId, b.CurrentTaskId, StringComparison.Ordinal);
+        && string.Equals(a.CurrentTaskId, b.CurrentTaskId, StringComparison.Ordinal)
+        && string.Equals(a.ExecutionId, b.ExecutionId, StringComparison.Ordinal);
 
     private async Task RunSendAsync(RelaySend send)
     {
@@ -961,7 +972,8 @@ public sealed class DurableDelegationService : BackgroundService
         {
             var at = current.PriorCancels.FindIndex(p =>
                 string.Equals(p.Agent, send.Snapshot.Agent, StringComparison.Ordinal)
-                && string.Equals(p.TaskId, send.Snapshot.CurrentTaskId, StringComparison.Ordinal));
+                && string.Equals(p.TaskId, send.Snapshot.CurrentTaskId, StringComparison.Ordinal)
+                && string.Equals(p.ExecutionId, send.Snapshot.ExecutionId, StringComparison.Ordinal));
             if (at >= 0)
             {
                 current.PriorCancels.RemoveAt(at);
@@ -1069,7 +1081,8 @@ public sealed class DurableDelegationService : BackgroundService
                 r.TaskId, r.CurrentTaskId, r.Agent, r.Namespace, r.WorkflowId, r.RunId, r.ActivityId,
                 r.IncompleteAttempt, r.CreatedAt, r.WaitStartedAt, r.Deadline,
                 r.LastPublishedAt == DateTimeOffset.MinValue ? null : r.LastPublishedAt,
-                r.HasResult ? "answer-recorded" : r.TimeoutMessage is not null ? "timed-out" : r.CancelRequested ? "cancelling" : "waiting"))]);
+                r.HasResult ? "answer-recorded" : r.TimeoutMessage is not null ? "timed-out" : r.CancelRequested ? "cancelling" : "waiting",
+                r.ExecutionId))]);
     }
 
     private async Task<List<PendingDelegation>> SnapshotRecordsAsync(CancellationToken ct)
@@ -1119,4 +1132,5 @@ public sealed record PendingDelegationView(
     DateTimeOffset WaitStartedAt,
     DateTimeOffset Deadline,
     DateTimeOffset? LastPublishedAt,
-    string State);
+    string State,
+    string ExecutionId);

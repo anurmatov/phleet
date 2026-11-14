@@ -153,6 +153,21 @@ internal sealed class FakeRelay : IDelegationRelay
     }
 
     private readonly List<string> _events = [];
+    private readonly List<(string Agent, string TaskId, string? ExecutionId)> _cancelRequests = [];
+
+    /// <summary>Every cancel that went out, with the execution id it named (null if none).</summary>
+    public IReadOnlyList<(string Agent, string TaskId, string? ExecutionId)> CancelRequests
+    {
+        get { lock (_lock) return [.. _cancelRequests]; }
+    }
+
+    /// <summary>
+    /// The execution id of a record, null when it has none. Read by name so that these tests also
+    /// build against the bridge as it was before records had one; there it is always null, which
+    /// is what that bridge put on the wire.
+    /// </summary>
+    internal static string? ExecutionIdOf(PendingDelegation delegation) =>
+        typeof(PendingDelegation).GetProperty("ExecutionId")?.GetValue(delegation) is string { Length: > 0 } id ? id : null;
 
     private async Task EnterAsync(string kind, PendingDelegation delegation, CancellationToken ct)
     {
@@ -192,7 +207,7 @@ internal sealed class FakeRelay : IDelegationRelay
             lock (_lock)
             {
                 _published.Add((delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction, delegation.Repo));
-                Receiver?.Directive(delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction);
+                Receiver?.Directive(delegation.Agent, delegation.CurrentTaskId, delegation.CurrentInstruction, ExecutionIdOf(delegation));
             }
         }
         finally
@@ -213,7 +228,8 @@ internal sealed class FakeRelay : IDelegationRelay
             lock (_lock)
             {
                 _cancels.Add((delegation.Agent, delegation.CurrentTaskId));
-                Receiver?.Cancel(delegation.Agent, delegation.CurrentTaskId);
+                _cancelRequests.Add((delegation.Agent, delegation.CurrentTaskId, ExecutionIdOf(delegation)));
+                Receiver?.Cancel(delegation.Agent, delegation.CurrentTaskId, ExecutionIdOf(delegation));
             }
 
             return CancelOutcome;
@@ -247,10 +263,17 @@ internal sealed class FakeRelay : IDelegationRelay
 }
 
 /// <summary>
-/// The agent, as far as a delegation can tell: it knows a piece of work by its task id and by
-/// nothing else. A directive whose task id it is already working on is dropped as a repeat, so
-/// the work in progress is what answers it. A cancel stops whatever is running under the task id,
-/// whoever the cancel was meant for.
+/// The agent, as far as a delegation can tell. A directive whose task id it is already working on
+/// is dropped as a repeat, so the work in progress is what answers it.
+///
+/// <para>
+/// By default it is the agent from before execution ids: it knows a piece of work by its task id
+/// and nothing else, and a cancel stops whatever is running under the task id, whoever the cancel
+/// was meant for. With <see cref="ComparesExecutionIds"/> it follows the rule the agent has now
+/// (<c>TaskManager.CancelBridgeExecutionAsync</c>, which has its own tests against the real code):
+/// a cancel that names an execution stops only the task whose directive named the same one, and a
+/// cancel that names none is matched by task id as before.
+/// </para>
 /// </summary>
 internal sealed class TaskIdOnlyReceiver
 {
@@ -260,6 +283,7 @@ internal sealed class TaskIdOnlyReceiver
         public required string Agent { get; init; }
         public required string TaskId { get; init; }
         public required string Instruction { get; init; }
+        public string? ExecutionId { get; init; }
         public bool Cancelled { get; set; }
         public bool Running => !Cancelled;
     }
@@ -267,6 +291,9 @@ internal sealed class TaskIdOnlyReceiver
     private readonly Lock _lock = new();
     private readonly List<Execution> _executions = [];
     private readonly List<string> _log = [];
+
+    /// <summary>The agent with the execution-id check; false is the agent from before it.</summary>
+    public bool ComparesExecutionIds { get; init; }
 
     public IReadOnlyList<Execution> Executions
     {
@@ -287,14 +314,18 @@ internal sealed class TaskIdOnlyReceiver
 
     private readonly Dictionary<string, Execution> _serving = new(StringComparer.Ordinal);
 
-    public void Directive(string agent, string taskId, string instruction)
+    public void Directive(string agent, string taskId, string instruction, string? executionId = null)
     {
         lock (_lock)
         {
             var running = _executions.LastOrDefault(e => e.Running && e.Agent == agent && e.TaskId == taskId);
             if (running is null)
             {
-                running = new Execution { Number = _executions.Count + 1, Agent = agent, TaskId = taskId, Instruction = instruction };
+                running = new Execution
+                {
+                    Number = _executions.Count + 1, Agent = agent, TaskId = taskId, Instruction = instruction,
+                    ExecutionId = ComparesExecutionIds ? executionId : null,
+                };
                 _executions.Add(running);
             }
 
@@ -303,11 +334,15 @@ internal sealed class TaskIdOnlyReceiver
         }
     }
 
-    public void Cancel(string agent, string taskId)
+    public void Cancel(string agent, string taskId, string? executionId = null)
     {
         lock (_lock)
         {
-            var hit = _executions.Where(e => e.Running && e.Agent == agent && e.TaskId == taskId).ToList();
+            var named = ComparesExecutionIds && !string.IsNullOrEmpty(executionId);
+            var hit = _executions
+                .Where(e => e.Running && e.Agent == agent && e.TaskId == taskId
+                            && (!named || string.Equals(e.ExecutionId, executionId, StringComparison.Ordinal)))
+                .ToList();
             foreach (var execution in hit) execution.Cancelled = true;
             _log.Add(hit.Count == 0 ? $"cancel:{taskId}→nothing" : $"cancel:{taskId}→#{string.Join(",#", hit.Select(e => e.Number))}");
         }
@@ -341,11 +376,15 @@ internal sealed class DurableHarness : IDisposable
     public CapturingLogger<DurableDelegationService> Log { get; } = new();
     public DurableDelegationService Service { get; private set; }
 
-    public DurableHarness(bool enabled = true)
+    private readonly IDelegationRelay? _relayInstead;
+
+    /// <param name="relay">Used in place of <see cref="Relay"/>: the real relay over a recording wire.</param>
+    public DurableHarness(bool enabled = true, IDelegationRelay? relay = null)
     {
         Directory = Path.Combine(Path.GetTempPath(), "durable-delegation-" + Guid.NewGuid().ToString("N"));
         System.IO.Directory.CreateDirectory(Directory);
         Gateway.Clock = Clock;
+        _relayInstead = relay;
         Service = Build(enabled);
     }
 
@@ -354,7 +393,7 @@ internal sealed class DurableHarness : IDisposable
 
     private DurableDelegationService Build(bool enabled) => new(
         Options.Create(new DurableDelegationOptions { Enabled = enabled, StateFile = StateFile }),
-        Gateway, Relay, Log, Clock);
+        Gateway, _relayInstead ?? Relay, Log, Clock);
 
     /// <summary>A delegation started the way the activity starts one.</summary>
     public async Task StartAsync(DelegationStart start)

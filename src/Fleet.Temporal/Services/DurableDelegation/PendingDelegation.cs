@@ -38,6 +38,18 @@ public sealed class PendingDelegation
 
     public string Agent { get; set; } = "";
 
+    /// <summary>
+    /// Names this delegation to the agent, on every directive published for it (the first, a
+    /// re-send, a continuation) and on every cancel issued for it. Minted once, when the record is
+    /// created, and kept in the file, so it is the same after a restart. The task id cannot do
+    /// this job: a later attempt of the same step has the same task id.
+    /// <para>
+    /// Empty in a record written before the field existed. Such a record sends what it always
+    /// sent, and its cancel is matched by task id.
+    /// </para>
+    /// </summary>
+    public string ExecutionId { get; set; } = "";
+
     /// <summary>The directive being waited on: the original, or the current continuation prompt.</summary>
     public string CurrentInstruction { get; set; } = "";
 
@@ -165,6 +177,9 @@ public sealed class PriorCancel
 
     /// <summary>The id the agent was working under: the task id, or a continuation's.</summary>
     public string TaskId { get; set; } = "";
+
+    /// <summary>The predecessor's <see cref="PendingDelegation.ExecutionId"/>; empty if it had none.</summary>
+    public string ExecutionId { get; set; } = "";
 }
 
 /// <summary>What the activity knows when it hands a delegation over.</summary>

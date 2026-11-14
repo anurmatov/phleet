@@ -110,12 +110,17 @@ public sealed class DelegationRelay : IDelegationRelay
     public Task PublishDirectiveAsync(PendingDelegation delegation, CancellationToken ct) =>
         PublishAsync(
             delegation, delegation.Agent, delegation.CurrentInstruction, delegation.CurrentTaskId,
-            delegation.Repo, ct);
+            delegation.Repo, ct, ExecutionIdOf(delegation));
+
+    /// <summary>Null for a record that has none, so nothing is written for it.</summary>
+    private static string? ExecutionIdOf(PendingDelegation delegation) =>
+        string.IsNullOrEmpty(delegation.ExecutionId) ? null : delegation.ExecutionId;
 
     public async Task<CancelDelivery> SendCancelAsync(PendingDelegation delegation, CancellationToken ct = default)
     {
         var agentName = delegation.Agent;
         var taskId = delegation.CurrentTaskId;
+        var executionId = ExecutionIdOf(delegation);
 
         if (!string.IsNullOrEmpty(_bridgeConfig.OrchestratorUrl))
         {
@@ -125,6 +130,10 @@ public sealed class DelegationRelay : IDelegationRelay
                 cts.CancelAfter(TimeSpan.FromSeconds(10));
                 var client = _httpClientFactory.CreateClient("orchestrator-cancel");
                 var url = $"{_bridgeConfig.OrchestratorUrl.TrimEnd('/')}/api/agents/{agentName}/cancel/{Uri.EscapeDataString(taskId)}";
+                // The orchestrator passes this on to the agent, which then stops only the task
+                // that carries the same id. A query parameter, so an orchestrator or an agent
+                // that does not know it ignores it and matches by task id as before.
+                if (executionId is not null) url += $"?{ExecutionIdParameter}={Uri.EscapeDataString(executionId)}";
                 var request = new HttpRequestMessage(HttpMethod.Post, url);
                 if (!string.IsNullOrEmpty(_bridgeConfig.OrchestratorAuthToken))
                     request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _bridgeConfig.OrchestratorAuthToken);
@@ -132,6 +141,8 @@ public sealed class DelegationRelay : IDelegationRelay
                 _logger.LogInformation(
                     "Targeted cancel sent to orchestrator for agent {Agent}, taskId={TaskId}, status={Status}",
                     agentName, taskId, (int)response.StatusCode);
+                if (executionId is not null && response.IsSuccessStatusCode)
+                    await LogExecutionAnswerAsync(response, agentName, taskId, executionId, cts.Token);
                 // 2xx: the agent answered the orchestrator, so it has applied the cancel. 404: the
                 // orchestrator knows no such agent and sent nothing. Anything else leaves open
                 // what reached the agent.
@@ -148,10 +159,30 @@ public sealed class DelegationRelay : IDelegationRelay
                     agentName, taskId, ex.GetType().Name);
                 return CancelDelivery.Unknown;
             }
+            catch (Exception ex) when (executionId is not null)
+            {
+                _logger.LogWarning(
+                    "Orchestrator targeted cancel failed for agent {Agent}, taskId={TaskId}: {Error}. No broadcast is sent for a delegation with an execution id",
+                    agentName, taskId, ex.GetType().Name);
+                return CancelDelivery.Unknown;
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Orchestrator targeted cancel failed for agent {Agent}, taskId={TaskId} — falling back to RabbitMQ broadcast", agentName, taskId);
             }
+        }
+
+        if (executionId is not null)
+        {
+            // The fallback tells the agent to stop EVERYTHING it is doing, whenever it reads the
+            // message. That cannot be held to one execution, which is what the execution id is
+            // for, so a delegation that has one is cancelled through the orchestrator or not at
+            // all. The agent then finishes the work and its answer finds nothing waiting.
+            if (string.IsNullOrEmpty(_bridgeConfig.OrchestratorUrl))
+                _logger.LogWarning(
+                    "Cancel for agent {Agent}, taskId={TaskId} was not sent: TemporalBridge:OrchestratorUrl is not set, and no broadcast is sent for a delegation with an execution id",
+                    agentName, taskId);
+            return CancelDelivery.Unknown;
         }
 
         try
@@ -188,8 +219,51 @@ public sealed class DelegationRelay : IDelegationRelay
         }
     }
 
+    /// <summary>The name of the query parameter that carries the execution id on a cancel.</summary>
+    public const string ExecutionIdParameter = "executionId";
+
+    /// <summary>
+    /// What the agent did with a cancel that named an execution, for the log: <c>cancelled</c>,
+    /// <c>not_found</c> (it had finished, or never arrived), <c>other_execution</c> (the task id
+    /// is now another delegation's) or <c>no_execution_id</c>. Nothing when the answer does not
+    /// say, which is an orchestrator or an agent from before the id: the cancel was then matched
+    /// by task id. Identifiers only, and the outcome of the cancel never depends on this.
+    /// </summary>
+    private async Task LogExecutionAnswerAsync(
+        HttpResponseMessage response, string agentName, string taskId, string executionId, CancellationToken ct)
+    {
+        string? outcome = null;
+        try
+        {
+            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            if (body.RootElement.ValueKind == JsonValueKind.Object
+                && body.RootElement.TryGetProperty("executionId", out var echoed)
+                && echoed.ValueKind == JsonValueKind.String
+                && string.Equals(echoed.GetString(), executionId, StringComparison.Ordinal)
+                && body.RootElement.TryGetProperty("outcome", out var said)
+                && said.ValueKind == JsonValueKind.String)
+            {
+                outcome = said.GetString();
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or HttpRequestException or IOException or OperationCanceledException)
+        {
+            // An answer that cannot be read says nothing.
+        }
+
+        if (outcome is null)
+            _logger.LogWarning(
+                "Cancel for agent {Agent}, taskId={TaskId} was answered without the execution id: the orchestrator or the agent predates it and matched by task id",
+                agentName, taskId);
+        else
+            _logger.LogInformation(
+                "Cancel for agent {Agent}, taskId={TaskId}, execution {ExecutionId}: {Outcome}",
+                agentName, taskId, executionId, outcome is "cancelled" or "not_found" or "other_execution" or "no_execution_id" ? outcome : "unrecognised");
+    }
+
     private async Task PublishAsync(
-        PendingDelegation delegation, string agentName, string instruction, string taskId, string? repo, CancellationToken ct)
+        PendingDelegation delegation, string agentName, string instruction, string taskId, string? repo, CancellationToken ct,
+        string? executionId = null)
     {
         instruction =
             $"[fleet-wf:{delegation.WorkflowType}:{delegation.WorkflowId}]\n" +
@@ -210,7 +284,8 @@ public sealed class DelegationRelay : IDelegationRelay
             Timestamp: DateTimeOffset.UtcNow,
             Type: RelayMessageType.Directive,
             TaskId: taskId,
-            Repo: repo);
+            Repo: repo,
+            ExecutionId: executionId);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };

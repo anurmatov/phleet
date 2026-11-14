@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Fleet.Temporal.Models;
 
 /// <summary>
@@ -8,6 +10,14 @@ namespace Fleet.Temporal.Models;
 /// step's <c>repo</c> field. It travels as a structured field so the agent can route project
 /// context by it without ever parsing directive text. It is trailing and optional, so a payload
 /// written before it existed deserializes with <c>Repo = null</c>.
+/// </para>
+///
+/// <para>
+/// <c>ExecutionId</c> names the one durable delegation a directive belongs to. Task ids are
+/// reused by a later attempt of the same step, so the agent keeps this with the task and applies a
+/// cancel that carries an execution id only to the task that carries the same one. It is written
+/// only when set: a directive from the in-process path, or from a durable record that has none,
+/// is the same bytes it always was, and an agent that does not know the field ignores it.
 /// </para>
 /// </summary>
 public sealed record RelayMessage(
@@ -20,7 +30,8 @@ public sealed record RelayMessage(
     string? TaskId = null,
     string? WorkflowId = null,
     string? SignalName = null,
-    string? Repo = null);
+    string? Repo = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ExecutionId = null);
 
 public static class RelayMessageType
 {

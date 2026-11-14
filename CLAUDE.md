@@ -432,16 +432,23 @@ two byte-identical. The pass (`TickAsync`) talks to Temporal only; every relay s
 cancel, timeout notice) goes out on a separate lane that reads what a record owes and writes back
 what was sent. At most 4 relay calls are unfinished at once and one per record; a call past its
 time is told to stop and still counts until it has ended; nothing is queued, so what is not sent
-stays owed in the record. The agent matches a cancel by task id only and a retried step reuses its
-task id, so a directive is not published while a cancel for the same task id is owed, unfinished,
-or ended without a definite answer less than 30 s ago (`Fenced`, `PriorCancels`,
+stays owed in the record. A retried step reuses its task id, so each record has an `ExecutionId`
+(minted once, persisted): it is on every directive (optional `ExecutionId` on the relay message)
+and every cancel (optional `?executionId=` on the orchestrator's and the agent's cancel routes;
+`AgentTaskCancel` forwards it), and the agent's `TaskManager.CancelBridgeExecutionAsync` stops a
+task only when the id it keeps with the task-id reservation is equal. A cancel without an id is
+matched by task id as before, and the in-process path sends none. For an agent or orchestrator from
+before the id the bridge still orders its sends: no directive while a cancel for the same task id
+is owed, unfinished, or ended without a 2xx less than 30 s ago (`Fenced`, `PriorCancels`,
 `PublishNotBefore`). The service is registered before
 the peer-config bootstrap on purpose: heartbeats start with the host, relay sends wait for
 `IDelegationRelay.Ready` (`FleetWorkflowConfig.PeerConfigLoaded` and a non-empty escalation target).
 
 MUST NOT: await a relay send from a pass or a reply (ten 10 s cancels once put another activity's
 heartbeat past its 90 s timeout); publish a directive ahead of a cancel for the same task id, or
-give a place to a new call while the old one has not ended; log or return an instruction, an answer or a task token (the state file is the only place
+give a place to a new call while the old one has not ended; send the `/cancel all` broadcast for a
+record that has an execution id, mint a new id for a record that has one or was loaded without one,
+or write the field when it is empty (the in-process path's bytes must not change); log or return an instruction, an answer or a task token (the state file is the only place
 they are kept, mode 0600; `GET /pending-delegations` is identifiers, counters and times); raise
 `MaximumAttempts` on a delegate (a retry re-publishes and the agent redoes the work); overwrite a
 state file that cannot be read (it is moved aside). An outage longer than the activity's

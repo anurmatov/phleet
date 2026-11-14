@@ -1,8 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LIVENESS_TIMEOUT_MS, PONG_FRAME, PROTOCOL } from './chatProtocol.ts'
-import { ChatConnection, type ChatState, type OutgoingFile, type StreamHandlers } from './chatConnection.ts'
+import { ChatConnection, pendingToShow, type ChatState, type OutgoingFile, type PendingSend, type StreamHandlers } from './chatConnection.ts'
 import { sha256Hex } from './sha256.ts'
+import { emptyTranscript as emptyTranscriptForTest } from './chatTranscript.ts'
 
 // ── fakes ───────────────────────────────────────────────────────────────────
 
@@ -813,4 +814,49 @@ test('a file that is not a picture is reserved and named as a file', async () =>
   await settle()
   assert.equal((server.callsTo('POST', /\/attachments$/)[0].body as { kind: string }).kind, 'file')
   assert.deepEqual((server.callsTo('POST', /\/submissions$/)[0].body as { attachments: unknown }).attachments, [{ attachmentId: 'A1', kind: 'file' }])
+})
+
+// ── what is drawn while a send is unanswered ────────────────────────────────
+
+test('a message the stream delivered before its send was answered is drawn once, not twice', async () => {
+  // The chat service holds the answer until the test lets it go.
+  let release: (reply: Reply) => void = () => {}
+  const server = chatService().on('POST', /\/submissions$/, () => new Promise<Reply>(resolve => { release = resolve }))
+  const c = await live(server)
+
+  c.chat.send('hello')
+  await settle()
+  assert.equal(pendingToShow(c.last().transcript, c.last().pending).length, 1)
+
+  // The message arrives on the stream while its send is still unanswered.
+  c.stream().deliver(event(1, 'submission.text', 'server-id', { text: 'hello' }))
+  assert.equal(c.last().pending.length, 1)
+  assert.equal(c.last().transcript.entries.length, 1)
+  assert.deepEqual(pendingToShow(c.last().transcript, c.last().pending), [])
+
+  // The answer settles it: the send is gone and the thread's own row stands.
+  release({ status: 201, body: { protocol: PROTOCOL, submissionId: 'sub-1', acceptedSeq: 1 } })
+  await settle()
+  assert.deepEqual(c.last().pending, [])
+})
+
+test('only a send still waiting for its answer is left out, and one message hides one send', () => {
+  const send = (over: Partial<PendingSend>): PendingSend => ({
+    submissionId: 'p', text: 'again', files: [], status: 'sending', acceptedSeq: null, problem: null, canRetry: false,
+    sentAfterSeq: 4, ...over,
+  })
+  const transcriptWith = (...texts: Array<[number, string]>) => ({
+    ...emptyTranscriptForTest(),
+    entries: texts.map(([seq, text]) => ({ type: 'you' as const, key: `e${seq}`, seq, at: null, submissionId: `s${seq}`, text, attachments: [] })),
+  })
+
+  // The same words from before this send are another message: the send is still drawn.
+  assert.equal(pendingToShow(transcriptWith([3, 'again']), [send({})]).length, 1)
+  assert.equal(pendingToShow(transcriptWith([5, 'again']), [send({})]).length, 0)
+  // Two identical sends, one arrival: one is still drawn.
+  assert.equal(pendingToShow(transcriptWith([5, 'again']), [send({ submissionId: 'a' }), send({ submissionId: 'b' })]).length, 1)
+  assert.equal(pendingToShow(transcriptWith([5, 'again'], [6, 'again']), [send({ submissionId: 'a' }), send({ submissionId: 'b' })]).length, 0)
+  // A failed send is always drawn: it is the only place its Retry lives.
+  assert.equal(pendingToShow(transcriptWith([5, 'again']), [send({ status: 'failed' })]).length, 1)
+  assert.equal(pendingToShow(transcriptWith([5, 'other words']), [send({})]).length, 1)
 })

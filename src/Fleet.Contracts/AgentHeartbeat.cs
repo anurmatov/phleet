@@ -15,8 +15,8 @@ namespace Fleet.Contracts;
 /// <para>
 /// The members an agent leaves out are the ones an older image never sent: <see cref="Journal"/>
 /// when the journal is off (#377), and <see cref="PlanSha256"/> for a provider with no harness plan
-/// (#460). <see cref="Endpoint"/> and <see cref="Capabilities"/> are read by the orchestrator and
-/// sent by no agent in this repository.
+/// (#460). <see cref="Endpoint"/> is read by the orchestrator but not sent here.
+/// <see cref="Capabilities"/> advertises the running image's optional chat support.
 /// </para>
 /// </remarks>
 public sealed record AgentHeartbeat(

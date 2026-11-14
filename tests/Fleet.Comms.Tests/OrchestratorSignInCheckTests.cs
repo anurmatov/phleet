@@ -20,6 +20,18 @@ public sealed class OrchestratorSignInCheckTests
     private const string SignedBody =
         """{"principalId":"owner","deviceId":"d_1","credentialId":"t_1","kind":"app","agentChatEnabled":true}""";
 
+    [Theory]
+    [InlineData("true", true)]
+    [InlineData("false", false)]
+    [InlineData("\"true\"", false)]
+    public async Task Reply_requires_an_explicit_boolean_capability(string wire, bool supported)
+    {
+        var body = SignedBody[..^1] + ",\"agentReplySupported\":" + wire + "}";
+        using var check = Build(new StubHandler(_ => Json(HttpStatusCode.OK, body)));
+        var answer = await check.CheckAsync(AppCredential, "agent1", fresh: true, CancellationToken.None);
+        Assert.Equal(supported, answer.AgentReplySupported);
+    }
+
     [Fact]
     public async Task It_asks_the_check_route_with_its_own_token_and_forwards_only_the_credential()
     {
@@ -33,6 +45,7 @@ public sealed class OrchestratorSignInCheckTests
         Assert.Equal("owner", answer.Caller!.PrincipalId);
         Assert.False(answer.Caller.IsBrowser);
         Assert.True(answer.AgentChatEnabled);
+        Assert.False(answer.AgentReplySupported);
 
         var request = Assert.Single(handler.Requests);
         Assert.Equal(HttpMethod.Post, request.Method);

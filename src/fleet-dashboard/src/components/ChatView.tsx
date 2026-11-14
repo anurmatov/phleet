@@ -351,6 +351,10 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
 
   function submit(event?: FormEvent | KeyboardEvent<HTMLTextAreaElement>) {
     event?.preventDefault()
+    if (replyTo && agent.replySupported !== true) {
+      setComposerError('Reply is unavailable for this agent. Clear the reply to send a new message.')
+      return
+    }
     if (!chat || tooLong || nothingToSend || preparing > 0) return
     const problem = chat.send(draft, files, replyTo)
     if (problem) { setComposerError(problem); return }
@@ -463,7 +467,7 @@ function ChatThread({ agent, fleetAgent, onBack, onOpenAgent }: {
             </div>
           )}
           <ChatTranscript entries={state.transcript.entries} status={state.transcript.status} pending={pendingToShow(state.transcript, state.pending)}
-            onRetry={id => chat?.retry(id)} onDiscard={id => chat?.discard(id)} onReply={canSend ? startReply : undefined} agentLabel={agent.displayName} />
+            onRetry={id => chat?.retry(id)} onDiscard={id => chat?.discard(id)} onReply={canSend && agent.replySupported === true ? startReply : undefined} agentLabel={agent.displayName} />
           {running && <Working name={agent.displayName} transcript={state.transcript} />}
         </div>
         {away && (

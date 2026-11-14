@@ -157,6 +157,8 @@ internal sealed class SignInHost : IAsyncDisposable
 
         builder.Services.AddFleetSignIn(durable);
         builder.Services.AddSingleton<JournalTokenService>();
+        builder.Services.AddSingleton<TaskHistoryStore>();
+        builder.Services.AddSingleton<AgentRegistry>();
         builder.Services.AddRateLimiter(rl =>
         {
             rl.AddSignInPolicy();

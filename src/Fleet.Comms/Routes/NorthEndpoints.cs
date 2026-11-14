@@ -90,12 +90,12 @@ public static class NorthEndpoints
     /// Null when the credential names nobody.
     /// </summary>
     internal static async Task<SignInAnswer?> CheckAsync(
-        HttpContext http, ISignInCheck signIn, string? agent, CancellationToken ct)
+        HttpContext http, ISignInCheck signIn, string? agent, CancellationToken ct, bool fresh = false)
     {
         // Nothing presented costs no question.
         if (PresentedCredential.Of(http.Request) is not { } credential) return null;
 
-        var answer = await signIn.CheckAsync(credential, agent, fresh: false, ct);
+        var answer = await signIn.CheckAsync(credential, agent, fresh, ct);
 
         switch (answer.Outcome)
         {

@@ -133,6 +133,7 @@ export function streamUrl(wsBase: string, conversationId: string, clientInstance
 export interface ChatAgent {
   agentName: string
   displayName: string
+  replySupported?: boolean
 }
 
 export type ChatAgentsAnswer =
@@ -164,7 +165,8 @@ export function readChatAgents(httpStatus: number, body: unknown): ChatAgentsAns
     const agent = record(entry)
     const agentName = text(agent?.agentName)
     if (!agentName) continue
-    agents.push({ agentName, displayName: text(agent?.displayName) || agentName })
+    agents.push({ agentName, displayName: text(agent?.displayName) || agentName,
+      ...(agent?.replySupported === true ? { replySupported: true } : {}) })
   }
   return { status: 'ok', available: fields.available === true, agents }
 }

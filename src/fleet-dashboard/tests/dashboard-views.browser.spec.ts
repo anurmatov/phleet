@@ -831,6 +831,19 @@ test('chat: replying to an answer names it to the chat service and shows what wa
   await expect(page.locator('.chat-replying')).toHaveCount(0)
 })
 
+test('chat: an incompatible runtime has no Reply action but still accepts a new message', async ({ page }) => {
+  const { chat } = await openChat(page, 'chat/alpha', c => {
+    c.agents[0].replySupported = false
+    exchange(c, 'alpha', 's1', 'an earlier question', 'an earlier answer')
+  })
+  await expect(page.locator('.chat-row--agent')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Reply', exact: true })).toHaveCount(0)
+  await page.locator('.chat-composer textarea').fill('a new message')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => chat.writes('POST', /\/submissions$/).length).toBe(1)
+  expect((chat.writes('POST', /\/submissions$/)[0].body as { replyToEventId?: string }).replyToEventId ?? null).toBeNull()
+})
+
 test('chat: what was typed and not sent is still there after a reload', async ({ page }) => {
   await openChat(page, 'chat/alpha')
   await page.getByLabel('Message Alpha').fill('half a thought')

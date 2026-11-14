@@ -380,3 +380,11 @@ test('a reply names what it answers; a message that answers nothing has no such 
   assert.equal(refused.canRetry, false)
   assert.match(refused.message, /no longer in the conversation/)
 })
+
+test('Reply is available only for an explicitly capable runtime', () => {
+  for (const value of [undefined, false, 'true', true]) {
+    const answer = readChatAgents(200, { available: true, agents: [{ agentName: 'agent1', replySupported: value }] })
+    assert.equal(answer.status, 'ok')
+    if (answer.status === 'ok') assert.equal(answer.agents[0].replySupported === true, value === true)
+  }
+})

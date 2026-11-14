@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using Fleet.Orchestrator.Auth;
 using Fleet.Orchestrator.Endpoints;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Fleet.Orchestrator.Tests.Auth;
 
@@ -423,12 +424,20 @@ public class AuthEndpointsTests
         await host.SeedAgentAsync("reviewer", chatEnabled: true, displayName: "Reviewer");
         await host.SeedAgentAsync("builder", chatEnabled: true, displayName: " ");
         await host.SeedAgentAsync("planner", chatEnabled: false);
+        host.Services.GetRequiredService<Fleet.Orchestrator.Services.AgentRegistry>().UpdateAgent(
+            new Fleet.Contracts.AgentHeartbeat("builder", "idle", DateTimeOffset.UtcNow,
+                Capabilities: [Fleet.Shared.SignIn.ChatReplyCapability]));
         var cookie = await host.SignInBrowserAsync();
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await host.SendAsync(Get, "/api/chat/agents")).StatusCode);
 
         var body = await SignInHost.JsonAsync(await host.SendAsync(Get, "/api/chat/agents", cookie: cookie));
         Assert.True(body.GetProperty("available").GetBoolean());
+        Assert.True(body.GetProperty("agents")[0].GetProperty("replySupported").GetBoolean());
+        Assert.False(body.GetProperty("agents")[1].GetProperty("replySupported").GetBoolean());
+        var checkedAgent = await SignInHost.JsonAsync(await CheckAsync(host, CheckToken(host),
+            new { cookie = $"{CallerAuthenticator.SessionCookie}={cookie}", agent = "builder" }));
+        Assert.True(checkedAgent.GetProperty("agentReplySupported").GetBoolean());
         Assert.Equal(
             [("builder", "builder"), ("reviewer", "Reviewer")],
             body.GetProperty("agents").EnumerateArray()

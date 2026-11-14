@@ -358,6 +358,12 @@ characters), ahead of the person's words; it holds no map from event ids to text
 cannot find the target among the events it holds (retention moved past it) shows the reply without
 the quotation.
 
+Reply is offered only for a live runtime advertising `chat.reply-quote.v1` in its existing
+heartbeat capabilities: `/api/chat/agents` reports `replySupported` for each agent.
+Comms freshly checks `agentReplySupported` with the issuer before accepting a reply, refusing
+missing or false capability with `409 agent_unavailable` without accepting the submission.
+Ordinary submissions retain their existing behavior for these targets, with Reply unavailable.
+
 **`acceptedSeq` is a catch-up floor.** It is the conversation's `next_seq` as read inside the accept
 transaction: **the first `seq` that any event about this submission can occupy**. Since #305 that is
 also the `seq` of a real event — the accept appends `submission.text`, the transcript entry carrying

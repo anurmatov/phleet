@@ -31,6 +31,11 @@ internal sealed record ChatProvisioning(string SouthBaseUrl, string SouthToken, 
 /// </remarks>
 public static partial class ChatAgents
 {
+    public static bool SupportsReply(Models.AgentState? agent) =>
+        agent is { IsDbOnly: false }
+        && agent.EffectiveStatus is "idle" or "busy"
+        && agent.Capabilities?.Contains(SignIn.ChatReplyCapability, StringComparer.Ordinal) == true;
+
     /// <summary>Where a chat-enabled agent reaches the chat service's agent-facing listener.</summary>
     public const string DefaultSouthUrl = "http://fleet-comms:8082";
 

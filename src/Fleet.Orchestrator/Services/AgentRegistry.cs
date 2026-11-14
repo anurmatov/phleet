@@ -139,7 +139,8 @@ public sealed class AgentRegistry
                 if (heartbeat.Role          is not null) existing.Role          = heartbeat.Role;
                 if (heartbeat.Model         is not null) existing.Model         = heartbeat.Model;
                 if (heartbeat.ContainerName is not null) existing.ContainerName = heartbeat.ContainerName;
-                if (heartbeat.Capabilities  is not null) existing.Capabilities  = heartbeat.Capabilities;
+                // A rollback to an old heartbeat must withdraw its former capabilities.
+                existing.Capabilities = heartbeat.Capabilities;
                 return existing;
             });
 

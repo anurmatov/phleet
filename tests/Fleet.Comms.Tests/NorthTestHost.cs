@@ -154,6 +154,7 @@ internal sealed class NorthTestHost : IAsyncDisposable
 /// </summary>
 internal sealed class FakeSignIn : ISignInCheck
 {
+    public bool? ReplySupported { get; set; } = true;
     public const string Owner = "p_owner";
 
     private readonly ConcurrentDictionary<string, AuthenticatedPrincipal> _bearers = new(StringComparer.Ordinal);
@@ -221,7 +222,7 @@ internal sealed class FakeSignIn : ISignInCheck
         if (caller is null) return Task.FromResult(SignInAnswer.Refused);
 
         bool? chat = agent is null ? null : ChatAgents.TryGetValue(agent, out var on) && on;
-        return Task.FromResult(new SignInAnswer(SignInOutcome.Signed, caller, chat));
+        return Task.FromResult(new SignInAnswer(SignInOutcome.Signed, caller, chat, ReplySupported));
     }
 }
 

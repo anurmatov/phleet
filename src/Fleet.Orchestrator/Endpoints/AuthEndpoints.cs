@@ -204,7 +204,7 @@ public static class AuthEndpoints
 
         app.MapPost(CheckPath, async (HttpContext http, [FromBody] CheckBody? body,
             [FromServices] JournalTokenService tokens, [FromServices] CallerAuthenticator authenticator,
-            [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+            [FromServices] IServiceScopeFactory scopes, [FromServices] AgentRegistry registry, CancellationToken ct) =>
         {
             var presented = CallerAuthenticator.BearerOf(http.Request.Headers.Authorization.FirstOrDefault());
             // 403, never 401: a 401 here means "the caller in the question is not signed in". A
@@ -265,13 +265,14 @@ public static class AuthEndpoints
                 credentialId = caller.CredentialId,
                 kind = KindName(caller.Kind),
                 agentChatEnabled,
+                agentReplySupported = agentChatEnabled == true && ChatAgents.SupportsReply(registry.Get(body.Agent!)),
             });
         });
 
         // ── which agents a person can chat with ──────────────────────────────
 
         app.MapGet("/api/chat/agents", async ([FromServices] JournalTokenService tokens,
-            [FromServices] IServiceScopeFactory scopes, CancellationToken ct) =>
+            [FromServices] IServiceScopeFactory scopes, [FromServices] AgentRegistry registry, CancellationToken ct) =>
         {
             await using var scope = scopes.CreateAsyncScope();
             var db = scope.ServiceProvider.GetService<Data.OrchestratorDbContext>();
@@ -293,6 +294,7 @@ public static class AuthEndpoints
                     {
                         agentName = a.Name,
                         displayName = string.IsNullOrWhiteSpace(a.DisplayName) ? a.Name : a.DisplayName,
+                        replySupported = ChatAgents.SupportsReply(registry.Get(a.Name)),
                     }),
             });
         });

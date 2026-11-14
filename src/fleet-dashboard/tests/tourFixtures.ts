@@ -215,6 +215,90 @@ export function answer(path: string, override?: Record<string, unknown>): unknow
   return []
 }
 
+// ── chat (the chat service's routes, under /v1/) ────────────────────────────────
+
+const PROTOCOL = 'fleet.conversation.v1'
+let chatSeq = 0
+const chatEvent = (kind: string, submissionId: string, payload: Record<string, unknown>, minutes: number) => ({
+  protocol: PROTOCOL, eventId: `ev-${++chatSeq}`, seq: chatSeq, emittedAt: minutesAgo(minutes), kind,
+  identity: { principalId: 'owner', role: 'owner', channelId: 'client', conversationId: 'c-acto', submissionId, attempt: 1 },
+  payload,
+})
+
+const chatHistory = [
+  chatEvent('submission.text', 's1', { text: 'How many agents had a failed warmup this week?' }, 1500),
+  chatEvent('turn.started', 's1', {}, 1500),
+  chatEvent('turn.final', 's1', {
+    completion: 'completed',
+    text: [
+      'Two, both on Tuesday after the image was rebuilt:',
+      '',
+      '- **adev-codex**: the app-server did not answer `initialize` within the timeout.',
+      '- **scribe**: the local model was still loading.',
+      '',
+      'Both came up on the second try. To see it yourself:',
+      '',
+      '```bash',
+      'docker logs fleet-adev-codex --since 168h | grep -i warmup',
+      '```',
+    ].join('\n'),
+  }, 1498),
+  chatEvent('submission.text', 's2', {
+    text: 'This is what the Schedules page looks like on my phone. Is the last column meant to be cut off?',
+    attachments: [
+      { attachmentId: 'att-1', kind: 'image', contentType: 'image/png', byteSize: 184320, fileName: 'schedules.png' },
+      { attachmentId: 'att-2', kind: 'image', contentType: 'image/png', byteSize: 97280, fileName: 'schedules-2.png' },
+    ],
+  }, 42),
+  chatEvent('turn.started', 's2', {}, 42),
+  chatEvent('turn.final', 's2', {
+    completion: 'completed',
+    text: 'No. The table has a fixed minimum width, so on a narrow screen it runs past the edge. I can turn each row into a card below 720px. Want me to open a PR?',
+  }, 40),
+  chatEvent('submission.text', 's3', { text: 'Yes, and check the Credentials page for the same thing.' }, 3),
+  chatEvent('turn.started', 's3', {}, 3),
+  chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Grep' }, 3),
+  chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Read' }, 2),
+  chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Read' }, 2),
+  chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Read' }, 2),
+  chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Edit' }, 1),
+  chatEvent('turn.progress', 's3', { activity: 'tool', toolName: 'Bash' }, 1),
+]
+
+/** A small picture, for a file a message carries: a few bars, like a list seen from far away. */
+export const chatPicture = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAADAAAAAkCAIAAABAJy5dAAAAV0lEQVR42mP48PkbMnJb1YSJTly6QxBh1UikOcgOYBh10KiDqOygAUejDhryDhrNZaMOGi0YR8uhUQeN5rJRB40WjKPl0KiDRgvGUQeNFoyj2X7UQXgRAOpNih2hTj6/AAAAAElFTkSuQmCC',
+  'base64',
+)
+
+/** What the chat service answers, by method and path. Undefined for a route it does not have. */
+export function chatAnswer(method: string, path: string, body: unknown): unknown {
+  if (method === 'GET' && path === '/v1/session') {
+    return { protocol: PROTOCOL, principalId: 'owner', limits: { inboundTextBytes: 32768, catchUpLimitDefault: 200, catchUpLimitMax: 1000 } }
+  }
+  if (method === 'GET' && path === '/v1/conversations') {
+    return {
+      protocol: PROTOCOL,
+      conversations: [
+        { conversationId: 'c-acto', agent: 'acto', externalRef: 'main', nextSeq: chatHistory.length + 1, retainedFloorSeq: 1, lastActivityAt: minutesAgo(1) },
+        { conversationId: 'c-adev', agent: 'adev', externalRef: 'main', nextSeq: 12, retainedFloorSeq: 1, lastActivityAt: minutesAgo(190) },
+      ],
+    }
+  }
+  if (method === 'POST' && path === '/v1/conversations') {
+    const agent = (body as { agent?: string } | null)?.agent ?? 'acto'
+    return { protocol: PROTOCOL, conversationId: `c-${agent}`, agent, nextSeq: 1, retainedFloorSeq: 1 }
+  }
+  const events = path.match(/^\/v1\/conversations\/([^/]+)\/events$/)
+  if (method === 'GET' && events) {
+    return { protocol: PROTOCOL, events: events[1] === 'c-acto' ? chatHistory : [], nextAfterSeq: 0, hasMore: false }
+  }
+  return undefined
+}
+
+/** What this browser has shown of each thread: Adev's has moved on since. */
+export const chatSeen = { acto: chatHistory.length, adev: 6 }
+
 /** Every page of the dashboard, by the hash that opens it. */
 export const pages = [
   'agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles', 'repositories',

@@ -5,7 +5,9 @@ import {
   cancelBody, closeAction, errorCode, eventsUrl, failureAction, isValidIdentifier, loadClientInstanceId,
   newIdentifier, openBody, parseFrame, pickAgent, readAcceptedSeq, readCatchUp, readChatAgents, readLimits, readOpen,
   reconnectDelayMs, sendProblem, shouldSendOnKey, sizeNote, streamUrl, submitBody, utf8Bytes, wsBaseFor,
+  attachmentContentPath, isImageAttachment, readAttachments, readReservation, readThreads, uploadProblem,
 } from './chatProtocol.ts'
+import type { AttachmentRef } from './chatProtocol'
 
 // ── identifiers ─────────────────────────────────────────────────────────────
 
@@ -146,8 +148,8 @@ test('catch-up page: events in order, the gap, hasMore; events that cannot be pl
   const page = readCatchUp({
     gap: { fromSeq: 1, toSeq: 9, retainedFloorSeq: 10 },
     events: [
-      { eventId: 'e10', seq: 10, kind: 'submission.text', identity: { submissionId: 'S1' }, payload: { text: 'hi' } },
-      { eventId: 'e11', seq: 11, kind: 'turn.started', identity: {} },
+      { eventId: 'e10', seq: 10, kind: 'submission.text', emittedAt: '2026-01-01T12:00:02+00:00', identity: { submissionId: 'S1' }, payload: { text: 'hi' } },
+      { eventId: 'e11', seq: 11, kind: 'turn.started', emittedAt: 'not a time', identity: {} },
       { eventId: 'bad', seq: null, kind: 'conversation.replay_gap' },
       { seq: 12, kind: 'turn.final' },
     ],
@@ -157,8 +159,8 @@ test('catch-up page: events in order, the gap, hasMore; events that cannot be pl
   assert.deepEqual(page, {
     gap: { fromSeq: 1, toSeq: 9 },
     events: [
-      { eventId: 'e10', seq: 10, kind: 'submission.text', identity: { submissionId: 'S1' }, payload: { text: 'hi' } },
-      { eventId: 'e11', seq: 11, kind: 'turn.started', identity: { submissionId: '' }, payload: {} },
+      { eventId: 'e10', seq: 10, kind: 'submission.text', emittedAt: Date.UTC(2026, 0, 1, 12, 0, 2), identity: { submissionId: 'S1' }, payload: { text: 'hi' } },
+      { eventId: 'e11', seq: 11, kind: 'turn.started', emittedAt: null, identity: { submissionId: '' }, payload: {} },
     ],
     hasMore: true,
   })
@@ -178,7 +180,7 @@ test('stream frames: hello, ping, events, and anything else ignored', () => {
   assert.deepEqual(parseFrame('{"protocol":"fleet.conversation.v1","kind":"hello","conversationId":"C1","nextSeq":3}'), { type: 'hello' })
   assert.deepEqual(parseFrame('{"kind":"ping"}'), { type: 'ping' })
   assert.deepEqual(parseFrame(JSON.stringify({ eventId: 'e1', seq: 1, kind: 'turn.started', identity: { submissionId: 'S' }, payload: {} })),
-    { type: 'event', event: { eventId: 'e1', seq: 1, kind: 'turn.started', identity: { submissionId: 'S' }, payload: {} } })
+    { type: 'event', event: { eventId: 'e1', seq: 1, kind: 'turn.started', emittedAt: null, identity: { submissionId: 'S' }, payload: {} } })
   assert.deepEqual(parseFrame('not json'), { type: 'other' })
   assert.deepEqual(parseFrame('{"kind":"turn.final"}'), { type: 'other' })
   assert.deepEqual(parseFrame(new ArrayBuffer(4)), { type: 'other' })
@@ -293,4 +295,79 @@ test('Enter sends; Shift+Enter and the Enter that ends an IME composition do not
   assert.equal(shouldSendOnKey({ key: 'Enter', shiftKey: true, isComposing: false }), false)
   assert.equal(shouldSendOnKey({ key: 'Enter', shiftKey: false, isComposing: true }), false)
   assert.equal(shouldSendOnKey({ key: 'a', shiftKey: false, isComposing: false }), false)
+})
+
+test('the thread list: this page’s thread per agent, other references left out', () => {
+  const threads = readThreads({
+    conversations: [
+      { conversationId: 'c1', agent: 'builder', externalRef: 'main', nextSeq: 41, retainedFloorSeq: 12, lastActivityAt: '2026-11-12T10:00:00+00:00' },
+      { conversationId: 'c2', agent: 'builder', externalRef: 'other-client', nextSeq: 99, lastActivityAt: '2026-11-13T10:00:00+00:00' },
+      { conversationId: 'c3', agent: 'writer', externalRef: 'main', nextSeq: 1 },
+      { conversationId: '', agent: 'broken', externalRef: 'main', nextSeq: 4 },
+    ],
+  })
+  assert.deepEqual(threads, {
+    builder: { conversationId: 'c1', agent: 'builder', nextSeq: 41, lastActivityAt: Date.UTC(2026, 10, 12, 10) },
+    writer: { conversationId: 'c3', agent: 'writer', nextSeq: 1, lastActivityAt: null },
+  })
+  assert.equal(readThreads({ nope: true }), null)
+  assert.equal(readThreads(null), null)
+})
+
+test('a message without files keeps the body it always had; one with files names them by id', () => {
+  assert.deepEqual(submitBody('S1', 'hello'), {
+    protocol: PROTOCOL, type: 'create', submissionId: 'S1', idempotencyKey: 'S1', text: 'hello',
+  })
+  assert.equal('attachments' in submitBody('S1', 'hello', []), false)
+  const file: AttachmentRef = { attachmentId: 'A1', kind: 'image', contentType: 'image/png', byteSize: 3, fileName: 'a.png' }
+  assert.deepEqual(submitBody('S1', '', [file]).attachments, [{ attachmentId: 'A1', kind: 'image' }])
+})
+
+test('files in a transcript entry: read by id, shown as a picture by what the server recorded', () => {
+  const read = readAttachments({
+    attachments: [
+      { attachmentId: '01JA', kind: 'image', contentType: 'image/jpeg', byteSize: 2481216, fileName: 'photo.jpg' },
+      { attachmentId: '01JB', kind: 'document', contentType: 'application/pdf' },
+      { attachmentId: 'has space', kind: 'image' },
+      'nope',
+    ],
+  })
+  assert.deepEqual(read, [
+    { attachmentId: '01JA', kind: 'image', contentType: 'image/jpeg', byteSize: 2481216, fileName: 'photo.jpg' },
+    { attachmentId: '01JB', kind: 'document', contentType: 'application/pdf', byteSize: null, fileName: '' },
+  ])
+  assert.deepEqual(readAttachments({}), [])
+  assert.equal(isImageAttachment(read[0]), true)
+  assert.equal(isImageAttachment(read[1]), false)
+  // A name that ends in .png does not make a file a picture.
+  assert.equal(isImageAttachment({ kind: 'document', contentType: 'text/html' }), false)
+  assert.equal(attachmentContentPath('01JA'), '/v1/attachments/01JA/content')
+})
+
+test('a reservation is used only when its upload URL is this origin’s own attachment route', () => {
+  const ok = { attachmentId: '01JA', uploadUrl: '/v1/attachments/01JA/content', uploadToken: 'tok' }
+  assert.deepEqual(readReservation(ok), ok)
+  assert.equal(readReservation({ ...ok, uploadUrl: 'https://elsewhere.example/v1/attachments/01JA/content' }), null)
+  assert.equal(readReservation({ ...ok, uploadUrl: '//elsewhere.example/x' }), null)
+  assert.equal(readReservation({ ...ok, uploadUrl: '/v1/attachments/../session' }), null)
+  assert.equal(readReservation({ ...ok, uploadToken: '' }), null)
+  assert.equal(readReservation({ ...ok, attachmentId: 'a b' }), null)
+  assert.equal(readReservation(null), null)
+})
+
+test('why a file did not go up, and whether trying again could help', () => {
+  // No such route: the deployment has files switched off.
+  assert.deepEqual(
+    [uploadProblem({ httpStatus: 404, code: '' }).unsupported, uploadProblem({ httpStatus: 400, code: 'unsupported_attachments' }).unsupported],
+    [true, true])
+  assert.equal(uploadProblem({ httpStatus: 404, code: 'conversation_not_found' }).unsupported, false)
+  // An upload window that ran out is a reason to send the file up again.
+  assert.equal(uploadProblem({ httpStatus: 404, code: 'attachment_not_found' }).canRetry, true)
+  // The seal refused the bytes: the same bytes will be refused again.
+  assert.equal(uploadProblem({ httpStatus: 422, code: 'attachment_not_found' }).canRetry, false)
+  assert.equal(uploadProblem({ httpStatus: 0, code: '' }).canRetry, true)
+  assert.equal(uploadProblem({ httpStatus: 503, code: '' }).canRetry, true)
+  assert.equal(uploadProblem({ httpStatus: 413, code: 'payload_too_large' }).canRetry, false)
+  assert.equal(uploadProblem({ httpStatus: 415, code: 'unsupported_media_type' }).canRetry, false)
+  assert.equal(uploadProblem({ httpStatus: 409, code: 'attachment_limit' }).canRetry, false)
 })

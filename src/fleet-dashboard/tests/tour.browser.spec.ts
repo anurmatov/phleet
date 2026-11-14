@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { answer, pages, scenes } from './tourFixtures'
+import { answer, chatAnswer, chatPicture, chatSeen, pages, scenes } from './tourFixtures'
 
 // A visual tour: every page, at a phone's width and a desktop's, drawn from synthetic data and
 // saved as a picture. It asserts two things a picture cannot be trusted to show at a glance —
@@ -17,8 +17,20 @@ async function open(page: Page, hash: string, override?: Record<string, unknown>
     return host === '127.0.0.1' || host === 'localhost' ? route.continue() : route.abort()
   })
   await page.routeWebSocket('**/ws**', () => { /* held open, silent */ })
-  await page.routeWebSocket('**/v1/**', () => { /* the chat stream: held open, silent */ })
-  await page.route('**/v1/**', route => route.fulfill({ status: 503, json: {} }))
+  // The chat stream: says hello, then stays open and silent.
+  await page.routeWebSocket('**/v1/**', ws => { ws.send(JSON.stringify({ protocol: 'fleet.conversation.v1', kind: 'hello' })) })
+  await page.route('**/v1/**', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (/^\/v1\/attachments\/[^/]+\/content$/.test(url.pathname)) {
+      await route.fulfill({ status: 200, contentType: 'image/png', body: chatPicture })
+      return
+    }
+    const body = chatAnswer(request.method(), url.pathname, request.postDataJSON())
+    if (body === undefined) await route.fulfill({ status: 503, json: {} })
+    else await route.fulfill({ json: body })
+  })
+  await page.addInitScript(seen => { window.localStorage.setItem('fleet.chat.seen', JSON.stringify(seen)) }, chatSeen)
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url())
     if (route.request().method() !== 'GET') { await route.fulfill({ json: {} }); return }
@@ -119,9 +131,9 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
     if (await memory.count() === 0) await page.locator('.memory-tree-type-btn').first().click()
     await memory.click()
   },
-  'chat-open': async (page, phone) => {
-    if (phone) await page.locator('.chat-agent-select').selectOption({ index: 1 })
-    else await page.locator('.chat-agent').first().click()
+  'chat-open': async page => {
+    await page.locator('.chat-agent').first().click()
+    await expect(page.locator('.chat-working')).toBeVisible()
   },
   'sign-in': async () => {},
   'first-run': async () => {},

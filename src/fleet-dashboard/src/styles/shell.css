@@ -105,6 +105,8 @@
 .sidenav-item.active .sidenav-badge { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
 .sidenav-badge-attention { background: var(--warn); color: var(--on-warn); }
 .sidenav-badge-alert { background: var(--danger); color: var(--on-danger); }
+.sidenav-badge-new,
+.sidenav-item.active .sidenav-badge-new { background: var(--info); color: var(--surface); }
 .sidenav-item.active .sidenav-badge-attention { background: var(--warn); color: var(--on-warn); }
 .sidenav-item.active .sidenav-badge-alert { background: var(--danger); color: var(--on-danger); }
 
@@ -319,6 +321,7 @@ input.header-search-input {
     font-weight: 700;
     line-height: 1;
   }
+  .tabbar-badge-new { background: var(--info); color: var(--surface); }
 
   /* The sidebar becomes a sheet that rises over the page when More is pressed. */
   .sidenav {
@@ -362,4 +365,7 @@ input.header-search-input {
   .conn-chip { padding: 0 8px; font-size: var(--fs-xs); }
 
   .app-main { padding-top: 16px; }
+  /* The two pages that fill the window keep no padding: 16px more would push their last row under the tab bar. */
+  .app-main--memory,
+  .app-main--chat { padding-top: 0; }
 }

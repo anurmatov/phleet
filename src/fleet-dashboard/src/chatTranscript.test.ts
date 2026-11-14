@@ -2,12 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { WireEvent } from './chatProtocol'
 import {
-  GAP_TEXT, applyEvents, applyGap, emptyTranscript, isTurnRunning, replyNote, statusLabel, type Transcript,
+  GAP_TEXT, agoLabel, applyEvents, applyGap, dayKey, dayLabel, emptyTranscript, foldTrail, formatElapsed, isTurnRunning,
+  replyNote, statusLabel, type Transcript,
 } from './chatTranscript.ts'
 
 /** An event as catch-up or the stream delivers it. */
-function ev(seq: number, kind: string, submissionId = '', payload: Record<string, unknown> = {}): WireEvent {
-  return { eventId: `e${seq}`, seq, kind, identity: { submissionId }, payload }
+function ev(seq: number, kind: string, submissionId = '', payload: Record<string, unknown> = {}, emittedAt: number | null = null): WireEvent {
+  return { eventId: `e${seq}`, seq, kind, emittedAt, identity: { submissionId }, payload }
 }
 
 function fold(...events: WireEvent[]): Transcript {
@@ -165,7 +166,7 @@ test('answers that need a word: shortened, partial, unfinished, empty', () => {
   assert.equal(replyNote({ text: 'fine', completion: 'completed', isPartial: false, truncated: false }), null)
 
   const t = fold(ev(1, 'turn.started', 'A'), ev(2, 'turn.final', 'A', { text: '', completion: 'idle' }))
-  assert.deepEqual(t.entries, [{ type: 'agent', key: 'e2', seq: 2, text: '', note: 'The agent had nothing to add.' }])
+  assert.deepEqual(t.entries, [{ type: 'agent', key: 'e2', seq: 2, at: null, text: '', note: 'The agent had nothing to add.' }])
 })
 
 test('stopped, canceled by the operator, unconfirmed, refused, and a notice each get their line', () => {
@@ -203,7 +204,7 @@ test('a cancel acknowledgement is recorded; with nothing running it says so and 
 
 test('a recovered answer is shown as the agent’s, labelled', () => {
   const t = fold(ev(1, 'turn.recovered_answer', '', { text: 'from before', truncated: false }))
-  assert.deepEqual(t.entries, [{ type: 'agent', key: 'e1', seq: 1, text: 'from before', note: 'Recovered from an earlier turn.' }])
+  assert.deepEqual(t.entries, [{ type: 'agent', key: 'e1', seq: 1, at: null, text: 'from before', note: 'Recovered from an earlier turn.' }])
 })
 
 test('expired history is shown once, before what follows it', () => {
@@ -218,4 +219,82 @@ test('kinds this page does not render move the cursor and nothing else', () => {
   assert.equal(t.lastSeq, 1)
   assert.equal(t.entries.length, 0)
   assert.deepEqual(t.status, {})
+})
+
+// ── times, files and the trail of tools ─────────────────────────────────────
+
+test('entries carry when they were written, and a message carries its files', () => {
+  const at = Date.UTC(2026, 10, 14, 9, 30)
+  const t = fold(
+    ev(1, 'submission.text', 'A', {
+      text: '', attachments: [{ attachmentId: '01JA', kind: 'image', contentType: 'image/png', byteSize: 10, fileName: 'shot.png' }],
+    }, at),
+    ev(2, 'turn.started', 'A', {}, at + 1000),
+    ev(3, 'turn.final', 'A', { text: 'seen', completion: 'completed' }, at + 5000),
+  )
+  assert.deepEqual(t.entries[0], {
+    type: 'you', key: 'e1', seq: 1, at, submissionId: 'A', text: '',
+    attachments: [{ attachmentId: '01JA', kind: 'image', contentType: 'image/png', byteSize: 10, fileName: 'shot.png' }],
+  })
+  assert.equal(t.entries[1].at, at + 5000)
+  // A message without files has an empty list, never a missing one.
+  assert.deepEqual(fold(ev(1, 'submission.text', 'A', { text: 'hi' })).entries[0], {
+    type: 'you', key: 'e1', seq: 1, at: null, submissionId: 'A', text: 'hi', attachments: [],
+  })
+})
+
+test('a running turn remembers when it started and the tools it has used; its end forgets both', () => {
+  const at = Date.UTC(2026, 10, 14, 9, 30)
+  let t = fold(
+    ev(1, 'submission.text', 'A', { text: 'go' }),
+    ev(2, 'turn.started', 'A', {}, at),
+    ev(3, 'turn.progress', 'A', { activity: 'tool', toolName: 'Read' }),
+    ev(4, 'turn.progress', 'A', { activity: 'tool', toolName: 'Read' }),
+    ev(5, 'turn.progress', 'A', { activity: 'typing' }),
+    ev(6, 'turn.progress', 'A', { activity: 'tool', toolName: 'Bash' }),
+  )
+  assert.equal(t.turnStartedAt, at)
+  assert.deepEqual(t.trail, ['Read', 'Read', 'Bash'])
+  assert.deepEqual(foldTrail(t.trail), [{ tool: 'Read', count: 2 }, { tool: 'Bash', count: 1 }])
+
+  t = applyEvents(t, [ev(7, 'turn.final', 'A', { text: 'done', completion: 'completed' })])
+  assert.equal(t.turnStartedAt, null)
+  assert.deepEqual(t.trail, [])
+
+  // A new turn starts its own trail: a tool of the last one is not this one's.
+  t = applyEvents(t, [ev(8, 'turn.started', 'B', {}, at + 60_000)])
+  assert.deepEqual(t.trail, [])
+  assert.equal(t.turnStartedAt, at + 60_000)
+})
+
+test('a very long turn keeps its latest tools, not all of them', () => {
+  const events = [ev(1, 'turn.started', 'A')]
+  for (let i = 0; i < 200; i++) events.push(ev(i + 2, 'turn.progress', 'A', { activity: 'tool', toolName: `T${i}` }))
+  const t = fold(...events)
+  assert.equal(t.trail.length, 60)
+  assert.equal(t.trail[59], 'T199')
+})
+
+test('elapsed time, day names and how long ago', () => {
+  assert.equal(formatElapsed(0), '0:00')
+  assert.equal(formatElapsed(7_900), '0:07')
+  assert.equal(formatElapsed(760_000), '12:40')
+  assert.equal(formatElapsed(3_725_000), '1:02:05')
+  assert.equal(formatElapsed(-5_000), '0:00')
+
+  const now = new Date(2026, 10, 14, 15, 0).getTime()
+  assert.equal(dayLabel(new Date(2026, 10, 14, 0, 5).getTime(), now), 'Today')
+  assert.equal(dayLabel(new Date(2026, 10, 13, 23, 55).getTime(), now), 'Yesterday')
+  assert.notEqual(dayLabel(new Date(2026, 10, 10, 12, 0).getTime(), now), 'Yesterday')
+  // The first of a month: yesterday is in the month before.
+  assert.equal(dayLabel(new Date(2026, 9, 31, 12, 0).getTime(), new Date(2026, 10, 1, 9, 0).getTime()), 'Yesterday')
+  assert.equal(dayKey(new Date(2026, 10, 14, 0, 0).getTime()), dayKey(new Date(2026, 10, 14, 23, 59).getTime()))
+  assert.notEqual(dayKey(new Date(2026, 10, 14, 23, 59).getTime()), dayKey(new Date(2026, 10, 15, 0, 0).getTime()))
+
+  assert.equal(agoLabel(now - 20_000, now), 'now')
+  assert.equal(agoLabel(now - 5 * 60_000, now), '5m')
+  assert.equal(agoLabel(now - 3 * 3_600_000, now), '3h')
+  assert.equal(agoLabel(now - 2 * 86_400_000, now), '2d')
+  // A clock that is ahead of this one never gives a negative age.
+  assert.equal(agoLabel(now + 60_000, now), 'now')
 })

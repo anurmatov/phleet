@@ -7,6 +7,7 @@ interface TabBarProps {
   onNavigate: (view: ActiveView) => void
   attentionWorkflowCount: number
   unreadAlertCount: number
+  unreadChatCount: number
   moreOpen: boolean
   onMore: () => void
 }
@@ -19,7 +20,7 @@ interface TabBarProps {
  * is always one tab that says where you are.
  */
 export default function TabBar({
-  activeView, onNavigate, attentionWorkflowCount, unreadAlertCount, moreOpen, onMore,
+  activeView, onNavigate, attentionWorkflowCount, unreadAlertCount, unreadChatCount, moreOpen, onMore,
 }: TabBarProps) {
   const inMore = !TAB_VIEWS.includes(activeView)
 
@@ -39,6 +40,9 @@ export default function TabBar({
               <Icon name={item.icon as IconName} size={22} />
               {view === 'workflows' && attentionWorkflowCount > 0 && (
                 <span className="tabbar-badge" title="Waiting for you">{attentionWorkflowCount}</span>
+              )}
+              {view === 'chat' && unreadChatCount > 0 && (
+                <span className="tabbar-badge tabbar-badge-new" title="Threads with new activity">{unreadChatCount}</span>
               )}
             </span>
             <span className="tabbar-label">{item.label}</span>

@@ -1,11 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LIVENESS_TIMEOUT_MS, PONG_FRAME, PROTOCOL } from './chatProtocol.ts'
-import { ChatConnection, type ChatState, type StreamHandlers } from './chatConnection.ts'
+import { ChatConnection, type ChatState, type OutgoingFile, type StreamHandlers } from './chatConnection.ts'
+import { sha256Hex } from './sha256.ts'
 
 // ── fakes ───────────────────────────────────────────────────────────────────
 
-interface Call { method: string; url: string; body: unknown }
+interface Call { method: string; url: string; body: unknown; headers: Record<string, string> }
 type Reply = { status: number; body?: unknown } | 'network-error'
 type Route = (call: Call) => Reply | Promise<Reply>
 
@@ -21,7 +22,9 @@ class FakeServer {
 
   fetch = async (url: string, init?: RequestInit): Promise<Response> => {
     const method = init?.method ?? 'GET'
-    const call = { method, url, body: init?.body ? JSON.parse(String(init.body)) : null }
+    // A JSON body is read; a file's bytes are kept as they were sent.
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body ?? null
+    const call = { method, url, body, headers: Object.fromEntries(new Headers(init?.headers).entries()) }
     this.calls.push(call)
     const route = this.routes.find(r => r.method === method && r.match.test(url))
     if (!route) throw new Error(`no route for ${method} ${url}`)
@@ -645,4 +648,135 @@ test('navigation retains an unconfirmed send and retries only with its original 
   const calls = server.callsTo('POST', /\/submissions$/)
   assert.deepEqual(calls[1].body, calls[0].body)
   resumed.dispose()
+})
+
+// ── files ───────────────────────────────────────────────────────────────────
+
+function picture(id: string, bytes: number[]): OutgoingFile {
+  return { id, fileName: `${id}.png`, contentType: 'image/png', bytes: new Uint8Array(bytes), previewUrl: null, attachmentId: null }
+}
+
+/** A chat service that takes files: each reservation gets the next id, `A1`, `A2`, … */
+function fileService() {
+  let next = 0
+  return chatService()
+    .on('POST', /\/attachments$/, () => {
+      const id = `A${++next}`
+      return { status: 201, body: { protocol: PROTOCOL, attachmentId: id, uploadUrl: `/v1/attachments/${id}/content`, uploadToken: `tok-${id}`, maxBytes: 8388608 } }
+    })
+    .on('PUT', /^\/v1\/attachments\/[^/]+\/content$/, call => ({ status: 201, body: { protocol: PROTOCOL, attachmentId: call.url.split('/')[3], state: 'sealed' } }))
+    .on('POST', /\/submissions$/, { status: 201, body: { protocol: PROTOCOL, submissionId: 'sub-1', acceptedSeq: 1 } })
+}
+
+test('a message with pictures: each is reserved, sent up with its own token, then named by the message', async () => {
+  const server = fileService()
+  const c = await live(server)
+
+  assert.equal(c.chat.send('look', [picture('one', [1, 2, 3]), picture('two', [4, 5])]), null)
+  await settle()
+
+  const reservations = server.callsTo('POST', /\/attachments$/)
+  assert.deepEqual(reservations.map(r => r.body), [
+    { protocol: PROTOCOL, kind: 'image', contentType: 'image/png', byteSize: 3, sha256: sha256Hex(new Uint8Array([1, 2, 3])), fileName: 'one.png' },
+    { protocol: PROTOCOL, kind: 'image', contentType: 'image/png', byteSize: 2, sha256: sha256Hex(new Uint8Array([4, 5])), fileName: 'two.png' },
+  ])
+
+  const uploads = server.callsTo('PUT', /content$/)
+  assert.deepEqual(uploads.map(u => [u.url, u.headers.authorization, u.headers['content-type']]), [
+    ['/v1/attachments/A1/content', 'Bearer tok-A1', 'image/png'],
+    ['/v1/attachments/A2/content', 'Bearer tok-A2', 'image/png'],
+  ])
+  assert.deepEqual(uploads[0].body, new Uint8Array([1, 2, 3]))
+
+  const submission = server.callsTo('POST', /\/submissions$/)
+  assert.equal(submission.length, 1)
+  assert.deepEqual(submission[0].body, {
+    protocol: PROTOCOL, type: 'create', submissionId: 'sub-1', idempotencyKey: 'sub-1', text: 'look',
+    attachments: [{ attachmentId: 'A1', kind: 'image' }, { attachmentId: 'A2', kind: 'image' }],
+  })
+  assert.equal(c.last().pending[0].status, 'sent')
+})
+
+test('pictures alone are a message; more than four are not', async () => {
+  const server = fileService()
+  const c = await live(server)
+  assert.equal(c.chat.send('', [picture('one', [1])]), null)
+  await settle()
+  assert.equal((server.callsTo('POST', /\/submissions$/)[0].body as { text: string }).text, '')
+
+  const five = ['a', 'b', 'c', 'd', 'e'].map(id => picture(id, [1]))
+  assert.match(c.chat.send('too many', five) ?? '', /at most 4/)
+  assert.equal(c.chat.send('', []), 'Type a message first.')
+})
+
+test('a picture that did not go up fails the message; a retry sends only what is missing', async () => {
+  let failSecond = true
+  const server = fileService()
+    .on('PUT', /A2\/content$/, () => (failSecond ? { status: 503 } : undefined as never))
+  const c = await live(server)
+
+  c.chat.send('look', [picture('one', [1]), picture('two', [2])])
+  await settle()
+  let pending = c.last().pending[0]
+  assert.equal(pending.status, 'failed')
+  assert.equal(pending.canRetry, true)
+  assert.deepEqual(pending.files.map(f => f.attachmentId), ['A1', null])
+  // The words were not sent without the picture.
+  assert.equal(server.callsTo('POST', /\/submissions$/).length, 0)
+
+  failSecond = false
+  server.on('PUT', /A3\/content$/, { status: 201, body: { protocol: PROTOCOL, attachmentId: 'A3', state: 'sealed' } })
+  c.chat.retry('sub-1')
+  await settle()
+  pending = c.last().pending[0]
+  assert.equal(pending.status, 'sent')
+  // One was reserved once, two twice: three reservations, and the first file went up only once.
+  assert.equal(server.callsTo('POST', /\/attachments$/).length, 3)
+  assert.equal(server.callsTo('PUT', /A1\/content$/).length, 1)
+  assert.deepEqual((server.callsTo('POST', /\/submissions$/)[0].body as { attachments: unknown }).attachments,
+    [{ attachmentId: 'A1', kind: 'image' }, { attachmentId: 'A3', kind: 'image' }])
+})
+
+test('a chat service without the file routes: the message fails, and the composer stops offering files', async () => {
+  const server = chatService().on('POST', /\/attachments$/, { status: 404 })
+  const c = await live(server)
+  assert.equal(c.last().filesOff, false)
+  c.chat.send('look', [picture('one', [1])])
+  await settle()
+  assert.equal(c.last().filesOff, true)
+  assert.equal(c.last().pending[0].status, 'failed')
+  assert.equal(c.last().pending[0].canRetry, false)
+  assert.equal(server.callsTo('POST', /\/submissions$/).length, 0)
+})
+
+test('a message naming a picture the chat service no longer holds: nothing is sent, and a retry sends the picture up again', async () => {
+  let refuse = true
+  const server = fileService()
+    .on('POST', /\/submissions$/, () => (refuse
+      ? { status: 400, body: { protocol: PROTOCOL, code: 'attachment_not_found', message: 'x' } }
+      : { status: 201, body: { protocol: PROTOCOL, submissionId: 'sub-1', acceptedSeq: 1 } }))
+  const c = await live(server)
+
+  c.chat.send('look', [picture('one', [1])])
+  await settle()
+  assert.equal(c.last().pending[0].status, 'failed')
+  assert.equal(c.last().pending[0].canRetry, true)
+  assert.deepEqual(c.last().pending[0].files.map(f => f.attachmentId), [null])
+
+  refuse = false
+  c.chat.retry('sub-1')
+  await settle()
+  assert.equal(c.last().pending[0].status, 'sent')
+  assert.equal(server.callsTo('PUT', /content$/).length, 2)
+  assert.deepEqual((server.callsTo('POST', /\/submissions$/)[1].body as { attachments: unknown }).attachments, [{ attachmentId: 'A2', kind: 'image' }])
+})
+
+test('a reservation that points the upload at another host is not followed', async () => {
+  const server = chatService()
+    .on('POST', /\/attachments$/, { status: 201, body: { protocol: PROTOCOL, attachmentId: 'A1', uploadUrl: 'https://elsewhere.example/v1/attachments/A1/content', uploadToken: 'tok' } })
+  const c = await live(server)
+  c.chat.send('look', [picture('one', [1])])
+  await settle()
+  assert.equal(c.last().pending[0].status, 'failed')
+  assert.equal(server.calls.some(call => call.method === 'PUT'), false)
 })

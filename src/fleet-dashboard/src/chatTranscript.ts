@@ -13,7 +13,8 @@
 //   running turn never receives a terminal naming it; closing it any other way leaves it working
 //   forever.
 
-import type { Gap, WireEvent } from './chatProtocol'
+import { readAttachments } from './chatProtocol.ts'
+import type { AttachmentRef, Gap, WireEvent } from './chatProtocol'
 
 export type SubmissionStatus =
   /** The message is durable; the agent has not said what it did with it yet. */
@@ -38,11 +39,11 @@ const TERMINAL: ReadonlySet<SubmissionStatus> = new Set(['queue-full', 'dropped'
 
 export type Entry =
   /** What the person sent. Shown as plain text, never as Markdown. */
-  | { type: 'you'; key: string; seq: number; submissionId: string; text: string }
+  | { type: 'you'; key: string; seq: number; at: number | null; submissionId: string; text: string; attachments: AttachmentRef[] }
   /** What the agent answered. Shown as Markdown. `note` qualifies it; `text` may be empty. */
-  | { type: 'agent'; key: string; seq: number; text: string; note: string | null }
+  | { type: 'agent'; key: string; seq: number; at: number | null; text: string; note: string | null }
   /** A line that is neither: a notice, a failed or stopped turn, history that expired. */
-  | { type: 'system'; key: string; tone: 'info' | 'warn' | 'error'; text: string }
+  | { type: 'system'; key: string; at: number | null; tone: 'info' | 'warn' | 'error'; text: string }
 
 export interface Transcript {
   /** The seq of the last event applied: the cursor. 0 before any. */
@@ -58,13 +59,20 @@ export interface Transcript {
   attachedToUnknown: string[]
   /** What the running turn is doing: `tool` names a tool it started, null when it is just working. */
   activity: { tool: string | null } | null
+  /** When the running turn started, in epoch milliseconds, when the event that started it said. */
+  turnStartedAt: number | null
+  /** The tools the running turn has started, oldest first, as far as this page saw them live. */
+  trail: string[]
   /** The seq of the last cancel acknowledgement. */
   lastAckSeq: number
 }
 
 export function emptyTranscript(): Transcript {
-  return { lastSeq: 0, entries: [], status: {}, host: null, attached: {}, attachedToUnknown: [], activity: null, lastAckSeq: 0 }
+  return { lastSeq: 0, entries: [], status: {}, host: null, attached: {}, attachedToUnknown: [], activity: null, turnStartedAt: null, trail: [], lastAckSeq: 0 }
 }
+
+/** How many tool names the trail keeps. A long turn shows its latest, not all of them. */
+const MAX_TRAIL = 60
 
 export const GAP_TEXT = 'Earlier messages are no longer available.'
 
@@ -87,7 +95,7 @@ export function statusLabel(status: SubmissionStatus | undefined): string | null
 export function applyGap(transcript: Transcript, gap: Gap): Transcript {
   const key = `gap:${gap.fromSeq}`
   if (transcript.entries.some(entry => entry.key === key)) return transcript
-  return { ...transcript, entries: [...transcript.entries, { type: 'system', key, tone: 'warn', text: GAP_TEXT }] }
+  return { ...transcript, entries: [...transcript.entries, { type: 'system', key, at: null, tone: 'warn', text: GAP_TEXT }] }
 }
 
 /** Apply events in order. Returns the same transcript when none of them was new. */
@@ -100,6 +108,7 @@ export function applyEvents(transcript: Transcript, events: readonly WireEvent[]
     status: { ...transcript.status },
     attached: { ...transcript.attached },
     attachedToUnknown: [...transcript.attachedToUnknown],
+    trail: [...transcript.trail],
   }
   for (const event of events) {
     if (event.seq <= next.lastSeq) continue
@@ -121,7 +130,10 @@ function apply(t: Transcript, event: WireEvent): void {
   switch (event.kind) {
     case 'submission.text':
       if (submissionId) known(t, submissionId)
-      t.entries.push({ type: 'you', key: event.eventId, seq: event.seq, submissionId, text: text(payload.text) })
+      t.entries.push({
+        type: 'you', key: event.eventId, seq: event.seq, at: event.emittedAt, submissionId,
+        text: text(payload.text), attachments: readAttachments(payload),
+      })
       return
 
     case 'submission.accepted':
@@ -148,37 +160,46 @@ function apply(t: Transcript, event: WireEvent): void {
       t.host = submissionId
       // A new turn has done nothing yet; a tool named by an earlier one is not this one's.
       t.activity = null
+      t.turnStartedAt = event.emittedAt
+      t.trail = []
       return
 
-    case 'turn.progress':
-      t.activity = { tool: payload.activity === 'tool' ? text(payload.toolName) || null : null }
+    case 'turn.progress': {
+      const tool = payload.activity === 'tool' ? text(payload.toolName) || null : null
+      t.activity = { tool }
+      if (tool) t.trail = [...t.trail.slice(-(MAX_TRAIL - 1)), tool]
       return
+    }
 
     case 'turn.notice':
-      if (text(payload.text)) t.entries.push({ type: 'system', key: event.eventId, tone: 'info', text: text(payload.text) })
+      if (text(payload.text)) t.entries.push({ type: 'system', key: event.eventId, at: event.emittedAt, tone: 'info', text: text(payload.text) })
       return
 
     case 'turn.recovered_answer':
       t.entries.push({
-        type: 'agent', key: event.eventId, seq: event.seq, text: text(payload.text),
+        type: 'agent', key: event.eventId, seq: event.seq, at: event.emittedAt, text: text(payload.text),
         note: payload.truncated === true ? 'Recovered from an earlier turn, and shortened.' : 'Recovered from an earlier turn.',
       })
       return
 
     case 'turn.final':
       close(t, event, 'answered')
-      t.entries.push({ type: 'agent', key: event.eventId, seq: event.seq, text: text(payload.text), note: replyNote(payload) })
+      t.entries.push({
+        type: 'agent', key: event.eventId, seq: event.seq, at: event.emittedAt, text: text(payload.text), note: replyNote(payload),
+      })
       return
 
     case 'turn.error':
       close(t, event, 'failed')
-      t.entries.push({ type: 'system', key: event.eventId, tone: 'error', text: text(payload.message) || 'The turn failed.' })
+      t.entries.push({
+        type: 'system', key: event.eventId, at: event.emittedAt, tone: 'error', text: text(payload.message) || 'The turn failed.',
+      })
       return
 
     case 'turn.canceled':
       close(t, event, 'canceled')
       t.entries.push({
-        type: 'system', key: event.eventId, tone: 'info',
+        type: 'system', key: event.eventId, at: event.emittedAt, tone: 'info',
         text: payload.reason === 'user' ? 'Stopped.' : payload.reason === 'operator' ? 'Stopped by the operator.' : 'Canceled.',
       })
       return
@@ -186,7 +207,7 @@ function apply(t: Transcript, event: WireEvent): void {
     case 'turn.outcome_unknown':
       close(t, event, 'unknown')
       t.entries.push({
-        type: 'system', key: event.eventId, tone: 'warn',
+        type: 'system', key: event.eventId, at: event.emittedAt, tone: 'warn',
         text: 'The outcome could not be confirmed: the agent may have run this in full, in part, or not at all.',
       })
       return
@@ -195,12 +216,14 @@ function apply(t: Transcript, event: WireEvent): void {
       t.lastAckSeq = event.seq
       // A cancel with nothing running is the whole story: no terminal follows it.
       if (payload.hadRunningTask === false) {
-        t.entries.push({ type: 'system', key: event.eventId, tone: 'info', text: 'Nothing was running to stop.' })
+        t.entries.push({ type: 'system', key: event.eventId, at: event.emittedAt, tone: 'info', text: 'Nothing was running to stop.' })
       }
       return
 
     case 'protocol.rejected':
-      t.entries.push({ type: 'system', key: event.eventId, tone: 'error', text: text(payload.message) || 'The agent refused a message.' })
+      t.entries.push({
+        type: 'system', key: event.eventId, at: event.emittedAt, tone: 'error', text: text(payload.message) || 'The agent refused a message.',
+      })
       return
 
     // Kinds this page does not render advance the cursor and nothing else.
@@ -240,6 +263,8 @@ function close(t: Transcript, event: WireEvent, outcome: SubmissionStatus): void
   t.attachedToUnknown = []
   if (t.host && closing.has(t.host)) t.host = null
   t.activity = null
+  t.turnStartedAt = null
+  t.trail = []
 }
 
 /** What qualifies an answer, if anything: shortened, partial, unfinished, or empty. */
@@ -250,4 +275,60 @@ export function replyNote(payload: Record<string, unknown>): string | null {
   if (payload.completion === 'incomplete' || payload.completion === 'failed') return 'This turn did not finish normally.'
   if (empty) return payload.completion === 'idle' ? 'The agent had nothing to add.' : 'No answer was produced.'
   return null
+}
+
+// ── what the view derives ───────────────────────────────────────────────────
+
+/** The trail with runs of one tool folded: `Read, Read, Bash` is `Read ×2`, `Bash`. */
+export function foldTrail(trail: readonly string[]): { tool: string; count: number }[] {
+  const out: { tool: string; count: number }[] = []
+  for (const tool of trail) {
+    const last = out[out.length - 1]
+    if (last && last.tool === tool) last.count++
+    else out.push({ tool, count: 1 })
+  }
+  return out
+}
+
+/** How long something has run, as `0:07`, `12:40` or `1:02:05`. */
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = String(total % 60).padStart(2, '0')
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`
+}
+
+/** The local calendar day a moment falls on, as a number that only compares: days are equal or not. */
+export function dayKey(at: number): number {
+  const d = new Date(at)
+  return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate()
+}
+
+/** What a day separator says: Today, Yesterday, or the date (with the year when it is another). */
+export function dayLabel(at: number, now: number): string {
+  const day = new Date(at)
+  const today = new Date(now)
+  if (dayKey(at) === dayKey(now)) return 'Today'
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1)
+  if (dayKey(at) === dayKey(yesterday.getTime())) return 'Yesterday'
+  return day.toLocaleDateString(undefined, {
+    weekday: 'short', day: 'numeric', month: 'short',
+    ...(day.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
+  })
+}
+
+/** The time of day beside a message. */
+export function timeLabel(at: number): string {
+  return new Date(at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+}
+
+/** How long ago, in a few characters, for a list: `now`, `5m`, `3h`, `2d`, then a date. */
+export function agoLabel(at: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - at) / 1000))
+  if (seconds < 60) return 'now'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
+  if (seconds < 7 * 86400) return `${Math.floor(seconds / 86400)}d`
+  return new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
 }

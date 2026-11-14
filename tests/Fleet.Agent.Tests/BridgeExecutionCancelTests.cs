@@ -305,6 +305,74 @@ public sealed class BridgeExecutionCancelTests
         Assert.Equal(1, Volatile.Read(ref completions));
     }
 
+    [Theory]
+    [InlineData("execution-1")]
+    [InlineData(null)]
+    public async Task ACancelDuringPredecessorHandover_CancelsOnlyTheSuccessorReservation(string? predecessorExecutionId)
+    {
+        var turns = new Turns();
+        var manager = Manager(turns);
+        var completions = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        manager.OnTaskCompleted += (_, result, _, _, _, _, _, _) => completions.Enqueue(result);
+        await DirectiveAsync(manager, "predecessor", predecessorExecutionId);
+        var predecessor = await turns.WaitForAsync(1);
+        var gate = GateOf(manager);
+        Task<TaskDispatchOutcome> successor, replacement;
+        Task<BridgeCancelOutcome> cancel, otherCancel;
+
+        gate.Enter();
+        try
+        {
+            predecessor.Finish.SetResult();
+            // Teardown releases the id before HandOver can take this gate. The closed
+            // predecessor is still registered, but no longer owns this task id.
+            UntilReserved(manager, 0);
+            Assert.True(manager.HasRunningTasks(Chat));
+            successor = Task.Run(() => DirectiveAsync(manager, "cancelled successor", "execution-2"));
+            UntilReserved(manager, 1);
+            Assert.Equal("execution-2", manager.ExecutionIdOf(TaskId));
+            otherCancel = manager.CancelBridgeExecutionAsync(TaskId, "execution-other");
+            Assert.True(otherCancel.IsCompletedSuccessfully);
+            cancel = manager.CancelBridgeExecutionAsync(TaskId, "execution-2");
+            Assert.True(cancel.IsCompletedSuccessfully);
+
+            // Take the released slot before the cancelled directive can leave the gate.
+            // Its later cleanup must not release this replacement's reservation.
+            replacement = Task.Run(() => DirectiveAsync(manager, "replacement", "execution-3"));
+            Assert.True(SpinWait.SpinUntil(
+                () => manager.ExecutionIdOf(TaskId) == "execution-3" || replacement.IsCompleted, Promptly));
+        }
+        finally
+        {
+            gate.Exit();
+        }
+
+        try
+        {
+            Assert.Equal(BridgeCancelOutcome.OtherExecution, await otherCancel);
+            Assert.Equal(BridgeCancelOutcome.Cancelled, await cancel);
+            Assert.Equal(TaskDispatchOutcome.Dropped, await successor.WaitAsync(Promptly));
+            Assert.Contains(await replacement.WaitAsync(Promptly),
+                new[] { TaskDispatchOutcome.Queued, TaskDispatchOutcome.Ran });
+            var next = await turns.WaitForAsync(2);
+            Assert.Equal("replacement", next.Task);
+            Assert.Equal("execution-3", manager.ExecutionIdOf(TaskId));
+            Assert.Equal(BridgeCancelOutcome.OtherExecution,
+                await manager.CancelBridgeExecutionAsync(TaskId, "execution-2"));
+            Assert.False(next.Stopped);
+            next.Finish.SetResult();
+            await UntilIdleAsync(manager);
+            Assert.Equal(new[] { "predecessor", "replacement" }, turns.All.Select(t => t.Task));
+            Assert.Equal(new[] { "predecessor", "replacement" }, completions);
+            Assert.False(predecessor.Stopped);
+            Assert.False(next.Stopped);
+        }
+        finally
+        {
+            await manager.CancelAllAsync();
+        }
+    }
+
     /// <summary>
     /// The same moment with the agent busy, where the directive would have been queued. It is not
     /// queued: when the running turn ends, nothing follows it.

@@ -33,6 +33,10 @@ public sealed class TaskManager
     {
         public string? ExecutionId { get; } = executionId;
 
+        // Set under _admissionGate at registration. A closed predecessor can still be in
+        // _chatTasks after releasing the id, so task-id equality alone does not prove ownership.
+        public RunningTask? AdmittedTurn;
+
         /// <summary>
         /// Set by a cancel that named this execution and found it reserved but not yet admitted.
         /// Read and written under <see cref="_admissionGate"/> only, which is also where a
@@ -602,6 +606,8 @@ public sealed class TaskManager
                 running.ReplaceMergedSubmissionIds(
                     start.MergedSubmissionIds.Where(id => !string.Equals(id, start.Identity.SubmissionId, StringComparison.Ordinal)));
             }
+            if (start.TaskId is not null && _activeTaskIds.TryGetValue(start.TaskId, out var reservation))
+                reservation.AdmittedTurn = running;
             return new RegisteredTurn(state, running, cts, turnIdentity);
         }
         catch
@@ -2309,8 +2315,8 @@ public sealed class TaskManager
     /// The decision and the choice of what to stop are made in one hold of the admission gate. No
     /// task is queued or registered while it is held, and a task is queued or registered only
     /// while its own execution holds the reservation, so what is picked here belongs to the
-    /// execution that was just compared (or is the previous holder's turn in its last moments,
-    /// which has already finished its work).
+    /// execution that was just compared. The reservation records its own admitted turn: a closed
+    /// predecessor still awaiting handover does not count as this reservation's admitted work.
     /// </para>
     ///
     /// <para>
@@ -2340,9 +2346,7 @@ public sealed class TaskManager
                 refused = BridgeCancelOutcome.OtherExecution;
             else
             {
-                foreach (var (_, state) in _chatTasks)
-                    foreach (var t in state.Snapshot())
-                        if (t.BridgeTaskId == bridgeTaskId) running.Add(t);
+                if (held.AdmittedTurn is { } admitted) running.Add(admitted);
 
                 queued = _messageQueue.RemoveByTaskId(bridgeTaskId);
                 foreach (var item in queued)

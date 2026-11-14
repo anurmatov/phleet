@@ -120,3 +120,6 @@ public static class InstructionEndpoints
         return app;
     }
 }
+
+internal sealed record InstructionCreateRequest(string Name, string Content, string? Reason, string? CreatedBy);
+internal sealed record InstructionUpdateRequest(string Content, string? Reason, string? CreatedBy);

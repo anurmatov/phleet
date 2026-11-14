@@ -1,3 +1,4 @@
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Fleet.Shared;
@@ -69,7 +70,7 @@ public static class SecretBindingEndpoints
                 .Where(r => keys.Contains(r.EnvKeyName))
                 .Select(r => new { r.EnvKeyName, Agent = r.Agent.Name, Held = r.PlaceholderSha256 != null })
                 .ToListAsync(ct);
-            var env = ContainerProvisioningService.LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+            var env = EnvFile.Read(ProvisioningOptions.From(config).EnvFilePath);
 
             return Results.Ok(new
             {
@@ -141,7 +142,7 @@ public static class SecretBindingEndpoints
                 .OrderBy(r => r.Agent.Name)
                 .Select(r => new AgentGrant(r.Agent.Name, r.PlaceholderSha256 != null))
                 .ToListAsync(ct);
-            var env = ContainerProvisioningService.LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+            var env = EnvFile.Read(ProvisioningOptions.From(config).EnvFilePath);
 
             return Results.Ok(new
             {

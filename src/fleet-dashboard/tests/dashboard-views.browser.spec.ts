@@ -319,6 +319,38 @@ test('live: a workflows message replaces the list', async ({ page }) => {
   await expect(page.locator('.attention-card')).toHaveCount(1)
 })
 
+test('live: a late workflow refresh cannot restore rows removed by the socket', async ({ page }) => {
+  const fleet = await open(page, 'workflows')
+  await expect(page.locator('.app-footer-ws.app-ws-connected')).toBeVisible()
+  await expect(wfRow(page, 'BuildWorkflow')).toBeVisible()
+  const stale = [...fleet.workflows]
+  let releaseSnapshot!: () => void
+  const held = new Promise<void>(resolve => { releaseSnapshot = resolve })
+  await page.route('**/api/workflows', async route => {
+    await held
+    await route.fulfill({ json: stale })
+  })
+  try {
+    const refresh = page.getByTitle('Refresh workflows', { exact: true })
+    await refresh.click()
+    await expect(refresh).toBeDisabled()
+    fleet.pushWorkflows([fleet.workflows[0]])
+    await expect(wfRow(page, 'BuildWorkflow')).toHaveCount(0)
+    releaseSnapshot()
+    await expect(refresh).toBeEnabled()
+    await expect(wfRow(page, 'BuildWorkflow')).toHaveCount(0)
+    await expect(page.locator('.attention-card')).toHaveCount(1)
+
+    // A refresh begun after the live update is still allowed to replace the list.
+    await page.unroute('**/api/workflows')
+    fleet.workflows = stale
+    await refresh.click()
+    await expect(wfRow(page, 'BuildWorkflow')).toBeVisible()
+  } finally {
+    releaseSnapshot()
+  }
+})
+
 // ── Workflows ───────────────────────────────────────────────────────────────────────────────────
 
 test('workflows: a signal goes through the confirm bar and is then reported as sent', async ({ page }) => {

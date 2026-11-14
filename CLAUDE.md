@@ -19,6 +19,30 @@ The orchestrator manages agent lifecycle (create, provision, reprovision, stop) 
 
 Workflows are orchestrated via Temporal. The temporal bridge connects Temporal workers to agent containers via RabbitMQ.
 
+### What services send each other: `Fleet.Contracts`
+
+Everything one service puts on the broker or sends over HTTP for another is declared once, in
+`src/Fleet.Contracts` (no package, no project reference): `RelayMessage` and `RelayMessageType`,
+`AgentHeartbeat`, the allowlist and access-request payloads, `ConfigChangedEvent`,
+`TokenUpdatePayload`, `EpicGrantDecisionRequest`, the gate names (`GateSignal`, `CeoGateSignals`),
+the exchange, queue and routing-key names (`RelayBroker`, `OrchestratorBroker`,
+`ConversationBroker`) and the journal token format (`JournalTokens`). MUST NOT declare one of these
+again in a service. Each producer writes the `RelayMessage` fields it has always written
+(`RelayShape`: the orchestrator and the token broadcast five, fleet-bridge seven, an agent nine, a
+delegation all ten), and every consumer reads any of them.
+
+`tests/fixtures/wire/` holds the exact bytes of each pair. The producer's test compares what its
+production code writes with the file; the consumer's test, in another test project, reads the same
+file through its own handler. Services are deployed one at a time and agents are reprovisioned
+after them, so every pair runs with one old end for a while. MUST NOT rename a field, add a
+required one, reorder them or change whether a null is written: a changed sample is a wire change.
+`FLEET_WIRE_GOLDEN_RECORD=1` records a shape changed on purpose.
+
+`Fleet.Shared` has no package and no project reference either (`SharedDependencyTests`): the
+secret forwarder and the chat service reference it. The Telegram formatters are in
+`Fleet.Shared.Telegram` and the RabbitMQ helper and `PeerConfigClient` in `Fleet.Shared.Messaging`;
+both keep the `Fleet.Shared` namespace.
+
 ### Container start: `entrypoint.sh` and `prepare`
 
 `entrypoint.sh` does only what must happen in the shell before the agent exists: the hosted-key
@@ -190,7 +214,7 @@ runbook: `docs/upgrading/remove-project-context-cards.md`.
 
 Off by default (`FLEET_SECRETS_ENABLED=false` → orchestrator `SecretProxy__Enabled`; selects the
 `secrets` compose profile). A `.env` key with a row in `secret_bindings` is a **bound secret** and is
-never written into a container: `ContainerProvisioningService.BuildEnv` skips it whatever else is
+never written into a container: `ContainerSpecBuilder.BuildEnv` skips it whatever else is
 true, and `SecretGrantPlanner.Plan` (the only place that decides delivery) gives the agent a
 placeholder (`SecretPlaceholders`, `fleet_placeholder_` + 43 base64url characters, minted on every
 provision, only its SHA-256 stored in `agent_env_refs.PlaceholderSha256`; the prefix must never take
@@ -293,8 +317,8 @@ instruction permits sharing. See `docs/comms-journal.md` and
 
 ## Telegram Image Handling
 
-- **Image-only messages** (no caption): `AgentTransport` passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.
-- **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `AgentTransport` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
+- **Image-only messages** (no caption): the Telegram transport (`TelegramMessageIntake`) passes the photo to `MessageRouter`, which substitutes `TelegramOptions.DefaultImagePrompt` (default: `"(image attached — please analyze)"`) as the task prompt so the executor always receives a non-empty string.
+- **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `TelegramMessageIntake` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
 - **Size limits**: individual photos exceeding `MaxImageBytes` (default: 10 MB) are skipped with a Telegram reply warning. Groups exceeding `MaxImagesPerGroup` (default: 10) drop extra photos with a warning.
 - **ClaudeExecutor**: forwards all images as separate content blocks in the multi-modal Claude CLI JSON payload.
 - **CodexExecutor**: forwards images that have a persisted `FilePath` as `{type:"localImage",path}` entries in the app-server v2 `UserInput[]` of `turn/start`. Images without a `FilePath` (persistence disabled, size limit exceeded, or file swept before dispatch) are skipped with a per-batch warning. PDFs remain hint-only (`[document attachment: path]`).
@@ -486,7 +510,7 @@ startup, so a change needs a recreate. Writes always succeed; REST adds `size`, 
 values are in the README.
 
 `Agent:TurnStallTimeoutMinutes` (agent, default 180, `0` = off, 1–10080; out of range exits 1 at startup) limits how long a
-running turn may go without one executor event, on every provider. It is a limit on silence, never a deadline: `TaskManager`
+running turn may go without one executor event, on every provider. It is a limit on silence, never a deadline: `TurnRun`
 restarts it on each event, and when it runs out cancels the executor read, so the provider process is stopped and the turn
 fails with a fixed message. The orchestrator does not write it; until it does, set `Agent__TurnStallTimeoutMinutes` through an
 Env Ref. MUST NOT lower the default without rechecking the silent cases listed in `TurnStallTimeout`.

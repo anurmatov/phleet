@@ -202,7 +202,7 @@ public sealed class CodexExecutor : IAgentExecutor
         await _turnLock.WaitAsync(ct);
 
         string? turnId = null;
-        var abandonReason = "consumer_exit";
+        var relay = new TurnRelay();
         var (forwardedPaths, skippedCount) = CollectImagePaths(images);
 
         Exception? startupError = null;
@@ -273,31 +273,55 @@ public sealed class CodexExecutor : IAgentExecutor
                 };
             }
 
-            await using var stream = StreamTurnAsync(turnId!, ct).GetAsyncEnumerator(ct);
-            while (true)
-            {
-                bool moved;
-                try { moved = await stream.MoveNextAsync(); }
-                catch
-                {
-                    abandonReason = "producer_exception";
-                    throw;
-                }
-                if (!moved)
-                {
-                    abandonReason = "stream_ended";
-                    break;
-                }
-                _lastActivity = DateTimeOffset.UtcNow;
-                yield return stream.Current;
-                if (stream.Current.FinalResult is not null) yield break;
-            }
+            await foreach (var progress in RelayTurnAsync(StreamTurnAsync(turnId!, ct), relay, ct))
+                yield return progress;
         }
         finally
         {
             if (turnId is not null && _activeTurnId == turnId)
-                await AbandonOwnedTurnAsync(turnId, "task", abandonReason, acquireTurnLock: false);
+                await AbandonOwnedTurnAsync(turnId, "task", relay.AbandonReason, acquireTurnLock: false);
             _turnLock.Release();
+        }
+    }
+
+    /// <summary>Why a turn's stream stopped, for the abandon log when the turn is still active.</summary>
+    private sealed class TurnRelay
+    {
+        /// <summary>
+        /// <c>consumer_exit</c> until the stream itself says otherwise: it ended without a terminal
+        /// (<c>stream_ended</c>) or it threw (<c>producer_exception</c>).
+        /// </summary>
+        public string AbandonReason { get; set; } = "consumer_exit";
+    }
+
+    /// <summary>
+    /// The one read loop behind a task turn (<see cref="ExecuteAsync"/>) and a shell command
+    /// (<see cref="SendCommandAsync"/>): relays the turn's progress until its terminal result,
+    /// stamps the activity time on every event and records in <paramref name="relay"/> why the
+    /// stream stopped. The caller's <c>finally</c> reads that after this enumerator is disposed.
+    /// </summary>
+    private async IAsyncEnumerable<AgentProgress> RelayTurnAsync(
+        IAsyncEnumerable<AgentProgress> turn, TurnRelay relay,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        await using var stream = turn.GetAsyncEnumerator(ct);
+        while (true)
+        {
+            bool moved;
+            try { moved = await stream.MoveNextAsync(); }
+            catch
+            {
+                relay.AbandonReason = "producer_exception";
+                throw;
+            }
+            if (!moved)
+            {
+                relay.AbandonReason = "stream_ended";
+                break;
+            }
+            _lastActivity = DateTimeOffset.UtcNow;
+            yield return stream.Current;
+            if (stream.Current.FinalResult is not null) yield break;
         }
     }
 
@@ -414,41 +438,22 @@ public sealed class CodexExecutor : IAgentExecutor
             yield break;
         }
 
-        var abandonReason = "consumer_exit";
+        var relay = new TurnRelay();
         string? commandTurnId = null;
         try
         {
             // Capture this enumeration's id at discovery, not from the shared live marker on
             // dispose: a new command can start after this one's terminal was yielded.
-            await using var stream = StreamTurnAsync(expectedTurnId: null, ct,
-                onTurnResolved: id => commandTurnId = id).GetAsyncEnumerator(ct);
-            while (true)
-            {
-                bool moved;
-                try { moved = await stream.MoveNextAsync(); }
-                catch
-                {
-                    abandonReason = "producer_exception";
-                    throw;
-                }
-                if (!moved)
-                {
-                    abandonReason = "stream_ended";
-                    break;
-                }
-                var progress = stream.Current;
-                _lastActivity = DateTimeOffset.UtcNow;
-
+            var turn = StreamTurnAsync(expectedTurnId: null, ct, onTurnResolved: id => commandTurnId = id);
+            await foreach (var progress in RelayTurnAsync(turn, relay, ct))
                 yield return progress;
-                if (progress.FinalResult is not null) yield break;
-            }
         }
         finally
         {
             try
             {
                 if (commandTurnId is not null)
-                    await AbandonOwnedTurnAsync(commandTurnId, "run", abandonReason, acquireTurnLock: true);
+                    await AbandonOwnedTurnAsync(commandTurnId, "run", relay.AbandonReason, acquireTurnLock: true);
             }
             finally
             {
@@ -794,17 +799,8 @@ public sealed class CodexExecutor : IAgentExecutor
 
     private Task StartProcessAsync(CancellationToken ct)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = CodexBin,
-            Arguments = "app-server --listen stdio://",
-            WorkingDirectory = _config.WorkDir,
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
+        var psi = ProviderChildProcess.CreateStartInfo(CodexBin, _config.WorkDir);
+        psi.Arguments = "app-server --listen stdio://";
 
         // D5.5, for every model: codex runs a root shell for the model, so a key in its
         // environment is one `env` call from the transcript. entrypoint.sh already unset these
@@ -833,7 +829,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         var pending = new ConcurrentDictionary<long, TaskCompletionSource<RpcOutcome>>();
         Volatile.Write(ref _pendingRequests, pending);
-        _process = _processStarter(psi) ?? throw new InvalidOperationException("Failed to start codex app-server");
+        _process = ProviderChildProcess.Start(_processStarter, psi, "Failed to start codex app-server");
         Volatile.Write(ref _stdin, new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true });
         _notificationChannel = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions
         {
@@ -846,7 +842,11 @@ public sealed class CodexExecutor : IAgentExecutor
         var writer = _notificationChannel.Writer;
         var token = _readerCts.Token;
         _ = Task.Run(() => ReadStdoutAsync(stdout, writer, pending, token));
-        _ = Task.Run(() => ReadStderrAsync(stderr, token));
+        _ = ProviderChildProcess.PumpStderr(stderr, line =>
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+                _logger.LogWarning("[codex stderr] {Line}", line);
+        }, token);
 
         _threadId = null;
         _activeTurnId = null;
@@ -965,12 +965,8 @@ public sealed class CodexExecutor : IAgentExecutor
     {
         try
         {
-            string? line = "";
-            while (!ct.IsCancellationRequested && (line = await reader.ReadLineAsync(ct)) is not null)
+            await ProviderChildProcess.ReadLinesAsync(reader, async line =>
             {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-
                 JsonNode? node;
                 try
                 {
@@ -979,11 +975,11 @@ public sealed class CodexExecutor : IAgentExecutor
                 catch (JsonException ex)
                 {
                     _logger.LogWarning(ex, "CodexExecutor: malformed JSON-RPC line from app-server: {Line}", line);
-                    continue;
+                    return;
                 }
 
                 if (node is not JsonObject obj)
-                    continue;
+                    return;
 
                 if (TryGetRequestId(obj, out var requestId))
                 {
@@ -994,14 +990,14 @@ public sealed class CodexExecutor : IAgentExecutor
                     // Review any future caller outside that lock against this assumption.
                     if (pending.TryRemove(requestId, out var tcs))
                         tcs.TrySetResult(new RpcOutcome(obj["result"] as JsonObject, obj["error"] as JsonObject));
-                    continue;
+                    return;
                 }
 
                 if (obj["method"] is JsonValue)
                 {
                     await writer.WriteAsync(obj, ct);
                 }
-            }
+            }, ct);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -1013,21 +1009,6 @@ public sealed class CodexExecutor : IAgentExecutor
             FailPendingRequests(pending, new InvalidOperationException("Codex app-server stdout reader stopped before the request completed."));
             writer.TryComplete();
         }
-    }
-
-    private async Task ReadStderrAsync(StreamReader reader, CancellationToken ct)
-    {
-        try
-        {
-            string? line;
-            while (!ct.IsCancellationRequested && (line = await reader.ReadLineAsync(ct)) is not null)
-            {
-                if (!string.IsNullOrWhiteSpace(line))
-                    _logger.LogWarning("[codex stderr] {Line}", line);
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
     }
 
     private async Task<JsonObject> SendRequestAsync(string method, JsonObject? @params, CancellationToken ct)
@@ -1626,12 +1607,7 @@ public sealed class CodexExecutor : IAgentExecutor
 
         if (_process is not null)
         {
-            try
-            {
-                if (!_process.HasExited)
-                    _process.Kill(entireProcessTree: true);
-                await _process.WaitForExitAsync();
-            }
+            try { await ProviderChildProcess.KillAsync(_process); }
             catch { }
 
             _process.Dispose();

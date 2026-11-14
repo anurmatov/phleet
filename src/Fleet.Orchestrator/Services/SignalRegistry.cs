@@ -28,12 +28,12 @@ public static class SignalRegistry
         {
             ["UweHumanInputWorkflow"] =
             [
-                new SignalDef("request-input", "human input", [new SignalButton("Answer", "{}")],
+                new SignalDef(GateSignal.RequestInput, "human input", [new SignalButton("Answer", "{}")],
                     ValidPhases: ["request-input"], BindAttribute: "GateRef"),
             ],
             ["ExternalAdvisoryWorkflow"] =
             [
-                new SignalDef("advisory-review", "advisory review", [
+                new SignalDef(GateSignal.AdvisoryReview, "advisory review", [
                     new SignalButton("Approve", """{"Decision":"approved"}"""),
                     new SignalButton("Reject",  """{"Decision":"rejected"}""", RequiresComment: true),
                 ]),
@@ -41,7 +41,7 @@ public static class SignalRegistry
             // UWE workflow variants — mirror the compiled workflow signal definitions above
             ["UweDesignWorkflow"] =
             [
-                new SignalDef("design-approval", "design approval", [
+                new SignalDef(GateSignal.DesignApproval, "design approval", [
                     new SignalButton("Approve",         """{"Decision":"approved"}"""),
                     new SignalButton("Request Changes", """{"Decision":"changes_requested"}""", RequiresComment: true),
                     new SignalButton("Reject",          """{"Decision":"rejected"}""",          RequiresComment: true),
@@ -49,7 +49,7 @@ public static class SignalRegistry
             ],
             ["UweDocMaintenanceWorkflow"] =
             [
-                new SignalDef("doc-review", "doc review", [
+                new SignalDef(GateSignal.DocReview, "doc review", [
                     new SignalButton("Approve",         """{"Decision":"approved"}"""),
                     new SignalButton("Request Changes", """{"Decision":"changes_requested"}""", RequiresComment: true),
                     new SignalButton("Reject",          """{"Decision":"rejected"}""",          RequiresComment: true),
@@ -57,21 +57,21 @@ public static class SignalRegistry
             ],
             ["UwePrImplementationWorkflow"] =
             [
-                new SignalDef("human-review", "human review", [
+                new SignalDef(GateSignal.HumanReview, "human review", [
                     new SignalButton("Approve",         """{"Decision":"approved"}"""),
                     new SignalButton("Request Changes", """{"Decision":"changes_requested"}""", RequiresComment: true),
                     new SignalButton("Reject",          """{"Decision":"rejected"}"""),
                 ], ValidPhases: ["human-review"]),
-                new SignalDef("merge-approval", "merge approval", [
+                new SignalDef(GateSignal.MergeApproval, "merge approval", [
                     new SignalButton("Approve Merge",    """{"Decision":"approved"}"""),
                     new SignalButton("Request Changes",  """{"Decision":"changes_requested"}""", RequiresComment: true),
                     new SignalButton("Reject",           """{"Decision":"rejected"}""",          RequiresComment: true),
                 ], ValidPhases: ["merge-approval"], BindAttribute: "GateRef"),
-                new SignalDef("acceptance-decision", "acceptance decision", [
+                new SignalDef(GateSignal.AcceptanceDecision, "acceptance decision", [
                     new SignalButton("Continue", """{"Decision":"continue"}"""),
                     new SignalButton("Stop", """{"Decision":"stop"}"""),
                 ], ValidPhases: ["acceptance-continue", "acceptance-blocked"], BindAttribute: "GateRef"),
-                new SignalDef("escalation-decision", "escalation", [
+                new SignalDef(GateSignal.EscalationDecision, "escalation", [
                     new SignalButton("Approve",         """{"Decision":"approved"}"""),
                     new SignalButton("Request Changes", """{"Decision":"changes_requested"}""", RequiresComment: true),
                     new SignalButton("Cancel",          """{"Decision":"cancel"}"""),

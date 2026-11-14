@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Fleet.Protocol\Fleet.Protocol.csproj" />
+    <!-- The other dependency-free contract project, held to the same rule by tests here. -->
+    <ProjectReference Include="..\..\src\Fleet.Contracts\Fleet.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

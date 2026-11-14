@@ -316,7 +316,7 @@ public sealed class SharedSessionHonestyTests : IDisposable
     ///
     /// The kind is pinned deliberately: <c>turn.error</c> carrying the fixed <c>internal</c>
     /// message. A stopped provider process ends the in-flight stream abnormally, which reaches
-    /// <c>ProcessTask</c>'s outer catch. Pinning it means a future change that converts this into a
+    /// <c>TurnRun.RunAsync</c>'s outer catch. Pinning it means a future change that converts this into a
     /// silent <c>turn.final</c> — reporting success for a turn that was killed — fails here.
     /// </summary>
     [Fact]
@@ -559,7 +559,7 @@ public sealed class SharedSessionHonestyTests : IDisposable
         using var cts = new CancellationTokenSource(budget);
         while (manager.HasRunningTasks(key))
             await Task.Delay(10, cts.Token);
-        // The terminal publish happens inside ProcessTask, just before the task leaves the running
+        // The terminal publish happens inside TurnRun.RunAsync, just before the task leaves the running
         // set; give the finally block a beat so the reaper check has run too.
         await Task.Delay(50, CancellationToken.None);
     }

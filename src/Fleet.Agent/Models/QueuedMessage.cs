@@ -6,6 +6,12 @@ namespace Fleet.Agent.Models;
 /// One ordered part of a queued conversational entry. Task is already fully
 /// formatted by PromptAssembler and must not be rebuilt from raw user text.
 ///
+/// <see cref="ColdStartTask"/> is that same prompt as PromptAssembler builds it for a provider
+/// process that holds no conversation: with the recent history above the message. Both are built
+/// when the message arrives, but which one the turn needs is only known when the turn starts: the
+/// provider process can be restarted while the message waits (a token broadcast does that), and
+/// a prompt built for a warm process then reaches a cold one with no context at all.
+///
 /// <see cref="Identity"/> is optional and trailing so existing construction sites are unchanged.
 /// Each part keeps its OWN identity — a coalesced entry is one turn but several submissions, and
 /// each part needs its own submission id so the client can correlate its acceptance event.
@@ -26,8 +32,16 @@ public sealed record QueuedMessagePart(
     ConversationIdentity? Identity = null,
     TaskPriority Priority = TaskPriority.Routine,
     long TelegramMessageId = 0,
-    IReadOnlyList<long>? PrimaryMessageIds = null)
+    IReadOnlyList<long>? PrimaryMessageIds = null,
+    string? ColdStartTask = null)
 {
+    /// <summary>
+    /// The prompt for a turn that starts now. A cold process gets <see cref="ColdStartTask"/> when
+    /// there is one; a warm process gets <see cref="Task"/> as it was built, never less.
+    /// </summary>
+    public string TaskAtTurnStart(bool processCold) =>
+        processCold && ColdStartTask is not null ? ColdStartTask : Task;
+
     /// <summary>
     /// Set once a steering copy of this human message entered a running workflow turn (#406), so
     /// the reply turn tells the model it has already seen it. Set under that turn's dispatch lock.
@@ -125,9 +139,15 @@ public sealed class QueuedMessage
     public IReadOnlyList<string> MergedSubmissionIds =>
         [.. _parts.Select(p => p.Identity?.SubmissionId).Where(id => !string.IsNullOrEmpty(id)).Select(id => id!)];
 
-    public QueuedMessagePayload BuildPayload(DateTimeOffset startedAt) =>
+    /// <param name="startedAt">When the turn that takes this entry begins.</param>
+    /// <param name="processCold">
+    /// True when the provider process holds no conversation at that moment. The entry's first part
+    /// then carries its history (<see cref="QueuedMessagePart.ColdStartTask"/>); the parts after it
+    /// follow in the same prompt and stay as they were built.
+    /// </param>
+    public QueuedMessagePayload BuildPayload(DateTimeOffset startedAt, bool processCold = false) =>
         new(
-            Task: BuildCombinedTask(startedAt),
+            Task: BuildCombinedTask(startedAt, processCold),
             DisplayText: DisplayText,
             IsSessionTask: IsSessionTask,
             Source: Source,
@@ -140,15 +160,16 @@ public sealed class QueuedMessage
             Identity: Identity,
             MergedSubmissionIds: MergedSubmissionIds);
 
-    private string BuildCombinedTask(DateTimeOffset startedAt)
+    private string BuildCombinedTask(DateTimeOffset startedAt, bool processCold)
     {
+        var firstTask = _parts[0].TaskAtTurnStart(processCold);
         if (_parts.Count == 1)
-            return _parts[0].Task;
+            return firstTask;
 
         var lines = new List<string>
         {
             $"[This batch of {_parts.Count} messages waited {FormatElapsed(startedAt - QueuedAt)} in queue before this turn began]",
-            _parts[0].Task
+            firstTask
         };
 
         for (var i = 1; i < _parts.Count; i++)

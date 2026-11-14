@@ -45,7 +45,10 @@ Thank you for your interest in contributing to Phleet!
 | `src/Fleet.Temporal/` | Temporal workflow engine bridge |
 | `src/Fleet.Bridge/` | RabbitMQ inter-agent relay |
 | `src/Fleet.Memory/` | Semantic memory MCP server |
-| `src/Fleet.Shared/` | Shared utilities |
+| `src/Fleet.Contracts/` | What services send each other: message records, broker names, token format. No dependencies |
+| `src/Fleet.Shared/` | Rules several services apply the same way (models, harness, sign-in names). No dependencies |
+| `src/Fleet.Shared.Telegram/` | Telegram formatters, for the agent and fleet-telegram |
+| `src/Fleet.Shared.Messaging/` | RabbitMQ connection helper and the peer-config client |
 | `src/fleet-dashboard/` | React SPA |
 | `tests/` | Unit and integration tests |
 

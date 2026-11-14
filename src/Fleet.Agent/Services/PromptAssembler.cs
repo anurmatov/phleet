@@ -41,7 +41,23 @@ public sealed class PromptAssembler
     /// </param>
     public string ForDm(GroupChatBuffer buffer, string taskText,
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
-        bool isVoiceTranscription = false)
+        bool isVoiceTranscription = false) =>
+        RenderDm(buffer, taskText, replyToTelegramMessageId, telegramMessageId, isVoiceTranscription,
+            _executor.IsProcessWarm);
+
+    /// <summary>
+    /// <see cref="ForDm"/> as a provider process that holds no conversation needs it: with the
+    /// recent history above the message, whatever the process's state is right now. A message that
+    /// may wait in the queue is given both, because the process can be restarted while it waits.
+    /// </summary>
+    public string ForDmColdStart(GroupChatBuffer buffer, string taskText,
+        long? replyToTelegramMessageId = null, long telegramMessageId = 0,
+        bool isVoiceTranscription = false) =>
+        RenderDm(buffer, taskText, replyToTelegramMessageId, telegramMessageId, isVoiceTranscription,
+            processWarm: false);
+
+    private static string RenderDm(GroupChatBuffer buffer, string taskText,
+        long? replyToTelegramMessageId, long telegramMessageId, bool isVoiceTranscription, bool processWarm)
     {
         var channelAnchor = buffer.RenderHeader();
         var msgIdTag = telegramMessageId > 0 ? $"[telegram_message_id: {telegramMessageId}]" : "";
@@ -51,7 +67,7 @@ public sealed class PromptAssembler
             ? $"{(msgIdTag.Length > 0 ? " " : "")}[reply_to_message_id: {replyToTelegramMessageId}]"
             : "";
 
-        if (_executor.IsProcessWarm)
+        if (processWarm)
         {
             var meta = string.Concat(msgIdTag, replyContext, channelLine, voiceLine);
             return meta.Length > 0 ? $"{meta}\n{taskText}" : taskText;
@@ -74,7 +90,19 @@ public sealed class PromptAssembler
     /// </summary>
     public string ForGroupMessage(GroupChatBuffer buffer, string sender, string taskText,
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
-        bool isVoiceTranscription = false)
+        bool isVoiceTranscription = false) =>
+        RenderGroupMessage(buffer, sender, taskText, replyToTelegramMessageId, telegramMessageId,
+            isVoiceTranscription, _executor.IsProcessWarm);
+
+    /// <summary><see cref="ForGroupMessage"/> for a cold provider process. See <see cref="ForDmColdStart"/>.</summary>
+    public string ForGroupMessageColdStart(GroupChatBuffer buffer, string sender, string taskText,
+        long? replyToTelegramMessageId = null, long telegramMessageId = 0,
+        bool isVoiceTranscription = false) =>
+        RenderGroupMessage(buffer, sender, taskText, replyToTelegramMessageId, telegramMessageId,
+            isVoiceTranscription, processWarm: false);
+
+    private static string RenderGroupMessage(GroupChatBuffer buffer, string sender, string taskText,
+        long? replyToTelegramMessageId, long telegramMessageId, bool isVoiceTranscription, bool processWarm)
     {
         var channelAnchor = buffer.RenderHeader();
         var replyTag = replyToTelegramMessageId is > 0 ? $"[reply_to_message_id: {replyToTelegramMessageId}]" : "";
@@ -88,7 +116,7 @@ public sealed class PromptAssembler
         var fromLine = $"[From: {sender}]";
         var header = $"{msgIdLine}{channelLine}{voiceLine}{fromLine}";
 
-        if (_executor.IsProcessWarm)
+        if (processWarm)
             return $"[New message]\n{header} {taskText}";
 
         var context = buffer.FormatContext();
@@ -121,16 +149,23 @@ public sealed class PromptAssembler
     /// When the buffer is sourced from a real group/DM, the channel anchor identifies it;
     /// falls back to <c>[channel: relay]</c> for headless/workflow buffers (ChatId == 0).
     /// </summary>
-    public string ForCheckIn(GroupChatBuffer buffer, string label, string instruction)
+    public string ForCheckIn(GroupChatBuffer buffer, string label, string instruction) =>
+        RenderCheckIn(buffer, label, instruction, _executor.IsProcessWarm);
+
+    /// <summary><see cref="ForCheckIn"/> for a cold provider process. See <see cref="ForDmColdStart"/>.</summary>
+    public string ForCheckInColdStart(GroupChatBuffer buffer, string label, string instruction) =>
+        RenderCheckIn(buffer, label, instruction, processWarm: false);
+
+    private static string RenderCheckIn(GroupChatBuffer buffer, string label, string instruction, bool processWarm)
     {
         var channelAnchor = buffer.RenderHeader() ?? "[channel: relay]";
-        var context = _executor.IsProcessWarm
+        var context = processWarm
             ? buffer.FormatNewMessages()
             : buffer.FormatContext();
 
         if (context.Length > 0)
         {
-            var contextLabel = _executor.IsProcessWarm
+            var contextLabel = processWarm
                 ? "New messages since last check-in"
                 : "Recent group conversation";
             return $"""

@@ -18,6 +18,10 @@ WORKDIR /src
 COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Comms/Fleet.Comms.csproj src/Fleet.Comms/
 COPY src/Fleet.Protocol/Fleet.Protocol.csproj src/Fleet.Protocol/
+COPY src/Fleet.Contracts/Fleet.Contracts.csproj src/Fleet.Contracts/
+COPY src/Fleet.Conversations/Fleet.Conversations.csproj src/Fleet.Conversations/
+COPY src/Fleet.Conversations.Contracts/Fleet.Conversations.Contracts.csproj src/Fleet.Conversations.Contracts/
+COPY src/Fleet.Shared/Fleet.Shared.csproj src/Fleet.Shared/
 RUN dotnet restore src/Fleet.Comms/Fleet.Comms.csproj
 
 COPY src/ src/

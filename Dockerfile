@@ -3,6 +3,13 @@ WORKDIR /src
 # Build settings and package versions shared by every project; restore needs both.
 COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Agent/Fleet.Agent.csproj src/Fleet.Agent/
+COPY src/Fleet.Contracts/Fleet.Contracts.csproj src/Fleet.Contracts/
+COPY src/Fleet.Conversations.Contracts/Fleet.Conversations.Contracts.csproj src/Fleet.Conversations.Contracts/
+COPY src/Fleet.Journal.Client/Fleet.Journal.Client.csproj src/Fleet.Journal.Client/
+COPY src/Fleet.Protocol/Fleet.Protocol.csproj src/Fleet.Protocol/
+COPY src/Fleet.Shared/Fleet.Shared.csproj src/Fleet.Shared/
+COPY src/Fleet.Shared.Messaging/Fleet.Shared.Messaging.csproj src/Fleet.Shared.Messaging/
+COPY src/Fleet.Shared.Telegram/Fleet.Shared.Telegram.csproj src/Fleet.Shared.Telegram/
 RUN dotnet restore src/Fleet.Agent/Fleet.Agent.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Agent/Fleet.Agent.csproj -c Release -o /app

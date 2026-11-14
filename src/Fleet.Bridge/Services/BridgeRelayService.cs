@@ -92,11 +92,11 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 cancellationToken: ct);
 
             // Declare bridge queue for receiving responses
-            const string queueName = "fleet.agent.bridge";
+            const string queueName = RelayBroker.BridgeQueue;
             await _consumeChannel.QueueDeclareAsync(
                 queue: queueName, durable: true, exclusive: false, autoDelete: false,
                 cancellationToken: ct);
-            await _consumeChannel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: "bridge",
+            await _consumeChannel.QueueBindAsync(queueName, _rabbitConfig.Exchange, routingKey: RelayBroker.BridgeKey,
                 cancellationToken: ct);
 
             var consumer = new AsyncEventingBasicConsumer(_consumeChannel);
@@ -136,10 +136,10 @@ public sealed class BridgeRelayService : IAsyncDisposable
                 Sender: sender,
                 Text: question,
                 Timestamp: DateTimeOffset.UtcNow,
-                Type: "bridge-request",
+                Type: RelayMessageType.BridgeRequest,
                 CorrelationId: correlationId);
 
-            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+            var body = RelayWire.Serialize(message, RelayShape.Bridge);
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
 
             var target = TargetAgent.ToLowerInvariant();
@@ -197,13 +197,13 @@ public sealed class BridgeRelayService : IAsyncDisposable
             // Use status-check type — handled by GroupBehavior.OnRelayMessage directly
             var message = new RelayMessage(
                 ChatId: BridgeChatId,
-                Sender: "bridge",
+                Sender: RelaySender.Bridge,
                 Text: "",
                 Timestamp: DateTimeOffset.UtcNow,
-                Type: "status-check",
+                Type: RelayMessageType.StatusCheck,
                 CorrelationId: null);
 
-            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+            var body = RelayWire.Serialize(message, RelayShape.Bridge);
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
 
             var target = TargetAgent.ToLowerInvariant();
@@ -236,21 +236,21 @@ public sealed class BridgeRelayService : IAsyncDisposable
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
-            var message = JsonSerializer.Deserialize<RelayMessage>(json);
+            var message = RelayWire.Deserialize(json);
             if (message is null)
                 return Task.CompletedTask;
 
             _logger.LogInformation("Bridge received message type={Type}, correlationId={CorrelationId}, from={Sender}",
                 message.Type, message.CorrelationId, message.Sender);
 
-            if (message.Type == "bridge-response" && message.CorrelationId is not null)
+            if (message.Type == RelayMessageType.BridgeResponse && message.CorrelationId is not null)
             {
                 if (_pendingRequests.TryRemove(message.CorrelationId, out var tcs))
                     tcs.TrySetResult(message.Text);
                 else
                     _logger.LogWarning("No pending request for correlationId={CorrelationId}", message.CorrelationId);
             }
-            else if (message.Type == "status-response")
+            else if (message.Type == RelayMessageType.StatusResponse)
             {
                 // Status responses don't have correlationId — resolve the first pending status check
                 foreach (var kvp in _pendingRequests)
@@ -285,7 +285,4 @@ public sealed class BridgeRelayService : IAsyncDisposable
         if (_connection is not null)
             await _connection.CloseAsync();
     }
-
-    private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
-        string Type = "directive", string? CorrelationId = null, string? TaskId = null);
 }

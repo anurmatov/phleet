@@ -1029,6 +1029,106 @@ public sealed class ConversationSouthConsumerTests
         return root.GetProperty("events")[0].GetProperty("ordinal").GetUInt64();
     }
 
+    /// <summary>
+    /// A conversation remembers the submissions it started only for a while after they finish.
+    /// </summary>
+    /// <remarks>
+    /// The owner's chat is ONE conversation for the life of the process, and every message in it is
+    /// a submission. Remembering each one as started for ever was a set that only grew. The memory
+    /// exists for a <c>turn.started</c> that arrives after its own terminal, which is a few events
+    /// late, never thousands of submissions late.
+    /// </remarks>
+    [Fact]
+    public async Task AConversationForgetsFinishedSubmissionsInsteadOfRememberingEveryOne()
+    {
+        var south = new RecordingSouth();
+        var (consumer, handoff, counters, _) = Build(south);
+        consumer.AckHook = _ => Task.CompletedTask;
+
+        var total = ConversationState.RememberedFinishedSubmissions + 40;
+        for (var i = 0; i < total; i++)
+        {
+            consumer.TrackForTesting(new ConversationSouthConsumer.OwnedDelivery(
+                $"m_{i}", $"s_{i}", $"a_{i}", ConversationId, (ulong)(i + 1)));
+            // Terminal first: the commit starts the turn itself, then commits it.
+            Assert.True(handoff.TryEnqueue(ItemFor($"s_{i}", SouthOutboundAction.Commit, ConversationEventKind.TurnFinal, $"t_{i}")));
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var state = consumer.Conversation(ConversationId);
+        var loop = Task.Run(() => consumer.DrainConversationAsync(state, cts.Token), CancellationToken.None);
+        var last = $"s_{total - 1}";
+        while (consumer.OwnsForTesting(last) && !cts.IsCancellationRequested)
+            await Task.Delay(5, CancellationToken.None);
+
+        Assert.Equal(total, counters.CommitCount);
+        Assert.Equal(ConversationState.RememberedFinishedSubmissions, state.TrackedForTesting.StartedSubmissions);
+        Assert.False(state.TurnStarted("s_0"));
+        Assert.True(state.TurnStarted(last));
+
+        // A start that arrives after its terminal still sends nothing, remembered or not: the
+        // forgotten one because its delivery is no longer owned, the recent one by being recognised.
+        var callsBefore = south.Calls.Count;
+        handoff.TryEnqueue(ItemFor("s_0", SouthOutboundAction.StartTurn, ConversationEventKind.TurnStarted, "t_0"));
+        handoff.TryEnqueue(ItemFor(last, SouthOutboundAction.StartTurn, ConversationEventKind.TurnStarted, $"t_{total - 1}"));
+        while (counters.TurnStartSuppressedCount == 0 && !cts.IsCancellationRequested)
+            await Task.Delay(5, CancellationToken.None);
+
+        await cts.CancelAsync();
+        await loop;
+
+        Assert.Equal(1, counters.TurnStartSuppressedCount);
+        Assert.Equal(callsBefore, south.Calls.Count);
+    }
+
+    /// <summary>
+    /// The append stop is per attempt, and an attempt whose delivery is finished needs none.
+    /// </summary>
+    [Fact]
+    public async Task AStoppedAttemptIsForgottenWhenItsDeliveryIsFinished()
+    {
+        var south = new RecordingSouth(path =>
+            path == "/events:append" ? HttpStatusCode.InternalServerError : HttpStatusCode.OK);
+        var (consumer, handoff, counters, _) = Build(south);
+        consumer.AckHook = _ => Task.CompletedTask;
+
+        consumer.TrackForTesting(
+            new ConversationSouthConsumer.OwnedDelivery(MessageId, SubmissionId, AttemptId, ConversationId, 1));
+        var state = consumer.Conversation(ConversationId);
+
+        handoff.TryEnqueue(Item(SouthOutboundAction.StartTurn, ConversationEventKind.TurnStarted, turnId: "t-1"));
+        handoff.TryEnqueue(Item(SouthOutboundAction.Append, ConversationEventKind.TurnProgress));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var loop = Task.Run(() => consumer.DrainConversationAsync(state, cts.Token), CancellationToken.None);
+        while (counters.FenceRejectionCount == 0 && !cts.IsCancellationRequested)
+            await Task.Delay(5, CancellationToken.None);
+
+        // The rejected append stopped this attempt, and the stop is on record while it is owned.
+        Assert.True(state.AppendsStopped(AttemptId));
+        Assert.Equal(1, state.TrackedForTesting.StoppedAttempts);
+
+        handoff.TryEnqueue(Item(SouthOutboundAction.Commit, ConversationEventKind.TurnFinal, turnId: "t-1"));
+        while (consumer.OwnsForTesting(SubmissionId) && !cts.IsCancellationRequested)
+            await Task.Delay(5, CancellationToken.None);
+
+        await cts.CancelAsync();
+        await loop;
+
+        Assert.Equal(1, counters.CommitCount);
+        Assert.Equal(0, state.TrackedForTesting.StoppedAttempts);
+    }
+
+    private static SouthOutboundItem ItemFor(string submissionId, SouthOutboundAction action, string kind, string turnId) => new()
+    {
+        ConversationId = ConversationId,
+        Action = action,
+        Event = new EventDescriptor { Kind = kind, EventId = Ulid.NewUlid(), PayloadJson = "{}" },
+        RetentionClass = ConversationSouthAdapter.RetentionFor(kind),
+        SubmissionId = submissionId,
+        TurnId = turnId,
+    };
+
     private static async Task WaitForAsync(Func<bool> condition)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);

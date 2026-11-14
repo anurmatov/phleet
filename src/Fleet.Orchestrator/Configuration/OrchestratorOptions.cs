@@ -7,5 +7,5 @@ public sealed class RabbitMqOptions
     public string Host { get; set; } = "";
 
     /// <summary>Topic exchange for orchestrator messages (heartbeats, registrations).</summary>
-    public string Exchange { get; set; } = "fleet.orchestrator";
+    public string Exchange { get; set; } = OrchestratorBroker.Exchange;
 }

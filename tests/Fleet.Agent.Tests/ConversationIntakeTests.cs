@@ -101,7 +101,7 @@ public class ConversationIntakeTests : IDisposable
     }
 
     /// <summary>
-    /// StartTask returns as soon as dispatch decides; ProcessTask runs fire-and-forget, so the
+    /// StartTask returns as soon as dispatch decides; TurnRun.RunAsync runs fire-and-forget, so the
     /// executor has not necessarily been called yet when SubmitAsync returns.
     /// </summary>
     private static async Task<string> WaitForPromptAsync(Harness harness)

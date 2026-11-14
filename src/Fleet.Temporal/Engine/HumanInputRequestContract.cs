@@ -10,7 +10,7 @@ namespace Fleet.Temporal.Engine;
 public static class HumanInputRequestContract
 {
     public const string WorkflowType = "UweHumanInputWorkflow";
-    public const string Signal = "request-input";
+    public const string Signal = GateSignal.RequestInput;
     public const string OriginMemo = "HumanInputOrigin";
     public const int MaxInputCharacters = 1800;
     public static bool IsWorkflowType(string value) => string.Equals(value.Trim(), WorkflowType, StringComparison.OrdinalIgnoreCase);

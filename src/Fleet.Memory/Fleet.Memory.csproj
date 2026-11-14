@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
+    <ProjectReference Include="..\Fleet.Shared.Messaging\Fleet.Shared.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -17,5 +18,10 @@
     <PackageReference Include="YamlDotNet" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+    <!-- The wire contracts are used throughout; see src/Fleet.Contracts. -->
+    <Using Include="Fleet.Contracts" />
+  </ItemGroup>
 
 </Project>

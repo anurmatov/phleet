@@ -626,8 +626,8 @@ public sealed class SouthSurfaceTests(MySqlFixture fixture)
     public async Task A_token_of_another_purpose_is_not_a_south_token(string purpose)
     {
         await using var host = await SouthTestHost.StartAsync(_store);
-        var token = Fleet.Conversations.Journal.JournalTokens.Mint(
-            Fleet.Conversations.Journal.JournalTokens.ParseKeys(SouthTestHost.Key)[0], purpose, SouthTestHost.Agent);
+        var token = JournalTokens.Mint(
+            JournalTokens.ParseKeys(SouthTestHost.Key)[0], purpose, SouthTestHost.Agent);
 
         var response = await host.PostAsAsync("/deliveries:claim",
             new ClaimDeliveryRequest { MessageId = Ulid.NewUlid(), Owner = "agent-1" }, token);

@@ -1,8 +1,9 @@
 using System.Runtime.CompilerServices;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Orchestrator.Services;
 
@@ -64,12 +65,12 @@ public sealed class SecretProxyStateWriter(
     internal Action<string> DeleteFile { get; set; } = File.Delete;
 
     /// <summary>The state file path, or null when the fleet base directory is not configured.</summary>
-    public string? StatePath => config["Provisioning:BaseDir"] is { Length: > 0 } baseDir
+    public string? StatePath => ProvisioningOptions.From(config).BaseDir is { Length: > 0 } baseDir
         ? Path.Combine(baseDir, SecretProxyState.StateDirectory, SecretProxyState.FileName)
         : null;
 
     /// <summary>The CA certificate the forwarder created, as the orchestrator sees it on the host.</summary>
-    public string? CaCertificatePath => config["Provisioning:BaseDir"] is { Length: > 0 } baseDir
+    public string? CaCertificatePath => ProvisioningOptions.From(config).BaseDir is { Length: > 0 } baseDir
         ? Path.Combine(baseDir, SecretProxyState.CaDirectory, SecretProxyState.CaCertificateFile)
         : null;
 
@@ -161,7 +162,7 @@ public sealed class SecretProxyStateWriter(
             .Where(r => r.PlaceholderSha256 != null)
             .Select(r => new HeldGrant(r.Agent.Id, r.Agent.Name, r.EnvKeyName, r.PlaceholderSha256!))
             .ToListAsync(ct);
-        var env = ContainerProvisioningService.LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+        var env = EnvFile.Read(ProvisioningOptions.From(config).EnvFilePath);
 
         Replace(path, Build(bindings, held, env, settings, logger), "current");
         return null;

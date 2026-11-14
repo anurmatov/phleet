@@ -5,6 +5,8 @@ using System.Text.RegularExpressions;
 using Fleet.Agent.Abstractions;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
+using Fleet.Agent.Services.Credentials;
+using Fleet.Agent.Services.GroupChat;
 using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -23,16 +25,14 @@ public sealed class GroupBehavior
     private readonly PromptAssembler _prompts;
     private readonly ILogger<GroupBehavior> _logger;
 
-    private readonly ConcurrentDictionary<long, GroupChatBuffer> _groupBuffers = new();
-
     // Per-group debounce timers (fixes global-timer bug)
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _debounceTimers = new();
 
-    // Pending images buffered from all-mode non-direct-trigger messages; drained at next check-in.
-    private readonly ConcurrentDictionary<long, PendingImagesEntry> _pendingImages = new();
+    private readonly GroupChatHistoryStore _history;
+    private readonly PendingGroupImages _pendingImages;
+    private readonly ProviderTokenUpdater _tokens;
+    private readonly ProactiveCheckInLoop _proactive;
 
-    private readonly string _historyPath;
-    private bool _historyLoaded;
     private CancellationToken _shutdownToken;
 
     private string _botUsername = "";
@@ -70,8 +70,13 @@ public sealed class GroupBehavior
         _logger = logger;
         _sink = sink ?? NullMessageSink.Instance;
 
-        _historyPath = Path.Combine(_agentConfig.WorkDir, ".fleet", "chat-history.json");
+        _history = new GroupChatHistoryStore(Path.Combine(_agentConfig.WorkDir, ".fleet", "chat-history.json"), _logger);
+        _pendingImages = new PendingGroupImages(_logger);
+        _tokens = new ProviderTokenUpdater(_agentConfig, _executor, _logger);
+        _proactive = new ProactiveCheckInLoop(_agentConfig, _allowlist, _executor, _history, StartGroupCheckIn, _logger);
     }
+
+    public GroupChatBuffer GetGroupBuffer(long chatId) => _history.GetGroupBuffer(chatId);
 
     public void SetBotUsername(string username) => _botUsername = username;
 
@@ -84,31 +89,20 @@ public sealed class GroupBehavior
     /// </summary>
     internal CancellationToken ShutdownTokenForTesting => _shutdownToken;
 
-    public GroupChatBuffer GetGroupBuffer(long chatId)
-    {
-        if (!_historyLoaded)
-            LoadBuffersFromDisk();
-
-        var buffer = _groupBuffers.GetOrAdd(chatId, id => new GroupChatBuffer { ChatId = id });
-        // Patch buffers deserialized before ChatId was introduced (ChatId == 0 on load)
-        if (buffer.ChatId == 0) buffer.ChatId = chatId;
-        return buffer;
-    }
-
     public void BufferBotResponse(long chatId, string text, long telegramMessageId = 0)
     {
         var buffer = GetGroupBuffer(chatId);
         var truncated = text.Length > 200 ? text[..200] + "..." : text;
         buffer.Add($"@{_botUsername}", truncated, replyTo: null, DateTimeOffset.UtcNow,
             telegramMessageId: telegramMessageId);
-        SaveBuffers();
+        _history.Save();
     }
 
     public void BufferToolUse(long chatId, string toolName, string description)
     {
         var buffer = GetGroupBuffer(chatId);
         buffer.AddToolUse(toolName, description, DateTimeOffset.UtcNow);
-        SaveBuffers();
+        _history.Save();
     }
 
     public void AddAndPersist(long chatId, string sender, string text, string? replyTo,
@@ -118,102 +112,7 @@ public sealed class GroupBehavior
         buffer.Add(sender, text, replyTo, DateTimeOffset.UtcNow,
             telegramMessageId: telegramMessageId,
             replyToTelegramMessageId: replyToTelegramMessageId);
-        SaveBuffers();
-    }
-
-    private void LoadBuffersFromDisk()
-    {
-        _historyLoaded = true;
-
-        if (!File.Exists(_historyPath))
-            return;
-
-        try
-        {
-            var json = File.ReadAllText(_historyPath);
-
-            // Try the current format: Dictionary<long, PersistedBuffer> (LastChecked + Entries).
-            // Old files use Dictionary<long, List<SerializedEntry>> — values are JSON arrays,
-            // which fail to deserialize as PersistedBuffer objects, so we catch and fall through.
-            Dictionary<long, PersistedBuffer>? newData = null;
-            try
-            {
-                newData = JsonSerializer.Deserialize<Dictionary<long, PersistedBuffer>>(json);
-            }
-            catch (JsonException)
-            {
-                // Old format — fall through to legacy path
-            }
-
-            if (newData is not null)
-            {
-                foreach (var (chatId, persisted) in newData)
-                {
-                    var buffer = _groupBuffers.GetOrAdd(chatId, id => new GroupChatBuffer { ChatId = id });
-                    if (buffer.ChatId == 0) buffer.ChatId = chatId;
-                    buffer.LoadEntries(persisted.Entries);
-                    buffer.LoadState(persisted.LastChecked);
-                }
-                _logger.LogInformation("Loaded chat history from disk ({Count} chats)", newData.Count);
-            }
-            else
-            {
-                // Legacy format: Dictionary<long, List<SerializedEntry>> — no LastChecked stored.
-                // Default to UtcNow so existing messages are not treated as unread after upgrade.
-                var legacyData = JsonSerializer.Deserialize<Dictionary<long, List<SerializedEntry>>>(json);
-                if (legacyData is null) return;
-
-                var now = DateTimeOffset.UtcNow;
-                foreach (var (chatId, entries) in legacyData)
-                {
-                    var buffer = _groupBuffers.GetOrAdd(chatId, id => new GroupChatBuffer { ChatId = id });
-                    if (buffer.ChatId == 0) buffer.ChatId = chatId;
-                    buffer.LoadEntries(entries);
-                    buffer.LoadState(now);
-                }
-                _logger.LogInformation("Loaded chat history from disk (legacy format, {Count} chats)", legacyData.Count);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to load chat history from {Path}", _historyPath);
-        }
-    }
-
-    private void SaveBuffers()
-    {
-        try
-        {
-            var data = new Dictionary<long, PersistedBuffer>();
-            foreach (var (chatId, buffer) in _groupBuffers)
-            {
-                // Client (non-Telegram) conversations are process-lifetime only and never reach
-                // disk. This filter is mandatory rather than belt-and-braces: BufferBotResponse
-                // calls SaveBuffers() on EVERY completion, so without it client text would be
-                // persisted through the completion path regardless of what the intake does.
-                // It also avoids accumulating orphaned on-disk buffers keyed to reserved runtime
-                // keys that will never be reused after a restart.
-                if (ConversationRegistry.IsReservedKey(chatId))
-                    continue;
-
-                // Normalize MinValue (never-checked buffer) to UtcNow so that on next
-                // load the existing entries are not treated as unread.
-                var lastChecked = buffer.GetLastChecked();
-                if (lastChecked == DateTimeOffset.MinValue)
-                    lastChecked = DateTimeOffset.UtcNow;
-                data[chatId] = new PersistedBuffer(lastChecked, buffer.GetEntries());
-            }
-
-            var dir = Path.GetDirectoryName(_historyPath)!;
-            Directory.CreateDirectory(dir);
-
-            var json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_historyPath, json);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to save chat history to {Path}", _historyPath);
-        }
+        _history.Save();
     }
 
     // --- Debounce (per-group) ---
@@ -282,61 +181,8 @@ public sealed class GroupBehavior
     /// Buffer images from a non-direct-trigger all-mode message so they can be forwarded
     /// to the LLM when the debounce check-in fires. Enforces MaxImagesPerGroup cap.
     /// </summary>
-    public void AddPendingImages(long chatId, IReadOnlyList<MessageImage> images, int maxImages)
-    {
-        if (images.Count == 0) return;
-        var entry = _pendingImages.GetOrAdd(chatId, _ => new PendingImagesEntry());
-        var hadOverflow = entry.AddRange(images, maxImages);
-        if (hadOverflow)
-            _logger.LogWarning("Pending image buffer for group {ChatId} exceeded cap ({Cap}), overflow images dropped", chatId, maxImages);
-    }
-
-    private IReadOnlyList<MessageImage> DrainPendingImages(long chatId)
-    {
-        if (!_pendingImages.TryRemove(chatId, out var entry))
-            return [];
-        if (entry.IsExpired)
-        {
-            _logger.LogDebug("Pending images for group {ChatId} exceeded TTL, dropping without forwarding", chatId);
-            return [];
-        }
-        return entry.Drain();
-    }
-
-    /// <summary>
-    /// Returns a snapshot of buffered pending images without removing them.
-    /// Excludes TTL-expired entries (they must not be delivered) but does NOT
-    /// remove the expired entry — that is deferred to <see cref="CommitPendingImages"/>.
-    /// </summary>
-    private IReadOnlyList<MessageImage> PeekPendingImages(long chatId)
-    {
-        if (!_pendingImages.TryGetValue(chatId, out var entry))
-            return [];
-        if (entry.IsExpired)
-        {
-            _logger.LogDebug("Pending images for group {ChatId} exceeded TTL, excluding from snapshot (CommitPendingImages will clean up)", chatId);
-            return [];
-        }
-        return entry.Peek();
-    }
-
-    /// <summary>
-    /// Removes the pending-images entry for <paramref name="chatId"/> when all images
-    /// in storage predate <paramref name="boundary"/> (i.e. no new images arrived after
-    /// the snapshot). Also removes expired entries so they are not left behind indefinitely.
-    /// </summary>
-    private void CommitPendingImages(long chatId, DateTimeOffset boundary)
-    {
-        if (!_pendingImages.TryGetValue(chatId, out var entry))
-            return;
-        if (!entry.ShouldCommit(boundary))
-        {
-            // New images arrived after our snapshot — leave them for the next cycle.
-            _logger.LogDebug("Pending images for group {ChatId}: new images arrived after snapshot boundary, not committing", chatId);
-            return;
-        }
-        _pendingImages.TryRemove(chatId, out _);
-    }
+    public void AddPendingImages(long chatId, IReadOnlyList<MessageImage> images, int maxImages) =>
+        _pendingImages.Add(chatId, images, maxImages);
 
     // --- Relay handling ---
 
@@ -375,7 +221,7 @@ public sealed class GroupBehavior
             _logger.LogInformation("Token update received from {Sender}", sender);
             _ = Task.Run(async () =>
             {
-                try { await ApplyTokenUpdateAsync(text); }
+                try { await _tokens.ApplyAsync(text); }
                 catch (Exception ex) { _logger.LogError(ex, "Token update failed"); }
             });
             return;
@@ -480,200 +326,25 @@ public sealed class GroupBehavior
             "Relay message could not be dispatched and was dropped (chat={ChatId}, sender={Sender}, type={Type}, taskId={TaskId})",
             chatId, sender, type, taskId ?? "none");
 
-    internal Task ApplyTokenUpdateForTestsAsync(string tokenJson) => ApplyTokenUpdateAsync(tokenJson);
+    internal Task ApplyTokenUpdateForTestsAsync(string tokenJson) => _tokens.ApplyAsync(tokenJson);
 
     /// <summary>Where a codex token broadcast writes. Settable so tests do not touch the real home.</summary>
-    internal string CodexAuthPath { get; set; } = "/root/.codex/auth.json";
+    internal string CodexAuthPath
+    {
+        get => _tokens.CodexAuthPath;
+        set => _tokens.CodexAuthPath = value;
+    }
 
     /// <summary>Where a claude token broadcast writes. Settable so tests do not touch the real home.</summary>
-    internal string ClaudeCredentialsPath { get; set; } = "/root/.claude/.credentials.json";
-
-    private async Task ApplyTokenUpdateAsync(string tokenJson)
+    internal string ClaudeCredentialsPath
     {
-        var shared = JsonNode.Parse(tokenJson);
-        var newAccessToken = shared?["accessToken"]?.GetValue<string>();
-        var newRefreshToken = shared?["refreshToken"]?.GetValue<string>();
-        var newExpiresAt = shared?["expiresAt"]?.GetValue<long>();
-        if (newAccessToken is null || newExpiresAt is null)
-        {
-            _logger.LogWarning("Invalid token update payload");
-            return;
-        }
-
-        // Route by provider — default to "claude" for backward compat with old broadcasts
-        var provider = shared?["provider"]?.GetValue<string>() ?? "claude";
-        var agentProvider = _agentConfig.Provider.ToLowerInvariant();
-
-        if (!provider.Equals(agentProvider, StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogDebug(
-                "Token update for provider '{Provider}' ignored — this agent uses '{AgentProvider}'",
-                provider, agentProvider);
-            return;
-        }
-
-        if (provider == "codex")
-        {
-            // A hosted-provider agent holds no OpenAI credential (#335 D6), and this broadcast would
-            // recreate auth.json in the persisted workspace volume. Nothing to restart either.
-            if (_agentConfig.HostedProvider)
-            {
-                _logger.LogDebug("Codex token update ignored — this agent routes to a hosted provider");
-                return;
-            }
-
-            await ApplyCodexTokenUpdateAsync(shared!, newAccessToken, newRefreshToken, newExpiresAt.Value);
-        }
-        else if (provider == "gemini")
-        {
-            await ApplyGeminiTokenUpdateAsync(newAccessToken, newExpiresAt.Value);
-        }
-        else
-        {
-            // A local-model agent holds no Claude credential (#340 D3), and this broadcast would
-            // create one in the persisted /root/.claude. Nothing to restart either.
-            if (ClaudeLocalModel.IsEnabled(_agentConfig.Provider, _agentConfig.AnthropicBaseUrl))
-            {
-                _logger.LogInformation("Claude token update ignored — local model mode");
-                return;
-            }
-
-            await ApplyClaudeTokenUpdateAsync(newAccessToken, newRefreshToken, newExpiresAt.Value);
-        }
-
-        if (!await _executor.TryStopProcessAsync())
-            _executor.RequestRestart();
+        get => _tokens.ClaudeCredentialsPath;
+        set => _tokens.ClaudeCredentialsPath = value;
     }
 
-    private async Task ApplyClaudeTokenUpdateAsync(string newAccessToken, string? newRefreshToken, long newExpiresAt)
-    {
-        var credsPath = ClaudeCredentialsPath;
-
-        JsonNode creds;
-        if (File.Exists(credsPath))
-        {
-            creds = JsonNode.Parse(await File.ReadAllTextAsync(credsPath))!;
-        }
-        else
-        {
-            _logger.LogInformation("Claude credentials file not found, creating from token update");
-            Directory.CreateDirectory(Path.GetDirectoryName(credsPath)!);
-            creds = JsonNode.Parse("{}")!;
-        }
-
-        var oauth = creds["claudeAiOauth"];
-        if (oauth is null)
-        {
-            oauth = JsonNode.Parse("{}")!;
-            creds["claudeAiOauth"] = oauth;
-        }
-
-        oauth["accessToken"] = newAccessToken;
-        oauth["expiresAt"] = newExpiresAt;
-        if (newRefreshToken is not null)
-            oauth["refreshToken"] = newRefreshToken;
-
-        var tmpPath = credsPath + ".tmp";
-        await File.WriteAllTextAsync(tmpPath, creds!.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        File.Move(tmpPath, credsPath, overwrite: true);
-
-        _logger.LogInformation("Claude credentials updated, new expiry: {ExpiresAt}", newExpiresAt);
-    }
-
-    private async Task ApplyCodexTokenUpdateAsync(JsonNode payload, string newAccessToken, string? newRefreshToken, long newExpiresAt)
-    {
-        var authPath = CodexAuthPath;
-
-        var newIdToken = payload["idToken"]?.GetValue<string>();
-        var newAccountId = payload["accountId"]?.GetValue<string>();
-
-        JsonNode auth;
-        if (File.Exists(authPath))
-        {
-            auth = JsonNode.Parse(await File.ReadAllTextAsync(authPath))!;
-        }
-        else
-        {
-            _logger.LogInformation("Codex auth.json not found, creating from token update");
-            Directory.CreateDirectory(Path.GetDirectoryName(authPath)!);
-            auth = JsonNode.Parse("""{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{}}""")!;
-        }
-
-        var tokens = auth["tokens"];
-        if (tokens is null)
-        {
-            tokens = JsonNode.Parse("{}")!;
-            auth["tokens"] = tokens;
-        }
-
-        tokens["access_token"] = newAccessToken;
-        if (newRefreshToken is not null)
-            tokens["refresh_token"] = newRefreshToken;
-        if (newIdToken is not null)
-            tokens["id_token"] = newIdToken;
-        if (newAccountId is not null)
-            tokens["account_id"] = newAccountId;
-        auth["last_refresh"] = DateTimeOffset.UtcNow.ToString("O");
-
-        var tmpPath = authPath + ".tmp";
-        await File.WriteAllTextAsync(tmpPath, auth.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        File.Move(tmpPath, authPath, overwrite: true);
-
-        _logger.LogInformation("Codex auth.json updated, new expiry: {ExpiresAt}", newExpiresAt);
-    }
-
-    private async Task ApplyGeminiTokenUpdateAsync(string newAccessToken, long newExpiresAt)
-    {
-        const string credsPath = "/root/.gemini/oauth_creds.json";
-
-        JsonNode creds;
-        if (File.Exists(credsPath))
-        {
-            creds = JsonNode.Parse(await File.ReadAllTextAsync(credsPath))!;
-        }
-        else
-        {
-            _logger.LogInformation("Gemini oauth_creds.json not found, creating from token update");
-            Directory.CreateDirectory(Path.GetDirectoryName(credsPath)!);
-            creds = JsonNode.Parse("{}")!;
-        }
-
-        // Only update access_token and expiry_date — refresh_token, client_id, client_secret
-        // must be preserved exactly as-is (Google does not rotate the refresh token).
-        creds["access_token"] = newAccessToken;
-        creds["expiry_date"] = newExpiresAt;
-
-        var content = creds.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
-        try
-        {
-            await WriteCredentialFileAsync(credsPath, content);
-            _logger.LogInformation("Gemini oauth_creds.json updated, new expiry: {ExpiresAt}", newExpiresAt);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to write Gemini oauth_creds.json (path: {Path})", credsPath);
-        }
-    }
-
-    // Write credential content to a bind-mounted file via copy-then-delete.
-    // File.Move / rename(2) fails with EBUSY on Docker bind-mount targets; writing
-    // through an open file descriptor (File.Copy overwrite) succeeds because it
-    // opens the existing inode for writing rather than replacing the directory entry.
-    internal static async Task WriteCredentialFileAsync(string finalPath, string content)
-    {
-        var tmpPath = finalPath + ".tmp";
-        await File.WriteAllTextAsync(tmpPath, content);
-        try
-        {
-            File.Copy(tmpPath, finalPath, overwrite: true);
-            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-                File.SetUnixFileMode(finalPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        }
-        finally
-        {
-            try { File.Delete(tmpPath); } catch { }
-        }
-    }
+    /// <summary>See <see cref="ProviderTokenUpdater.WriteCredentialFileAsync"/>.</summary>
+    internal static Task WriteCredentialFileAsync(string finalPath, string content) =>
+        ProviderTokenUpdater.WriteCredentialFileAsync(finalPath, content);
 
     private string? ExtractRelayCommand(string text)
     {
@@ -692,76 +363,9 @@ public sealed class GroupBehavior
         return firstLine.StartsWith('/') ? firstLine : null;
     }
 
-    // --- Proactive loop (iterates ALL groups — fixes single-group bug) ---
+    // --- Proactive loop ---
 
-    public async Task RunProactiveLoopAsync(CancellationToken ct)
-    {
-        var interval = TimeSpan.FromMinutes(_agentConfig.ProactiveIntervalMinutes);
-        _logger.LogInformation("Proactive loop started with interval {Interval}", interval);
-
-        using var timer = new PeriodicTimer(interval);
-
-        try
-        {
-            while (await timer.WaitForNextTickAsync(ct))
-            {
-                try
-                {
-                    await RunProactiveCheckIns(ct);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    _logger.LogError(ex, "Proactive check-in failed");
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected on shutdown
-        }
-
-        _logger.LogInformation("Proactive loop stopped");
-    }
-
-    private Task RunProactiveCheckIns(CancellationToken ct)
-    {
-        // Iterate ALL allowed groups with new messages (fixes first-group-only bug)
-        foreach (var groupId in _allowlist.GetAllowedGroupIds())
-        {
-            if (!_groupBuffers.TryGetValue(groupId, out var buffer) || !buffer.HasMessagesSinceLastCheck())
-                continue;
-
-            buffer.MarkChecked();
-
-            var isAllMode = _agentConfig.GroupListenMode.Equals("all", StringComparison.OrdinalIgnoreCase);
-
-            if (isAllMode && _executor.IsProcessWarm)
-            {
-                StartGroupCheckIn(groupId, "Proactive check-in", """
-                    Review your memory and session context. Are there pending tasks,
-                    follow-ups, or overdue items? If nothing needs attention: IDLE
-                    """, ct);
-            }
-            else
-            {
-                var context = buffer.FormatContext();
-                if (context.Length == 0)
-                {
-                    _logger.LogDebug("Proactive check-in: buffer empty after format for group {ChatId}, skipping", groupId);
-                    continue;
-                }
-
-                StartGroupCheckIn(groupId, "Proactive check-in", $"""
-                    Review the recent conversation and your memory. Track all tasks — ones
-                    the CEO assigned to any agent, ones you delegated, and ones assigned to you.
-                    Are there pending items, follow-ups, or overdue tasks? If nothing needs
-                    attention, respond with just: IDLE
-                    """, ct);
-            }
-        }
-
-        return Task.CompletedTask;
-    }
+    public Task RunProactiveLoopAsync(CancellationToken ct) => _proactive.RunAsync(ct);
 
     // --- Check-in dispatch methods ---
 
@@ -775,15 +379,17 @@ public sealed class GroupBehavior
     {
         var buffer = GetGroupBuffer(chatId);
         var prompt = _prompts.ForCheckIn(buffer, label, instruction);
+        var coldStartPrompt = _prompts.ForCheckInColdStart(buffer, label, instruction);
         buffer.MarkChecked();
-        var pendingImages = DrainPendingImages(chatId);
+        var pendingImages = _pendingImages.Drain(chatId);
         _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
 
         // Delegate entirely to TaskManager — it handles typing, execution,
         // session tracking, tool buffering, IDLE suppression, and completion events.
         _taskManager.StartTaskDetached(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.CheckIn,
-            images: pendingImages.Count > 0 ? pendingImages : null);
+            images: pendingImages.Count > 0 ? pendingImages : null,
+            coldStartTask: coldStartPrompt);
     }
 
     /// <summary>
@@ -797,20 +403,22 @@ public sealed class GroupBehavior
     {
         var buffer = GetGroupBuffer(chatId);
         var batchTime = DateTimeOffset.UtcNow;
-        var pendingImages = PeekPendingImages(chatId);
+        var pendingImages = _pendingImages.Peek(chatId);
         var prompt = _prompts.ForCheckIn(buffer, label, instruction);
+        var coldStartPrompt = _prompts.ForCheckInColdStart(buffer, label, instruction);
         _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
 
         var outcome = await _taskManager.StartTask(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.DebouncedGroupBatch,
-            images: pendingImages.Count > 0 ? pendingImages : null);
+            images: pendingImages.Count > 0 ? pendingImages : null,
+            coldStartTask: coldStartPrompt);
 
         if (outcome is TaskDispatchOutcome.Ran or TaskDispatchOutcome.Injected or TaskDispatchOutcome.Queued)
         {
             buffer.MarkChecked(batchTime);
             // CommitPendingImages is unconditional: even when pendingImages is empty, committed
             // entries with storedAt ≤ batchTime need cleanup (e.g. images that expired mid-batch).
-            CommitPendingImages(chatId, batchTime);
+            _pendingImages.Commit(chatId, batchTime);
         }
         else
         {
@@ -820,19 +428,44 @@ public sealed class GroupBehavior
 
     public string BuildGroupTask(long chatId, string sender, string taskText,
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
-        string? chatTitle = null, bool isVoiceTranscription = false)
+        string? chatTitle = null, bool isVoiceTranscription = false) =>
+        _prompts.ForGroupMessage(GroupBufferFor(chatId, chatTitle), sender, taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    /// <summary>
+    /// <see cref="BuildGroupTask"/> as a provider process with no memory of the conversation needs
+    /// it. Passed to <see cref="TaskManager.StartTask"/> beside the prompt, for a turn that ends
+    /// up starting on a process that was restarted while the message waited.
+    /// </summary>
+    public string BuildGroupColdStartTask(long chatId, string sender, string taskText,
+        long? replyToTelegramMessageId = null, long telegramMessageId = 0,
+        string? chatTitle = null, bool isVoiceTranscription = false) =>
+        _prompts.ForGroupMessageColdStart(GroupBufferFor(chatId, chatTitle), sender, taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    public string BuildDmTask(long chatId, string taskText, long? replyToTelegramMessageId = null,
+        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null,
+        bool isVoiceTranscription = false) =>
+        _prompts.ForDm(DmBufferFor(chatId, chatUsername, chatFirstName), taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    /// <summary><see cref="BuildDmTask"/> for a cold provider process. See <see cref="BuildGroupColdStartTask"/>.</summary>
+    public string BuildDmColdStartTask(long chatId, string taskText, long? replyToTelegramMessageId = null,
+        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null,
+        bool isVoiceTranscription = false) =>
+        _prompts.ForDmColdStart(DmBufferFor(chatId, chatUsername, chatFirstName), taskText, replyToTelegramMessageId,
+            telegramMessageId, isVoiceTranscription);
+
+    private GroupChatBuffer GroupBufferFor(long chatId, string? chatTitle)
     {
         var buffer = GetGroupBuffer(chatId);
         // Store title on first encounter (don't overwrite once set)
         if (chatTitle is not null && buffer.ChatTitle is null)
             buffer.ChatTitle = chatTitle;
-        return _prompts.ForGroupMessage(buffer, sender, taskText, replyToTelegramMessageId,
-            telegramMessageId, isVoiceTranscription);
+        return buffer;
     }
 
-    public string BuildDmTask(long chatId, string taskText, long? replyToTelegramMessageId = null,
-        long telegramMessageId = 0, string? chatUsername = null, string? chatFirstName = null,
-        bool isVoiceTranscription = false)
+    private GroupChatBuffer DmBufferFor(long chatId, string? chatUsername, string? chatFirstName)
     {
         var buffer = GetGroupBuffer(chatId);
         // Build and cache the DM label on first encounter
@@ -843,7 +476,7 @@ public sealed class GroupBehavior
             else if (chatFirstName is { Length: > 0 })
                 buffer.ChatLabel = $"name=\"{chatFirstName.Replace("\"", "\\\"")}\"";
         }
-        return _prompts.ForDm(buffer, taskText, replyToTelegramMessageId, telegramMessageId, isVoiceTranscription);
+        return buffer;
     }
 
     // --- Welcome DM on approval ---
@@ -864,93 +497,6 @@ public sealed class GroupBehavior
         return Task.CompletedTask;
     }
 
-    // --- Persistence schema ---
-
-    /// <summary>
-    /// On-disk shape for a single group's chat history (current format).
-    /// Replaces the legacy <c>List&lt;SerializedEntry&gt;</c> value so that
-    /// <see cref="GroupChatBuffer._lastChecked"/> survives agent restarts.
-    /// </summary>
-    private sealed record PersistedBuffer(DateTimeOffset LastChecked, List<SerializedEntry> Entries);
-
-    // --- Pending images buffer entry ---
-
-    private sealed class PendingImagesEntry
-    {
-        /// Images older than this are considered stale and dropped on drain.
-        private static readonly TimeSpan Ttl = TimeSpan.FromMinutes(5);
-
-        private readonly Lock _lock = new();
-        private readonly List<MessageImage> _images = [];
-        private DateTimeOffset _storedAt = DateTimeOffset.UtcNow;
-
-        /// <summary>
-        /// Appends <paramref name="incoming"/> up to <paramref name="cap"/>.
-        /// Returns <c>true</c> if any images were dropped due to the cap.
-        /// </summary>
-        public bool AddRange(IReadOnlyList<MessageImage> incoming, int cap)
-        {
-            lock (_lock)
-            {
-                _storedAt = DateTimeOffset.UtcNow;
-                var hadOverflow = false;
-                foreach (var img in incoming)
-                {
-                    if (_images.Count >= cap) { hadOverflow = true; break; }
-                    _images.Add(img);
-                }
-                return hadOverflow;
-            }
-        }
-
-        public IReadOnlyList<MessageImage> Drain()
-        {
-            lock (_lock)
-            {
-                if (_images.Count == 0) return [];
-                var result = _images.ToArray();
-                _images.Clear();
-                return result;
-            }
-        }
-
-        /// <summary>
-        /// Returns a copy of the buffered images without removing them.
-        /// </summary>
-        public IReadOnlyList<MessageImage> Peek()
-        {
-            lock (_lock)
-            {
-                return _images.Count == 0 ? [] : [.. _images];
-            }
-        }
-
-        /// <summary>
-        /// Returns <c>true</c> when all images in storage were stored at or before
-        /// <paramref name="boundary"/> — meaning no new images arrived after the snapshot
-        /// and it is safe to remove the entire entry.
-        /// Also returns <c>true</c> when the entry is TTL-expired, so stale entries are
-        /// cleaned up whenever a commit runs.
-        /// </summary>
-        public bool ShouldCommit(DateTimeOffset boundary)
-        {
-            lock (_lock) return _storedAt <= boundary || IsExpiredLocked;
-        }
-
-        public bool IsExpired
-        {
-            get { lock (_lock) return IsExpiredLocked; }
-        }
-
-        private bool IsExpiredLocked => DateTimeOffset.UtcNow - _storedAt > Ttl;
-
-        /// <summary>Testing seam: sets _storedAt to simulate images that arrived in the past.</summary>
-        internal void BackdateStoredAtForTest(TimeSpan age)
-        {
-            lock (_lock) _storedAt = DateTimeOffset.UtcNow - age;
-        }
-    }
-
     // ─── Internal testing seams ─────────────────────────────────────────────────
     // Exposed via InternalsVisibleTo for Fleet.Agent.Tests. Production code never calls these.
 
@@ -958,21 +504,18 @@ public sealed class GroupBehavior
     internal Task TriggerDebouncedGroupBatchForTestAsync(long chatId, string label = "test", string instruction = "check-in")
         => StartDebouncedGroupCheckInAsync(chatId, label, instruction, CancellationToken.None);
 
-    /// <summary>Returns <c>true</c> when the pending-images dictionary has an entry for <paramref name="chatId"/>.</summary>
-    internal bool HasPendingImages(long chatId) => _pendingImages.ContainsKey(chatId);
+    /// <summary>Returns <c>true</c> when there are pending images for <paramref name="chatId"/>.</summary>
+    internal bool HasPendingImages(long chatId) => _pendingImages.Has(chatId);
 
-    /// <summary>Exposes <see cref="CommitPendingImages"/> for boundary-logic tests.</summary>
+    /// <summary>Exposes <see cref="PendingGroupImages.Commit"/> for boundary-logic tests.</summary>
     internal void CommitPendingImagesForTest(long chatId, DateTimeOffset boundary)
-        => CommitPendingImages(chatId, boundary);
+        => _pendingImages.Commit(chatId, boundary);
 
-    /// <summary>Exposes <see cref="PeekPendingImages"/> for TTL tests.</summary>
+    /// <summary>Exposes <see cref="PendingGroupImages.Peek"/> for TTL tests.</summary>
     internal IReadOnlyList<MessageImage> PeekPendingImagesForTest(long chatId)
-        => PeekPendingImages(chatId);
+        => _pendingImages.Peek(chatId);
 
     /// <summary>Sets the pending-images entry for <paramref name="chatId"/> to appear older than <paramref name="age"/>.</summary>
-    internal void BackdatePendingImagesForTest(long chatId, TimeSpan age)
-    {
-        if (_pendingImages.TryGetValue(chatId, out var entry))
-            entry.BackdateStoredAtForTest(age);
-    }
+    internal void BackdatePendingImagesForTest(long chatId, TimeSpan age) =>
+        _pendingImages.BackdateForTest(chatId, age);
 }

@@ -1,0 +1,276 @@
+## preview
+container: fleet-agent-cloud (resolved fleet-agent-cloud)
+image: fleet:agent-golden
+memory: 2147483648
+secret network address: (none)
+env:
+  NOT_IN_ENV_FILE=<secret>
+  PLAIN_SETTING=synthetic-plain-value
+  QUOTED_SETTING=synthetic quoted value
+  Telegram__BotToken=synthetic-cloud-bot-token
+  TELEGRAM_USER_ID=4242
+  RabbitMq__Host=rabbitmq
+  GIT_USER_NAME=Cloudy
+  GIT_USER_EMAIL=fleet-agent-cloud@users.noreply.github.com
+  GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+  Whisper__ServiceUrl=http://fleet-whisper:8080
+  Tts__ServiceUrl=http://fleet-kokoro-tts:8880
+binds:
+  ./workspaces/fleet-agent-cloud:/workspace
+  ./workspaces/fleet-agent-cloud/.generated/projects:/app/projects:ro
+  ./workspaces/fleet-agent-cloud/.generated/appsettings.json:/app/appsettings.json:ro
+  ./workspaces/fleet-agent-cloud/claude:/root/.claude
+  ./workspaces/fleet-agent-cloud/.generated/settings.json:/root/.claude/settings.json:ro
+  ./workspaces/fleet-agent-cloud/codex:/root/.codex
+  ./workspaces/fleet-agent-cloud/.generated/.mcp.json:/workspace/.mcp.json:ro
+  ./workspaces/fleet-agent-cloud/.generated/roles:/app/roles:ro
+  /var/run/docker.sock:/var/run/docker.sock
+  ./workspaces/fleet-agent-cloud/.generated/output-styles:/workspace/.claude/output-styles:ro
+  ./.claude-credentials.json:/root/.claude-host/.credentials.json:ro
+  <base>/credentials/deploy.key:/workspace/.ssh/deploy.key:ro
+networks:
+  fleet-net
+  project-net
+extra hosts:
+diffs:
+  container not found — not running
+
+## result
+ok: container 'fleet-agent-cloud' created and started (id=0123456789ab, networks=[fleet-net, project-net])
+
+## docker calls
+GET /v1.41/containers/fleet-agent-cloud/json
+POST /v1.41/containers/create
+POST /v1.41/networks/project-net/connect
+POST /v1.41/containers/fleet-agent-cloud/start
+
+## create body
+{
+  "Image": "fleet:agent-golden",
+  "Env": [
+    "NOT_IN_ENV_FILE=<secret>",
+    "PLAIN_SETTING=synthetic-plain-value",
+    "QUOTED_SETTING=synthetic quoted value",
+    "Telegram__BotToken=synthetic-cloud-bot-token",
+    "TELEGRAM_USER_ID=4242",
+    "RabbitMq__Host=rabbitmq",
+    "GIT_USER_NAME=Cloudy",
+    "GIT_USER_EMAIL=fleet-agent-cloud@users.noreply.github.com",
+    "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1",
+    "Whisper__ServiceUrl=http://fleet-whisper:8080",
+    "Tts__ServiceUrl=http://fleet-kokoro-tts:8880"
+  ],
+  "ExposedPorts": {
+    "8080/tcp": {}
+  },
+  "HostConfig": {
+    "Memory": 2147483648,
+    "Binds": [
+      "<base>/workspaces/fleet-agent-cloud:/workspace",
+      "<base>/workspaces/fleet-agent-cloud/.generated/projects:/app/projects:ro",
+      "<base>/workspaces/fleet-agent-cloud/.generated/appsettings.json:/app/appsettings.json:ro",
+      "<base>/workspaces/fleet-agent-cloud/claude:/root/.claude",
+      "<base>/workspaces/fleet-agent-cloud/.generated/settings.json:/root/.claude/settings.json:ro",
+      "<base>/workspaces/fleet-agent-cloud/codex:/root/.codex",
+      "<base>/workspaces/fleet-agent-cloud/.generated/.mcp.json:/workspace/.mcp.json:ro",
+      "<base>/workspaces/fleet-agent-cloud/.generated/roles:/app/roles:ro",
+      "/var/run/docker.sock:/var/run/docker.sock",
+      "<base>/workspaces/fleet-agent-cloud/.generated/output-styles:/workspace/.claude/output-styles:ro",
+      "<base>/.claude-credentials.json:/root/.claude-host/.credentials.json:ro",
+      "<base>/credentials/deploy.key:/workspace/.ssh/deploy.key:ro"
+    ],
+    "RestartPolicy": {
+      "Name": "unless-stopped"
+    },
+    "NetworkMode": "fleet-net",
+    "PortBindings": {
+      "8080/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "9100"
+        }
+      ]
+    },
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-size": "10m",
+        "max-file": "3"
+      }
+    }
+  },
+  "NetworkingConfig": {
+    "EndpointsConfig": {
+      "fleet-net": {}
+    }
+  }
+}
+
+## network connects
+project-net: {"Container":"0123456789abcdef0123"}
+
+## generated files
+--- .mcp.json
+{
+  "mcpServers": {
+    "custom": {
+      "type": "sse",
+      "url": "http://custom-host:9999/mcp?token=keep"
+    },
+    "fleet-comms-journal": {
+      "type": "http",
+      "url": "http://fleet-comms:8084/journal/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer cj1.read.agent-cloud.KTrruVAS6p4FqgorrxV5fFpAGF4pHfXTF-SCywx7I6w"
+      }
+    },
+    "fleet-memory": {
+      "type": "http",
+      "url": "http://fleet-memory:3100?agent=agent-cloud"
+    },
+    "fleet-telegram": {
+      "type": "http",
+      "url": "http://fleet-telegram:3200?agent=agent-cloud\u0026formatting_mode=2"
+    },
+    "fleet-temporal": {
+      "type": "http",
+      "url": "http://fleet-temporal-bridge:3001?agent=agent-cloud"
+    },
+    "fleet-journal-files": {
+      "type": "http",
+      "url": "http://127.0.0.1:8091/journal-files/v1/mcp"
+    }
+  }
+}
+--- appsettings.json
+{
+  "Agent": {
+    "Name": "agent-cloud",
+    "ContainerName": "fleet-agent-cloud",
+    "Role": "developer",
+    "Model": "claude-opus-5-5",
+    "Provider": "claude",
+    "Projects": [
+      "alpha",
+      "beta",
+      "missing"
+    ],
+    "AllowedTools": [
+      "Bash",
+      "mcp__fleet-comms-journal__get_message",
+      "mcp__fleet-journal-files__fetch_attachment",
+      "mcp__fleet-journal-files__send_attachment",
+      "mcp__fleet-memory__memory_store"
+    ],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ProactiveIntervalMinutes": 30,
+    "GroupListenMode": "all",
+    "GroupDebounceSeconds": 15,
+    "WarmupTimeoutSeconds": 60,
+    "ShortName": "Cloudy",
+    "ShowStats": true,
+    "PrefixMessages": true,
+    "FormattingMode": 2,
+    "SuppressToolMessages": false,
+    "Effort": "high",
+    "JsonSchema": null,
+    "AgentsJson": null,
+    "CodexSandboxMode": null,
+    "HostedProvider": false,
+    "HostedProviderKeyEnv": null,
+    "AnthropicBaseUrl": null,
+    "InstructionOrder": [
+      "_base",
+      "developer",
+      "review",
+      "unversioned"
+    ],
+    "ReplyLookup": "available",
+    "McpHeaderSupport": true,
+    "HarnessExtra": "--disallowedTools WebSearch\nMAX_MCP_OUTPUT_TOKENS=12000\n"
+  },
+  "Telegram": {
+    "AllowedUserIds": [
+      77,
+      4242
+    ],
+    "AllowedGroupIds": [
+      -1001
+    ],
+    "SendOnly": false,
+    "CanReceiveChatRequests": true,
+    "RequestReceivedMessage": "Got it.",
+    "PrimaryHumanUserId": 4242
+  },
+  "Journal": {
+    "IngestToken": "cj1.ingest.agent-cloud._vYjqbSnVFoclibXRrX6MngqZdjkcWNOBy9baQ1cJIc",
+    "ExcludedChatIds": "-1005,-1003",
+    "ReadToken": "cj1.read.agent-cloud.KTrruVAS6p4FqgorrxV5fFpAGF4pHfXTF-SCywx7I6w",
+    "FilesEnabled": true,
+    "SendEnabled": true,
+    "CrossChatEnabled": true,
+    "CrossChatToken": "cj1.read-cross-chat.agent-cloud.mYITUknF8l2HLlDsS4R6tUZNKSfayYTqGnggcTDww_Y",
+    "MediaEnabled": true
+  },
+  "Conversations": {
+    "SouthBaseUrl": "http://fleet-comms:8082",
+    "SouthBearerToken": "cj1.south.agent-cloud.i09eR4vrUTIpPOB-zfvwYcb4PRYzy9GkmcY5i8zSDig",
+    "PrimaryHumanPrincipalId": "owner"
+  }
+}
+--- output-styles/terse.md
+Answer in one short paragraph.
+
+--- projects/alpha/context.md
+# Alpha v2
+
+The canonical context.
+
+--- projects/beta/context.md
+# beta
+
+(No content — no versions found)
+
+--- projects/missing/context.md
+# missing
+
+(No content — project context not yet seeded in DB)
+
+--- roles/_base/system.md
+Base v2: be careful.
+
+--- roles/developer/system.md
+Developer instruction.
+
+--- roles/review/system.md
+Review v2: the latest, since nothing is current.
+
+--- settings.json
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "mcp__fleet-comms-journal__get_message",
+      "mcp__fleet-journal-files__fetch_attachment",
+      "mcp__fleet-journal-files__send_attachment",
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-memory__memory_store",
+      "mcp__fleet-temporal__notify_cto"
+    ]
+  },
+  "outputStyle": "terse"
+}
+## log lines
+[Warning] Project context 'beta' has no versions for agent 'agent-cloud' — generating empty stub
+[Warning] Project context 'missing' not found in DB for agent 'agent-cloud' — generating empty stub
+[Information] Generating config for 'agent-cloud': 5 tools [Bash, mcp__fleet-comms-journal__get_message, mcp__fleet-journal-files__fetch_attachment, MCP__fleet-journal-files__SEND_ATTACHMENT, mcp__fleet-memory__memory_store], 5 MCP endpoints [custom, fleet-comms-journal, fleet-memory, fleet-telegram, fleet-temporal], permissionMode=acceptEdits
+[Warning] No version content found for instruction 'unversioned' (agent 'agent-cloud') — skipping
+[Information] Wrote output style 'terse' for 'agent-cloud' to <base>/workspaces/fleet-agent-cloud/.generated/output-styles
+[Information] Generated config files for 'agent-cloud' in <base>/workspaces/fleet-agent-cloud/.generated
+[Information] Generated instruction files for 'agent-cloud' in <base>/workspaces/fleet-agent-cloud/.generated/roles (4 instruction(s))
+[Information] Generated project context files for 'agent-cloud' in <base>/workspaces/fleet-agent-cloud/.generated/projects (3 project(s))
+[Information] Provisioning 'agent-cloud' container='fleet-agent-cloud' image='fleet:agent-golden'

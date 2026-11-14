@@ -1,0 +1,1 @@
+{"ChatId":0,"Sender":"agent1","Text":"{\u0022Decision\u0022:\u0022approved\u0022}","Timestamp":"<ts>","Type":"workflow-signal","CorrelationId":null,"TaskId":null,"WorkflowId":"wf-1","SignalName":"human-review"}

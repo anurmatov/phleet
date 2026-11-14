@@ -176,7 +176,7 @@ export default function App() {
   const log = useLogViewer()
 
   const { pruneSentSignals, getSignalDefs, signalModal } = wfActions
-  const { refreshWorkflows, refreshCompleted } = wfLists
+  const { refreshWorkflows, refreshCompleted, receiveWorkflows } = wfLists
   const loadInstructions = instr.reload
   const loadProjectContexts = ctx.reload
 
@@ -199,7 +199,7 @@ export default function App() {
       try {
         const msg: WsMessage = JSON.parse(event.data)
         if (msg.type === 'workflows') {
-          setWorkflows(msg.data)
+          receiveWorkflows(msg.data)
           pruneSentSignals(msg.data)
         } else {
           const agent = msg as AgentState
@@ -220,7 +220,7 @@ export default function App() {
       reconnectTimer.current = setTimeout(connect, next.delayMs)
     }
     ws.onerror = () => ws.close()
-  }, [refreshAgents, pruneSentSignals])
+  }, [refreshAgents, pruneSentSignals, receiveWorkflows])
 
   useEffect(() => {
     refreshAgents()

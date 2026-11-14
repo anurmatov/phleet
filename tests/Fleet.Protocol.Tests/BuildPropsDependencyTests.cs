@@ -104,6 +104,37 @@ public class BuildPropsDependencyTests
         }
     }
 
+    [Theory]
+    [InlineData("Dockerfile", "Fleet.Agent")]
+    [InlineData("Dockerfile.temporal", "Fleet.Temporal")]
+    [InlineData("src/Fleet.Orchestrator/Dockerfile", "Fleet.Orchestrator")]
+    [InlineData("src/Fleet.Bridge/Dockerfile", "Fleet.Bridge")]
+    [InlineData("src/Fleet.Telegram/Dockerfile", "Fleet.Telegram")]
+    [InlineData("src/Fleet.Memory/Dockerfile", "Fleet.Memory")]
+    [InlineData("src/Fleet.Comms/Dockerfile", "Fleet.Comms")]
+    [InlineData("src/Fleet.SecretProxy/Dockerfile", "Fleet.SecretProxy")]
+    public void Image_restore_includes_every_referenced_project(string dockerfile, string project)
+    {
+        var root = RepositoryRoot.FullName;
+        var source = File.ReadAllText(Path.Combine(root, dockerfile));
+        var beforeRestore = source[..source.IndexOf("RUN dotnet restore", StringComparison.Ordinal)];
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        Visit($"src/{project}/{project}.csproj");
+
+        void Visit(string path)
+        {
+            if (!visited.Add(path)) return;
+            Assert.Contains($"COPY {path} {Path.GetDirectoryName(path)}/", beforeRestore);
+            var document = XDocument.Load(Path.Combine(root, path));
+            foreach (var reference in document.Descendants("ProjectReference"))
+            {
+                var relative = reference.Attribute("Include")!.Value.Replace('\\', '/');
+                Visit(Path.GetRelativePath(root, Path.GetFullPath(Path.Combine(root,
+                    Path.GetDirectoryName(path)!, relative))));
+            }
+        }
+    }
+
     private static bool RunsDotnetBuild(string line) =>
         line.Contains("dotnet restore", StringComparison.Ordinal)
         || line.Contains("dotnet publish", StringComparison.Ordinal)

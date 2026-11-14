@@ -87,7 +87,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
             autoDelete: false,
             cancellationToken: ct);
 
-        const string queueName = "fleet.orchestrator.heartbeats";
+        const string queueName = OrchestratorBroker.HeartbeatQueue;
         await _channel.QueueDeclareAsync(
             queue: queueName,
             durable: true,
@@ -114,7 +114,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
     private Task OnMessageReceived(object sender, BasicDeliverEventArgs ea)
     {
         // Route by routing key prefix before attempting deserialization.
-        if (ea.RoutingKey.StartsWith("access-request.", StringComparison.OrdinalIgnoreCase))
+        if (ea.RoutingKey.StartsWith(OrchestratorBroker.AccessRequest + ".", StringComparison.OrdinalIgnoreCase))
             return HandleAccessRequestAsync(ea);
 
         try
@@ -147,8 +147,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
-            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
-            var payload = JsonSerializer.Deserialize<AccessRequestPayload>(json, opts);
+            var payload = JsonSerializer.Deserialize<AccessRequestPayload>(json);
 
             if (payload is null)
             {
@@ -179,7 +178,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
                 $"Wait for the CEO's reply. ONLY after the CEO explicitly approves, call manage_agent_telegram_users with action=add to grant access. " +
                 $"Never auto-approve.";
 
-            await _publisher.PublishDirectiveToAgentAsync(ctoAgent, directive, type: "access.request");
+            await _publisher.PublishDirectiveToAgentAsync(ctoAgent, directive, type: RelayMessageType.AccessRequest);
 
             _logger.LogInformation(
                 "Access request from user {UserId} for bot '{TargetAgent}' forwarded to CTO agent '{CtoAgent}' (request_id={RequestId})",
@@ -189,17 +188,6 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         {
             _logger.LogError(ex, "Error processing access-request message (routingKey={RoutingKey})", ea.RoutingKey);
         }
-    }
-
-    /// <summary>Mirrors Fleet.Agent.Models.AccessRequestPayload — must stay in sync with JSON shape.</summary>
-    private sealed class AccessRequestPayload
-    {
-        public string RequestId { get; init; } = "";
-        public string TargetAgent { get; init; } = "";
-        public long UserId { get; init; }
-        public string? Username { get; init; }
-        public string? FirstName { get; init; }
-        public string MessageText { get; init; } = "";
     }
 
     public async ValueTask DisposeAsync()

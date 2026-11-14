@@ -569,7 +569,7 @@ public sealed class BridgeExecutionCancelTests
             {"ChatId":7,"Sender":"temporal-bridge","Text":"do the task","Timestamp":"2026-11-14T00:00:00+00:00",
              "Type":"directive","CorrelationId":null,"TaskId":"wf-1/review","WorkflowId":null,"SignalName":null,"Repo":null}
             """;
-        var type = typeof(GroupRelayService).GetNestedType("RelayMessage", BindingFlags.NonPublic)!;
+        var type = typeof(Fleet.Contracts.RelayMessage);
         string? ExecutionIdOf(string json) =>
             (string?)type.GetProperty("ExecutionId")!.GetValue(JsonSerializer.Deserialize(json, type));
 
@@ -595,12 +595,13 @@ public sealed class BridgeExecutionCancelTests
     [Fact]
     public void AMessageWithoutAnExecutionId_IsTheBytesItAlwaysWas()
     {
-        var type = typeof(GroupRelayService).GetNestedType("RelayMessage", BindingFlags.NonPublic)!;
+        var type = typeof(Fleet.Contracts.RelayMessage);
         var message = JsonSerializer.Deserialize(
             """{"ChatId":7,"Sender":"test","Text":"an answer","Timestamp":"2026-11-14T00:00:00+00:00","Type":"response","TaskId":"wf-1/review"}""",
             type)!;
 
-        var json = JsonSerializer.Serialize(message, type);
+        var json = System.Text.Encoding.UTF8.GetString(Fleet.Contracts.RelayWire.Serialize(
+            (Fleet.Contracts.RelayMessage)message, Fleet.Contracts.RelayShape.Agent));
 
         Assert.DoesNotContain("ExecutionId", json);
         Assert.Equal(

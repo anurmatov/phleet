@@ -93,7 +93,7 @@ Each scenario then asserts exactly the three properties the bus does guarantee, 
 
 **2. The periodic typing heartbeat is excluded from the cell.** `turn.progress(typing)` is emitted
 at turn start and then every four seconds for as long as the turn runs
-(`TaskManager.RunTypingLoopAsync`), so its multiplicity is a function of elapsed time, not of
+(`TurnRun.RunTypingLoopAsync`), so its multiplicity is a function of elapsed time, not of
 provider behaviour. Including it would make every ordered cell a timing assertion. Each scenario
 asserts it separately.
 

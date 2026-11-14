@@ -1,27 +1,22 @@
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.RegularExpressions;
-
 namespace Fleet.Orchestrator.Services;
 
 /// <summary>
-/// Mints the derived conversation-journal credentials that provisioning places in agent config.
-/// The wire format deliberately mirrors Fleet.Comms' verifier without taking a dependency on the
-/// conversations implementation assembly.
+/// Mints the derived conversation-journal credentials that provisioning places in agent config, and
+/// verifies the ones the chat service presents, with the key in <c>Journal:TokenKey</c>.
 /// </summary>
+/// <remarks>
+/// The token format is <see cref="JournalTokens"/>, the one implementation the chat service verifies
+/// and mints with too. What is here is the orchestrator's own part: where the key comes from and
+/// what a missing or unusable key is called.
+/// </remarks>
 public sealed class JournalTokenService(IConfiguration configuration)
 {
-    public const string PurposeIngest = "ingest";
-    public const string PurposeRead = "read";
-    public const string PurposeStatus = "status";
-    public const string PurposeReadCrossChat = "read-cross-chat";
-    public const string PurposeCrossChatAuthz = "cross-chat-authz";
-    public const int MinimumKeyBytes = 32;
-
-    private static readonly Regex SubjectPattern =
-        new("^[A-Za-z0-9_-]{1,128}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
-    private static readonly Regex PurposePattern =
-        new("^[a-z-]{1,32}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    public const string PurposeIngest = JournalTokens.PurposeIngest;
+    public const string PurposeRead = JournalTokens.PurposeRead;
+    public const string PurposeStatus = JournalTokens.PurposeStatus;
+    public const string PurposeReadCrossChat = JournalTokens.PurposeReadCrossChat;
+    public const string PurposeCrossChatAuthz = JournalTokens.PurposeCrossChatAuthz;
+    public const int MinimumKeyBytes = JournalTokens.MinimumKeyBytes;
 
     /// <summary>The fault code provisioning must return before touching a container, or null.</summary>
     public string? DescribeKeyFault()
@@ -31,7 +26,7 @@ public sealed class JournalTokenService(IConfiguration configuration)
 
         try
         {
-            _ = ParseKeys(raw);
+            _ = JournalTokens.ParseKeys(raw);
             return null;
         }
         catch (FormatException)
@@ -40,36 +35,24 @@ public sealed class JournalTokenService(IConfiguration configuration)
         }
     }
 
+    /// <summary>Mints with the first configured key.</summary>
+    /// <exception cref="JournalConfigurationException">The key is missing or unusable.</exception>
     public string Mint(string purpose, string subject)
     {
         var fault = DescribeKeyFault();
         if (fault is not null) throw new JournalConfigurationException(fault);
-        if (!PurposePattern.IsMatch(purpose ?? string.Empty))
-            throw new ArgumentException("not a token purpose", nameof(purpose));
-        if (!SubjectPattern.IsMatch(subject ?? string.Empty))
-            throw new ArgumentException("a subject is 1-128 characters of [A-Za-z0-9_-]", nameof(subject));
 
-        var key = ParseKeys(configuration["Journal:TokenKey"]!)[0];
-        var payload = Encoding.UTF8.GetBytes($"cj1|{purpose}|{subject}");
-        var mac = EncodeBase64Url(HMACSHA256.HashData(key, payload));
-        return $"cj1.{purpose}.{subject}.{mac}";
+        return JournalTokens.Mint(JournalTokens.ParseKeys(configuration["Journal:TokenKey"])[0], purpose, subject);
     }
 
+    /// <summary>Verifies under every configured key. False, never a throw, when the key is unusable.</summary>
     public bool TryVerify(string? token, string purpose, out string subject)
     {
         subject = "";
-        var parts = (token ?? "").Split('.');
-        var valid = parts.Length == 4 && parts[0] == "cj1" && PurposePattern.IsMatch(parts[1]) && SubjectPattern.IsMatch(parts[2]);
         if (DescribeKeyFault() is not null) return false;
-        var matched = false;
-        foreach (var key in ParseKeys(configuration["Journal:TokenKey"]!))
-        {
-            var expected = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes($"cj1|{(valid ? parts[1] : "")}|{(valid ? parts[2] : "")}"));
-            matched |= CryptographicOperations.FixedTimeEquals(expected, valid ? DecodeBase64Url(parts[3]) ?? [] : []);
-        }
-        if (!valid || !matched || parts[1] != purpose) return false;
-        subject = parts[2];
-        return true;
+
+        return JournalTokens.TryVerify(
+            token, purpose, JournalTokens.ParseKeys(configuration["Journal:TokenKey"]), out subject);
     }
 
     /// <summary>Union configured by the operator; blanks are ignored and duplicates collapse.</summary>
@@ -84,48 +67,6 @@ public sealed class JournalTokenService(IConfiguration configuration)
         }
         return [.. result];
     }
-
-    private static IReadOnlyList<byte[]> ParseKeys(string raw)
-    {
-        var keys = new List<byte[]>();
-        foreach (var entry in raw.Split(','))
-        {
-            if (string.IsNullOrWhiteSpace(entry)) continue;
-            var decoded = DecodeBase64Url(entry.Trim())
-                ?? throw new FormatException("journal key is not base64url");
-            if (decoded.Length < MinimumKeyBytes)
-                throw new FormatException("journal key is too short");
-            keys.Add(decoded);
-        }
-
-        if (keys.Count == 0) throw new FormatException("no journal key is configured");
-        return keys;
-    }
-
-    private static byte[]? DecodeBase64Url(string value)
-    {
-        var body = value.TrimEnd('=');
-        if (body.Length == 0 || value.Length - body.Length > 2) return null;
-        if (body.Any(c => c is not ((>= 'A' and <= 'Z') or (>= 'a' and <= 'z')
-                or (>= '0' and <= '9') or '-' or '_')))
-            return null;
-
-        var standard = body.Replace('-', '+').Replace('_', '/');
-        standard = (standard.Length % 4) switch
-        {
-            0 => standard,
-            2 => standard + "==",
-            3 => standard + "=",
-            _ => null!,
-        };
-        if (standard is null) return null;
-
-        try { return Convert.FromBase64String(standard); }
-        catch (FormatException) { return null; }
-    }
-
-    private static string EncodeBase64Url(byte[] bytes) =>
-        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
 
 public sealed class JournalConfigurationException(string code) : Exception(code)

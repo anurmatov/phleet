@@ -19,7 +19,7 @@ public sealed partial class AutonomyDecisionTests
         run.GateVisit = "design-approval:1";
         run.ReviewScrub = " scope-fit";
     }
-    private static Fleet.Orchestrator.Services.EpicGrantDecisionRequest DesignRequest(string visit = "design-approval:1") =>
+    private static EpicGrantDecisionRequest DesignRequest(string visit = "design-approval:1") =>
         EpicGrantWorld.Request(gate: "design-approval", visitId: visit);
 
     [Fact]

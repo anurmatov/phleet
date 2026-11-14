@@ -3,6 +3,9 @@ WORKDIR /src
 # Build settings and package versions shared by every project; restore needs both.
 COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Temporal/Fleet.Temporal.csproj src/Fleet.Temporal/
+COPY src/Fleet.Contracts/Fleet.Contracts.csproj src/Fleet.Contracts/
+COPY src/Fleet.Shared/Fleet.Shared.csproj src/Fleet.Shared/
+COPY src/Fleet.Shared.Messaging/Fleet.Shared.Messaging.csproj src/Fleet.Shared.Messaging/
 RUN dotnet restore src/Fleet.Temporal/Fleet.Temporal.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Temporal/Fleet.Temporal.csproj -c Release -o /app

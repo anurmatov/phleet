@@ -32,7 +32,13 @@ public class EmissionOwnershipInventoryTests
     private static readonly Dictionary<string, int> ExpectedSinkCallSites = new()
     {
         // #401: primary-key capacity; #411: deferred steering notice uses the Human text owner.
-        ["Services/TaskManager.cs"] = 28,
+        // The 28 sites that were all in TaskManager.cs, where its parts now live. None was added
+        // or removed by the split, so the five counts still sum to 28.
+        ["Services/TaskManager.cs"] = 2,                // primary-key capacity; "now processing"
+        ["Services/Dispatch/TaskCommands.cs"] = 16,     // /stop, /reset, /status, /cancel
+        ["Services/Dispatch/TurnRun.cs"] = 6,           // a turn's replies, notices and typing
+        ["Services/Dispatch/QueueIntake.cs"] = 2,       // queue full; busy notice
+        ["Services/Dispatch/MidTurnDelivery.cs"] = 2,   // mid-turn and steering queue notices
         ["Services/CommandDispatcher.cs"] = 7,
         ["Services/MessageRouter.cs"] = 3,
     };
@@ -188,7 +194,7 @@ public class EmissionOwnershipInventoryTests
         Assert.Equal(new Dictionary<string, int>(StringComparer.Ordinal)
         {
             ["Interfaces/AgentTransport.cs"] = 4,   // render-path guards (#274 Constraint 1)
-            ["Services/GroupBehavior.cs"] = 1,      // SaveBuffers persistence filter
+            ["Services/GroupChat/GroupChatHistoryStore.cs"] = 1, // Save persistence filter (was GroupBehavior.SaveBuffers)
             ["Services/TurnBindingPublisher.cs"] = 2, // #401 observed-chat and dispatch binding filters
         }, byFile);
     }

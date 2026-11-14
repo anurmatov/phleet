@@ -4,6 +4,8 @@ WORKDIR /src
 COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Fleet.Orchestrator/Fleet.Orchestrator.csproj src/Fleet.Orchestrator/
 COPY src/Fleet.Shared/Fleet.Shared.csproj src/Fleet.Shared/
+COPY src/Fleet.Shared.Messaging/Fleet.Shared.Messaging.csproj src/Fleet.Shared.Messaging/
+COPY src/Fleet.Contracts/Fleet.Contracts.csproj src/Fleet.Contracts/
 RUN dotnet restore src/Fleet.Orchestrator/Fleet.Orchestrator.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Orchestrator/Fleet.Orchestrator.csproj -c Release -o /app

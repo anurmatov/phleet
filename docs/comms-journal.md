@@ -357,7 +357,7 @@ Two settings enable media, on two different containers, and only one of them is 
 **`Journal:MediaEnabled` is derived at provisioning, never configured per agent.** The orchestrator
 writes it into the agent's `appsettings.json` when — and only when — this deployment's provisioning
 env file sets `FLEET_COMMS_MEDIA_ENDPOINT` to a non-blank value
-(`ContainerProvisioningService.MediaEndpointIsConfigured`).
+(`ProvisioningPolicy.MediaEndpointIsConfigured`).
 
 The ENDPOINT ALONE is the gate, because that is the key compose treats as the media switch
 (`Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}`) and the key `upgrade.sh` uses to decide

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
@@ -6,10 +7,18 @@ using Microsoft.EntityFrameworkCore;
 namespace Fleet.Orchestrator.Services;
 
 /// <summary>
-/// Shadow-mode container provisioning service.
-/// Generates expected Docker container specs from DB config and diffs them against
-/// the actual running container. No containers are created or modified.
+/// The lifecycle of an agent's container: preview, provision, deprovision and reprovision, one at
+/// a time per agent. It holds the per-agent lock, talks to Docker and records secret grants.
 /// </summary>
+/// <remarks>
+/// What the container gets is decided elsewhere, and none of it needs Docker:
+/// <see cref="ContainerSpecBuilder"/> (image, env, binds, networks), <see cref="AgentConfigFiles"/>
+/// (the generated files' contents), <see cref="ProvisioningFaults"/> and
+/// <see cref="ProvisioningPolicy"/> (what refuses a provision), <see cref="AgentFileRenderer"/> and
+/// <see cref="AgentFileWriter"/> (rendering the files, then writing them), and
+/// <see cref="ContainerSpecDiff"/> (a preview's comparison with the running container).
+/// <see cref="SecretGrantPlanner.Plan"/> stays the only place that decides how a secret is delivered.
+/// </remarks>
 public sealed class ContainerProvisioningService(
     IServiceScopeFactory scopeFactory,
     DockerService docker,
@@ -20,39 +29,12 @@ public sealed class ContainerProvisioningService(
     SecretProxyStateWriter? secretState = null)
 {
     private readonly SecretProxySettings _secretSettings = secretSettings ?? SecretProxySettings.Disabled;
+    private readonly ProvisioningPolicy _policy = new(config, journalTokens);
+    private readonly AgentFileRenderer _renderer = new(scopeFactory, config, journalTokens, logger);
+    private readonly AgentFileWriter _writer = new(logger);
 
-    private const string DefaultAgentImage = "fleet:agent";
-    internal const string JournalMcpServerName = "fleet-comms-journal";
-    internal const string JournalFilesServerName = "fleet-journal-files";
-    internal const string JournalFilesGrant = "mcp__fleet-journal-files__fetch_attachment";
-    private static bool HasFilesGrant(Agent agent) => agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase));
-    private static IEnumerable<string> SendWarnings(Agent agent)
-    {
-        if (JournalGrants.HasSendGrant(agent) && !JournalGrants.SendEffective(agent))
-            yield return "journal_send_unavailable:journal_capture_off";
-        if (agent.JournalCrossChatEnabled && !JournalGrants.CrossChatEffective(agent))
-            yield return "journal_cross_chat_unavailable:" + (JournalGrants.HasSendGrant(agent) ? "journal_capture_off" : "send_grant_missing");
-    }
-    private static string? FilesWarning(Agent agent) => HasFilesGrant(agent) && (!agent.JournalEnabled || !HasTelegramBot(agent))
-        ? "journal_files_unavailable:journal_capture_off" : null;
-
-    /// <summary>
-    /// Header support is a property of the pinned provider CLI, not something provisioning probes
-    /// at runtime. Flip a false value only with a pinned-CLI tools/list transcript in the PR.
-    /// </summary>
-    internal static readonly IReadOnlyDictionary<string, bool> McpHeaderSupport =
-        new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["claude"] = true,
-            ["codex"] = true,
-            ["gemini"] = false,
-        };
-
-    private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
-
-    // Actual Docker network names as reported by the Docker API.
-    // fleet-net is declared with an explicit name so it keeps its name (not prefixed by Docker Compose).
-    private const string FleetNetwork = "fleet-net";
+    /// <summary>The <c>Provisioning</c> section as configuration holds it now.</summary>
+    private ProvisioningOptions Options => ProvisioningOptions.From(config);
 
     public async Task<ProvisionPreview> PreviewAsync(string agentName, CancellationToken ct = default)
     {
@@ -75,8 +57,7 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return ProvisionPreview.NotFound(agentName);
 
-        var envFile = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
-        var envValues = LoadEnvFile(envFile);
+        var envValues = LoadEnvFile(Options.EnvFilePath);
 
         // A preview mints nothing: a bound key shows a fixed marker where a provision puts a placeholder.
         var bindings = await db.SecretBindings.AsNoTracking().ToListAsync(ct);
@@ -87,11 +68,11 @@ public sealed class ContainerProvisioningService(
         var (actual, resolvedContainerName) = await InspectActualAsync(agent.ContainerName, ct);
         var diffs   = actual is null
             ? ["container not found — not running"]
-            : ComputeDiff(desired, actual);
+            : ContainerSpecDiff.ComputeDiff(desired, actual);
         if (secretFault is not null) diffs = [.. diffs, secretFault];
 
-        if (FilesWarning(agent) is { } warning) diffs = [.. diffs, warning];
-        diffs = [.. diffs, .. SendWarnings(agent)];
+        if (ProvisioningFaults.FilesWarning(agent) is { } warning) diffs = [.. diffs, warning];
+        diffs = [.. diffs, .. ProvisioningFaults.SendWarnings(agent)];
 
         logger.LogInformation(
             "Provision preview for {Agent} ({Container}): {DiffCount} diff(s)",
@@ -105,292 +86,10 @@ public sealed class ContainerProvisioningService(
     private ContainerSpec BuildDesiredSpec(
         Agent agent, Dictionary<string, string> envValues, IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets)
     {
-        var containerName = agent.ContainerName;
-
-        var whisperServiceUrl = config["Provisioning:WhisperServiceUrl"] ?? "";
-        var kokoroServiceUrl  = config["Provisioning:KokoroServiceUrl"]  ?? "";
-        var env      = BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl, bindings, secrets);
-        var binds    = BuildBinds(agent);
-        var networks = BuildNetworks(agent);
-        var memBytes = (long)agent.MemoryLimitMb * 1024 * 1024;
-        var image    = agent.Image ?? config["Provisioning:AgentImage"] ?? DefaultAgentImage;
-
-        // Bound secrets: the CA the agent trusts, and its place on the internal secrets network.
-        if (secrets.Bind is { } caBind)
-            binds.Add(caBind);
-        if (secrets.SshBind is { } sshBind)
-            binds.Add(sshBind);
-        if (secrets.Address is not null && !networks.Contains(SecretProxyNetwork.NetworkName, StringComparer.Ordinal))
-            networks.Add(SecretProxyNetwork.NetworkName);
-
-        return new ContainerSpec(image, memBytes, env, binds, networks)
-        {
-            ExtraHosts = [.. secrets.ExtraHosts],
-            SecretNetworkAddress = secrets.Address,
-        };
-    }
-
-    /// <param name="bindings">Every secret binding. A bound key is never written here, whatever <paramref name="secrets"/> holds.</param>
-    /// <param name="secrets">The agent's placeholder plan, or <see cref="SecretPlan.None"/>.</param>
-    internal static List<string> BuildEnv(
-        Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl, string kokoroServiceUrl,
-        IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets)
-    {
-        var env = new List<string>();
-
-        // Secret refs from DB — resolve values from .env if available
-        foreach (var envRef in agent.EnvRefs.OrderBy(e => e.EnvKeyName))
-        {
-            // A bound secret never enters the container. Its placeholder is added below, from the plan.
-            if (SecretGrantPlanner.IsBound(bindings, envRef.EnvKeyName))
-                continue;
-
-            var value = envValues.TryGetValue(envRef.EnvKeyName, out var v) ? v : "<secret>";
-            // Only *_BOT_TOKEN-shaped TELEGRAM_* keys map to the Telegram__BotToken ASP.NET config key.
-            // Other TELEGRAM_* keys (e.g. TELEGRAM_USER_ID, TELEGRAM_GROUP_ID) pass through as-is
-            // so they can be used as normal env vars without colliding with the bot token config slot.
-            if (JournalGrants.IsBotRef(envRef.EnvKeyName))
-            {
-                if (envRef.EnvKeyName == JournalGrants.BotRef(agent))
-                    env.Add($"Telegram__BotToken={JournalGrants.ResolveBotToken(agent, envValues) ?? "<secret>"}");
-            }
-            else
-                env.Add($"{envRef.EnvKeyName}={value}");
-        }
-
-        // Static env vars common to all agents
-        env.Add("RabbitMq__Host=rabbitmq");
-
-        // Use ShortName from DB if populated, fall back to role-derived name
-        var gitName  = !string.IsNullOrEmpty(agent.ShortName) ? agent.ShortName : DeriveGitName(agent.Role);
-        var gitEmail = $"{agent.ContainerName}@users.noreply.github.com";
-        env.Add($"GIT_USER_NAME={gitName}");
-        env.Add($"GIT_USER_EMAIL={gitEmail}");
-
-        // GitHub App PEM — inject for all agents when present in .env (base64-encoded), unless the key
-        // is a bound secret: then no agent holds it, and those granted it hold a placeholder instead.
-        if (envValues.TryGetValue("GITHUB_APP_PEM", out var githubAppPem)
-            && !SecretGrantPlanner.IsBound(bindings, "GITHUB_APP_PEM"))
-            env.Add($"GITHUB_APP_PEM={githubAppPem}");
-
-        // Claude auto-memory — disable when agent uses fleet-memory instead
-        if (!agent.AutoMemoryEnabled)
-            env.Add("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1");
-
-        // Whisper (speech-to-text) — all agents, URL from cluster config
-        if (!string.IsNullOrWhiteSpace(whisperServiceUrl))
-            env.Add($"Whisper__ServiceUrl={whisperServiceUrl}");
-
-        // Kokoro TTS (text-to-speech) — all agents, URL from cluster config
-        if (!string.IsNullOrWhiteSpace(kokoroServiceUrl))
-            env.Add($"Tts__ServiceUrl={kokoroServiceUrl}");
-
-        // #367: a local server's context size, so Claude CLI compacts before the server rejects the
-        // turn. Local-mode claude agents only: Anthropic models have known windows an override
-        // could shrink. The claude child inherits it; ClaudeExecutor strips only its own list.
-        if (agent.ContextWindow is int window && ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
-            env.Add($"{ContextWindow.EnvVar}={window}");
-
-        env.AddRange(secrets.Env);
-
-        return env;
-    }
-
-    private List<string> BuildBinds(Agent agent)
-    {
-        var baseDir = config["Provisioning:BaseDir"]
-            ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
-        return BuildBinds(agent, baseDir);
-    }
-
-    internal static List<string> BuildBinds(Agent agent, string baseDir)
-    {
-        var containerName = agent.ContainerName;
-
-        var binds = new List<string>
-        {
-            $"./workspaces/{containerName}:/workspace",
-            $"./workspaces/{containerName}/.generated/projects:/app/projects:ro",
-            $"./workspaces/{containerName}/.generated/appsettings.json:/app/appsettings.json:ro",
-            $"./workspaces/{containerName}/claude:/root/.claude",
-            $"./workspaces/{containerName}/.generated/settings.json:/root/.claude/settings.json:ro",
-            $"./workspaces/{containerName}/codex:/root/.codex",
-            $"./workspaces/{containerName}/.generated/.mcp.json:/workspace/.mcp.json:ro",
-            $"./workspaces/{containerName}/.generated/roles:/app/roles:ro",
-        };
-
-        // docker.sock is only mounted when the agent's MountDockerSock flag is on
-        if (agent.MountDockerSock)
-            binds.Add("/var/run/docker.sock:/var/run/docker.sock");
-
-        // Output styles resolve as a PROJECT-level directory beside the user-level settings.json
-        // above — that is the combination provisioning produces and the one that was verified on
-        // the pinned CLI. Cloud claude only: the other providers and local-model claude get the
-        // same text in their prompt (see HasStyleFile). Absent for a styleless agent, so its
-        // container config is unchanged.
-        if (HasStyleFile(agent))
-            binds.Add($"./workspaces/{containerName}/.generated/output-styles:/workspace/.claude/output-styles:ro");
-
-        // PV1 (#386): one explicit case per provider. Only an empty provider means claude; any
-        // other string is refused rather than handed the Claude credential.
-        switch (AgentProviders.Normalize(agent.Provider))
-        {
-            case AgentProviders.Gemini:
-            {
-                // Mount gemini OAuth credentials writable — the CLI's google-auth-library refreshes
-                // the file in-place on token expiry, so the mount must be read-write. The refreshed
-                // token propagates back to the host, preventing stale-token failures on container restart.
-                var geminiTokenStorePath = Path.Combine(baseDir, ".gemini-credentials.json");
-                if (File.Exists(geminiTokenStorePath))
-                    binds.Add("./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw");
-                break;
-            }
-            case AgentProviders.Codex:
-            {
-                // #460: the generated root keys, written by GenerateConfigFilesAsync before the
-                // container is created (a missing host file would mount as an empty directory).
-                // Codex agents only; entrypoint.sh reads the same container path.
-                binds.Add(CodexRootTomlBind(containerName));
-
-                // A hosted-provider agent must hold no OpenAI credential (#335 D6): its model is served
-                // by the vendor through the loopback adapter, and the credential would be one more
-                // secret in a container whose model runs a root shell.
-                if (IsHostedProvider(agent))
-                    return AppendCredentialMounts(agent, binds);
-
-                // Mount codex credentials for seeding new codex containers (entrypoint.sh reads this)
-                var codexTokenStorePath = Path.Combine(baseDir, ".codex-credentials.json");
-                if (File.Exists(codexTokenStorePath))
-                    binds.Add("./.codex-credentials.json:/root/.codex-host/auth.json:ro");
-                break;
-            }
-            case AgentProviders.Claude:
-            {
-                // A local-model agent must hold no Claude credential (#340 D3): its model is served by a
-                // local Anthropic-compatible server, which must never receive a real OAuth token.
-                if (ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
-                    return AppendCredentialMounts(agent, binds);
-
-                // Mount orchestrator-stored Claude credentials for seeding new containers (entrypoint.sh reads this)
-                var tokenStorePath = Path.Combine(baseDir, ".claude-credentials.json");
-                if (File.Exists(tokenStorePath))
-                    binds.Add("./.claude-credentials.json:/root/.claude-host/.credentials.json:ro");
-                break;
-            }
-            default:
-                throw new InvalidOperationException(AgentProviders.UnknownProviderText(agent.Provider));
-        }
-
-        return AppendCredentialMounts(agent, binds);
-    }
-
-    /// <summary>The read-only bind of <c>.generated/codex-root.toml</c> (#460), codex agents only.</summary>
-    internal static string CodexRootTomlBind(string containerName) =>
-        $"./workspaces/{containerName}/.generated/{HarnessDefaults.CodexRootTomlFileName}:{HarnessDefaults.CodexRootTomlContainerPath}:ro";
-
-    private static List<string> AppendCredentialMounts(Agent agent, List<string> binds)
-    {
-        // Credential file mounts (from Files section in Credentials view)
-        foreach (var mount in agent.CredentialMounts)
-        {
-            if (File.Exists(mount.CredentialFile.FilePath))
-                binds.Add($"{mount.CredentialFile.FilePath}:{mount.MountPath}:{mount.Mode}");
-        }
-
-        return binds;
-    }
-
-    /// <summary>
-    /// The local-model fault that must stop provisioning (#340 D1 point 2, #382, #386), or null:
-    /// PV1, L1, L2, V4–V8, C1, C2, or a credential mount into <c>/root/.claude*</c>
-    /// that would hand a Claude local agent the credential the bind skip above withholds.
-    /// </summary>
-    internal static string? DescribeLocalModelFault(Agent agent)
-    {
-        // PV1 (#386): an unknown provider is refused before anything else reads it.
-        if (AgentProviders.DescribeFault(agent.Provider) is { } providerFault)
-            return providerFault;
-
-        if (LocalModel.DescribeConfigFault(
-                agent.Provider, agent.LocalBaseUrl, agent.Model, agent.Effort, agent.ContextWindow)
-            is { } fault)
-        {
-            return fault;
-        }
-
-        // #349 V8: off exists only in local mode; a local → cloud switch must not ship it upstream.
-        if (ClaudeLocalModel.DescribeLocalOnlyEffortFault(agent.Provider, agent.LocalBaseUrl, agent.Effort)
-            is { } effortFault)
-        {
-            return effortFault;
-        }
-
-        if (!ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
-            return null;
-
-        // "/root/.claude" also covers /root/.claude-host and /root/.claude.json.
-        var claudeMount = agent.CredentialMounts.FirstOrDefault(
-            m => m.MountPath.StartsWith("/root/.claude", StringComparison.Ordinal));
-        return claudeMount is null
-            ? null
-            : $"Claude local model mode forbids a credential mount into /root/.claude*, but one targets "
-            + $"{claudeMount.MountPath}. Remove it, then reprovision.";
-    }
-
-    /// <summary>
-    /// The faults that stop provisioning before Docker is called, and a reprovision before the old
-    /// container is removed: PV1 for every agent. Null
-    /// when there is none.
-    /// </summary>
-    /// <remarks>
-    /// Claude and codex local faults keep their #340/#382 path: <see cref="GenerateAppsettingsJson"/>
-    /// refuses them when the files are rendered, which a reprovision does before it removes the
-    /// container.
-    /// </remarks>
-    internal static string? DescribeProviderPreflightFault(Agent agent) =>
-        AgentProviders.DescribeFault(agent.Provider);
-
-    /// <summary>
-    /// P1 (#382): a codex agent whose model is <c>ollama/…</c> or <c>lmstudio/…</c> and has no local
-    /// server URL must reach its server through the legacy <c>CODEX_OSS_BASE_URL</c> Env Ref, with a
-    /// non-blank value in <c>.env</c>. Returns the fault, or null.
-    /// </summary>
-    /// <remarks>
-    /// Without this the Env Ref loop injects the literal <c>&lt;secret&gt;</c> for a missing key, and a
-    /// missing or unreadable <c>.env</c> reads as empty, so the agent would only fail at startup.
-    /// </remarks>
-    internal static string? DescribeCodexServerUrlFault(Agent agent, IReadOnlyDictionary<string, string> envValues)
-    {
-        if (!string.Equals(agent.Provider, "codex", StringComparison.Ordinal)
-            || !string.IsNullOrEmpty(agent.LocalBaseUrl)
-            || CodexLocalModelProviders.Split(agent.Model).Provider is null)
-        {
-            return null;
-        }
-
-        if (!agent.EnvRefs.Any(e => e.EnvKeyName == CodexOssBaseUrlEnvRef))
-            return $"Codex local model '{agent.Model}' has no server URL: set the local server URL, "
-                 + $"or the legacy {CodexOssBaseUrlEnvRef} Env Ref.";
-
-        return envValues.TryGetValue(CodexOssBaseUrlEnvRef, out var value) && !string.IsNullOrWhiteSpace(value)
-            ? null
-            : $"Codex local model '{agent.Model}' has no server URL: its {CodexOssBaseUrlEnvRef} Env Ref has "
-            + "no non-blank value in the orchestrator's .env. Set the local server URL instead, or fix .env.";
-    }
-
-    private const string CodexOssBaseUrlEnvRef = "CODEX_OSS_BASE_URL";
-
-    /// <summary>True when this agent's model routes to a hosted provider (#335 D1).</summary>
-    internal static bool IsHostedProvider(Agent agent) =>
-        HostedModelProviders.TryResolve(agent.Provider, agent.Model, out _, out _);
-
-    private static List<string> BuildNetworks(Agent agent)
-    {
-        // Use DB-stored network list if available; otherwise default to the fleet network only
-        if (agent.Networks.Count > 0)
-            return agent.Networks.Select(n => n.NetworkName).ToList();
-
-        return [FleetNetwork];
+        var options = Options;
+        return ContainerSpecBuilder.Build(
+            agent, envValues, bindings, secrets, options.RequireBaseDir(),
+            options.WhisperServiceUrl, options.KokoroServiceUrl, options.AgentImage);
     }
 
     // ── live provisioning ──────────────────────────────────────────────────────
@@ -461,12 +160,12 @@ public sealed class ContainerProvisioningService(
         if (agent is null)
             return (null, ProvisionResult.Fail(agentName, "agent not found in DB") with { Failure = ProvisionFailure.AgentNotFound });
 
-        if (DescribePrimaryHumanFault() is { } priorityFault)
+        if (_policy.DescribePrimaryHumanFault() is { } priorityFault)
             return Refuse(priorityFault);
         // #386: PV1, before Docker is called or any file is generated.
-        if (DescribeProviderPreflightFault(agent) is { } providerFault)
+        if (ProvisioningFaults.DescribeProviderPreflightFault(agent) is { } providerFault)
             return Refuse(providerFault);
-        if (DescribeJournalProvisioningFault(agent) is { } journalFault)
+        if (_policy.DescribeJournalProvisioningFault(agent) is { } journalFault)
             return Refuse(journalFault);
 
         // Bound secrets: decided before Docker is called or any file is generated. A fault here means
@@ -497,22 +196,21 @@ public sealed class ContainerProvisioningService(
                     $"container '{agent.ContainerName}' already exists — deprovision first or use reprovision_agent");
         }
 
-        var envFile   = config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env";
-        var baseDir   = config["Provisioning:BaseDir"]
-            ?? throw new InvalidOperationException("Provisioning:BaseDir is required but not configured.");
-        var envValues = LoadEnvFile(envFile);
+        var options   = Options;
+        var baseDir   = options.RequireBaseDir();
+        var envValues = LoadEnvFile(options.EnvFilePath);
         var ctoAgentName = CtoAgentSetting.Resolve(envValues, config);
 
-        if (DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
+        if (ProvisioningFaults.DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
             return Refuse(serverUrlFault);
 
-        var projectContexts = await ResolveProjectContextsAsync(agent);
-        var style = await ResolveOutputStyleAsync(agent);
+        var projectContexts = await _renderer.ResolveProjectContextsAsync(agent);
+        var style = await _renderer.ResolveOutputStyleAsync(agent);
 
         GeneratedFiles files;
         try
         {
-            files = RenderGeneratedFiles(agent, ctoAgentName ?? "", style, projectContexts, instructionVersionOverrides);
+            files = _renderer.RenderGeneratedFiles(agent, ctoAgentName ?? "", style, projectContexts, instructionVersionOverrides);
         }
         catch (InvalidOperationException ex)
         {
@@ -528,11 +226,11 @@ public sealed class ContainerProvisioningService(
                 "Local model for '{Agent}': harness {Provider}, server {Origin}, context window {ContextWindow}",
                 agentName, agent.Provider, agent.LocalBaseUrl, (object?)agent.ContextWindow ?? "unset");
             if (LocalModel.IsCodexEnabled(agent.Provider, agent.LocalBaseUrl)
-                && agent.EnvRefs.Any(e => e.EnvKeyName == CodexOssBaseUrlEnvRef))
+                && agent.EnvRefs.Any(e => e.EnvKeyName == ProvisioningFaults.CodexOssBaseUrlEnvRef))
             {
                 logger.LogWarning(
                     "Local model for '{Agent}': {EnvRef} Env Ref superseded by the local server URL; remove the Env Ref",
-                    agentName, CodexOssBaseUrlEnvRef);
+                    agentName, ProvisioningFaults.CodexOssBaseUrlEnvRef);
             }
         }
         else if (agent.ContextWindow is not null)
@@ -549,7 +247,7 @@ public sealed class ContainerProvisioningService(
             spec = spec with { Image = imageOverride };
 
         // Expand relative paths in binds for direct Docker API calls
-        var expandedBinds = spec.Binds.Select(b => ExpandBindPath(b, baseDir)).ToList();
+        var expandedBinds = spec.Binds.Select(b => ContainerSpecBuilder.ExpandBindPath(b, baseDir)).ToList();
 
         if (spec.Networks.Count == 0)
             return Refuse("no networks configured for agent");
@@ -569,9 +267,9 @@ public sealed class ContainerProvisioningService(
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
 
-        await WriteConfigFilesAsync(agent, baseDir, files);
-        await WriteInstructionFilesAsync(agent, baseDir, files);
-        await GenerateProjectContextFilesAsync(agent, baseDir, files.ProjectContexts);
+        await _writer.WriteConfigFilesAsync(agent, baseDir, files);
+        await _writer.WriteInstructionFilesAsync(agent, baseDir, files);
+        await _writer.WriteProjectContextFilesAsync(agent, baseDir, files.ProjectContexts);
 
         var primaryNetwork = spec.Networks[0];
 
@@ -579,8 +277,9 @@ public sealed class ContainerProvisioningService(
             "Provisioning '{Agent}' container='{Container}' image='{Image}'",
             agentName, agent.ContainerName, spec.Image);
 
-        var logMaxSize = config["Provisioning:ContainerLogMaxSize"];
-        var logMaxFile = config["Provisioning:ContainerLogMaxFile"];
+        var options = Options;
+        var logMaxSize = options.ContainerLogMaxSize;
+        var logMaxFile = options.ContainerLogMaxFile;
 
         // The forwarder must know the new placeholders before the container that holds them starts,
         // and must forget the previous container's: record their hashes, then rewrite its state.
@@ -793,7 +492,7 @@ public sealed class ContainerProvisioningService(
     {
         using var held = await _agentOperations.AcquireAsync(agentName, ct);
 
-        if (DescribePrimaryHumanFault() is { } priorityFault)
+        if (_policy.DescribePrimaryHumanFault() is { } priorityFault)
             return ProvisionResult.Fail(agentName, priorityFault);
 
         // #386: PV1 likewise keep the old container.
@@ -897,25 +596,6 @@ public sealed class ContainerProvisioningService(
         return results;
     }
 
-    // ── path expansion ─────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Expands a bind string's host-side path: replaces ./ with baseDir.
-    /// Format: "host:container" or "host:container:options"
-    /// </summary>
-    private static string ExpandBindPath(string bind, string baseDir)
-    {
-        var parts = bind.Split(':', 3);
-        if (parts.Length < 2) return bind;
-
-        var host = parts[0]
-            .Replace("./", $"{baseDir.TrimEnd('/')}/", StringComparison.Ordinal);
-
-        return parts.Length == 3
-            ? $"{host}:{parts[1]}:{parts[2]}"
-            : $"{host}:{parts[1]}";
-    }
-
     /// <summary>
     /// Ensures that all distinct networks referenced in agent_networks exist as
     /// standalone Docker bridge networks. Creates any that are missing.
@@ -934,7 +614,7 @@ public sealed class ContainerProvisioningService(
         if (allNetworks.Count == 0)
         {
             // Fallback: ensure the default fleet network exists even if DB is empty
-            allNetworks = [FleetNetwork];
+            allNetworks = [ContainerSpecBuilder.FleetNetwork];
         }
 
         var created  = new List<string>();
@@ -978,7 +658,7 @@ public sealed class ContainerProvisioningService(
         var resolvedName = containerName;
         if (json is null)
         {
-            var project = config["Provisioning:ComposeProject"] ?? "fleet";
+            var project = Options.ComposeProject;
             var composeName = $"{project}-{containerName}-1";
             json = await docker.InspectContainerAsync(composeName, ct);
             if (json is not null)
@@ -996,886 +676,13 @@ public sealed class ContainerProvisioningService(
         try
         {
             using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            var image  = root.GetProperty("Config").GetProperty("Image").GetString() ?? "";
-            var memory = root.GetProperty("HostConfig").GetProperty("Memory").GetInt64();
-
-            var env = new List<string>();
-            if (root.GetProperty("Config").TryGetProperty("Env", out var envArr))
-                foreach (var e in envArr.EnumerateArray())
-                    env.Add(e.GetString() ?? "");
-
-            var binds = new List<string>();
-            if (root.GetProperty("HostConfig").TryGetProperty("Binds", out var bindsEl)
-                && bindsEl.ValueKind == JsonValueKind.Array)
-                foreach (var b in bindsEl.EnumerateArray())
-                    binds.Add(b.GetString() ?? "");
-
-            var networks = new List<string>();
-            if (root.TryGetProperty("NetworkSettings", out var ns)
-                && ns.TryGetProperty("Networks", out var netsEl))
-                foreach (var n in netsEl.EnumerateObject())
-                    networks.Add(n.Name);
-
-            var extraHosts = new List<string>();
-            if (root.GetProperty("HostConfig").TryGetProperty("ExtraHosts", out var hostsEl)
-                && hostsEl.ValueKind == JsonValueKind.Array)
-                foreach (var h in hostsEl.EnumerateArray())
-                    extraHosts.Add(h.GetString() ?? "");
-
-            return (new ContainerSpec(image, memory, env, binds, networks) { ExtraHosts = extraHosts }, resolvedName);
+            return (ContainerSpecDiff.FromInspect(doc.RootElement), resolvedName);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to parse Docker inspect response for {Container}", resolvedName);
             return (null, resolvedName);
         }
-    }
-
-    // ── diff ───────────────────────────────────────────────────────────────────
-
-    public static List<string> ComputeDiff(ContainerSpec desired, ContainerSpec actual)
-    {
-        var diffs = new List<string>();
-
-        // Image
-        if (!string.Equals(desired.Image, actual.Image, StringComparison.OrdinalIgnoreCase))
-            diffs.Add($"image: desired '{desired.Image}' vs actual '{actual.Image}'");
-
-        // Memory
-        if (desired.MemoryBytes != actual.MemoryBytes)
-            diffs.Add($"memory: desired {FormatBytes(desired.MemoryBytes)} vs actual {FormatBytes(actual.MemoryBytes)}");
-
-        // Networks
-        var desiredNets = new HashSet<string>(desired.Networks, StringComparer.OrdinalIgnoreCase);
-        var actualNets  = new HashSet<string>(actual.Networks,  StringComparer.OrdinalIgnoreCase);
-        foreach (var n in desiredNets.Except(actualNets))
-            diffs.Add($"network missing: '{n}'");
-        foreach (var n in actualNets.Except(desiredNets))
-            diffs.Add($"network extra: '{n}'");
-
-        // Binds — compare container-side paths only (host paths differ between environments)
-        var desiredContainerPaths = desired.Binds
-            .Select(ParseContainerPath)
-            .Where(p => p is not null)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase)!;
-        var actualContainerPaths = actual.Binds
-            .Select(ParseContainerPath)
-            .Where(p => p is not null)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase)!;
-
-        foreach (var p in desiredContainerPaths.Except(actualContainerPaths))
-            diffs.Add($"mount missing (container path): '{p}'");
-        foreach (var p in actualContainerPaths.Except(desiredContainerPaths))
-            diffs.Add($"mount extra (container path): '{p}'");
-
-        // Env — compare keys only (values may differ due to secrets)
-        // Exclude base-image env vars that are injected by Docker/the base image and are not
-        // part of the agent's desired config.
-        var baseImageEnvPrefixes = new[] { "DOTNET_", "ASPNETCORE_" };
-        var baseImageEnvKeys = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "PATH", "APP_UID", "HOME", "HOSTNAME", "TERM",
-            "DOTNET_RUNNING_IN_CONTAINER", "DOTNET_VERSION",
-        };
-        bool IsBaseImageEnv(string key) =>
-            baseImageEnvKeys.Contains(key) ||
-            baseImageEnvPrefixes.Any(p => key.StartsWith(p, StringComparison.Ordinal));
-
-        var desiredEnvKeys = desired.Env.Select(ParseEnvKey).Where(k => !IsBaseImageEnv(k)).ToHashSet(StringComparer.Ordinal);
-        var actualEnvKeys  = actual.Env.Select(ParseEnvKey).Where(k => !IsBaseImageEnv(k)).ToHashSet(StringComparer.Ordinal);
-        foreach (var k in desiredEnvKeys.Except(actualEnvKeys))
-            diffs.Add($"env missing: '{k}'");
-        foreach (var k in actualEnvKeys.Except(desiredEnvKeys))
-            diffs.Add($"env extra: '{k}'");
-
-        // Host steering of bound secrets: a host points at the forwarder only after a reprovision.
-        var desiredHosts = new HashSet<string>(desired.ExtraHosts, StringComparer.OrdinalIgnoreCase);
-        var actualHosts  = new HashSet<string>(actual.ExtraHosts,  StringComparer.OrdinalIgnoreCase);
-        foreach (var h in desiredHosts.Except(actualHosts))
-            diffs.Add($"host entry missing: '{h}'");
-        foreach (var h in actualHosts.Except(desiredHosts))
-            diffs.Add($"host entry extra: '{h}'");
-
-        return diffs;
-    }
-
-    // ── helpers (internal so PreviewAgentProvisionTool can reuse) ──────────────
-
-    internal static string FormatBytes(long bytes) => bytes switch
-    {
-        0           => "unlimited / unset",
-        >= 1 << 30  => $"{bytes / (1 << 30)}GB",
-        >= 1 << 20  => $"{bytes / (1 << 20)}MB",
-        _           => $"{bytes}B",
-    };
-
-    /// <summary>The deployment's <c>.env</c>, by the one rule in <see cref="EnvFile"/>. Never throws.</summary>
-    internal static Dictionary<string, string> LoadEnvFile(string path) => EnvFile.Read(path);
-
-    private static string DeriveGitName(string role) => role switch
-    {
-        "co-cto"          => "Acto",
-        "developer"       => "Adev",
-        "devops"          => "Aops",
-        "product-manager" => "Apm",
-        _                 => role,
-    };
-
-    // ── config file generation ─────────────────────────────────────────────────
-
-    /// <summary>
-    /// Renders every file a provision writes under the agent's <c>.generated/</c> directory, in
-    /// memory. Writing them is <see cref="WriteConfigFilesAsync"/> and
-    /// <see cref="WriteInstructionFilesAsync"/>, which decide nothing.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">A generator refused; see <see cref="GenerateAppsettingsJson"/>.</exception>
-    private GeneratedFiles RenderGeneratedFiles(
-        Agent agent,
-        string ctoAgentName,
-        OutputStyle? style,
-        ProjectContextPlan projectContexts,
-        IReadOnlyDictionary<string, int>? instructionVersionOverrides)
-    {
-        var enabledTools  = agent.Tools.Where(t => t.IsEnabled).Select(t => t.ToolName).OrderBy(t => t).ToList();
-        var mcpEndpoints  = agent.McpEndpoints.Select(e => e.McpName).OrderBy(e => e).ToList();
-
-        logger.LogInformation(
-            "Generating config for '{Agent}': {ToolCount} tools [{Tools}], {McpCount} MCP endpoints [{Mcp}], permissionMode={Mode}",
-            agent.Name,
-            enabledTools.Count, string.Join(", ", enabledTools),
-            mcpEndpoints.Count, string.Join(", ", mcpEndpoints),
-            agent.PermissionMode);
-
-        var fleetMemoryMcpUrl = NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"]);
-        var journal = BuildJournalProvisioning(agent);
-        if (FilesWarning(agent) is { } filesWarning) logger.LogWarning("{warning}", filesWarning);
-        foreach (var warning in SendWarnings(agent)) logger.LogWarning("{warning}", warning);
-        if (agent.JournalEnabled && journal.IngestToken is null)
-            logger.LogInformation(
-                "Journal enabled for '{Agent}', but it has no Telegram bot token ref; omitting Journal config",
-                agent.Name);
-
-        var chat = ChatAgents.BuildProvisioning(agent, journalTokens, config["Chat:SouthUrl"], PrimaryHumanUserIdOrNull());
-        var appsettings = GenerateAppsettingsJson(agent, ctoAgentName, style, journal, PrimaryHumanRawValue(), chat);
-        var mcpJson     = GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled);
-        var settings    = GenerateSettingsJson(agent, ctoAgentName, style);
-
-        // #460: the same plan the effective-settings view serves. Written for codex agents only,
-        // before the container is created, so the read-only bind always finds a file.
-        string? codexRootToml = null;
-        if (HarnessExtra.IsSupportedProvider(agent.Provider))
-        {
-            var plan = HarnessDefaults.Build(HarnessInputFor(agent));
-            if (plan.ExtraState == HarnessDefaults.ExtraIgnored)
-                logger.LogWarning("harnessExtra ignored for '{Agent}', mode defaults apply: {Reason}", agent.Name, plan.ExtraReason);
-            foreach (var note in plan.Notes)
-                logger.LogWarning("harnessExtra for '{Agent}': {Note}", agent.Name, note);
-            codexRootToml = plan.CodexRootToml;
-        }
-
-        return new GeneratedFiles(
-            appsettings, mcpJson, settings, codexRootToml, style,
-            RenderInstructionFiles(agent, instructionVersionOverrides), projectContexts);
-    }
-
-    /// <summary>
-    /// Writes appsettings.json, .mcp.json, and settings.json into the agent's
-    /// .generated/ workspace directory before the container is started.
-    /// </summary>
-    private async Task WriteConfigFilesAsync(Agent agent, string baseDir, GeneratedFiles files)
-    {
-        var generatedDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated");
-        Directory.CreateDirectory(generatedDir);
-
-        // The style file is written BEFORE settings.json, so "settings.json names a style that
-        // exists on disk" is a fact about the order rather than a hope. GenerateSettingsJson
-        // refuses the reference outright when the row is missing.
-        await WriteOutputStyleFileAsync(agent, generatedDir, files.Style);
-
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), files.Appsettings);
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        files.McpJson);
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    files.SettingsJson);
-
-        if (files.CodexRootToml is not null)
-            await File.WriteAllTextAsync(Path.Combine(generatedDir, HarnessDefaults.CodexRootTomlFileName), files.CodexRootToml);
-
-        logger.LogInformation(
-            "Generated config files for '{Agent}' in {Dir}",
-            agent.Name, generatedDir);
-    }
-
-    // ── output styles ──────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Whether this agent resolves its style as a Claude Code style FILE, as opposed to having the
-    /// same text inlined into its prompt.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Output styles are a Claude Code feature: only a claude agent has anything that reads the
-    /// file or the <c>settings.json</c> key. Codex and gemini carry the identical text in
-    /// <c>Agent.OutputStyleBody</c> instead — see <see cref="GenerateAppsettingsJson"/>. The split
-    /// is here, in one predicate, so no path can give a provider the file and forget the prompt.
-    /// </para>
-    /// <para>
-    /// A claude agent in local-model mode takes the inlined path too (#365). Claude Code
-    /// re-asserts an active style by appending a system-role message every turn, and a local
-    /// server that folds every system message into the top block then changes the prompt prefix
-    /// on every turn, so its KV cache never matches and each message re-prefills the whole prompt.
-    /// </para>
-    /// </remarks>
-    internal static bool HasStyleFile(Agent agent) =>
-        !string.IsNullOrWhiteSpace(agent.OutputStyle) &&
-        string.Equals(agent.Provider, "claude", StringComparison.OrdinalIgnoreCase) &&
-        !ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl);
-
-    private async Task<OutputStyle?> ResolveOutputStyleAsync(Agent agent)
-    {
-        if (string.IsNullOrWhiteSpace(agent.OutputStyle)) return null;
-
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-        return await db.OutputStyles.AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Name == agent.OutputStyle);
-    }
-
-    private async Task WriteOutputStyleFileAsync(Agent agent, string generatedDir, OutputStyle? style)
-    {
-        var dir = Path.Combine(generatedDir, "output-styles");
-
-        if (!HasStyleFile(agent) || style is null)
-        {
-            // A stale file from a previous provision would still be mounted and discoverable, so
-            // clearing the style has to remove it rather than merely stop naming it.
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
-            return;
-        }
-
-        Directory.CreateDirectory(dir);
-        await File.WriteAllTextAsync(
-            Path.Combine(dir, $"{style.Name}.md"), OutputStyleRenderer.ForStyleFile(style));
-
-        logger.LogInformation(
-            "Wrote output style '{Style}' for '{Agent}' to {Dir}", style.Name, agent.Name, dir);
-    }
-
-    /// <summary>
-    /// The agent's assigned instructions in load order, with the tiebreak applied.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠️ <b>One definition, used by both generators.</b> The files under <c>.generated/roles/</c>
-    /// and the <c>InstructionOrder</c> list in <c>appsettings.json</c> describe the same set, and
-    /// the agent inlines the files in the order that list gives. Two sort expressions would be two
-    /// answers to one question, and the disagreement would surface as an instruction that is on
-    /// disk and never assembled — which is the defect #309 exists to close.
-    /// </para>
-    /// <para>
-    /// <c>LoadOrder</c> is not unique, so it is not a total order on its own. The name is the
-    /// tiebreak, ordinal, so two instructions sharing a load order have a defined position rather
-    /// than whatever the database happened to return.
-    /// </para>
-    /// </remarks>
-    internal static List<AgentInstruction> OrderedInstructions(Agent agent) =>
-        agent.Instructions
-            .OrderBy(ai => ai.LoadOrder)
-            .ThenBy(ai => ai.Instruction.Name, StringComparer.Ordinal)
-            .ToList();
-
-    /// <summary>
-    /// The <c>roles/</c> subdirectory an instruction is written to.
-    /// </summary>
-    /// <remarks>
-    /// The <c>base</c> → <c>_base</c> rename lives here and nowhere else. The agent is handed the
-    /// resulting directory names rather than the instruction names, so it never has to re-implement
-    /// this mapping — a second copy of it is a second thing that can drift.
-    /// </remarks>
-    internal static string InstructionDirectoryName(string instructionName) =>
-        instructionName == "base" ? "_base" : instructionName;
-
-    /// <summary>
-    /// The <c>roles/</c> files for the agent's instructions, from DB instruction content:
-    /// <c>_base/system.md</c> and <c>{name}/system.md</c>. Null when the agent has no instructions.
-    /// </summary>
-    private List<RenderedInstruction>? RenderInstructionFiles(
-        Agent agent,
-        IReadOnlyDictionary<string, int>? versionOverrides = null)
-    {
-        var instructions = OrderedInstructions(agent);
-
-        if (instructions.Count == 0)
-        {
-            logger.LogWarning("No instructions configured for '{Agent}' — skipping instruction file generation", agent.Name);
-            return null;
-        }
-
-        var rendered = new List<RenderedInstruction>(instructions.Count);
-        foreach (var agentInstruction in instructions)
-        {
-            var instruction = agentInstruction.Instruction;
-
-            // Use caller-supplied version override if provided, else fall back to CurrentVersion
-            InstructionVersion? version;
-            if (versionOverrides is not null
-                && versionOverrides.TryGetValue(instruction.Name, out var overrideVersionNumber))
-            {
-                version = instruction.Versions.FirstOrDefault(v => v.VersionNumber == overrideVersionNumber);
-                if (version is null)
-                {
-                    logger.LogWarning(
-                        "Requested version {V} for instruction '{Name}' not found — falling back to current",
-                        overrideVersionNumber, instruction.Name);
-                }
-            }
-            else
-            {
-                version = null;
-            }
-
-            version ??= instruction.Versions
-                .FirstOrDefault(v => v.VersionNumber == instruction.CurrentVersion)
-                ?? instruction.Versions.OrderByDescending(v => v.VersionNumber).FirstOrDefault();
-
-            if (version is null)
-            {
-                logger.LogWarning(
-                    "No version content found for instruction '{Name}' (agent '{Agent}') — skipping",
-                    instruction.Name, agent.Name);
-                continue;
-            }
-
-            // "base" → _base/system.md, anything else → {name}/system.md
-            rendered.Add(new RenderedInstruction(InstructionDirectoryName(instruction.Name), version.Content));
-        }
-
-        return rendered;
-    }
-
-    /// <summary>
-    /// Writes the rendered instruction files into the agent's .generated/roles/ workspace directory
-    /// before the container is started.
-    /// </summary>
-    private async Task WriteInstructionFilesAsync(Agent agent, string baseDir, GeneratedFiles files)
-    {
-        if (files.Instructions is null)
-            return;
-
-        var rolesDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated", "roles");
-
-        foreach (var instruction in files.Instructions)
-        {
-            var dir = Path.Combine(rolesDir, instruction.Directory);
-            Directory.CreateDirectory(dir);
-
-            await File.WriteAllTextAsync(Path.Combine(dir, "system.md"), instruction.Content);
-        }
-
-        logger.LogInformation(
-            "Generated instruction files for '{Agent}' in {Dir} ({Count} instruction(s))",
-            agent.Name, rolesDir, agent.Instructions.Count);
-    }
-
-    // ── project contexts ───────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Loads the agent's assigned project contexts. Names are matched in C#
-    /// (<see cref="StringComparer.OrdinalIgnoreCase"/>) on loaded rows, never by database collation.
-    /// </summary>
-    private async Task<ProjectContextPlan> ResolveProjectContextsAsync(Agent agent)
-    {
-        if (agent.Projects.Count == 0)
-            return ProjectContextPlan.Empty;
-
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-
-        var headers = await db.ProjectContexts.AsNoTracking().Select(p => new { p.Id, p.Name }).ToListAsync();
-        var ids = agent.Projects
-            .Select(ap => ProjectNameMatch.MatchByName(headers, ap.ProjectName, h => h.Name)?.Id)
-            .OfType<int>()
-            .Distinct()
-            .ToList();
-
-        var contexts = ids.Count == 0
-            ? []
-            : await db.ProjectContexts
-                .Include(p => p.Versions)
-                .Where(p => ids.Contains(p.Id))
-                .AsNoTracking()
-                .ToListAsync();
-
-        return BuildProjectContextPlan(agent, contexts, logger);
-    }
-
-    /// <summary>
-    /// Every assignment renders the project's canonical context — the version row
-    /// <c>CurrentVersion</c> points at, else the latest — or a stub when the context or its versions
-    /// are missing.
-    /// </summary>
-    internal static ProjectContextPlan BuildProjectContextPlan(
-        Agent agent, IReadOnlyCollection<ProjectContext> contexts, ILogger logger)
-    {
-        var assignments = new List<ProjectContextAssignment>();
-
-        foreach (var agentProject in agent.Projects)
-        {
-            var projectName = agentProject.ProjectName;
-            var ctx = ProjectNameMatch.MatchByName(contexts, projectName, c => c.Name);
-            var version = ctx?.Versions.FirstOrDefault(v => v.VersionNumber == ctx.CurrentVersion)
-                       ?? ctx?.Versions.OrderByDescending(v => v.VersionNumber).FirstOrDefault();
-
-            assignments.Add(Assignment(agent, projectName, ctx, version, logger));
-        }
-
-        return new ProjectContextPlan(assignments);
-    }
-
-    private static ProjectContextAssignment Assignment(
-        Agent agent, string projectName, ProjectContext? ctx, ProjectContextVersion? version, ILogger logger)
-    {
-        if (ctx is null)
-        {
-            logger.LogWarning(
-                "Project context '{Project}' not found in DB for agent '{Agent}' — generating empty stub",
-                projectName, agent.Name);
-            return new ProjectContextAssignment(projectName,
-                $"# {projectName}\n\n(No content — project context not yet seeded in DB)\n");
-        }
-
-        if (version is null)
-        {
-            logger.LogWarning(
-                "Project context '{Project}' has no versions for agent '{Agent}' — generating empty stub",
-                projectName, agent.Name);
-            return new ProjectContextAssignment(projectName,
-                $"# {projectName}\n\n(No content — no versions found)\n");
-        }
-
-        return new ProjectContextAssignment(projectName, version.Content);
-    }
-
-    /// <summary>
-    /// Writes <c>projects/{name}/context.md</c> for every assignment into the agent's
-    /// <c>.generated/projects/</c> directory before the container is started.
-    /// </summary>
-    private async Task GenerateProjectContextFilesAsync(Agent agent, string baseDir, ProjectContextPlan plan)
-    {
-        var projectsDir = Path.Combine(baseDir, "workspaces", agent.ContainerName, ".generated", "projects");
-        Directory.CreateDirectory(projectsDir);
-
-        // A full.md is left over from a card-mode provision before cards were removed (#346). Nothing
-        // reads it any more; delete every one so a formerly-card agent ends up identical to any other.
-        foreach (var dir in Directory.EnumerateDirectories(projectsDir))
-        {
-            var fullMd = Path.Combine(dir, "full.md");
-            if (File.Exists(fullMd))
-            {
-                File.Delete(fullMd);
-                logger.LogInformation(
-                    "Removed stale full.md for project '{Project}' of '{Agent}'", Path.GetFileName(dir), agent.Name);
-            }
-        }
-
-        if (agent.Projects.Count == 0)
-        {
-            logger.LogInformation("No projects configured for '{Agent}' — skipping project context file generation", agent.Name);
-            return;
-        }
-
-        foreach (var assignment in plan.Assignments)
-        {
-            var dir = Path.Combine(projectsDir, assignment.ProjectName);
-            Directory.CreateDirectory(dir);
-            await File.WriteAllTextAsync(Path.Combine(dir, "context.md"), assignment.ContextMd);
-        }
-
-        logger.LogInformation(
-            "Generated project context files for '{Agent}' in {Dir} ({Count} project(s))",
-            agent.Name, projectsDir, agent.Projects.Count);
-    }
-
-    /// <summary>The generated <c>Agent.AllowedTools</c> list, which the agent reads as its own.</summary>
-    internal static List<string> AllowedToolsFor(Agent agent, string ctoAgentName)
-    {
-        var tools = agent.Tools.Where(t => t.IsEnabled).OrderBy(t => t.ToolName)
-            .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName).ToList();
-
-        // Codex derives config.toml enabled_tools from AllowedTools (entrypoint.sh). Auto-grant
-        // the same baseline tools that GenerateSettingsJson grants for claude/gemini, but only
-        // for codex: other providers do not read AllowedTools this way.
-        if (string.Equals(agent.Provider, "codex", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!tools.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
-                tools.Add("mcp__fleet-memory__memory_get");
-
-            if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
-                !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
-                !tools.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
-            {
-                tools.Add("mcp__fleet-temporal__notify_cto");
-            }
-
-            tools.Sort(StringComparer.OrdinalIgnoreCase);
-        }
-
-        return tools;
-    }
-
-    /// <summary>
-    /// The <see cref="HarnessDefaults.Build"/> input for a claude or codex agent (#460): the values the
-    /// agent itself reads from its generated config. Provisioning and the effective-settings view both
-    /// call this, so the view and the generated <c>codex-root.toml</c> come from one plan.
-    /// </summary>
-    /// <remarks>
-    /// <c>AllowedTools</c> is the list the agent ends up with: the generated list bound onto the agent's
-    /// own six-tool default (<see cref="HarnessDefaults.AgentDefaultAllowedTools"/>), which the binder
-    /// appends to rather than replaces. It is built without the CTO name: the plan reads only built-in
-    /// names, and the CTO auto-grant is an <c>mcp__</c> entry.
-    /// </remarks>
-    internal static HarnessInput HarnessInputFor(Agent agent)
-    {
-        var local = LocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl);
-        return new HarnessInput
-        {
-            Provider = agent.Provider,
-            Local = local,
-            ContextWindow = local ? agent.ContextWindow : null,
-            AllowedTools = [.. HarnessDefaults.AgentDefaultAllowedTools, .. AllowedToolsFor(agent, ctoAgentName: "")],
-            HarnessExtra = agent.HarnessExtra,
-            LocalBaseUrl = local ? LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!) : null,
-            Model = agent.Model,
-            Effort = agent.Effort,
-        };
-    }
-
-    internal static string GenerateAppsettingsJson(
-        Agent agent,
-        string ctoAgentName,
-        OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null,
-        ChatProvisioning? chat = null)
-    {
-        var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
-        if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
-            throw new InvalidOperationException(
-                $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
-                "output_styles — refusing to generate config that drops the style silently.");
-
-        // #340 D1 point 2: a row edited by hand into an invalid state stops here, and provisioning
-        // refuses with the named fault instead of starting the agent misconfigured. A reprovision
-        // renders before it removes anything, so the old container keeps running.
-        if (DescribeLocalModelFault(agent) is { } localFault)
-            throw new InvalidOperationException($"Agent '{agent.Name}' cannot be provisioned: {localFault}");
-
-        var tools = AllowedToolsFor(agent, ctoAgentName);
-        var projects   = agent.Projects.Select(p => p.ProjectName).ToList();
-        var hosted     = HostedModelProviders.TryResolve(agent.Provider, agent.Model, out var hostedProvider, out _);
-
-        var obj = new
-        {
-            Agent = new
-            {
-                agent.Name,
-                agent.ContainerName,
-                agent.Role,
-                agent.Model,
-                agent.Provider,
-                Projects     = projects,
-                AllowedTools = tools,
-                agent.PermissionMode,
-                agent.MaxTurns,
-                agent.WorkDir,
-                agent.ProactiveIntervalMinutes,
-                agent.GroupListenMode,
-                agent.GroupDebounceSeconds,
-                agent.WarmupTimeoutSeconds,
-                agent.ShortName,
-                agent.ShowStats,
-                agent.PrefixMessages,
-                agent.FormattingMode,
-                agent.SuppressToolMessages,
-                agent.Effort,
-                agent.JsonSchema,
-                agent.AgentsJson,
-                agent.CodexSandboxMode,
-
-                // #335 D5. Computed from the shared registry so entrypoint.sh can decide the key
-                // handoff without a prefix list of its own, and the agent can check parity (D8).
-                HostedProvider       = hosted,
-                HostedProviderKeyEnv = hosted ? hostedProvider.KeyEnvVar : null,
-
-                // #340. Always canonical, so the agent's startup gate can treat any other form as
-                // version skew or a hand edit. null for every agent not in local mode.
-                AnthropicBaseUrl = ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl)
-                    ? ClaudeLocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!)
-                    : null,
-
-                // #309. Every assigned instruction, as roles/ directory names, in load order.
-                //
-                // Before this the agent read two fixed paths — roles/_base and roles/{Role} — so
-                // every other assigned instruction was written to disk and never read, with no
-                // error and no log line. The agent cannot derive this list itself: a directory
-                // listing has no load order, and it cannot distinguish an assigned instruction
-                // from a stale directory left by one that was unassigned.
-                InstructionOrder = OrderedInstructions(agent)
-                    .Select(ai => InstructionDirectoryName(ai.Instruction.Name))
-                    .ToList(),
-            },
-            Telegram = new
-            {
-                AllowedUserIds  = agent.TelegramUsers.Select(u => u.UserId).ToList(),
-                AllowedGroupIds = agent.TelegramGroups.Select(g => g.GroupId).ToList(),
-                SendOnly = agent.TelegramSendOnly,
-                CanReceiveChatRequests = agent.CanReceiveChatRequests,
-                RequestReceivedMessage = agent.RequestReceivedMessage,
-            },
-        };
-
-        var json = JsonSerializer.Serialize(obj, IndentedJson);
-
-        // Inlined for codex, gemini and local-model claude (#365). Cloud claude reads the style file
-        // instead, and putting the text in both places would assert the same rules twice.
-        //
-        // Added by editing the serialized document rather than by a nullable property on the
-        // anonymous type above, because a null property still SERIALIZES — and an agent with no
-        // style must produce the same bytes it produced before this existed.
-        var codexLocal = LocalModel.IsCodexEnabled(agent.Provider, agent.LocalBaseUrl);
-        if ((style is null || HasStyleFile(agent))
-            && journal?.IngestToken is null
-            && journal?.ReadToken is null
-            && !codexLocal
-            && !HasTelegramBot(agent)
-            && agent.HarnessExtra is null
-            && chat is null)
-            return json;
-
-        var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
-        if (HasTelegramBot(agent))
-        {
-            node["Agent"]!.AsObject()["ReplyLookup"] = ReplyLookupState(agent, journal);
-            if (primaryId is { } primary) node["Telegram"]!.AsObject()["PrimaryHumanUserId"] = primary;
-        }
-        if (style is not null && !HasStyleFile(agent))
-            node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
-        if (journal?.ReadToken is not null && SupportsMcpHeaders(agent.Provider)
-            && agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase)))
-            node["Agent"]!.AsObject()["McpHeaderSupport"] = true;
-
-        // #382: codex local mode only, so every other agent keeps its bytes. The agent sets the URL
-        // as CODEX_OSS_BASE_URL on the codex child and sends the window as model_context_window.
-        if (codexLocal)
-        {
-            var agentNode = node["Agent"]!.AsObject();
-            agentNode["CodexOssBaseUrl"] = LocalModel.CodexOssBaseUrl(LocalModel.CanonicalizeBaseUrl(agent.LocalBaseUrl!));
-            if (agent.ContextWindow is int window)
-                agentNode["ContextWindow"] = window;
-        }
-
-        // #460: written only when set, so every agent without the field keeps its bytes and an older
-        // agent image ignores the unknown key.
-        if (agent.HarnessExtra is not null)
-            node["Agent"]!.AsObject()["HarnessExtra"] = agent.HarnessExtra;
-        if (journal?.IngestToken is not null)
-        {
-            node["Journal"] = new System.Text.Json.Nodes.JsonObject
-            {
-                ["IngestToken"] = journal.IngestToken,
-                ["ExcludedChatIds"] = string.Join(',', journal.ExcludedChatIds),
-            };
-
-            // Written only when true, so an agent in a deployment with no bucket produces the exact
-            // bytes it produced before media existed. Absent means false on the agent side, which is
-            // the safe default and keeps this a one-write rollback.
-            if (journal.FilesEnabled || journal.SendEnabled)
-            {
-                node["Journal"]!.AsObject()["ReadToken"] = journal.ReadToken;
-                if (journal.FilesEnabled) node["Journal"]!.AsObject()["FilesEnabled"] = true;
-                if (journal.SendEnabled) node["Journal"]!.AsObject()["SendEnabled"] = true;
-            }
-            if (journal.CrossChatToken is not null)
-            {
-                node["Journal"]!.AsObject()["CrossChatEnabled"] = true;
-                node["Journal"]!.AsObject()["CrossChatToken"] = journal.CrossChatToken;
-            }
-            if (journal.MediaEnabled)
-                node["Journal"]!.AsObject()["MediaEnabled"] = true;
-        }
-
-        // #530. Written only for an agent chat applies to (ChatAgents.IsEffective), so every other
-        // agent — chat off, or no chat service on this deployment — keeps its bytes. The
-        // section's presence is what turns the agent's chat path on; it names no agent and no
-        // broker, because the agent already holds both.
-        if (chat is not null)
-        {
-            var conversations = new System.Text.Json.Nodes.JsonObject
-            {
-                ["SouthBaseUrl"] = chat.SouthBaseUrl,
-                ["SouthBearerToken"] = chat.SouthToken,
-            };
-            if (chat.PrimaryHumanPrincipalId is not null)
-                conversations["PrimaryHumanPrincipalId"] = chat.PrimaryHumanPrincipalId;
-            node["Conversations"] = conversations;
-        }
-        return node.ToJsonString(IndentedJson);
-    }
-
-    /// <summary>
-    /// Appends ?agent={agentName} to a fleet-internal MCP URL, stripping any pre-existing
-    /// query string first. Prevents double-appending if the URL was stored in the DB
-    /// with an old ?agent= already attached (e.g. after a manual DB edit or re-provision).
-    /// Note: ALL existing query params are dropped, not just ?agent=. Fleet-internal MCP
-    /// URLs never carry other query params, so this is intentional and safe.
-    /// </summary>
-    internal static string WithAgentParam(string url, string agentName)
-    {
-        var trimmed = url.TrimEnd('/');
-        var questionIdx = trimmed.IndexOf('?');
-        var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
-        return $"{basePath}?agent={agentName}";
-    }
-
-    internal static string WithAgentTelegramParams(string url, string agentName, byte formattingMode)
-    {
-        var trimmed = url.TrimEnd('/');
-        var questionIdx = trimmed.IndexOf('?');
-        var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
-        return $"{basePath}?agent={agentName}&formatting_mode={formattingMode}";
-    }
-
-    /// <summary>
-    /// Normalizes the FleetMemory:McpUrl config value for use in the auto-inject path.
-    /// Strips a pure trailing /mcp segment (case-insensitive) and any leftover trailing slash.
-    /// Falls back to the hardcoded default when the value is empty, null, or not a valid URI.
-    /// Must only be applied to the auto-inject fallback URL, never to explicit DB rows.
-    /// </summary>
-    internal static string NormalizeFleetMemoryMcpUrl(string? rawUrl)
-    {
-        const string DefaultUrl = "http://fleet-memory:3100";
-
-        if (string.IsNullOrWhiteSpace(rawUrl) || !Uri.TryCreate(rawUrl, UriKind.Absolute, out _))
-            return DefaultUrl;
-
-        // Strip query string; work on path only.
-        var withoutQuery = rawUrl.Split('?')[0].TrimEnd('/');
-
-        // Strip a pure trailing /mcp (case-insensitive). A segment like /mcp/v1 is left intact.
-        if (withoutQuery.EndsWith("/mcp", StringComparison.OrdinalIgnoreCase))
-            withoutQuery = withoutQuery[..^4];
-
-        return withoutQuery.TrimEnd('/');
-    }
-
-    internal static string GenerateMcpJson(
-        Agent agent,
-        string fleetMemoryMcpUrl,
-        string? journalReadToken = null, bool filesEnabled = false)
-    {
-        if (agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalFilesServerName, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException("journal_files_endpoint_reserved");
-        var mcpServers = agent.McpEndpoints
-            .OrderBy(e => e.McpName)
-            .ToDictionary(
-                e => e.McpName,
-                e =>
-                {
-                    if (string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (!SupportsMcpHeaders(agent.Provider))
-                            throw new InvalidOperationException("journal_headers_unsupported");
-                        if (string.IsNullOrWhiteSpace(journalReadToken))
-                            throw new InvalidOperationException("journal_key_missing");
-
-                        return (object)new
-                        {
-                            type = e.TransportType,
-                            url = WithoutQuery(e.Url),
-                            headers = new Dictionary<string, string>
-                            {
-                                ["Authorization"] = $"Bearer {journalReadToken}",
-                            },
-                        };
-                    }
-
-                    // Append ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal URLs
-                    // so each server can identify the calling agent without relying on the LLM to pass it.
-                    // WithAgentParam strips any existing query string before appending to prevent
-                    // double-appending when the URL was stored in the DB with ?agent= already.
-                    // fleet-telegram also gets ?formatting_mode={n} so send tools can honour the agent's
-                    // FormattingMode without an extra orchestrator round-trip on every send.
-                    var url = e.McpName == "fleet-telegram"
-                        ? WithAgentTelegramParams(e.Url, agent.Name, (byte)agent.FormattingMode)
-                        : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
-                            ? WithAgentParam(e.Url, agent.Name)
-                            : e.Url;
-                    return (object)new { type = e.TransportType, url };
-                });
-
-        // Every agent gets fleet-memory access for memory_get, even if not in DB.
-        // This is the provisioning-time enforcement point for mandatory read access.
-        if (!mcpServers.ContainsKey("fleet-memory"))
-        {
-            var url = WithAgentParam(fleetMemoryMcpUrl, agent.Name);
-            mcpServers["fleet-memory"] = new { type = "http", url };
-        }
-
-        if (filesEnabled && (HasFilesGrant(agent) || JournalGrants.HasSendGrant(agent)) && agent.JournalEnabled && HasTelegramBot(agent)
-            && !string.IsNullOrWhiteSpace(journalReadToken))
-            mcpServers[JournalFilesServerName] = new { type = "http", url = "http://127.0.0.1:8091/journal-files/v1/mcp" };
-        return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
-    }
-
-    private string? PrimaryHumanRawValue() =>
-        LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env").GetValueOrDefault("FLEET_PRIMARY_HUMAN_USER_ID");
-
-    /// <summary>
-    /// The deployment's primary human on Telegram, or null when it is blank or not a valid id.
-    /// For startup, which must not fail on a value provisioning already refuses by name.
-    /// </summary>
-    public long? PrimaryHumanUserIdOrNull()
-    {
-        try { return ParsePrimaryHumanUserId(PrimaryHumanRawValue()); }
-        catch (InvalidOperationException) { return null; }
-    }
-
-    private string? DescribePrimaryHumanFault()
-    {
-        try { ParsePrimaryHumanUserId(PrimaryHumanRawValue()); return null; }
-        catch (InvalidOperationException) { return "primary_human_invalid"; }
-    }
-
-    internal static long? ParsePrimaryHumanUserId(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        if (!long.TryParse(value.Trim(), System.Globalization.NumberStyles.None,
-            System.Globalization.CultureInfo.InvariantCulture, out var id) || id <= 0)
-            throw new InvalidOperationException("primary_human_invalid");
-        return id;
-    }
-
-    private static bool HasTelegramBot(Agent agent) => agent.EnvRefs.Any(e =>
-        e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
-        && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
-
-    internal static string ReplyLookupState(Agent agent, JournalProvisioning? journal)
-    {
-        if (!agent.JournalEnabled || journal?.IngestToken is null) return "journal_capture_off";
-        if (!SupportsMcpHeaders(agent.Provider)) return "provider_headers_unsupported";
-        if (!agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase))
-            || !agent.Tools.Any(t => t.IsEnabled && string.Equals(t.ToolName, "mcp__fleet-comms-journal__get_message", StringComparison.OrdinalIgnoreCase)))
-            return "tool_not_granted";
-        return "available";
-    }
-
-    internal static bool SupportsMcpHeaders(string? provider) =>
-        provider is not null && McpHeaderSupport.TryGetValue(provider, out var supported) && supported;
-
-    internal static string WithoutQuery(string url)
-    {
-        var trimmed = url.TrimEnd('/');
-        var question = trimmed.IndexOf('?');
-        return (question >= 0 ? trimmed[..question] : trimmed).TrimEnd('/');
     }
 
     private async Task<string?> DescribeJournalProvisioningFaultAsync(
@@ -1888,7 +695,7 @@ public sealed class ContainerProvisioningService(
             .Include(a => a.EnvRefs)
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        return agent is null ? null : DescribeJournalProvisioningFault(agent);
+        return agent is null ? null : _policy.DescribeJournalProvisioningFault(agent);
     }
 
     private async Task<string?> DescribeProviderPreflightFaultAsync(string agentName, CancellationToken ct)
@@ -1899,7 +706,7 @@ public sealed class ContainerProvisioningService(
             .Include(a => a.CredentialMounts)
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
-        return agent is null ? null : DescribeProviderPreflightFault(agent);
+        return agent is null ? null : ProvisioningFaults.DescribeProviderPreflightFault(agent);
     }
 
     private async Task<string?> DescribeCodexServerUrlFaultAsync(string agentName, CancellationToken ct)
@@ -1912,158 +719,17 @@ public sealed class ContainerProvisioningService(
             .FirstOrDefaultAsync(a => a.Name == agentName, ct);
         return agent is null
             ? null
-            : DescribeCodexServerUrlFault(agent, LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env"));
-    }
-
-    private string? DescribeJournalProvisioningFault(Agent agent)
-    {
-        if (agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalFilesServerName, StringComparison.OrdinalIgnoreCase)))
-            return "journal_files_endpoint_reserved";
-        var hasJournalEndpoint = agent.McpEndpoints.Any(e =>
-            string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase));
-        if (!agent.JournalEnabled && !hasJournalEndpoint) return null;
-
-        var keyFault = journalTokens.DescribeKeyFault();
-        if (keyFault is not null) return keyFault;
-        if (hasJournalEndpoint && !SupportsMcpHeaders(agent.Provider))
-            return "journal_headers_unsupported";
-        return null;
-    }
-
-    private JournalProvisioning BuildJournalProvisioning(Agent agent)
-    {
-        if (DescribeJournalProvisioningFault(agent) is { } fault)
-            throw new InvalidOperationException(fault);
-
-        var hasBotToken = agent.EnvRefs.Any(e =>
-            e.EnvKeyName.StartsWith("TELEGRAM_", StringComparison.OrdinalIgnoreCase)
-            && e.EnvKeyName.EndsWith("_BOT_TOKEN", StringComparison.OrdinalIgnoreCase));
-        var hasJournalEndpoint = agent.McpEndpoints.Any(e =>
-            string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase));
-
-        var filesEnabled = HasFilesGrant(agent) && agent.JournalEnabled && hasBotToken;
-        var sendEnabled = JournalGrants.SendEffective(agent);
-        return new JournalProvisioning(
-            agent.JournalEnabled && hasBotToken
-                ? journalTokens.Mint(JournalTokenService.PurposeIngest, agent.Name)
-                : null,
-            agent.JournalEnabled ? journalTokens.ExcludedChatIds() : [],
-            (hasJournalEndpoint || filesEnabled || sendEnabled)
-                ? journalTokens.Mint(JournalTokenService.PurposeRead, agent.Name)
-                : null,
-            // ⚠️ Derived, never configured per agent. `Journal:MediaEnabled` is the agent's opt-in
-            //    for archived media, and nothing else on the agent side can know whether a bucket
-            //    exists. Without this key the flag is unreachable from a provisioned deployment:
-            //    the agent journals every attachment as `not_archived(media_disabled)` forever and
-            //    the media plane never runs, while Comms happily accepts uploads.
-            //
-            //    The gate is the ENDPOINT ALONE, which is the same key the compose file uses to
-            //    enable media (`Comms__Media__Endpoint=${FLEET_COMMS_MEDIA_ENDPOINT:-}`) and the
-            //    same key `upgrade.sh` uses to decide whether to start the `comms-media` profile.
-            //    There is therefore exactly one switch, and no second condition that can be unset
-            //    while the bucket is running. An earlier version of this also required
-            //    `FLEET_COMMS_MEDIA_BUCKET`, which `setup.sh` never writes — compose defaults it to
-            //    `comms-journal` — so a fresh install that said yes to media provisioned every
-            //    agent with the flag OFF. That is the bug this line exists to avoid, not a
-            //    theoretical one.
-            //
-            //    The bucket name and the scoped credential pair are deliberately NOT part of the
-            //    gate: an agent must not read a secret to decide a boolean, and a half-provisioned
-            //    bucket is Comms' startup failure to raise, not the agent's to guess at.
-            MediaEnabled: MediaEndpointIsConfigured(), FilesEnabled: filesEnabled,
-            SendEnabled: sendEnabled,
-            CrossChatToken: JournalGrants.CrossChatEffective(agent)
-                ? journalTokens.Mint(JournalTokenService.PurposeReadCrossChat, agent.Name) : null);
+            : ProvisioningFaults.DescribeCodexServerUrlFault(agent, LoadEnvFile(Options.EnvFilePath));
     }
 
     /// <summary>
-    /// Whether the deployment's media switch is on, read from the same <c>.env</c> the orchestrator
-    /// reads the Codex server URL from.
+    /// The deployment's primary human on Telegram, or null when it is blank or not a valid id.
+    /// For startup, which must not fail on a value provisioning already refuses by name.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Read from the provisioning env file the same way <c>DescribeCodexServerUrlFault</c> reads the
-    /// Codex URL — these values are deployment-scoped, and the orchestrator's own process environment
-    /// is not where the Comms media settings live. <c>LoadEnvFile</c> keeps <c>KEY=</c> as an empty
-    /// value and skips a commented <c>#KEY=…</c>, so both "declined media" (<c>setup.sh</c> writes a
-    /// blank endpoint) and "never asked" (the line is commented out in <c>.env.example</c>) read as
-    /// off.
-    /// </para>
-    /// <para>
-    /// The endpoint alone, with no <c>FLEET_COMMS_MEDIA_BUCKET</c> condition: see the caller for why
-    /// that second condition was the bug.
-    /// </para>
-    /// </remarks>
-    internal bool MediaEndpointIsConfigured()
-    {
-        var env = LoadEnvFile(config["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
-        return HasMeaningfulValue(env, "FLEET_COMMS_MEDIA_ENDPOINT");
-    }
+    public long? PrimaryHumanUserIdOrNull() => _policy.PrimaryHumanUserIdOrNull();
 
-    private static bool HasMeaningfulValue(IReadOnlyDictionary<string, string> env, string key) =>
-        env.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value);
-
-    /// <summary>
-    /// The user-level <c>~/.claude/settings.json</c>. Carries <c>outputStyle</c> only for an agent
-    /// that has one; a styleless agent's file is byte-identical to what it was before styles
-    /// existed, which is what makes the column a per-agent rollout switch and a one-write rollback.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">
-    /// The agent names a style with no row, so no file was generated for it. Refusing here is the
-    /// point: naming an unresolvable style would leave the agent silently on <c>default</c> with
-    /// nothing to show for it, which is indistinguishable from the style not working.
-    /// </exception>
-    internal static string GenerateSettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null)
-    {
-        if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
-            throw new InvalidOperationException(
-                $"Agent '{agent.Name}' names output style '{agent.OutputStyle}', which has no row in " +
-                "output_styles — refusing to write settings.json with an unresolvable reference.");
-
-        var allow = agent.Tools
-            .Where(t => t.IsEnabled)
-            .OrderBy(t => t.ToolName)
-            .Select(t => JournalGrants.IsSendGrant(t.ToolName) ? JournalGrants.SendGrant : string.Equals(t.ToolName, JournalFilesGrant, StringComparison.OrdinalIgnoreCase) ? JournalFilesGrant : t.ToolName)
-            .ToList();
-
-        // Every agent gets memory_get — provisioning-time enforcement of mandatory read access.
-        // Use the fully-qualified MCP name so Claude CLI matches the permission without prompting.
-        if (!allow.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
-            allow.Add("mcp__fleet-memory__memory_get");
-
-        // Auto-grant notify_cto to every agent except the CTO agent itself.
-        // If FLEET_CTO_AGENT is unset (empty ctoAgentName), skip the grant entirely — fail-safe
-        // over fail-open: a misconfigured CTO name must not silently create a self-loop.
-        // Use the fully-qualified MCP name so Claude CLI matches the permission without prompting.
-        if (!string.IsNullOrWhiteSpace(ctoAgentName) &&
-            !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase) &&
-            !allow.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
-        {
-            allow.Add("mcp__fleet-temporal__notify_cto");
-        }
-
-        allow.Sort(StringComparer.OrdinalIgnoreCase);
-
-        // Two shapes rather than one with a null: the key must be ABSENT, not null, for an agent
-        // with no style — Claude Code would resolve a null to nothing useful and the byte-identity
-        // guarantee would be gone either way.
-        return HasStyleFile(agent) && style is not null
-            ? JsonSerializer.Serialize(new { permissions = new { allow }, outputStyle = style.Name }, IndentedJson)
-            : JsonSerializer.Serialize(new { permissions = new { allow } }, IndentedJson);
-    }
-
-    private static string? ParseContainerPath(string bind)
-    {
-        // bind format: "host:container" or "host:container:options"
-        var parts = bind.Split(':', 3);
-        return parts.Length >= 2 ? parts[1] : null;
-    }
-
-    internal static string ParseEnvKey(string envEntry)
-    {
-        var idx = envEntry.IndexOf('=');
-        return idx >= 0 ? envEntry[..idx] : envEntry;
-    }
+    /// <inheritdoc cref="ProvisioningPolicy.MediaEndpointIsConfigured"/>
+    internal bool MediaEndpointIsConfigured() => _policy.MediaEndpointIsConfigured();
 
     /// <summary>
     /// Returns the effective HostPort for an agent.
@@ -2088,107 +754,66 @@ public sealed class ContainerProvisioningService(
             agent.Name, hostPort);
         return $"http://127.0.0.1:{hostPort}";
     }
-}
 
-public record ContainerSpec(
-    string Image,
-    long MemoryBytes,
-    List<string> Env,
-    List<string> Binds,
-    List<string> Networks)
-{
-    /// <summary><c>host:address</c> entries: bound hosts pointed at <c>fleet-secrets</c>.</summary>
-    public List<string> ExtraHosts { get; init; } = [];
+    // ── The same members under their earlier names ─────────────────────────────
+    //
+    // Each of these moved to the class named on its line. They stay here, as one-line forwards, for
+    // the endpoints, tools and tests that reach them through this type.
 
-    /// <summary>The agent's fixed address on the secrets network, when it holds a bound secret.</summary>
-    public string? SecretNetworkAddress { get; init; }
-}
+    internal const string JournalMcpServerName = AgentConfigFiles.JournalMcpServerName;
+    internal const string JournalFilesServerName = AgentConfigFiles.JournalFilesServerName;
+    internal const string JournalFilesGrant = AgentConfigFiles.JournalFilesGrant;
+    internal static IReadOnlyDictionary<string, bool> McpHeaderSupport => AgentConfigFiles.McpHeaderSupport;
 
-public record ProvisionPreview(
-    string AgentName,
-    string ContainerName,
-    /// <summary>The actual container name that was found (may differ from ContainerName if compose naming was used).</summary>
-    string ResolvedContainerName,
-    ContainerSpec Desired,
-    ContainerSpec? Actual,
-    List<string> Diffs)
-{
-    public static ProvisionPreview NotFound(string agentName) =>
-        new(agentName, "", "", new ContainerSpec("", 0, [], [], []), null, [$"agent '{agentName}' not found in DB"]);
-}
+    /// <summary>The deployment's <c>.env</c>, by the one rule in <see cref="EnvFile"/>. Never throws.</summary>
+    internal static Dictionary<string, string> LoadEnvFile(string path) => EnvFile.Read(path);
 
-public record NetworkEnsureResult(
-    List<string> Ensured,
-    List<string> Failed)
-{
-    public bool AllOk => Failed.Count == 0;
-}
+    /// <inheritdoc cref="ContainerSpecBuilder.BuildEnv"/>
+    internal static List<string> BuildEnv(
+        Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl, string kokoroServiceUrl,
+        IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets) =>
+        ContainerSpecBuilder.BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl, bindings, secrets);
 
-public record ProvisionResult(string AgentName, bool Success, string Message)
-{
-    /// <summary>
-    /// Why a failure happened, for a caller that has to act on it. Never serialised: the REST and
-    /// MCP answers are the three fields above, unchanged.
-    /// </summary>
-    [System.Text.Json.Serialization.JsonIgnore]
-    public ProvisionFailure Failure { get; init; }
+    internal static List<string> BuildBinds(Agent agent, string baseDir) => ContainerSpecBuilder.BuildBinds(agent, baseDir);
+    internal static string CodexRootTomlBind(string containerName) => ContainerSpecBuilder.CodexRootTomlBind(containerName);
+    internal static bool IsHostedProvider(Agent agent) => ContainerSpecBuilder.IsHostedProvider(agent);
 
-    public static ProvisionResult Ok(string agentName, string message)   => new(agentName, true,  message);
-    public static ProvisionResult Fail(string agentName, string message) => new(agentName, false, message);
-}
+    public static List<string> ComputeDiff(ContainerSpec desired, ContainerSpec actual) => ContainerSpecDiff.ComputeDiff(desired, actual);
+    internal static string FormatBytes(long bytes) => ContainerSpecDiff.FormatBytes(bytes);
+    internal static string ParseEnvKey(string envEntry) => ContainerSpecDiff.ParseEnvKey(envEntry);
 
-/// <summary>The failures a caller branches on. Everything else is <see cref="Unspecified"/>.</summary>
-public enum ProvisionFailure
-{
-    Unspecified = 0,
-    AgentNotFound,
-    /// <summary>A deprovision found no container to remove.</summary>
-    ContainerNotFound,
-}
+    internal static string? DescribeLocalModelFault(Agent agent) => ProvisioningFaults.DescribeLocalModelFault(agent);
+    internal static string? DescribeProviderPreflightFault(Agent agent) => ProvisioningFaults.DescribeProviderPreflightFault(agent);
+    internal static string? DescribeCodexServerUrlFault(Agent agent, IReadOnlyDictionary<string, string> envValues) =>
+        ProvisioningFaults.DescribeCodexServerUrlFault(agent, envValues);
 
-/// <summary>
-/// One provision, decided and rendered: the loaded agent, the container to create and the files to
-/// write. Built once by <c>PrepareAsync</c>; <c>CreateAsync</c> reads nothing else.
-/// </summary>
-internal sealed record PreparedProvision(
-    Agent Agent,
-    ContainerSpec Spec,
-    List<string> ExpandedBinds,
-    SecretPlan SecretPlan,
-    string BaseDir,
-    GeneratedFiles Files);
+    internal static string GenerateAppsettingsJson(
+        Agent agent, string ctoAgentName, OutputStyle? style = null,
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null, ChatProvisioning? chat = null) =>
+        AgentConfigFiles.GenerateAppsettingsJson(agent, ctoAgentName, style, journal, primaryHumanUserId, chat);
 
-/// <summary>The contents of the agent's <c>.generated/</c> directory, before any of it is written.</summary>
-/// <param name="Style">The agent's resolved output style row, or null. Whether it becomes a file is <c>HasStyleFile</c>.</param>
-/// <param name="Instructions">The <c>roles/</c> files, or null when the agent has no instructions.</param>
-internal sealed record GeneratedFiles(
-    string Appsettings,
-    string McpJson,
-    string SettingsJson,
-    string? CodexRootToml,
-    OutputStyle? Style,
-    IReadOnlyList<RenderedInstruction>? Instructions,
-    ProjectContextPlan ProjectContexts);
+    internal static string GenerateMcpJson(
+        Agent agent, string fleetMemoryMcpUrl, string? journalReadToken = null, bool filesEnabled = false) =>
+        AgentConfigFiles.GenerateMcpJson(agent, fleetMemoryMcpUrl, journalReadToken, filesEnabled);
 
-/// <summary>One instruction's <c>roles/{Directory}/system.md</c>.</summary>
-internal sealed record RenderedInstruction(string Directory, string Content);
+    internal static string GenerateSettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null) =>
+        AgentConfigFiles.GenerateSettingsJson(agent, ctoAgentName, style);
 
-internal sealed record JournalProvisioning(
-    string? IngestToken,
-    IReadOnlyList<long> ExcludedChatIds,
-    string? ReadToken,
-    bool MediaEnabled = false,
-    bool FilesEnabled = false,
-    bool SendEnabled = false,
-    string? CrossChatToken = null);
+    internal static List<string> AllowedToolsFor(Agent agent, string ctoAgentName) => AgentConfigFiles.AllowedToolsFor(agent, ctoAgentName);
+    internal static HarnessInput HarnessInputFor(Agent agent) => AgentConfigFiles.HarnessInputFor(agent);
+    internal static bool HasStyleFile(Agent agent) => AgentConfigFiles.HasStyleFile(agent);
+    internal static List<AgentInstruction> OrderedInstructions(Agent agent) => AgentConfigFiles.OrderedInstructions(agent);
+    internal static string InstructionDirectoryName(string instructionName) => AgentConfigFiles.InstructionDirectoryName(instructionName);
+    internal static string WithAgentParam(string url, string agentName) => AgentConfigFiles.WithAgentParam(url, agentName);
+    internal static string WithAgentTelegramParams(string url, string agentName, byte formattingMode) =>
+        AgentConfigFiles.WithAgentTelegramParams(url, agentName, formattingMode);
+    internal static string NormalizeFleetMemoryMcpUrl(string? rawUrl) => AgentConfigFiles.NormalizeFleetMemoryMcpUrl(rawUrl);
+    internal static string WithoutQuery(string url) => AgentConfigFiles.WithoutQuery(url);
+    internal static long? ParsePrimaryHumanUserId(string? value) => AgentConfigFiles.ParsePrimaryHumanUserId(value);
+    internal static string ReplyLookupState(Agent agent, JournalProvisioning? journal) => AgentConfigFiles.ReplyLookupState(agent, journal);
+    internal static bool SupportsMcpHeaders(string? provider) => AgentConfigFiles.SupportsMcpHeaders(provider);
 
-/// <summary>One assignment's project context, resolved once per provision.</summary>
-/// <param name="ProjectName">The assignment's name — the <c>projects/</c> directory the agent reads.</param>
-/// <param name="ContextMd">The <c>context.md</c> body.</param>
-internal sealed record ProjectContextAssignment(string ProjectName, string ContextMd);
-
-/// <summary>Every assignment's project context.</summary>
-internal sealed record ProjectContextPlan(IReadOnlyList<ProjectContextAssignment> Assignments)
-{
-    public static readonly ProjectContextPlan Empty = new([]);
+    internal static ProjectContextPlan BuildProjectContextPlan(
+        Agent agent, IReadOnlyCollection<ProjectContext> contexts, ILogger logger) =>
+        AgentFileRenderer.BuildProjectContextPlan(agent, contexts, logger);
 }

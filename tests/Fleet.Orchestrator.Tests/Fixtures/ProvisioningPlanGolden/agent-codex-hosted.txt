@@ -1,0 +1,177 @@
+## preview
+container: fleet-agent-codex-hosted (resolved fleet-agent-codex-hosted)
+image: fleet:agent-golden
+memory: 1073741824
+secret network address: (none)
+env:
+  ZAI_CODING_PLAN_API_KEY=synthetic-hosted-key
+  RabbitMq__Host=rabbitmq
+  GIT_USER_NAME=synthetic-codex-hosted
+  GIT_USER_EMAIL=fleet-agent-codex-hosted@users.noreply.github.com
+  GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==
+  Whisper__ServiceUrl=http://fleet-whisper:8080
+  Tts__ServiceUrl=http://fleet-kokoro-tts:8880
+binds:
+  ./workspaces/fleet-agent-codex-hosted:/workspace
+  ./workspaces/fleet-agent-codex-hosted/.generated/projects:/app/projects:ro
+  ./workspaces/fleet-agent-codex-hosted/.generated/appsettings.json:/app/appsettings.json:ro
+  ./workspaces/fleet-agent-codex-hosted/claude:/root/.claude
+  ./workspaces/fleet-agent-codex-hosted/.generated/settings.json:/root/.claude/settings.json:ro
+  ./workspaces/fleet-agent-codex-hosted/codex:/root/.codex
+  ./workspaces/fleet-agent-codex-hosted/.generated/.mcp.json:/workspace/.mcp.json:ro
+  ./workspaces/fleet-agent-codex-hosted/.generated/roles:/app/roles:ro
+  ./workspaces/fleet-agent-codex-hosted/.generated/codex-root.toml:/app/codex-root.toml:ro
+networks:
+  fleet-net
+extra hosts:
+diffs:
+  container not found — not running
+
+## result
+ok: container 'fleet-agent-codex-hosted' created and started (id=0123456789ab, networks=[fleet-net])
+
+## docker calls
+GET /v1.41/containers/fleet-agent-codex-hosted/json
+POST /v1.41/containers/create
+POST /v1.41/containers/fleet-agent-codex-hosted/start
+
+## create body
+{
+  "Image": "fleet:agent-golden",
+  "Env": [
+    "ZAI_CODING_PLAN_API_KEY=synthetic-hosted-key",
+    "RabbitMq__Host=rabbitmq",
+    "GIT_USER_NAME=synthetic-codex-hosted",
+    "GIT_USER_EMAIL=fleet-agent-codex-hosted@users.noreply.github.com",
+    "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
+    "Whisper__ServiceUrl=http://fleet-whisper:8080",
+    "Tts__ServiceUrl=http://fleet-kokoro-tts:8880"
+  ],
+  "ExposedPorts": {
+    "8080/tcp": {}
+  },
+  "HostConfig": {
+    "Memory": 1073741824,
+    "Binds": [
+      "<base>/workspaces/fleet-agent-codex-hosted:/workspace",
+      "<base>/workspaces/fleet-agent-codex-hosted/.generated/projects:/app/projects:ro",
+      "<base>/workspaces/fleet-agent-codex-hosted/.generated/appsettings.json:/app/appsettings.json:ro",
+      "<base>/workspaces/fleet-agent-codex-hosted/claude:/root/.claude",
+      "<base>/workspaces/fleet-agent-codex-hosted/.generated/settings.json:/root/.claude/settings.json:ro",
+      "<base>/workspaces/fleet-agent-codex-hosted/codex:/root/.codex",
+      "<base>/workspaces/fleet-agent-codex-hosted/.generated/.mcp.json:/workspace/.mcp.json:ro",
+      "<base>/workspaces/fleet-agent-codex-hosted/.generated/roles:/app/roles:ro",
+      "<base>/workspaces/fleet-agent-codex-hosted/.generated/codex-root.toml:/app/codex-root.toml:ro"
+    ],
+    "RestartPolicy": {
+      "Name": "unless-stopped"
+    },
+    "NetworkMode": "fleet-net",
+    "PortBindings": {
+      "8080/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "8084"
+        }
+      ]
+    },
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-size": "10m",
+        "max-file": "3"
+      }
+    }
+  },
+  "NetworkingConfig": {
+    "EndpointsConfig": {
+      "fleet-net": {}
+    }
+  }
+}
+
+## network connects
+
+## generated files
+--- .mcp.json
+{
+  "mcpServers": {
+    "fleet-memory": {
+      "type": "http",
+      "url": "http://fleet-memory:3100?agent=agent-codex-hosted"
+    }
+  }
+}
+--- appsettings.json
+{
+  "Agent": {
+    "Name": "agent-codex-hosted",
+    "ContainerName": "fleet-agent-codex-hosted",
+    "Role": "product-manager",
+    "Model": "zai/glm-5.3",
+    "Provider": "codex",
+    "Projects": [],
+    "AllowedTools": [
+      "Bash",
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-temporal__notify_cto"
+    ],
+    "PermissionMode": "acceptEdits",
+    "MaxTurns": 50,
+    "WorkDir": "/workspace",
+    "ProactiveIntervalMinutes": 0,
+    "GroupListenMode": "mention",
+    "GroupDebounceSeconds": 15,
+    "WarmupTimeoutSeconds": 60,
+    "ShortName": "synthetic-codex-hosted",
+    "ShowStats": true,
+    "PrefixMessages": false,
+    "FormattingMode": 0,
+    "SuppressToolMessages": false,
+    "Effort": "high",
+    "JsonSchema": null,
+    "AgentsJson": null,
+    "CodexSandboxMode": null,
+    "HostedProvider": true,
+    "HostedProviderKeyEnv": "ZAI_CODING_PLAN_API_KEY",
+    "AnthropicBaseUrl": null,
+    "InstructionOrder": []
+  },
+  "Telegram": {
+    "AllowedUserIds": [],
+    "AllowedGroupIds": [],
+    "SendOnly": false,
+    "CanReceiveChatRequests": false,
+    "RequestReceivedMessage": null
+  },
+  "Conversations": {
+    "SouthBaseUrl": "http://fleet-comms:8082",
+    "SouthBearerToken": "cj1.south.agent-codex-hosted.hHoa8EJ735iXbSnhieNb2RtSbILwWpBENxU5-_smH18",
+    "PrimaryHumanPrincipalId": "owner"
+  }
+}
+--- codex-root.toml
+check_for_update_on_startup = false
+
+[analytics]
+enabled = false
+
+[history]
+persistence = "none"
+
+--- settings.json
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "mcp__fleet-memory__memory_get",
+      "mcp__fleet-temporal__notify_cto"
+    ]
+  }
+}
+## log lines
+[Information] Generating config for 'agent-codex-hosted': 1 tools [Bash], 0 MCP endpoints [], permissionMode=acceptEdits
+[Warning] No instructions configured for 'agent-codex-hosted' — skipping instruction file generation
+[Information] Generated config files for 'agent-codex-hosted' in <base>/workspaces/fleet-agent-codex-hosted/.generated
+[Information] No projects configured for 'agent-codex-hosted' — skipping project context file generation
+[Information] Provisioning 'agent-codex-hosted' container='fleet-agent-codex-hosted' image='fleet:agent-golden'

@@ -1,7 +1,8 @@
 using System.Diagnostics;
-using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
@@ -60,7 +61,7 @@ public static class JournalCrossChatAuthorizationEndpoints
             string? member = null;
             if (effective && body.ChatId is long chat && body.UserId is long user)
             {
-                var env = ContainerProvisioningService.LoadEnvFile(configuration["Provisioning:EnvFilePath"] ?? "/app/deploy/.env");
+                var env = EnvFile.Read(ProvisioningOptions.From(configuration).EnvFilePath);
                 var token = JournalGrants.ResolveBotToken(agent!, env);
                 member = await telegram.CheckAsync(token, body.BotId, chat, user, request.HttpContext.RequestAborted);
             }

@@ -130,6 +130,52 @@ public sealed class PendingDelegation
     public bool TemporalSettled { get; set; }
 
     /// <summary>
+    /// The delegation was started with <c>noRedelivery</c>: the bridge makes at most one attempt
+    /// to publish its directive. No five-minute re-send, no continuation of an incomplete answer,
+    /// and nothing from a process that only read the record from the file.
+    /// <para>
+    /// Written to the file only when true, like <see cref="PublishAttempted"/>, so a record
+    /// without it is the same bytes it was before the field existed.
+    /// </para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool PublishOnce { get; set; }
+
+    /// <summary>
+    /// The one publish attempt of a <see cref="PublishOnce"/> record has been made, or is about
+    /// to be: set, and confirmed in the file, BEFORE the directive is handed to the relay. From
+    /// then on nothing publishes for the record, whether that attempt delivered, failed or ended
+    /// without the bridge knowing which. Never set for any other record.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool PublishAttempted { get; set; }
+
+    /// <summary>
+    /// The record was read from the state file by this process, not created by it. In memory
+    /// only. It matters for a <see cref="PublishOnce"/> record alone: a restored one never
+    /// initiates a directive.
+    /// </summary>
+    [JsonIgnore]
+    public bool Restored { get; set; }
+
+    /// <summary>
+    /// The attempt marker of a <see cref="PublishOnce"/> record could not be confirmed in the
+    /// file when its held directive came due, so the directive was not sent and never will be.
+    /// In memory only; after a restart the record is a restored, unattempted one, which ends the
+    /// same way.
+    /// </summary>
+    [JsonIgnore]
+    public bool MarkerWriteFailed { get; set; }
+
+    /// <summary>
+    /// A <see cref="PublishOnce"/> record whose directive was never handed to the relay and now
+    /// cannot be: the pass fails its activity, so the workflow can go on to read back what
+    /// happened instead of waiting out a budget for an answer nobody was asked for.
+    /// </summary>
+    [JsonIgnore]
+    public bool DirectiveWillNeverBeSent => PublishOnce && !PublishAttempted && (Restored || MarkerWriteFailed);
+
+    /// <summary>
     /// The activity that started this delegation is publishing its first directive right now.
     /// In memory only: after a restart nobody is, and a pass sends whatever was not sent.
     /// </summary>
@@ -197,7 +243,8 @@ public sealed record DelegationStart(
     string WorkflowType,
     string ActivityId,
     int Attempt,
-    byte[] TaskToken);
+    byte[] TaskToken,
+    bool NoRedelivery = false);
 
 /// <summary>What became of an agent reply offered to the pending delegations.</summary>
 public enum DurableReplyOutcome

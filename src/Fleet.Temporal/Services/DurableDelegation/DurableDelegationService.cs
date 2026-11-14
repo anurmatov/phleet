@@ -4,6 +4,7 @@ using Fleet.Temporal.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Temporalio.Exceptions;
 
 namespace Fleet.Temporal.Services;
 
@@ -44,6 +45,16 @@ namespace Fleet.Temporal.Services;
 /// task id alone, and a later attempt of a step reuses its predecessor's task id, so a directive
 /// is never published while a cancel for the same task id is still out or may still arrive
 /// (<see cref="Fenced"/>).
+/// </para>
+///
+/// <para>
+/// A delegation started with <c>noRedelivery</c> (<see cref="PendingDelegation.PublishOnce"/>) is
+/// the exception to "sends what is owed": at most one attempt is ever made to publish its
+/// directive. The attempt is marked in the record and confirmed in the file before the directive
+/// is handed to the relay (<see cref="StartDelegationAsync"/> for the one an activity publishes
+/// itself, <see cref="MarkAttempted"/> for one the lane publishes because it was held), nothing
+/// is sent when the file could not be written, a failed attempt is not repeated, an incomplete
+/// answer is not continued, and a record read from the file never initiates a directive.
 /// </para>
 ///
 /// <para>
@@ -183,10 +194,24 @@ public sealed class DurableDelegationService : BackgroundService
         TickInterval > TimeSpan.Zero ? TickInterval : TimeSpan.FromSeconds(Math.Max(1, _options.TickSeconds));
 
     /// <summary>
+    /// The error type of the failure an activity gets when a <c>noRedelivery</c> directive was
+    /// not sent and will not be: its record could not be confirmed in the state file, or it was
+    /// read back from the file before any attempt had been made.
+    /// </summary>
+    public const string DirectiveNotSentErrorType = "DirectiveNotSent";
+
+    /// <summary>
     /// Records the delegation and publishes its directive. Returns once both are done; the caller
     /// then tells Temporal the activity completes later. A directive that cannot be published
     /// fails here, with nothing left behind, exactly as the activity failed when it could not
     /// publish.
+    ///
+    /// <para>
+    /// A <c>noRedelivery</c> start is recorded with <see cref="PendingDelegationStore.TryPut"/>,
+    /// carrying the attempt marker when the directive is about to go out from here. If the file
+    /// does not then hold the record, nothing is published and the start fails
+    /// (<see cref="DirectiveNotSentErrorType"/>), with the store as it was.
+    /// </para>
     /// </summary>
     public async Task StartDelegationAsync(DelegationStart start, CancellationToken ct)
     {
@@ -211,6 +236,7 @@ public sealed class DurableDelegationService : BackgroundService
             BudgetSeconds = (int)Math.Ceiling(start.Budget.TotalSeconds),
             RetryOnIncomplete = start.RetryOnIncomplete,
             MaxIncompleteRetries = start.MaxIncompleteRetries,
+            PublishOnce = start.NoRedelivery,
             CreatedAt = now,
             WaitStartedAt = now,
             LastPublishedAt = DateTimeOffset.MinValue,
@@ -218,6 +244,7 @@ public sealed class DurableDelegationService : BackgroundService
 
         bool held;
         var noRoom = false;
+        var recorded = true;
         await _gate.WaitAsync(ct);
         try
         {
@@ -267,16 +294,35 @@ public sealed class DurableDelegationService : BackgroundService
                 noRoom = true;
             }
 
+            if (record.PublishOnce)
+            {
+                // The marker is in the record that is written, and the write is confirmed, before
+                // the directive can go anywhere. A held directive is recorded unmarked; the lane
+                // marks it, the same way, when it comes due. Without the file there is no record
+                // at all: the store puts back whatever it held under the task id.
+                record.PublishAttempted = !held;
+                recorded = _store.TryPut(record);
+                held |= !recorded;
+            }
+
             record.Publishing = !held;
             if (!held) _startingPublishes.Add(record);
 
             // Recorded before it is published, so a reply can never arrive for a delegation the
             // bridge does not know about.
-            _store.Put(record);
+            if (!record.PublishOnce) _store.Put(record);
         }
         finally
         {
             _gate.Release();
+        }
+
+        if (!recorded)
+        {
+            _logger.LogError(
+                "Delegation taskId={TaskId} asked for at most one publish attempt and its record could not be confirmed in the state file (durable={Durable}); no directive was sent to {Agent} and the activity is failed",
+                start.TaskId, _store.Durable, start.Agent);
+            throw DirectiveNotSent(record, "its record could not be confirmed in the state file");
         }
 
         if (held)
@@ -383,7 +429,9 @@ public sealed class DurableDelegationService : BackgroundService
             }
 
             var attempt = record.IncompleteAttempt;
-            var incomplete = record.RetryOnIncomplete && result.IsIncomplete;
+            // A continuation is a second directive: a publish-once record returns an incomplete
+            // answer as it came, whatever its retry settings say.
+            var incomplete = record.RetryOnIncomplete && !record.PublishOnce && result.IsIncomplete;
 
             if (attempt > 0)
                 record.AccumulatedText += "\n" + result.Text;
@@ -645,6 +693,22 @@ public sealed class DurableDelegationService : BackgroundService
         if (record.HasResult)
             return await DeliverAsync(record, ct);
 
+        // A publish-once record whose directive was never handed to the relay and cannot be now
+        // (it was read from the file, or its marker could not be written). There is no answer to
+        // wait for, so the activity is failed at once and the workflow goes on to find out what
+        // state things are in. A timeout or a cancel already recorded is reported as what it is.
+        if (record.DirectiveWillNeverBeSent && record.TimeoutMessage is null && !record.CancelRequested)
+        {
+            var reason = record.MarkerWriteFailed
+                ? "the attempt could not be confirmed in the state file"
+                : "the bridge restarted before any attempt was made";
+            _logger.LogWarning(
+                "Delegation taskId={TaskId} (workflow {WorkflowId}, activity {ActivityId}, agent {Agent}) allows one publish attempt and none was made: {Reason}. No directive is sent; the activity is failed",
+                record.TaskId, record.WorkflowId, record.ActivityId, record.Agent, reason);
+            return Settle(
+                record, await _gateway.FailAsync(record, DirectiveNotSent(record, reason), ct), "its unsent directive was reported");
+        }
+
         if (record.TimeoutMessage is null && !record.CancelRequested)
         {
             var now = _time.GetUtcNow();
@@ -733,6 +797,12 @@ public sealed class DurableDelegationService : BackgroundService
         if (record.CancelRequested) return record.CancelSent ? RelayEffect.None : RelayEffect.Cancel;
         if (record.TimeoutMessage is not null) return record.TimeoutReported ? RelayEffect.None : RelayEffect.TimeoutNotice;
         if (record.HasResult || record.TemporalSettled) return RelayEffect.None;
+
+        // A publish-once record owes its directive once, and only to the process that recorded
+        // it: not again after the attempt (delivered, failed or unknown), not after a restart,
+        // and not when the attempt could not be marked in the file.
+        if (record.PublishOnce && (record.PublishAttempted || record.Restored || record.MarkerWriteFailed))
+            return RelayEffect.None;
 
         return now - record.LastPublishedAt >= ResendInterval
                && now >= record.PublishRetryAfter
@@ -926,6 +996,9 @@ public sealed class DurableDelegationService : BackgroundService
         var effect = Owed(record, now);
         if (effect == RelayEffect.None) return null;
         if (effect == RelayEffect.Publish && Fenced(record, now)) return null;
+        // Last, when the call is certain to be made: a marker with no attempt behind it would
+        // leave the record waiting out its budget for an answer nobody was asked for.
+        if (effect == RelayEffect.Publish && record.PublishOnce && !MarkAttempted(record)) return null;
 
         var snapshot = record.Clone();
         PriorCancel? prior = null;
@@ -952,6 +1025,38 @@ public sealed class DurableDelegationService : BackgroundService
             Cancellation = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token),
         };
     }
+
+    /// <summary>
+    /// The lane's half of "marker first" for a publish-once record whose first directive was held
+    /// or owed: sets the marker and confirms it in the file, under the gate, before the call is
+    /// made. False when the file does not hold it. Then nothing is published, now or later, and
+    /// the next pass fails the activity.
+    /// </summary>
+    private bool MarkAttempted(PendingDelegation record)
+    {
+        record.PublishAttempted = true;
+        if (_store.TrySave()) return true;
+
+        record.PublishAttempted = false;
+        record.MarkerWriteFailed = true;
+        _logger.LogError(
+            "Delegation taskId={TaskId} allows one publish attempt and the attempt could not be confirmed in the state file (durable={Durable}); no directive is sent to {Agent} and the next pass fails the activity",
+            record.TaskId, _store.Durable, record.Agent);
+        Wake();
+        return false;
+    }
+
+    /// <summary>
+    /// What the activity of a publish-once delegation is failed with when its directive was not
+    /// sent. Not retryable: a retried attempt would be a second publish. Identifiers only.
+    /// </summary>
+    private static ApplicationFailureException DirectiveNotSent(PendingDelegation record, string reason) =>
+        new(
+            $"Directive for agent {record.Agent} was not sent: {reason}. The delegation allows one publish " +
+            $"attempt (noRedelivery), so nothing was sent and nothing will be. " +
+            $"(taskId={record.TaskId}, workflowId={record.WorkflowId})",
+            errorType: DirectiveNotSentErrorType,
+            nonRetryable: true);
 
     private static bool SameTarget(PendingDelegation a, PendingDelegation b) =>
         string.Equals(a.Agent, b.Agent, StringComparison.Ordinal)
@@ -1094,6 +1199,16 @@ public sealed class DurableDelegationService : BackgroundService
                 _store.Save();
                 RemoveIfFinished(record);
                 return;
+        }
+
+        if (!sent && record.PublishOnce)
+        {
+            // The one attempt. Whether anything left the bridge is not known, so the record stays
+            // and waits for an answer, a cancel or its budget, as it would after a restart.
+            _logger.LogWarning(
+                "Failed to publish directive to agent {Agent} for taskId={TaskId}: {Error}. The delegation allows one publish attempt; it is not tried again",
+                record.Agent, send.Snapshot.CurrentTaskId, error);
+            return;
         }
 
         if (!sent)

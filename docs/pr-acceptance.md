@@ -35,17 +35,21 @@ still refuses `acceptance_missing`, including absent/false inputs and
 In `off`, IMPLEMENT → REVIEW (five attested rounds) → UNRESOLVED → PIN remains.
 Exact head, `review_ref == H`, complete CI rollup, the bound human merge gate
 and `--match-head-commit H` still apply. CI failure returns to IMPLEMENT;
-pending uses the existing 12 × 300-second CI_WAIT. CI success for code or
+pending uses the existing 12 × 300-second CI_WAIT and then the technical
+stall (STALLED), in both modes, never a gate. CI success for code or
 doc-only goes directly to MERGE_GATE without acceptance or cleanup children.
-Only `ci_timeout`, unknown-head `owner_unavailable` and `stale_signals` can
-reach BLOCKED. No plan, recovery, owner, harness or child reason can block.
+Only unknown-head `owner_unavailable` and `stale_signals` can reach BLOCKED.
+No plan, recovery, owner, harness or child reason can block.
 
-All four PIN instructions carry `REQUIRE_ACCEPTANCE: <off|required>`, including
-post-approval repin. In `off`, read only the actual head, every CI page and diff
-paths. Skip body hashing, design lookup, plans, receipts, prior rounds, owner
-and capability-map checks. Ignore missing/malformed acceptance tokens.
-Unchanged head plus successful CI after human approval still routes to MERGE;
-otherwise approval is invalidated. The required acceptance subtree is unchanged.
+All five PIN instructions carry `REQUIRE_ACCEPTANCE: <off|required>`: PIN, the
+CI wait, the cleanup wait and both post-approval re-pins (one for a delegated
+approval, one for a human approval). In `off`, read only the actual head, every
+CI page and diff paths. Skip body hashing, design lookup, plans, receipts, prior
+rounds, owner and capability-map checks. Ignore missing/malformed acceptance
+tokens. After a delegated approval, unchanged head plus successful CI routes to
+MERGE and anything else invalidates the approval, as before. After a human
+approval the same re-pin feeds the merge check described under
+"Holds and the technical stall". The required acceptance subtree is unchanged.
 The plan/receipt/lease sections below apply only in `required` mode. Empty JSON
 strings have an explicit off case because the engine default filter only covers
 empty CLR strings and null JSON values, not empty JSON strings.
@@ -89,12 +93,19 @@ providers. A validation failure exits nonzero without echoing input values.
 | `design-result` | `--issue`, `--workflow-id`, `--run-id`, `--result-file` | `DESIGN_MATCH`, `DESIGN_REASON` |
 | `prior-rounds` | `--fix`, `--batch`, `--receipts yes\|no` | `PRIOR_ROUNDS`, valid counters |
 | `prior-clean` | `--receipts-file`, array of protected receipts | `PRIOR_ATTEMPTS_CLEAN` |
-| `ci-rollup` | `--checks-file`, `--statuses-file`, complete arrays | `CI`, `CI_FAILING` |
+| `ci-rollup` | `--checks-file`, `--statuses-file`, complete arrays | `CI`, `CI_FAILING`, `CI_DETAIL` |
 | `change-class` | `--paths-file`, one path per line | `CHANGE_CLASS` |
 | `access-check` | `--plan-file`, `--config-file`, `--status-file`, `--target-agent`, CSV `--reviewers`, explicit `--capabilities` | `OWNER` |
 | `harness-evidence` | `--comments-file`, complete comment array; `--head` | `HARNESS_RETRY_SPENT` |
 | `reserve-harness-retry` | `--repo`, `--pr`, `--head`, `--attempt-hash` | `RESERVATION` |
 | `render-comment` | `--receipt`, `--ssh-targets` | sanitized comment or nonzero with empty stdout |
+
+`CI_DETAIL` says why a result is pending: `running` (a check or status has not
+finished), `none_reported` (nothing but skipped/neutral results, or nothing at
+all) or `unexpected_terminal` (everything finished and something is neither
+success nor a known failure). It is `none` for `success` and `failure`. The
+`CI` and `CI_FAILING` lines are what they were. An unreadable file prints no
+token line and exits nonzero; the delegate reports that as `CI_READ: error`.
 
 In required mode the PIN delegate must collect **every** check/status/comment page; incomplete
 files are not evidence of absence. The reservation command itself uses `gh api
@@ -228,7 +239,8 @@ runtime acceptance or proof that every earlier attempt was discovered.
 
 ## Agent image size evidence
 
-The copied validator is 21,584 bytes. The baseline agent build already installs
+The copied validator is 21,951 bytes (21,584 when the image sizes below were
+measured; `CI_DETAIL` added the rest). The baseline agent build already installs
 Python transitively; explicitly naming `python3` makes that prerequisite durable.
 This is not a claim that the bare SDK base contains Python.
 
@@ -258,19 +270,22 @@ Recover a missing URL from the one branch's PR list, not by opening a duplicate.
 |---|---|
 | IMPLEMENT | Clear Acceptance first; implement on the same branch/PR; complete → REVIEW; incomplete → bounded revision |
 | REVIEW | Consensus maximum five rounds; reviewers exclude author and CTO, and attest H; unanimous approved at H → UNRESOLVED |
-| HUMAN_PAUSE | human-review 180/60/2; approved → fresh REVIEW, changes_requested → revision then IMPLEMENT, rejected/timeout → terminal |
+| HUMAN_PAUSE | Entered only after one CI-only probe of H answered success. human-review 180/60/2; approved → fresh REVIEW, changes_requested → revision then IMPLEMENT, rejected/timeout → terminal |
+| REVIEW_HOLD | `needs_human_review` at a head that is not green: 300-second timer then probe, 12 passes per head in total; success → fresh REVIEW, failure → IMPLEMENT, head moved → INVALIDATED, budget spent → STALLED(ci_timeout) |
 | UNRESOLVED | Report threads only; no push; unresolved threads → IMPLEMENT; none → PIN |
 | PIN | Re-read actual head, all CI pages, immutable plan evidence, owner access, prior receipts and counters |
-| CI_WAIT | Literal 300-second timer, maximum 12; repeat PIN; still pending → ci_timeout |
+| CI_WAIT | Literal 300-second timer, maximum 12; repeat PIN; a reported different head → INVALIDATED; still not success → STALLED(ci_timeout) |
+| STALLED | Owned technical state, no gate and no signal: one coordinator notice, then four 10800-second timers each followed by one probe; success → resume route, failure → IMPLEMENT, head moved → INVALIDATED, fourth read not success → TIMEOUT |
 | CLEANUP_WAIT | Literal 1800-second timer, maximum 16; repeat PIN; still dirty → cleanup_pending |
 | ACCEPT | Enforce batch entry guard, update counters, W1, then one awaited exact-head child |
 | CLASSIFY | Code-validated unanimous classification of failed attempt receipts; no synthesizer verdict |
 | ROUND_CHECK | batch 5 → CONTINUE_GATE before another revision; otherwise same-PR product fix |
 | CONTINUE_GATE | CEO-only acceptance-decision; continue resets batch only, stop → STOPPED |
-| BLOCKED | CEO-only acceptance-decision; continue → PIN and full revalidation, stop → STOPPED |
+| BLOCKED | CEO-only acceptance-decision; continue → PIN and full revalidation, stop → STOPPED. Never entered for `ci_timeout` |
 | INVALIDATED | W4 clear; publish sanitized head invalidation; withdraw review ref and fresh delta REVIEW |
-| MERGE_GATE | Required Phase/GateRef/Acceptance write then bound CEO merge wait |
-| MERGE | Recheck H and CI, then ready/merge with --match-head-commit H; verify actual merged state |
+| MERGE_GATE | Required Phase/GateRef/Acceptance write then bound CEO merge wait. Delegated approval → re-pin → MERGE or INVALIDATED; human approval → MERGE_HOLD |
+| MERGE_HOLD | Human approvals only. Re-pin, then a read-only preflight; clear → MERGE, CI failure → IMPLEMENT, head moved → INVALIDATED, anything else → 300-second timer and again, 12 passes per gate visit, then STALLED(merge_held). The approval is kept |
+| MERGE | Delegated: pinned merge, one read. Human: the merge command once per gate visit, then up to three reads of the actual merged state |
 | STOPPED | PR remains open, sanitized summary, waiter cancelled; no merge |
 | EXHAUSTED | No terminal sentinel after 60 delivery passes; notify, waiter cancelled, no merge |
 
@@ -298,8 +313,8 @@ starts only after verified merge and retains issue/reviewer/preparation inputs.
 
 The configured CTO performs a read-only PIN, bounded to 15 minutes, with
 `REQUIRE_ACCEPTANCE` on every PIN and post-approval repin. Off-mode PIN emits
-only HEAD_OID, CI and CHANGE_CLASS. Required-mode PIN emits
-PR, HEAD_OID, IS_DRAFT, CI, CI_FAILING, CHANGE_CLASS, PLAN, PLAN_SHA256,
+only HEAD_OID, CI_READ, CI, CI_DETAIL and CHANGE_CLASS. Required-mode PIN emits
+PR, HEAD_OID, IS_DRAFT, CI_READ, CI, CI_FAILING, CI_DETAIL, CHANGE_CLASS, PLAN, PLAN_SHA256,
 MAX_DURATION, WAIT_SECONDS, PRE_STAGES, POST_STAGES, OWNER, PRIOR_RECEIPTS,
 PRIOR_ATTEMPTS_CLEAN, PRIOR_ROUNDS, PRIOR_LAST_HEAD, MAP_COMMIT, MAP_SHA256,
 SSH_TARGETS, PINNED_AT, BODY_SHA256, PLAN_APPROVAL, APPROVED_PLAN_SHA256,
@@ -313,6 +328,21 @@ Any remaining incomplete/pending status, or zero nonignored results, is pending.
 Only the remaining all-success result is success; branch-protection permissions
 are not needed. Pending uses CI_WAIT; failure returns to IMPLEMENT with check
 names, never acceptance.
+
+`CI_READ` is `ok` when every check-run and status page was read and `error` when
+any GitHub read failed; `CI` is then `pending`. PIN, the CI wait and a human
+approval's re-pin read `error` beside `CI: success` as pending; the cleanup wait
+and a delegated approval's re-pin parse what they always parsed. A PIN without
+the line reads as `ok`, so `CI_READ` never turns a PIN that was success into
+something else.
+
+The run records every CI read that held it back as exactly one of `pending`
+(answered `CI: pending`, read ok), `unavailable` (`CI_READ: error`) or `silent`
+(no head or no parseable `CI:` line). A turn that failed or timed out is silent:
+the report variable is cleared before each read in CI_WAIT, in MERGE_HOLD and
+before every probe, so an old answer is never read as the new one. The three
+counters restart when H changes and appear in the stall notice. None of them is
+success.
 
 Doc-only is an allow-list: docs/**, nested README.md or CHANGELOG.md, with a
 winning deny-list for projects, roles, seed JSON, deploy, scripts, .github,
@@ -351,6 +381,10 @@ owner_unavailable (pin_failed), never blind progress.
 | merge_gate_seq | Increases per merge visit, including invalidation/feedback returns |
 | invalidations | Increases per INVALIDATED entry; never resets counters |
 | harness_retry_head | One durably reserved same-head retry; restart does not restore its availability |
+| ci_pending_reads, ci_unavailable_reads, ci_silent_reads | One per CI read that was pending, unavailable or silent; all three restart when H changes |
+| review_hold_passes | Review-hold passes spent at H, 0–12; restarts only when H changes |
+| merge_hold_passes | Merge-hold passes spent in this gate visit, 0–12; a stall and its resume do not restore them |
+| merge_issued_seq | The merge_gate_seq whose merge command was issued; the command is skipped when it equals the current visit |
 
 First attempt is round zero. At ACCEPT entry, a different head with batch 5
 must enter CONTINUE_GATE before any counter update or child. After five failed
@@ -359,7 +393,9 @@ on the same head is not a round. Continue returns to its caller (IMPLEMENT or
 ACCEPT); BLOCKED continue always repeats PIN and cleanup verification.
 
 Caps are independent: delivery 60; consensus five per review entry; stale signals
-five per gate visit; CI 12 × 300 seconds; cleanup 16 × 1800 seconds. Fix total and
+five per gate visit; CI 12 × 300 seconds; cleanup 16 × 1800 seconds; review hold
+12 × 300 seconds per head; merge hold 12 × 300 seconds per gate visit; stall
+4 × 10800 seconds; merged-state reads three, 60 seconds apart. Fix total and
 merge visits have no separate cap, but remain inside delivery. Exhaustion is not
 a synthetic approval. STOPPED is terminal; EXHAUSTED means no sentinel, both wake
 the optional waiter with cancelled and leave the PR open.
@@ -395,7 +431,14 @@ CTO changes_requested feedback third; matching Ref decision fourth; otherwise
 consume stale payload and rewait, up to five then stale_signals. A Ref-carrying
 changes_requested needs matching Ref. Grants retain existing VisitId/ArtifactRef
 guards, author/CTO exclusions and unanimously published ReviewRef/Scrub evidence.
-No new grant authority or grant creation is introduced.
+No new grant authority or grant creation is introduced. A delegated approval
+then takes the re-pin and pinned merge it always took; a human approval goes to
+MERGE_HOLD. Nothing after either changes a gate's timers.
+
+`technical-stalled` and `merge-hold` are phases of no wait and are in no signal
+registry: there is no button, no push notice and no badge for them, and a click
+kept from the merge gate is refused as `stale_phase` because GateRef is left as
+published while Phase has moved on.
 
 Acceptance waits have timeout/matching-decision/stale routing only. Continue/stop
 is CEO dashboard-only, including for the configured CTO. Timeout is 720 minutes,
@@ -403,6 +446,91 @@ is CEO dashboard-only, including for the configured CTO. Timeout is 720 minutes,
 180/60/2 and never consents to plans, privileges, production effects or merging.
 Notices are 1–3 plain sentences with verified facts, next owner/action and at most
 one human ask; no signal-sending instructions or invented progress.
+
+## Holds and the technical stall
+
+A technical pending state belongs to the run. It is not a question for a human,
+so it never opens a gate.
+
+**CI-only probe.** `ci_probe` is a read-only turn of the configured CTO, 15
+minutes, the same text in both modes: the actual head, every check-run and
+status page at it, `ci-rollup`, and nothing else. It returns HEAD_OID, CI_READ,
+CI, CI_FAILING and CI_DETAIL. Success means all three of: the head is H,
+`CI_READ: ok`, `CI: success`. A missing CI_READ line is not success here.
+
+**Human pause.** Every entry to `human_pause` is preceded by a probe, on the
+first `needs_human_review` verdict and on every later one. Success opens the
+pause as before. `CI: failure` returns to IMPLEMENT with the failing names and
+the reviewers' text. A reported different head invalidates. Pending,
+unavailable and silent hold: REVIEW_HOLD repeats timer and probe. A green read
+during a hold buys one fresh REVIEW at H, not the pause, because the stored
+verdict is older than the green result. A hold never approves anything:
+`review_ok` stays `no` and ReviewRef stays empty. The review prompt tells
+reviewers that the workflow verifies checks after review, so a running check is
+no reason to hold a verdict and `needs_human_review` is for a human decision.
+
+**STALLED(reason).** Entered from CI_WAIT (`ci_timeout`, resume PIN), from
+REVIEW_HOLD (`ci_timeout`, resume REVIEW) and from MERGE_HOLD (`merge_held`,
+resume the merge check). Entry is one required write of Phase
+`technical-stalled` and Acceptance `result=blocked;block=<reason>`; GateRef is
+not written. One notice goes to the configured CTO and to nobody else: head,
+reason, the three read counters, the last CI detail and hold reason, the times
+of the four reads, and that a concrete authority, risk, cost or scope question
+is the CTO's to raise through its normal channel. Then four 10800-second
+timers (one sleep step in a loop of four), each followed by one probe:
+720 minutes, the timeout of the gate this replaces. The first success takes the
+resume route (a review resumes with a review, never the pause), a failure goes
+to IMPLEMENT, a moved head invalidates, and a fourth read that is not success
+ends the run as TIMEOUT, the outcome of a gate timeout: waiter `cancelled`, PR
+open, run not Failed. No signal is read; a signal of any name changes neither
+the timers nor the outcome. A human can cancel the run.
+
+**After a human approval.** MERGE_HOLD first re-pins. Head moved → INVALIDATED.
+`CI: failure` → IMPLEMENT. `CI: success` → preflight. Anything else is held.
+`merge_preflight` is its own read-only turn (`gh pr view --json
+state,mergeStateStatus,mergeable,isDraft,headRefOid`) and the only place a hold
+can be reported: `MERGE_PREFLIGHT: clear|held`, `HOLD_REASON:
+checks_pending|queue|window_closed|other` and `IS_DRAFT: true|false`. An absent,
+failed or unparseable answer is held, never clear. Held writes Phase
+`merge-hold` and repeats timer, re-pin and preflight. The approval is kept
+throughout: one consensus round, one gate visit. When the passes are spent the
+run stalls with `merge_held`; back from the stall it checks once more without
+waiting, and stalls again if still held.
+
+**Merge turn.** `phase4_merge` is a plain delegate with `noRedelivery`, no
+continuation retries, a status variable and `ignoreFailure`; no step above it
+sets `ignoreFailure`. Its instruction is the pinned command and nothing else
+(`gh pr ready` first only when the preflight said the PR is a draft); it reads
+nothing before or after. Immediately before it the run records the gate visit
+the command is issued for, and the command is skipped for a visit that already
+has one. `MERGE_RESULT: merged|head_changed|failed`; a merge turn that answers
+`held` is `failed`. After the turn there is only reading: `verify_merge_status`,
+repeated up to twice more 60 seconds apart when it answers `ERROR` or nothing
+parseable. Reads repeat, the command does not. MERGED ends approved; not merged
+with `head_changed` invalidates; anything else ends Failed with
+`delivery_failed` and the existing notice. No route leads from the merge turn
+back to the preflight, the hold or the turn within the same gate visit; a new
+command needs a new review, a new gate visit and a new approval.
+
+Not covered:
+
+- Nothing wakes the run when CI finishes. It learns of a result at its next
+  timer, up to 300 seconds late in a wait or hold and up to three hours late in
+  a stall.
+- Each read is still a turn of the configured CTO. A wait costs twelve, a stall
+  four.
+- Who owns the change after it merged is not decided here.
+- `noRedelivery` bounds what the bridge sends, not what the agent executes; see
+  `docs/durable-delegation.md`.
+- The delegated path is unchanged on purpose: `phase4_merge_pinned` keeps
+  continuation retries and the five-minute re-send, and a re-pin that is not
+  green after a delegated approval still invalidates it.
+- The pause after merge-gate feedback (`post_feedback_human_review_signal`) is
+  not preceded by a probe.
+- PIN itself is unchanged: a PIN that reports no head still invalidates, and a
+  PIN turn that fails still leaves the previous report in place.
+- A merge that stays held with green CI alternates stall and check until the 60
+  delivery passes are spent; each stall sends its one notice.
 
 ## Child lease, stages and cancellation cleanup
 
@@ -458,10 +586,12 @@ anything broader requires plan_amendment. Never silently retry a failed write.
 
 Plan blockers: plan_missing, plan_invalid, plan_unapproved, plan_amendment,
 plan_changed. Other blockers: prerequisite_missing, privilege_required,
-production_risk, owner_unavailable, owner_timeout, ci_timeout, cleanup_residue,
+production_risk, owner_unavailable, owner_timeout, cleanup_residue,
 cleanup_pending, harness_repeated, harness_evidence_unknown, unclassified,
 environment, prior_rounds_unknown and stale_signals. They do not consume rounds.
 Attribute-only batch_limit records the continue gate, not a new blocked route.
+`ci_timeout` and `merge_held` are stall reasons: they appear in the same
+`block=` field with Phase `technical-stalled` and never open a blocked gate.
 
 A blocked continue permits revalidation, not prerequisite creation, tool/network/
 key/ACL access, reprovisioning, live definition edits or broader production scope.
@@ -471,6 +601,9 @@ resource deletion by another owner. Unclassified requires human evidence review,
 not a synthesizer override. Render failure withholds the public comment, not the
 protected result; gate notice reports evidence comment withheld.
 
+A run in `technical-stalled` or `merge-hold` is waiting on a timer, not on a
+person. `technical-stalled` with `block=ci_timeout` or `block=merge_held` that
+ends as a timeout is the signal to look at the PR's checks or merge state.
 Monitor Phase, GateRef and Acceptance. A merge gate is healthy only when the
 record head equals PR head and result passed (or off/doc-only not_required). Keyword
 supports equality only: list by Phase and inspect each run's value. Invalid value

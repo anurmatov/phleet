@@ -238,14 +238,14 @@ export default function DevicesSection({ onToast }: { onToast?: (message: string
           </div>
 
           {matrix && (
-            <div>
+            <div className="phone-setup-result">
               <QrCode matrix={matrix} />
               <p className="cred-note" role="status">
                 Scan this with the app. The code connects one phone, once, and stops working after
                 fifteen minutes. It hides itself after two.
               </p>
-              <button className="cred-action-btn" onClick={() => void copy()}>Copy as text</button>
-              <p style={note} role="status">
+              <button className="wfd-cancel-btn" onClick={() => void copy()}><Icon name="copy" size={16} />Copy as text</button>
+              <p className="cred-note" role="status">
                 {copied === 'yes'
                   ? 'Copied. Paste it in the app with “Paste” on its setup screen. It is the same one-time code as the picture, so treat the clipboard the same way.'
                   : copied === 'refused'

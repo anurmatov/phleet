@@ -691,6 +691,8 @@ input[type='file']::file-selector-button {
 .device-row-meta { color: var(--text-3); font-size: var(--fs-s); }
 .phone-setup { max-width: 560px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 .phone-setup-actions { margin: 12px 0; }
+.phone-setup-result { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.phone-setup-result .cred-note { margin: 0; }
 /* A code is read by a camera: black on white in either theme. */
 .phone-setup-code { display: block; max-width: 100%; height: auto; border-radius: var(--r-m); background: #fff; }
 

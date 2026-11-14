@@ -9,6 +9,10 @@ namespace Fleet.Agent.Models;
 /// <see cref="Identity"/> rides along so routing identity survives injection and the turn-end
 /// inbox drain. It is optional (trailing, defaulted) so every existing construction site is
 /// unchanged; a null identity means "synthesize a Telegram identity from the chat key".
+///
+/// <see cref="ColdStartTask"/> is the same prompt built for a provider process that holds no
+/// conversation, and is used in place of <see cref="Task"/> only when this message ends up
+/// starting a turn on such a process. See <see cref="QueuedMessagePart.ColdStartTask"/>.
 /// </summary>
 public sealed record MidTurnMessage(
     string Task,
@@ -24,4 +28,5 @@ public sealed record MidTurnMessage(
     DateTimeOffset ArrivedAt,
     ConversationIdentity? Identity = null,
     TaskPriority Priority = TaskPriority.Routine,
-    long TelegramMessageId = 0);
+    long TelegramMessageId = 0,
+    string? ColdStartTask = null);

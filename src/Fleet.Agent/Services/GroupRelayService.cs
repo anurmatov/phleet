@@ -340,9 +340,14 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
     /// <see cref="PublishToAgentAsync"/> for a caller that needs to know: true only when the
     /// message was handed to the broker. Never throws.
     /// </summary>
+    /// <param name="executionId">
+    /// Set on the answer to a task whose directive carried one, so the caller can tell this
+    /// attempt's answer from an earlier attempt's under the same task id. Nothing is written when
+    /// it is null.
+    /// </param>
     public async Task<bool> TryPublishToAgentAsync(string targetAgent, long chatId, string text,
         string type = RelayMessageType.Directive, string? correlationId = null, string? taskId = null,
-        string? workflowId = null, string? signalName = null)
+        string? workflowId = null, string? signalName = null, string? executionId = null)
     {
         if (_publishChannel is null || !_initialized)
         {
@@ -357,7 +362,8 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
         try
         {
             var routingKey = targetAgent.ToLowerInvariant();
-            var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName);
+            var message = new RelayMessage(chatId, _agentConfig.ShortName, text, DateTimeOffset.UtcNow, type, correlationId, taskId, workflowId, signalName,
+                string.IsNullOrEmpty(executionId) ? null : executionId);
             var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
 
             var props = new BasicProperties { DeliveryMode = DeliveryModes.Persistent };
@@ -461,8 +467,8 @@ public sealed class GroupRelayService : IAsyncDisposable, IAgentBrokerConnection
             await _connection.CloseAsync();
     }
 
-    // ExecutionId is read from a directive and never written by the agent, so what the agent
-    // publishes is the same bytes as before.
+    // ExecutionId is read from a directive and written only on the answer to a task that has
+    // one, so everything else the agent publishes is the same bytes as before.
     private sealed record RelayMessage(long ChatId, string Sender, string Text, DateTimeOffset Timestamp,
         string Type = RelayMessageType.Directive, string? CorrelationId = null, string? TaskId = null,
         string? WorkflowId = null, string? SignalName = null,

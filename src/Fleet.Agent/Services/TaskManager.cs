@@ -2233,6 +2233,15 @@ public sealed class TaskManager
     }
 
     /// <summary>
+    /// The execution id kept with the task that holds this task id, null when it has none or
+    /// nothing holds the id. Read by <see cref="RelayCompletionPublisher"/> while the task's
+    /// completion is being raised, which is before the task lets go of its task id, so that the
+    /// answer says which execution it is from.
+    /// </summary>
+    public string? ExecutionIdOf(string taskId) =>
+        _activeTaskIds.TryGetValue(taskId, out var executionId) ? executionId : null;
+
+    /// <summary>
     /// Cancels the task with the given bridge taskId, but only if it is the execution the cancel
     /// names. A workflow reuses a task id when it runs a step again, so a cancel issued for one
     /// attempt can arrive when the id belongs to the next; <see cref="CancelByBridgeTaskIdAsync"/>

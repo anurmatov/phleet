@@ -92,7 +92,9 @@ public sealed class BridgeExecutionCancelTests
 
     private static readonly IOptions<AgentOptions> AgentOpts = Options.Create(new AgentOptions
     {
-        Name = "test", Role = "test", WorkDir = Path.GetTempPath(), Provider = "claude", ShortName = "test",
+        Name = "test", Role = "test", Provider = "claude", ShortName = "test",
+        // Not the shared temp directory: the group buffer is persisted under WorkDir.
+        WorkDir = Path.Combine(Path.GetTempPath(), "bridge-execution-" + Guid.NewGuid().ToString("N")),
         GroupDebounceSeconds = 30,
     });
 
@@ -306,9 +308,12 @@ public sealed class BridgeExecutionCancelTests
         await turns.WaitUntilEndedAsync(turn);
     }
 
-    /// <summary>The agent reads the field and never writes it: what it publishes is unchanged.</summary>
+    /// <summary>
+    /// The field is written only when there is an id to write (on the answer to a task that has
+    /// one, see <c>BridgeExecutionAnswerTests</c>): a message without one is the bytes it always was.
+    /// </summary>
     [Fact]
-    public void WhatTheAgentPublishes_HasNoExecutionId()
+    public void AMessageWithoutAnExecutionId_IsTheBytesItAlwaysWas()
     {
         var type = typeof(GroupRelayService).GetNestedType("RelayMessage", BindingFlags.NonPublic)!;
         var message = JsonSerializer.Deserialize(

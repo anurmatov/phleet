@@ -68,6 +68,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private string? _pendingNarration;
     private ExecutionStats? _previousCumulativeStats;
 
+    // Usage feed: the result event's modelUsage/total_cost_usd are cumulative per process, so a new
+    // process is a new generation and its first row is a reset (UsageReporter).
+    private readonly UsageReporter? _usage;
+    private long _processGeneration;
+
     // Continuous background stdout reader — feeds all NDJSON events into this channel.
     // Separating stdout reads from the turn read-loop prevents stale events (e.g. a
     // background subagent's task_notification + result that arrives after the main turn
@@ -149,11 +154,12 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     public ClaudeExecutor(
         IOptions<AgentOptions> config, ILogger<ClaudeExecutor> logger, PromptBuilder promptBuilder,
-        AgentHarness? harness = null)
+        AgentHarness? harness = null, UsageReporter? usage = null)
     {
         _config = config.Value;
         _logger = logger;
         _promptBuilder = promptBuilder;
+        _usage = usage;
         _harness = harness ?? new AgentHarness(_config, Environment.GetEnvironmentVariable, logger);
     }
 
@@ -175,6 +181,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
             var message = await BuildUserMessageJsonAsync(task, images, documents, ct);
 
             var attempt = 0;
+            UsageTurn? usageTurn = null;
 
             while (attempt < 2)
             {
@@ -218,6 +225,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     OpenTurnFlags();
                     _currentTurnAssistantText = null;
                     _pendingNarration = null;
+                    usageTurn = _usage?.BeginTurn();
                     await WriteStdinLineAsync(message, ct);
                 }
                 catch (IOException) when (attempt < 2)
@@ -289,6 +297,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     // "result" event means this response is complete — process stays alive
                     if (isCurrentTurnResult)
                     {
+                        CompleteUsage(usageTurn, evt);
                         if (_restartRequested)
                         {
                             _restartRequested = false;
@@ -357,6 +366,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 _logger.LogInformation("Injected message started its own Claude turn; reading its answer");
                 _currentTurnAssistantText = null;
                 _pendingNarration = null;
+                var usageTurn = _usage?.BeginTurn();
 
                 await foreach (var read in ReadTurnEventsAsync(
                     reader, endQuietlyOnCancel: false, killOnCancel: true, ct))
@@ -372,6 +382,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                         break; // e.g. a background task-notification turn: not an answer; wait for the next start
 
                     remaining--;
+                    CompleteUsage(usageTurn, evt);
                     yield return new AgentProgress
                     {
                         IsSignificant = true,
@@ -451,6 +462,25 @@ public sealed class ClaudeExecutor : IAgentExecutor
             var isCurrentTurnResult = IsCurrentTurnResult(evt);
             var progress = ParseProgress(evt);
             yield return new TurnEvent(evt, isCurrentTurnResult, progress);
+        }
+    }
+
+    /// <summary>
+    /// The usage row of a turn that reached its own result, errors included. A turn whose process died
+    /// first has no result and gets no row.
+    /// </summary>
+    private void CompleteUsage(UsageTurn? turn, ClaudeStreamEvent result)
+    {
+        if (turn is null)
+            return;
+        try
+        {
+            _usage!.Complete(turn, ProviderUsageSnapshot.ForClaude(
+                result.ExtensionData, result.NumTurns, result.SessionId ?? _lastSessionId, _config.Model, _processGeneration));
+        }
+        catch (Exception ex)
+        {
+            _usage!.RecordDrop(ex.GetType().Name);
         }
     }
 
@@ -963,6 +993,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _stdin = null;
         _messageCount = 0;
         _previousCumulativeStats = null;
+        _processGeneration++;
 
         FallBackIfExitedBeforeInit();
 
@@ -1255,6 +1286,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 type = "user",
                 message = new { role = "user", content = command }
             });
+            var usageTurn = _usage?.BeginTurn();
             await WriteStdinLineAsync(message, ct);
 
             // Read response events until "result" — via the channel, not stdout directly.
@@ -1268,6 +1300,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
                 if (read.IsCurrentTurnResult)
                 {
+                    CompleteUsage(usageTurn, read.Event!);
                     _messageCount++;
                     if (BuildStatsProgress(read.Event!) is { } stats)
                         yield return stats;

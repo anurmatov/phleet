@@ -64,6 +64,14 @@ public sealed class CodexExecutor : IAgentExecutor
     private volatile string? _activeTurnId;
     private volatile string? _commandTurnId;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
+
+    // Usage feed: the current turn, the thread's last reported cumulative total for it, and how many
+    // app-server processes have started (a new one is a new thread, so its first row is a reset).
+    private readonly UsageReporter? _usage;
+    private UsageTurn? _usageTurn;
+    private JsonObject? _usageTotal;
+    private long? _usageContextWindow;
+    private long _processGeneration;
     private int _messageCount;
     // Accumulates assistant text from item/completed notifications of type "agentMessage".
     // Production codex app-server delivers the reply text here — NOT in turn.items of
@@ -112,8 +120,9 @@ public sealed class CodexExecutor : IAgentExecutor
         PromptBuilder promptBuilder,
         ILogger<CodexExecutor> logger,
         HostedProviderAdapterHost? adapterHost = null,
-        AgentHarness? harness = null)
-        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost, harness: harness)
+        AgentHarness? harness = null,
+        UsageReporter? usage = null)
+        : this(config, telegramConfig, promptBuilder, logger, Process.Start, adapterHost: adapterHost, harness: harness, usage: usage)
     {
     }
 
@@ -125,11 +134,13 @@ public sealed class CodexExecutor : IAgentExecutor
         Func<ProcessStartInfo, Process?> processStarter,
         Func<string, string?>? environmentReader = null,
         HostedProviderAdapterHost? adapterHost = null,
-        AgentHarness? harness = null)
+        AgentHarness? harness = null,
+        UsageReporter? usage = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _logger = logger;
+        _usage = usage;
         _harness = harness ?? new AgentHarness(_config, environmentReader ?? Environment.GetEnvironmentVariable, logger);
         _normalizedAttachmentDir = Path.GetFullPath(telegramConfig.Value.AttachmentDir);
         _processStarter = processStarter;
@@ -241,12 +252,16 @@ public sealed class CodexExecutor : IAgentExecutor
                     startParams["effort"] = codexEffort;
 
                 _logger.LogDebug("codex turn/start payload: {Payload}", startParams.ToJsonString());
+                var usageTurn = _usage?.BeginTurn();
                 var response = await SendRequestAsync("turn/start", startParams, ct);
                 var turn = response.RequireObject("turn");
                 turnId = turn.RequireString("id");
                 _activeTurnId = turnId;
                 _turnHasFinalAnswerPhase = false;
                 _lastTurnUsage = null;
+                _usageTurn = usageTurn;
+                _usageTotal = null;
+                _usageContextWindow = null;
                 _currentTurnAssistantText = "";
                 _pendingNarration = null;
             }
@@ -519,6 +534,9 @@ public sealed class CodexExecutor : IAgentExecutor
 
     internal void SetNotificationChannelForTests(Channel<JsonObject>? channel) =>
         _notificationChannel = channel;
+
+    /// <summary>The usage turn a real <c>turn/start</c> would have opened.</summary>
+    internal void SetUsageTurnForTests(UsageTurn? turn) => _usageTurn = turn;
 
     internal void SetThreadStateForTests(string? threadId, string? activeTurnId)
     {
@@ -859,6 +877,9 @@ public sealed class CodexExecutor : IAgentExecutor
         _activeTurnId = null;
         _lastTurnUsage = null;
         _messageCount = 0;
+        // A new app-server is a new thread: its totals start again and its first row is a reset.
+        _processGeneration++;
+        _usageTurn = null;
         _logger.LogInformation("CodexExecutor: app-server started (pid {Pid})", _process.Id);
 
         if (_localModelProvider is not null)
@@ -1136,7 +1157,7 @@ public sealed class CodexExecutor : IAgentExecutor
             {
                 var turnId = @params["turnId"]?.GetValue<string>();
                 if (resolvedTurnId is not null && turnId == resolvedTurnId)
-                    _lastTurnUsage = ParseTokenUsage(@params["tokenUsage"] as JsonObject);
+                    ObserveTokenUsage(@params);
                 continue;
             }
 
@@ -1383,6 +1404,7 @@ public sealed class CodexExecutor : IAgentExecutor
         {
             _currentTurnAssistantText = "";
             _pendingNarration = null;
+            CompleteUsage(null);
             return new AgentProgress
             {
                 EventType = "result",
@@ -1401,6 +1423,7 @@ public sealed class CodexExecutor : IAgentExecutor
         _currentTurnAssistantText = "";
         _pendingNarration = null;
         var durationMs = turn["durationMs"]?.GetValue<int?>() ?? 0;
+        CompleteUsage(turn);
         var stats = _lastTurnUsage is null
             ? new ExecutionStats { DurationMs = durationMs }
             : new ExecutionStats
@@ -1597,7 +1620,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 {
                     var updateTurnId = @params["turnId"]?.GetValue<string>();
                     if (updateTurnId == turnId)
-                        _lastTurnUsage = ParseTokenUsage(@params["tokenUsage"] as JsonObject);
+                        ObserveTokenUsage(@params);
                     continue;
                 }
 
@@ -1608,6 +1631,8 @@ public sealed class CodexExecutor : IAgentExecutor
                 {
                     _currentTurnAssistantText = "";
                     _pendingNarration = null;
+                    // An interrupted turn still reached its own terminal: it gets its row.
+                    CompleteUsage(@params["turn"] as JsonObject);
                     return DrainOutcome.Completed;
                 }
             }
@@ -1650,6 +1675,8 @@ public sealed class CodexExecutor : IAgentExecutor
         _commandTurnId = null;
         _turnHasFinalAnswerPhase = false;
         _lastTurnUsage = null;
+        // No terminal arrived: the turn gets no row.
+        _usageTurn = null;
         _currentTurnAssistantText = "";
         _pendingNarration = null;
         _messageCount = 0;
@@ -1744,6 +1771,44 @@ public sealed class CodexExecutor : IAgentExecutor
     private static bool AppliesToTurn(JsonObject @params, string? turnId) =>
         turnId is not null && string.Equals(@params["turnId"]?.GetValue<string>(), turnId, StringComparison.Ordinal)
         || turnId is not null && string.Equals((@params["turn"] as JsonObject)?["id"]?.GetValue<string>(), turnId, StringComparison.Ordinal);
+
+    /// <summary>
+    /// One <c>thread/tokenUsage/updated</c> for the current turn: the display stats keep reading
+    /// <c>last</c>, the usage feed keeps the thread's cumulative <c>total</c> for this thread only.
+    /// </summary>
+    private void ObserveTokenUsage(JsonObject @params)
+    {
+        var tokenUsage = @params["tokenUsage"] as JsonObject;
+        _lastTurnUsage = ParseTokenUsage(tokenUsage);
+
+        var threadId = @params["threadId"]?.GetValue<string>();
+        if (threadId is not null && threadId != _threadId)
+            return;
+        _usageTotal = tokenUsage?["total"] as JsonObject;
+        _usageContextWindow = ProviderUsageSnapshot.ReadCount(tokenUsage?["modelContextWindow"]);
+    }
+
+    /// <summary>
+    /// The usage row of the turn that just reached <c>turn/completed</c>, interrupted and failed
+    /// turns included. An app-server that exits first leaves no terminal and no row.
+    /// </summary>
+    private void CompleteUsage(JsonObject? turn)
+    {
+        var usageTurn = _usageTurn;
+        _usageTurn = null;
+        if (usageTurn is null)
+            return;
+        try
+        {
+            _usage!.Complete(usageTurn, ProviderUsageSnapshot.ForCodex(
+                _usageTotal, _usageContextWindow, ProviderUsageSnapshot.ReadCount(turn?["durationMs"]), _threadId,
+                ProviderUsageSnapshot.ModelOrFallback(_threadModel, _config.Model), _processGeneration));
+        }
+        catch (Exception ex)
+        {
+            _usage!.RecordDrop(ex.GetType().Name);
+        }
+    }
 
     private static ThreadTokenUsageSnapshot? ParseTokenUsage(JsonObject? tokenUsage)
     {

@@ -89,7 +89,8 @@ public sealed class ContainerProvisioningService(
         var options = Options;
         return ContainerSpecBuilder.Build(
             agent, envValues, bindings, secrets, options.RequireBaseDir(),
-            options.WhisperServiceUrl, options.KokoroServiceUrl, options.AgentImage);
+            options.WhisperServiceUrl, options.KokoroServiceUrl, options.AgentImage,
+            usageEnabled: UsageOptions.From(config).IsReady);
     }
 
     // ── live provisioning ──────────────────────────────────────────────────────

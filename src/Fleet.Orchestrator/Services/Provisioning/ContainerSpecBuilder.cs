@@ -17,11 +17,12 @@ internal static class ContainerSpecBuilder
 
     /// <summary>The whole spec for one agent, from values already read from configuration and <c>.env</c>.</summary>
     /// <param name="defaultImage">The image of an agent whose row names none (<see cref="ProvisioningOptions.AgentImage"/>).</param>
+    /// <param name="usageEnabled">The orchestrator's usage integration is enabled and valid (<see cref="UsageReadiness"/>).</param>
     internal static ContainerSpec Build(
         Agent agent, Dictionary<string, string> envValues, IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets,
-        string baseDir, string whisperServiceUrl, string kokoroServiceUrl, string defaultImage)
+        string baseDir, string whisperServiceUrl, string kokoroServiceUrl, string defaultImage, bool usageEnabled = false)
     {
-        var env      = BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl, bindings, secrets);
+        var env      = BuildEnv(agent, envValues, whisperServiceUrl, kokoroServiceUrl, bindings, secrets, usageEnabled);
         var binds    = BuildBinds(agent, baseDir);
         var networks = BuildNetworks(agent);
         var memBytes = (long)agent.MemoryLimitMb * 1024 * 1024;
@@ -46,7 +47,7 @@ internal static class ContainerSpecBuilder
     /// <param name="secrets">The agent's placeholder plan, or <see cref="SecretPlan.None"/>.</param>
     internal static List<string> BuildEnv(
         Agent agent, Dictionary<string, string> envValues, string whisperServiceUrl, string kokoroServiceUrl,
-        IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets)
+        IReadOnlyCollection<SecretBinding> bindings, SecretPlan secrets, bool usageEnabled = false)
     {
         var env = new List<string>();
 
@@ -102,6 +103,10 @@ internal static class ContainerSpecBuilder
         // could shrink. The claude child inherits it; ClaudeExecutor strips only its own list.
         if (agent.ContextWindow is int window && ClaudeLocalModel.IsEnabled(agent.Provider, agent.LocalBaseUrl))
             env.Add($"{ContextWindow.EnvVar}={window}");
+
+        // Usage feed: the switch only. The receiver address and its bearer stay with the orchestrator.
+        if (usageEnabled)
+            env.Add("Usage__Enabled=true");
 
         env.AddRange(secrets.Env);
 

@@ -522,8 +522,8 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(1, Timers(run, 300));
         Assert.Contains("merge-hold", run.Upserts("Phase"));
         Assert.Equal(2, run.Calls.Count(c => c.Step == "merge_preflight"));
-        Assert.Equal(["merge_preflight", "pin_after_approval", "merge_preflight", "phase4_merge"],
-            run.Calls.SkipWhile(c => c.Step != "merge_preflight").Select(c => c.Step).Take(4));
+        Assert.Equal(["merge_preflight", "notify_merge_prerequisite", "pin_after_approval", "merge_preflight", "phase4_merge"],
+            run.Calls.SkipWhile(c => c.Step != "merge_preflight").Select(c => c.Step).Take(5));
         Assert.Single(run.Calls, c => c.Step == "phase4_merge");
     }
 
@@ -837,7 +837,7 @@ public sealed partial class PrReadinessHoldTests
 
     /// <summary>
     /// A delegated approval is routed as before: a re-pin that is not green voids it and the head
-    /// is reviewed again; no hold, no preflight, one read after the pinned merge.
+    /// is reviewed again; formal review is checked separately, with one read after the pinned merge.
     /// </summary>
     [Fact]
     public async Task DelegatedApproval_PathUnchanged()
@@ -928,8 +928,9 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(10, merge.TimeoutMinutes);
         Assert.Equal("{{config.CtoAgent}}", merge.Target);
         Assert.DoesNotContain(steps, s => s is DelegateWithEscalationStep);
-        // The only step in the definition that opts in.
-        Assert.Equal([merge], steps.OfType<DelegateStep>().Where(d => d.NoRedelivery));
+        // Only the merge command and the two new cancellable scope reads opt in.
+        Assert.Equal(["validate_scope_answer", "scope_head_read", "phase4_merge"],
+            steps.OfType<DelegateStep>().Where(d => d.NoRedelivery).Select(d => d.Name));
     }
 
     [Fact]
@@ -963,7 +964,7 @@ public sealed partial class PrReadinessHoldTests
         Assert.DoesNotMatch(@"gh pr (view|checks|status|list)|gh run|gh api|--json|mergeStateStatus|--admin|--auto", merge.Instruction!);
         // The draft step is the workflow's, from the preflight's answer; the turn does not look.
         var ready = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).OfType<SetVariableStep>().Where(s => s.Name == "merge_ready_first").ToList();
-        Assert.Equal(2, ready.Count);
+        Assert.Equal(4, ready.Count);
         Assert.All(ready, r => Assert.Equal("gh pr ready {{vars.pr_url}} --repo {{input.Repo}}\n", r.Vars["merge_ready_command"]));
     }
 
@@ -996,7 +997,7 @@ public sealed partial class PrReadinessHoldTests
         var counters = all.Where(s => Type(s) == "set_variable" && s.GetProperty("vars").TryGetProperty("merge_gate_seq", out _)).ToList();
         Assert.Equal(["init_acceptance_state", "next_merge_gate"], counters.Select(Name));
         var gate = Assert.Single(all, s => Name(s) == "MERGE_GATE");
-        Assert.Equal("next_merge_gate", Name(gate.GetProperty("steps")[0]));
+        Assert.Equal(["merge_preflight_check", "before_merge_gate_readiness", "next_merge_gate"], gate.GetProperty("steps").EnumerateArray().Take(3).Select(Name));
         var issued = all.Where(s => Type(s) == "set_variable" && s.GetProperty("vars").TryGetProperty("merge_issued_seq", out _)).ToList();
         Assert.Equal(["init_acceptance_state", "record_merge_command"], issued.Select(Name));
 
@@ -1015,7 +1016,7 @@ public sealed partial class PrReadinessHoldTests
         // and only after the gate's record is back.
         var resume = Assert.Single(all, s => Name(s) == "stalled_resume_route");
         Assert.Equal("{{vars.stall_resume}}", resume.GetProperty("on").GetString());
-        Assert.Equal(["restore_merge_record", "route_MERGE"], resume.GetProperty("cases").GetProperty("MERGE").GetProperty("steps").EnumerateArray().Select(Name));
+        Assert.Equal(["restore_merge_record", "resume_owned_merge_readiness"], resume.GetProperty("cases").GetProperty("MERGE").GetProperty("steps").EnumerateArray().Select(Name));
         Assert.Equal(["MERGE"], Descendants(states["STALLED"]).Where(s => StateSet(s) == "MERGE").Select(_ => "MERGE"));
         Assert.Equal(["MERGE"], all.Where(s => Type(s) == "set_variable" && s.GetProperty("vars").TryGetProperty("stall_resume", out var to) && to.GetString() is not ("REVIEW" or "PIN")).Select(s => s.GetProperty("vars").GetProperty("stall_resume").GetString()));
         Assert.Equal(["CI_WAIT", "MERGE_HOLD", "REVIEW_HOLD"], Setters("STALLED"));
@@ -1026,7 +1027,7 @@ public sealed partial class PrReadinessHoldTests
             .Select(s => s.GetProperty("vars").GetProperty("continue_to").GetString()).Distinct().Order());
         // Before the loop the run can only start at a review or a revision.
         var before = Descendants(root).TakeWhile(s => Name(s) != "outer_loop").Select(StateSet).Where(v => v is not null).Distinct().Order();
-        Assert.Equal(["IMPLEMENT", "REVIEW"], before);
+        Assert.Equal(["IMPLEMENT", "REVIEW", "SCOPE_WAIT"], before);
     }
 
     [Fact]
@@ -1101,9 +1102,10 @@ public sealed partial class PrReadinessHoldTests
     private static Task<SeedRun> RunAsync(Script script, Func<WorkflowHandle, SeedHarness, Task> drive,
         bool captureWaiter = false, bool allowFailure = false, bool required = false,
         Action<System.Text.Json.Nodes.JsonNode>? mutateSeed = null,
-        Func<Call, object?[], Task<Fleet.Temporal.Models.AgentTaskResult>?>? delegateOverride = null) =>
+        Func<Call, object?[], Task<Fleet.Temporal.Models.AgentTaskResult>?>? delegateOverride = null,
+        bool humanInputNamespace = false) =>
         SeedHarness.RunAsync(Workflow, Input(required, captureWaiter), script.Respond, drive,
-            captureWaiter: captureWaiter, allowFailure: allowFailure, mutateSeed: mutateSeed, delegateOverride: delegateOverride);
+            captureWaiter: captureWaiter, allowFailure: allowFailure, mutateSeed: mutateSeed, delegateOverride: delegateOverride, humanInputNamespace: humanInputNamespace);
 
     private static async Task ApproveFirstVisit(WorkflowHandle handle, SeedHarness h)
     {
@@ -1154,6 +1156,8 @@ public sealed partial class PrReadinessHoldTests
                 case "phase2_5_unresolved_check": return "UNRESOLVED: none";
                 case "notify_invalidation": return $"HEAD_OID: {Head}";
                 case "prepare": return "PREP: NO_DOC";
+                case "merge_approval_preflight":
+                case "merge_gate_preflight": return SeedHarness.PreflightClear;
                 case "merge_preflight":
                     return Preflight(n) switch
                     {

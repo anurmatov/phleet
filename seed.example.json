@@ -1541,7 +1541,11 @@
               "ci_silent_reads": "0",
               "review_hold_passes": "0",
               "merge_issued_seq": "none",
-              "merge_ready_command": ""
+              "merge_ready_command": "",
+              "H": "",
+              "head_sha": "",
+              "scope_last_key": "",
+              "merge_hold_resume": "MERGE"
             }
           },
           {
@@ -1565,8 +1569,12 @@
             "type": "delegate",
             "target": "{{input.TargetAgent}}",
             "outputVar": "impl_result",
-            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nImplement the following task in repo {{input.Repo}}. When done, open a PR against main.\n\nTask:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nBranch name: Use `{{input.BranchName}}` if it is provided and non-empty. Otherwise, auto-generate: use `feat/issue-{{input.IssueNumber}}` if an issue number is provided, or a short `feat/<description-slug>` for description-only tasks.\n\nIMPORTANT: If an issue number is provided, always fetch the latest issue details before starting — run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` as your first step and use THAT content as your spec.\n\nAt the end of your response, output the PR URL on its own line:\nPR_URL: https://github.com/{{input.Repo}}/pull/NNN\n\nThen output the PR head commit you pushed, on its own line (from `gh pr view <PR> --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.",
-            "timeoutMinutes": 60
+            "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nImplement the following task in repo {{input.Repo}}. When done, open a PR against main.\n\nTask:\n  Issue number: {{input.IssueNumber | default: 'N/A'}}\n  Description: {{input.Description | default: 'none'}}\n\nBranch name: Use `{{input.BranchName}}` if it is provided and non-empty. Otherwise, auto-generate: use `feat/issue-{{input.IssueNumber}}` if an issue number is provided, or a short `feat/<description-slug>` for description-only tasks.\n\nIMPORTANT: If an issue number is provided, always fetch the latest issue details before starting — run `gh issue view {{input.IssueNumber}} --repo {{input.Repo}} --comments` as your first step and use THAT content as your spec.\n\nAt the end of your response, output the PR URL on its own line:\nPR_URL: https://github.com/{{input.Repo}}/pull/NNN\n\nThen output the PR head commit you pushed, on its own line (from `gh pr view <PR> --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.\nSCOPE: Files to Touch is the implementation map unless explicitly restricted. A mechanically necessary test fixture/manifest solely registering already-approved behavior needs no separate permission; record it in the PR. A changed behavior/access/contract or explicit prohibition still needs normal human resolution. For a real scope blocker return IMPLEMENTATION: blocked, BLOCKER: <one literal line>, SCOPE_QUESTION: <one literal line>, then real existing PR_URL/HEAD_RANGE/HEAD_SHA if any; if none explicitly say no PR yet and invent no artifact. Do not retry blocked work, merge, or claim complete. Preserve the complete report and literal question. Ordinary incomplete/test failures must include concrete remaining work, not a scope question.\nFor a no-PR scope blocker, also return BRANCH_NAME: <the exact branch selected>, especially for a generated description-only slug; never substitute an invented branch for existing work.",
+            "timeoutMinutes": 60,
+            "statusVar": "impl_status",
+            "ignoreFailure": true,
+            "retryOnIncomplete": false,
+            "maxIncompleteRetries": 0
           },
           {
             "name": "capture_implementation",
@@ -1576,10 +1584,12 @@
                 "name": "implementation_fields",
                 "type": "set_variable",
                 "vars": {
-                  "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete)\\r?$' | default: 'incomplete'}}",
+                  "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete|blocked)\\r?$' | default: 'incomplete'}}",
                   "next_url": "{{vars.impl_result | extract: '(?m)^PR_URL: (https://github\\.com/[^\\s]+/pull/[0-9]+)\\r?$' | default: ''}}",
                   "next_head": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: [0-9a-f]{40}\\.\\.([0-9a-f]{40})\\r?$' | default: ''}}",
-                  "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}"
+                  "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}",
+                  "scope_question": "{{vars.impl_result | extract: '(?m)^SCOPE_QUESTION: ([^\\r\\n]+)\\r?$'}}",
+                  "scope_blocker": "{{vars.impl_result | extract: '(?m)^BLOCKER: ([^\\r\\n]+)\\r?$'}}"
                 }
               },
               {
@@ -1600,71 +1610,139 @@
                 }
               },
               {
-                "name": "capture_head_range_end",
-                "type": "set_variable",
-                "vars": {
-                  "H": "{{vars.next_head}}",
-                  "head_sha": "{{vars.next_head}}"
+                "name": "refresh_head_if_present",
+                "type": "branch",
+                "on": "{{vars.next_head}}",
+                "cases": {
+                  "": {
+                    "type": "noop"
+                  }
+                },
+                "default": {
+                  "name": "capture_head_range_end",
+                  "type": "set_variable",
+                  "vars": {
+                    "H": "{{vars.next_head}}",
+                    "head_sha": "{{vars.next_head}}"
+                  }
                 }
               },
               {
-                "name": "implementation_complete",
+                "name": "scope_fields",
+                "type": "set_variable",
+                "vars": {
+                  "scope_fields": "{{vars.impl_status}}/{{vars.implementation}}\n{{vars.scope_question}}\n{{vars.scope_blocker}}"
+                }
+              },
+              {
+                "name": "explicit_scope_blocker",
                 "type": "branch",
-                "on": "{{vars.implementation}}",
+                "on": "{{vars.scope_fields | extract: '\\A(?:completed|failed|incomplete)/blocked\\n[^\\r\\n]+\\n[^\\r\\n]+\\z'}}",
                 "cases": {
-                  "complete": {
-                    "name": "complete_has_head",
+                  "": {
+                    "name": "implementation_complete",
                     "type": "branch",
-                    "on": "{{vars.H}}",
+                    "on": "{{vars.implementation}}/{{vars.impl_status}}",
                     "cases": {
-                      "": {
-                        "name": "route_IMPLEMENT",
-                        "type": "set_variable",
-                        "vars": {
-                          "state": "IMPLEMENT",
-                          "feedback": "Missing valid HEAD_RANGE"
+                      "complete/completed": {
+                        "name": "complete_has_head",
+                        "type": "branch",
+                        "on": "{{vars.next_head}}",
+                        "cases": {
+                          "": {
+                            "name": "route_IMPLEMENT",
+                            "type": "set_variable",
+                            "vars": {
+                              "state": "IMPLEMENT",
+                              "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                            }
+                          }
+                        },
+                        "default": {
+                          "name": "route_REVIEW",
+                          "type": "set_variable",
+                          "vars": {
+                            "state": "REVIEW"
+                          }
                         }
                       }
                     },
                     "default": {
-                      "name": "route_REVIEW",
-                      "type": "set_variable",
-                      "vars": {
-                        "state": "REVIEW"
-                      }
+                      "name": "implementation_incomplete",
+                      "type": "sequence",
+                      "steps": [
+                        {
+                          "name": "increment_incomplete",
+                          "type": "set_variable",
+                          "vars": {
+                            "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                          }
+                        },
+                        {
+                          "name": "incomplete_cap",
+                          "type": "branch",
+                          "on": "{{vars.incomplete_round}}",
+                          "cases": {
+                            "5": {
+                              "name": "emit_FAILED",
+                              "type": "set_variable",
+                              "vars": {
+                                "outer_done": "FAILED"
+                              }
+                            }
+                          },
+                          "default": {
+                            "name": "route_IMPLEMENT",
+                            "type": "set_variable",
+                            "vars": {
+                              "state": "IMPLEMENT",
+                              "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 },
                 "default": {
-                  "name": "implementation_incomplete",
+                  "name": "capture_scope_blocker",
                   "type": "sequence",
                   "steps": [
                     {
-                      "name": "increment_incomplete",
+                      "name": "scope_identity",
                       "type": "set_variable",
                       "vars": {
-                        "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                        "scope_key": "{{vars.pr_url}}/{{vars.H}}/{{vars.scope_question}}",
+                        "scope_report": "{{vars.impl_result}}",
+                        "scope_status": "{{vars.impl_status}}"
                       }
                     },
                     {
-                      "name": "incomplete_cap",
+                      "name": "scope_duplicate_pair",
+                      "type": "set_variable",
+                      "vars": {
+                        "scope_pair": "{{vars.scope_last_key}}\n{{vars.scope_key}}"
+                      }
+                    },
+                    {
+                      "name": "scope_same_question_head",
                       "type": "branch",
-                      "on": "{{vars.incomplete_round}}",
+                      "on": "{{vars.scope_pair | extract: '\\A([^\\r\\n]+)\\n\\1\\z'}}",
                       "cases": {
-                        "5": {
-                          "name": "emit_FAILED",
+                        "": {
+                          "name": "route_SCOPE_WAIT",
                           "type": "set_variable",
                           "vars": {
-                            "outer_done": "FAILED"
+                            "state": "SCOPE_WAIT"
                           }
                         }
                       },
                       "default": {
-                        "name": "route_IMPLEMENT",
+                        "name": "scope_repeated_after_answer",
                         "type": "set_variable",
                         "vars": {
-                          "state": "IMPLEMENT",
-                          "feedback": "Complete all approved scope before returning IMPLEMENTATION: complete."
+                          "outer_done": "FAILED",
+                          "failure_reason": "scope_blocker_repeated: coordinator must resolve the preserved report; no duplicate question or author retry."
                         }
                       }
                     }
@@ -3809,7 +3887,7 @@
                         "name": "notify_stalled",
                         "type": "delegate",
                         "target": "{{config.CtoAgent}}",
-                        "instruction": "Technical stall, for you only. Do not notify the primary human and do not ask anyone for a decision: this state has no button and reads no signal.\nPR {{vars.pr_url}}, head {{vars.H}}, reason {{vars.stall_reason}}. Reads at this head that were not success: pending {{vars.ci_pending_reads}}, unavailable {{vars.ci_unavailable_reads}}, silent {{vars.ci_silent_reads}}; last CI detail {{vars.ci_detail | default: 'none'}}; merge hold reason {{vars.hold_reason | default: 'none'}}.\nThe run reads again at 180, 360, 540 and 720 minutes and goes on by itself when a read is clear: CI at this head for ci_timeout, and for merge_held the re-pin and the merge preflight. After the fourth read that is not clear it ends as a timeout and the PR stays open. A human can only cancel the run.\nIf you see a concrete authority, risk, cost or scope question here, raise it through your normal channel. Otherwise do nothing. No code, branch, PR or workflow change.",
+                        "instruction": "Technical stall, for you only. Do not notify the primary human and do not ask anyone for a decision: this state has no button and reads no signal.\nPR {{vars.pr_url}}, head {{vars.H}}, reason {{vars.stall_reason}}. Reads at this head that were not success: pending {{vars.ci_pending_reads}}, unavailable {{vars.ci_unavailable_reads}}, silent {{vars.ci_silent_reads}}; last CI detail {{vars.ci_detail | default: 'none'}}; merge hold reason {{vars.hold_reason | default: 'none'}}.\nThe run reads again at 180, 360, 540 and 720 minutes and goes on by itself when a read is clear: CI at this head for ci_timeout, and for merge_held the re-pin and the merge preflight. After the fourth read that is not clear it ends as a timeout and the PR stays open. A human can only cancel the run.\nIf you see a concrete authority, risk, cost or scope question here, raise it through your normal channel. Otherwise do nothing. No code, branch, PR or workflow change.\nFormal GitHub review prerequisite: {{vars.github_review | default: 'UNKNOWN'}} at PR {{vars.pr_url}}, head {{vars.H}}. If REVIEW_REQUIRED ask an independent permitted reviewer to approve on GitHub; CHANGES_REQUESTED needs its findings resolved; UNKNOWN needs a successful read. This notice is not a merge-ready gate.",
                         "timeoutMinutes": 5,
                         "outputVar": "notify_stalled",
                         "ignoreFailure": true,
@@ -4086,12 +4164,13 @@
                                                 "name": "merge_preflight",
                                                 "type": "delegate",
                                                 "target": "{{config.CtoAgent}}",
-                                                "instruction": "Read-only merge preflight for {{vars.pr_url}} in repo {{input.Repo}}, pinned head {{vars.review_ref}}. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergeStateStatus,mergeable,isDraft,headRefOid\n\nThis turn only reads. Nothing here marks the PR ready, merges it, pushes, comments, approves, re-runs a check or changes anything; the merge command is a separate later turn.\nAnswer held only for an obstacle that exists now and that waiting can clear: required checks still pending (checks_pending), a merge queue or an ordering rule you have to wait for (queue), a closed merge window or freeze (window_closed), or another named obstacle (other). A draft PR is not an obstacle: report it in IS_DRAFT. Otherwise answer clear.\nReturn exactly these token lines: MERGE_PREFLIGHT: clear|held, HOLD_REASON: checks_pending|queue|window_closed|other|none, IS_DRAFT: true|false, then one line of evidence.",
+                                                "instruction": "Read-only merge preflight for {{vars.pr_url}} in repo {{input.Repo}}, pinned head {{vars.review_ref}}. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergeStateStatus,mergeable,isDraft,headRefOid,reviewDecision,reviews\n\nThis turn only reads. Nothing here marks the PR ready, merges it, pushes, comments, approves, re-runs a check or changes anything; the merge command is a separate later turn.\nAnswer held only for an obstacle that exists now and that waiting can clear: required checks still pending (checks_pending), a merge queue or an ordering rule you have to wait for (queue), a closed merge window or freeze (window_closed), or another named obstacle (other). A draft PR is not an obstacle: report it in IS_DRAFT. Otherwise answer clear.\nReturn exactly these token lines: MERGE_PREFLIGHT: clear|held, HOLD_REASON: checks_pending|queue|window_closed|other|none, IS_DRAFT: true|false, then one line of evidence.\nFORMAL GITHUB REVIEW: Read reviewDecision and reviews from that same successful JSON read. Return GITHUB_REVIEW: APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN. NOT_REQUIRED requires reviewDecision explicitly present as null or empty, never missing or a failed/invalid read. Conflicting changes-requested evidence in reviews is CHANGES_REQUESTED; unknown or inconsistent data is UNKNOWN. REVIEW_REQUIRED, CHANGES_REQUESTED and UNKNOWN are held, never clear. Missing fields or failed reads cannot be converted to NOT_REQUIRED. Preserve exact head/state/draft/checks/queue/window checks. This is read-only, not an approval or merge action.",
                                                 "timeoutMinutes": 10,
                                                 "outputVar": "preflight_report",
                                                 "ignoreFailure": true,
                                                 "retryOnIncomplete": false,
-                                                "maxIncompleteRetries": 0
+                                                "maxIncompleteRetries": 0,
+                                                "statusVar": "preflight_status"
                                               },
                                               {
                                                 "name": "merge_preflight_fields",
@@ -4099,21 +4178,22 @@
                                                 "vars": {
                                                   "preflight": "{{vars.preflight_report | extract: '(?m)^MERGE_PREFLIGHT: (clear|held)\\r?$' | default: 'held'}}",
                                                   "hold_reason": "{{vars.preflight_report | extract: '(?m)^HOLD_REASON: (checks_pending|queue|window_closed|other)\\r?$' | default: 'other'}}",
-                                                  "pr_is_draft": "{{vars.preflight_report | extract: '(?m)^IS_DRAFT: (true|false)\\r?$' | default: 'unknown'}}"
+                                                  "pr_is_draft": "{{vars.preflight_report | extract: '(?m)^IS_DRAFT: (true|false)\\r?$' | default: 'unknown'}}",
+                                                  "github_review": "{{vars.preflight_report | extract: '(?m)^GITHUB_REVIEW: (APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN)\\r?$' | default: 'UNKNOWN'}}"
                                                 }
                                               },
                                               {
                                                 "name": "merge_preflight_answer",
                                                 "type": "set_variable",
                                                 "vars": {
-                                                  "preflight_answer": "{{vars.preflight}}/{{vars.pr_is_draft}}"
+                                                  "preflight_answer": "{{vars.preflight}}/{{vars.pr_is_draft}}/{{vars.github_review}}/{{vars.preflight_status}}"
                                                 }
                                               },
                                               {
                                                 "name": "merge_preflight_result",
                                                 "type": "set_variable",
                                                 "vars": {
-                                                  "merge_ready": "{{vars.preflight_answer | extract: '^(clear)/(?:true|false)$' | default: 'held'}}"
+                                                  "merge_ready": "{{vars.preflight_answer | extract: '^(clear)/(?:true|false)/(?:APPROVED|NOT_REQUIRED)/completed$' | default: 'held'}}"
                                                 }
                                               },
                                               {
@@ -4492,10 +4572,24 @@
                                     }
                                   },
                                   {
-                                    "name": "route_MERGE",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "state": "MERGE"
+                                    "name": "resume_owned_merge_readiness",
+                                    "type": "branch",
+                                    "on": "{{vars.merge_hold_resume}}",
+                                    "cases": {
+                                      "MERGE": {
+                                        "name": "route_MERGE",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "state": "MERGE"
+                                        }
+                                      }
+                                    },
+                                    "default": {
+                                      "name": "route_MERGE_GATE",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "state": "MERGE_GATE"
+                                      }
                                     }
                                   }
                                 ]
@@ -6439,6 +6533,226 @@
                 }
               },
               {
+                "name": "dispatch_SCOPE_WAIT",
+                "type": "branch",
+                "on": "{{vars.state}}",
+                "cases": {
+                  "SCOPE_WAIT": {
+                    "name": "SCOPE_WAIT",
+                    "type": "sequence",
+                    "steps": [
+                      {
+                        "name": "capture_scope_branch",
+                        "type": "set_variable",
+                        "vars": {
+                          "scope_branch": "{{input.BranchName | default: ''}}"
+                        }
+                      },
+                      {
+                        "name": "scope_branch_from_author",
+                        "type": "branch",
+                        "on": "{{vars.scope_branch}}",
+                        "cases": {
+                          "": {
+                            "name": "capture_reported_scope_branch",
+                            "type": "set_variable",
+                            "vars": {
+                              "scope_branch": "{{vars.scope_report | extract: '(?m)^BRANCH_NAME: ([^\\r\\n]+)\\r?$'}}"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "name": "scope_branch_from_issue",
+                        "type": "branch",
+                        "on": "{{vars.scope_branch}}",
+                        "cases": {
+                          "": {
+                            "name": "no_pr_branch_default",
+                            "type": "branch",
+                            "on": "{{vars.pr_url}}",
+                            "cases": {
+                              "": {
+                                "name": "scope_issue_branch",
+                                "type": "branch",
+                                "on": "{{input.IssueNumber | default: ''}}",
+                                "cases": {
+                                  "": {
+                                    "type": "noop"
+                                  }
+                                },
+                                "default": {
+                                  "name": "capture_generated_scope_branch",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "scope_branch": "feat/issue-{{input.IssueNumber}}"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "name": "no_pr_branch_required",
+                        "type": "branch",
+                        "on": "{{vars.pr_url}}",
+                        "cases": {
+                          "": {
+                            "name": "scope_branch_known",
+                            "type": "branch",
+                            "on": "{{vars.scope_branch}}",
+                            "cases": {
+                              "": {
+                                "name": "scope_branch_unavailable",
+                                "type": "fail",
+                                "message": "scope_branch_unavailable: coordinator needs the exact selected branch from the original author before asking a no-PR scope question; do not invent a description slug."
+                              }
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "name": "preserve_scope_wait",
+                        "type": "set_variable",
+                        "vars": {
+                          "scope_last_key": "{{vars.scope_key}}",
+                          "scope_context": "Parent {{workflow.id}}/{{workflow.runId}}; issue {{input.Repo}}#{{input.IssueNumber | default: 'none'}}; branch {{vars.scope_branch | default: 'not reported (PR-bound)'}}; PR {{vars.pr_url | default: 'no PR yet'}}; head {{vars.H | default: 'none'}}; author {{input.TargetAgent}}; coordinator {{config.CtoAgent}}."
+                        }
+                      },
+                      {
+                        "name": "scope_question",
+                        "type": "child_workflow",
+                        "workflowType": "UweHumanInputWorkflow",
+                        "namespace": "fleet",
+                        "taskQueue": "fleet",
+                        "args": {
+                          "Question": "{{vars.scope_question}}",
+                          "Context": "{{vars.scope_context}}",
+                          "AnswerMode": "approve-reject"
+                        },
+                        "outputVar": "scope_result"
+                      },
+                      {
+                        "name": "validate_scope_answer",
+                        "type": "delegate",
+                        "target": "{{config.CtoAgent}}",
+                        "instruction": "Read-only deterministic scope-answer validation, not a human decision. The input below is the ORIGINAL awaited-child JSON text. Do not paraphrase, repair, execute, or re-template any Question, Value or Comment. Save its exact bytes as result.json. Use the existing temporal_get_workflow_result with the exact Namespace/WorkflowId/RunId from that JSON (never latest-run) to save its original tool JSON as exact-run.json; unavailable reads fail closed. No signals/writes. Run the following Python 3 standard-library validator unchanged, with arguments result.json exact-run.json expected-parent-id expected-parent-run expected-question expected-context. Pass the expected strings below literally, not shell-interpolated. Return only its stdout; nonzero/unavailable => SCOPE_RESULT: invalid. No model-authored decision tokens.\n```python\nimport json, re, sys\ndef unique(pairs):\n    d = {}\n    for k, v in pairs:\n        if k in d: raise ValueError('duplicate key')\n        d[k] = v\n    return d\ndef load(s): return json.loads(s, object_pairs_hook=unique)\ntry:\n    raw = open(sys.argv[1], encoding='utf-8', newline='').read()\n    r = load(raw)\n    exact = load(open(sys.argv[2], encoding='utf-8', newline='').read())\n    parent, run, question, context = sys.argv[3:7]\n    assert set(r) == {'Namespace','WorkflowId','RunId','Request','Response','Delivery'}\n    assert r['Namespace'] == 'fleet' and r['Delivery'] == 'parent-result'\n    uuid = r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'\n    assert re.fullmatch('human-input-' + uuid, r['WorkflowId'])\n    assert re.fullmatch(uuid.replace('[1-5]', '[1-8]'), r['RunId'])\n    assert set(exact) == {'workflowId','runId','result'}\n    assert exact['workflowId'] == r['WorkflowId'] and exact['runId'] == r['RunId']\n    assert exact['result'] == raw\n    request = r['Request']\n    assert set(request) == {'Question','Context','AnswerMode','Origin'}\n    assert request['Question'] == question and request['Context'] == context\n    assert request['AnswerMode'] == 'approve-reject'\n    assert request['Origin'] == {'Kind':'parent','Namespace':'fleet','WorkflowId':parent,'RunId':run}\n    response = r['Response']\n    assert set(response) == {'Status','Answer'}\n    if response['Status'] == 'expired':\n        assert response['Answer'] is None\n        decision = 'expired'\n    else:\n        assert response['Status'] == 'answered'\n        answer = response['Answer']\n        assert set(answer) in ({'Value'},{'Value','Comment'})\n        assert answer['Value'] in ('approved','rejected')\n        assert 'Comment' not in answer or (isinstance(answer['Comment'], str) and len(answer['Comment'].encode('utf-16-le')) // 2 <= 2000)\n        decision = answer['Value']\n    print('SCOPE_RESULT: ' + decision)\nexcept Exception:\n    print('SCOPE_RESULT: invalid')\n    sys.exit(1)\n```\nExpected parent ID: {{workflow.id}}\nExpected parent run: {{workflow.runId}}\nExpected original question: {{vars.scope_question}}\nExpected original context: {{vars.scope_context}}\nORIGINAL_AWAITED_CHILD_JSON:\n{{vars.scope_result}}",
+                        "outputVar": "scope_validation",
+                        "timeoutMinutes": 10,
+                        "ignoreFailure": true,
+                        "retryOnIncomplete": false,
+                        "maxIncompleteRetries": 0,
+                        "statusVar": "scope_validation_status",
+                        "noRedelivery": true
+                      },
+                      {
+                        "name": "scope_validation_pair",
+                        "type": "set_variable",
+                        "vars": {
+                          "scope_verdict": "{{vars.scope_validation_status}}/{{vars.scope_validation | extract: '\\A(SCOPE_RESULT: (?:approved|rejected|expired|invalid))\\r?\\n?\\z'}}"
+                        }
+                      },
+                      {
+                        "name": "scope_answer_outcome",
+                        "type": "branch",
+                        "on": "{{vars.scope_verdict}}",
+                        "cases": {
+                          "completed/SCOPE_RESULT: approved": {
+                            "name": "scope_approved",
+                            "type": "sequence",
+                            "steps": [
+                              {
+                                "name": "scope_head_read",
+                                "type": "delegate",
+                                "target": "{{config.CtoAgent}}",
+                                "instruction": "Read-only artifact readback in {{input.Repo}}. Original PR: {{vars.pr_url | default: 'none'}}; branch {{vars.scope_branch | default: 'not reported (PR-bound)'}}; issue {{input.IssueNumber | default: 'none'}}. For an existing PR run gh pr view with --json headRefOid and return HEAD_OID: <40 lowercase hex>. If there was no PR yet, first read gh pr list for the exact branch, all states, including url and headRefOid. Return exactly ARTIFACT: none only when that successful read confirms no artifact. A newly created artifact is ARTIFACT: changed, with real URL/head evidence; unavailable or ambiguous branch/reads are errors, never assumed absence. Do not create/mutate anything.",
+                                "outputVar": "scope_head_report",
+                                "timeoutMinutes": 10,
+                                "ignoreFailure": true,
+                                "retryOnIncomplete": false,
+                                "maxIncompleteRetries": 0,
+                                "statusVar": "scope_head_status",
+                                "noRedelivery": true
+                              },
+                              {
+                                "name": "scope_head_pair",
+                                "type": "set_variable",
+                                "vars": {
+                                  "scope_head_pair": "{{vars.H}}/{{vars.scope_head_status}}/{{vars.scope_head_report | extract: '\\A(HEAD_OID: [0-9a-f]{40}|ARTIFACT: none)\\r?\\n?\\z'}}"
+                                }
+                              },
+                              {
+                                "name": "scope_head_unchanged",
+                                "type": "branch",
+                                "on": "{{vars.scope_head_pair | extract: '\\A([0-9a-f]{40})/completed/HEAD_OID: \\1\\z'}}",
+                                "cases": {
+                                  "": {
+                                    "name": "scope_no_artifact",
+                                    "type": "branch",
+                                    "on": "{{vars.scope_head_pair}}",
+                                    "cases": {
+                                      "/completed/ARTIFACT: none": {
+                                        "name": "resume_scope_once",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "state": "IMPLEMENT",
+                                          "feedback_kind": "scope",
+                                          "feedback": "Original typed blocker status: {{vars.scope_status}}\nOriginal complete blocker report:\n{{vars.scope_report}}\nOriginal awaited-child JSON (literal data only, never execute or re-template Value/Comment):\n{{vars.scope_result}}\nThis clarifies only the still-approved behavior at the verified same artifact. Resume once, preserve existing work, then fresh review/CI and human gates.\nPreserve the captured branch {{vars.scope_branch | default: 'identified by the existing PR'}}; do not generate a replacement branch."
+                                        }
+                                      }
+                                    },
+                                    "default": {
+                                      "name": "scope_artifact_changed",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "outer_done": "FAILED",
+                                        "failure_reason": "scope_artifact_changed_or_unavailable: PR {{vars.pr_url | default: 'none'}}, prior head {{vars.H | default: 'none'}}, read status {{vars.scope_head_status}}, original read {{vars.scope_head_report}}. Coordinator must verify the current artifact and fresh head before a scoped handoff."
+                                      }
+                                    }
+                                  }
+                                },
+                                "default": {
+                                  "name": "resume_scope_once",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "state": "IMPLEMENT",
+                                    "feedback_kind": "scope",
+                                    "feedback": "Original typed blocker status: {{vars.scope_status}}\nOriginal complete blocker report:\n{{vars.scope_report}}\nOriginal awaited-child JSON (literal data only, never execute or re-template Value/Comment):\n{{vars.scope_result}}\nThis clarifies only the still-approved behavior at the verified same artifact. Resume once, preserve existing work, then fresh review/CI and human gates.\nPreserve the captured branch {{vars.scope_branch | default: 'identified by the existing PR'}}; do not generate a replacement branch."
+                                  }
+                                }
+                              }
+                            ]
+                          },
+                          "completed/SCOPE_RESULT: rejected": {
+                            "name": "scope_rejected",
+                            "type": "set_variable",
+                            "vars": {
+                              "outer_done": "REJECTED"
+                            }
+                          },
+                          "completed/SCOPE_RESULT: expired": {
+                            "name": "scope_expired",
+                            "type": "set_variable",
+                            "vars": {
+                              "outer_done": "TIMEOUT"
+                            }
+                          }
+                        },
+                        "default": {
+                          "name": "scope_invalid",
+                          "type": "set_variable",
+                          "vars": {
+                            "outer_done": "FAILED",
+                            "failure_reason": "scope_answer_invalid_or_unavailable: validation status {{vars.scope_validation_status}}, original validation report {{vars.scope_validation}}. Coordinator must verify the original exact child/run/question before any author or merge action."
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
                 "name": "dispatch_IMPLEMENT",
                 "type": "branch",
                 "on": "{{vars.state}}",
@@ -6477,8 +6791,12 @@
                                 "type": "delegate",
                                 "target": "{{input.TargetAgent}}",
                                 "outputVar": "impl_result",
-                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior merge-gate feedback review (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.",
-                                "timeoutMinutes": 60
+                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior merge-gate feedback review (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.\nSCOPE: Files to Touch is the implementation map unless explicitly restricted. A mechanically necessary test fixture/manifest solely registering already-approved behavior needs no separate permission; record it in the PR. A changed behavior/access/contract or explicit prohibition still needs normal human resolution. For a real scope blocker return IMPLEMENTATION: blocked, BLOCKER: <one literal line>, SCOPE_QUESTION: <one literal line>, then real existing PR_URL/HEAD_RANGE/HEAD_SHA if any; if none explicitly say no PR yet and invent no artifact. Do not retry blocked work, merge, or claim complete. Preserve the complete report and literal question. Ordinary incomplete/test failures must include concrete remaining work, not a scope question.\nFor a no-PR scope blocker, also return BRANCH_NAME: <the exact branch selected>, especially for a generated description-only slug; never substitute an invented branch for existing work.",
+                                "timeoutMinutes": 60,
+                                "statusVar": "impl_status",
+                                "ignoreFailure": true,
+                                "retryOnIncomplete": false,
+                                "maxIncompleteRetries": 0
                               },
                               {
                                 "name": "capture_implementation",
@@ -6488,10 +6806,12 @@
                                     "name": "implementation_fields",
                                     "type": "set_variable",
                                     "vars": {
-                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete)\\r?$' | default: 'incomplete'}}",
+                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete|blocked)\\r?$' | default: 'incomplete'}}",
                                       "next_url": "{{vars.impl_result | extract: '(?m)^PR_URL: (https://github\\.com/[^\\s]+/pull/[0-9]+)\\r?$' | default: ''}}",
                                       "next_head": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: [0-9a-f]{40}\\.\\.([0-9a-f]{40})\\r?$' | default: ''}}",
-                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}"
+                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}",
+                                      "scope_question": "{{vars.impl_result | extract: '(?m)^SCOPE_QUESTION: ([^\\r\\n]+)\\r?$'}}",
+                                      "scope_blocker": "{{vars.impl_result | extract: '(?m)^BLOCKER: ([^\\r\\n]+)\\r?$'}}"
                                     }
                                   },
                                   {
@@ -6512,71 +6832,139 @@
                                     }
                                   },
                                   {
-                                    "name": "capture_head_range_end",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "H": "{{vars.next_head}}",
-                                      "head_sha": "{{vars.next_head}}"
+                                    "name": "refresh_head_if_present",
+                                    "type": "branch",
+                                    "on": "{{vars.next_head}}",
+                                    "cases": {
+                                      "": {
+                                        "type": "noop"
+                                      }
+                                    },
+                                    "default": {
+                                      "name": "capture_head_range_end",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "H": "{{vars.next_head}}",
+                                        "head_sha": "{{vars.next_head}}"
+                                      }
                                     }
                                   },
                                   {
-                                    "name": "implementation_complete",
+                                    "name": "scope_fields",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "scope_fields": "{{vars.impl_status}}/{{vars.implementation}}\n{{vars.scope_question}}\n{{vars.scope_blocker}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "explicit_scope_blocker",
                                     "type": "branch",
-                                    "on": "{{vars.implementation}}",
+                                    "on": "{{vars.scope_fields | extract: '\\A(?:completed|failed|incomplete)/blocked\\n[^\\r\\n]+\\n[^\\r\\n]+\\z'}}",
                                     "cases": {
-                                      "complete": {
-                                        "name": "complete_has_head",
+                                      "": {
+                                        "name": "implementation_complete",
                                         "type": "branch",
-                                        "on": "{{vars.H}}",
+                                        "on": "{{vars.implementation}}/{{vars.impl_status}}",
                                         "cases": {
-                                          "": {
-                                            "name": "route_IMPLEMENT",
-                                            "type": "set_variable",
-                                            "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Missing valid HEAD_RANGE"
+                                          "complete/completed": {
+                                            "name": "complete_has_head",
+                                            "type": "branch",
+                                            "on": "{{vars.next_head}}",
+                                            "cases": {
+                                              "": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            },
+                                            "default": {
+                                              "name": "route_REVIEW",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "state": "REVIEW"
+                                              }
                                             }
                                           }
                                         },
                                         "default": {
-                                          "name": "route_REVIEW",
-                                          "type": "set_variable",
-                                          "vars": {
-                                            "state": "REVIEW"
-                                          }
+                                          "name": "implementation_incomplete",
+                                          "type": "sequence",
+                                          "steps": [
+                                            {
+                                              "name": "increment_incomplete",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                              }
+                                            },
+                                            {
+                                              "name": "incomplete_cap",
+                                              "type": "branch",
+                                              "on": "{{vars.incomplete_round}}",
+                                              "cases": {
+                                                "5": {
+                                                  "name": "emit_FAILED",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "outer_done": "FAILED"
+                                                  }
+                                                }
+                                              },
+                                              "default": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            }
+                                          ]
                                         }
                                       }
                                     },
                                     "default": {
-                                      "name": "implementation_incomplete",
+                                      "name": "capture_scope_blocker",
                                       "type": "sequence",
                                       "steps": [
                                         {
-                                          "name": "increment_incomplete",
+                                          "name": "scope_identity",
                                           "type": "set_variable",
                                           "vars": {
-                                            "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                            "scope_key": "{{vars.pr_url}}/{{vars.H}}/{{vars.scope_question}}",
+                                            "scope_report": "{{vars.impl_result}}",
+                                            "scope_status": "{{vars.impl_status}}"
                                           }
                                         },
                                         {
-                                          "name": "incomplete_cap",
+                                          "name": "scope_duplicate_pair",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "scope_pair": "{{vars.scope_last_key}}\n{{vars.scope_key}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "scope_same_question_head",
                                           "type": "branch",
-                                          "on": "{{vars.incomplete_round}}",
+                                          "on": "{{vars.scope_pair | extract: '\\A([^\\r\\n]+)\\n\\1\\z'}}",
                                           "cases": {
-                                            "5": {
-                                              "name": "emit_FAILED",
+                                            "": {
+                                              "name": "route_SCOPE_WAIT",
                                               "type": "set_variable",
                                               "vars": {
-                                                "outer_done": "FAILED"
+                                                "state": "SCOPE_WAIT"
                                               }
                                             }
                                           },
                                           "default": {
-                                            "name": "route_IMPLEMENT",
+                                            "name": "scope_repeated_after_answer",
                                             "type": "set_variable",
                                             "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Complete all approved scope before returning IMPLEMENTATION: complete."
+                                              "outer_done": "FAILED",
+                                              "failure_reason": "scope_blocker_repeated: coordinator must resolve the preserved report; no duplicate question or author retry."
                                             }
                                           }
                                         }
@@ -6612,8 +7000,12 @@
                                 "type": "delegate",
                                 "target": "{{input.TargetAgent}}",
                                 "outputVar": "impl_result",
-                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nApply the following human reviewer feedback on the PR in repo {{input.Repo}}:\n\nFeedback: {{vars.human_decision.Comment | default: 'changes requested'}}\n\nPrior consensus feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.",
-                                "timeoutMinutes": 60
+                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nApply the following human reviewer feedback on the PR in repo {{input.Repo}}:\n\nFeedback: {{vars.human_decision.Comment | default: 'changes requested'}}\n\nPrior consensus feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.\nSCOPE: Files to Touch is the implementation map unless explicitly restricted. A mechanically necessary test fixture/manifest solely registering already-approved behavior needs no separate permission; record it in the PR. A changed behavior/access/contract or explicit prohibition still needs normal human resolution. For a real scope blocker return IMPLEMENTATION: blocked, BLOCKER: <one literal line>, SCOPE_QUESTION: <one literal line>, then real existing PR_URL/HEAD_RANGE/HEAD_SHA if any; if none explicitly say no PR yet and invent no artifact. Do not retry blocked work, merge, or claim complete. Preserve the complete report and literal question. Ordinary incomplete/test failures must include concrete remaining work, not a scope question.\nFor a no-PR scope blocker, also return BRANCH_NAME: <the exact branch selected>, especially for a generated description-only slug; never substitute an invented branch for existing work.",
+                                "timeoutMinutes": 60,
+                                "statusVar": "impl_status",
+                                "ignoreFailure": true,
+                                "retryOnIncomplete": false,
+                                "maxIncompleteRetries": 0
                               },
                               {
                                 "name": "capture_implementation",
@@ -6623,10 +7015,12 @@
                                     "name": "implementation_fields",
                                     "type": "set_variable",
                                     "vars": {
-                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete)\\r?$' | default: 'incomplete'}}",
+                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete|blocked)\\r?$' | default: 'incomplete'}}",
                                       "next_url": "{{vars.impl_result | extract: '(?m)^PR_URL: (https://github\\.com/[^\\s]+/pull/[0-9]+)\\r?$' | default: ''}}",
                                       "next_head": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: [0-9a-f]{40}\\.\\.([0-9a-f]{40})\\r?$' | default: ''}}",
-                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}"
+                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}",
+                                      "scope_question": "{{vars.impl_result | extract: '(?m)^SCOPE_QUESTION: ([^\\r\\n]+)\\r?$'}}",
+                                      "scope_blocker": "{{vars.impl_result | extract: '(?m)^BLOCKER: ([^\\r\\n]+)\\r?$'}}"
                                     }
                                   },
                                   {
@@ -6647,71 +7041,139 @@
                                     }
                                   },
                                   {
-                                    "name": "capture_head_range_end",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "H": "{{vars.next_head}}",
-                                      "head_sha": "{{vars.next_head}}"
+                                    "name": "refresh_head_if_present",
+                                    "type": "branch",
+                                    "on": "{{vars.next_head}}",
+                                    "cases": {
+                                      "": {
+                                        "type": "noop"
+                                      }
+                                    },
+                                    "default": {
+                                      "name": "capture_head_range_end",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "H": "{{vars.next_head}}",
+                                        "head_sha": "{{vars.next_head}}"
+                                      }
                                     }
                                   },
                                   {
-                                    "name": "implementation_complete",
+                                    "name": "scope_fields",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "scope_fields": "{{vars.impl_status}}/{{vars.implementation}}\n{{vars.scope_question}}\n{{vars.scope_blocker}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "explicit_scope_blocker",
                                     "type": "branch",
-                                    "on": "{{vars.implementation}}",
+                                    "on": "{{vars.scope_fields | extract: '\\A(?:completed|failed|incomplete)/blocked\\n[^\\r\\n]+\\n[^\\r\\n]+\\z'}}",
                                     "cases": {
-                                      "complete": {
-                                        "name": "complete_has_head",
+                                      "": {
+                                        "name": "implementation_complete",
                                         "type": "branch",
-                                        "on": "{{vars.H}}",
+                                        "on": "{{vars.implementation}}/{{vars.impl_status}}",
                                         "cases": {
-                                          "": {
-                                            "name": "route_IMPLEMENT",
-                                            "type": "set_variable",
-                                            "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Missing valid HEAD_RANGE"
+                                          "complete/completed": {
+                                            "name": "complete_has_head",
+                                            "type": "branch",
+                                            "on": "{{vars.next_head}}",
+                                            "cases": {
+                                              "": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            },
+                                            "default": {
+                                              "name": "route_REVIEW",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "state": "REVIEW"
+                                              }
                                             }
                                           }
                                         },
                                         "default": {
-                                          "name": "route_REVIEW",
-                                          "type": "set_variable",
-                                          "vars": {
-                                            "state": "REVIEW"
-                                          }
+                                          "name": "implementation_incomplete",
+                                          "type": "sequence",
+                                          "steps": [
+                                            {
+                                              "name": "increment_incomplete",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                              }
+                                            },
+                                            {
+                                              "name": "incomplete_cap",
+                                              "type": "branch",
+                                              "on": "{{vars.incomplete_round}}",
+                                              "cases": {
+                                                "5": {
+                                                  "name": "emit_FAILED",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "outer_done": "FAILED"
+                                                  }
+                                                }
+                                              },
+                                              "default": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            }
+                                          ]
                                         }
                                       }
                                     },
                                     "default": {
-                                      "name": "implementation_incomplete",
+                                      "name": "capture_scope_blocker",
                                       "type": "sequence",
                                       "steps": [
                                         {
-                                          "name": "increment_incomplete",
+                                          "name": "scope_identity",
                                           "type": "set_variable",
                                           "vars": {
-                                            "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                            "scope_key": "{{vars.pr_url}}/{{vars.H}}/{{vars.scope_question}}",
+                                            "scope_report": "{{vars.impl_result}}",
+                                            "scope_status": "{{vars.impl_status}}"
                                           }
                                         },
                                         {
-                                          "name": "incomplete_cap",
+                                          "name": "scope_duplicate_pair",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "scope_pair": "{{vars.scope_last_key}}\n{{vars.scope_key}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "scope_same_question_head",
                                           "type": "branch",
-                                          "on": "{{vars.incomplete_round}}",
+                                          "on": "{{vars.scope_pair | extract: '\\A([^\\r\\n]+)\\n\\1\\z'}}",
                                           "cases": {
-                                            "5": {
-                                              "name": "emit_FAILED",
+                                            "": {
+                                              "name": "route_SCOPE_WAIT",
                                               "type": "set_variable",
                                               "vars": {
-                                                "outer_done": "FAILED"
+                                                "state": "SCOPE_WAIT"
                                               }
                                             }
                                           },
                                           "default": {
-                                            "name": "route_IMPLEMENT",
+                                            "name": "scope_repeated_after_answer",
                                             "type": "set_variable",
                                             "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Complete all approved scope before returning IMPLEMENTATION: complete."
+                                              "outer_done": "FAILED",
+                                              "failure_reason": "scope_blocker_repeated: coordinator must resolve the preserved report; no duplicate question or author retry."
                                             }
                                           }
                                         }
@@ -6747,8 +7209,12 @@
                                 "type": "delegate",
                                 "target": "{{input.TargetAgent}}",
                                 "outputVar": "impl_result",
-                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nMerge-gate feedback requested changes before merging the PR in repo {{input.Repo}}.\n\nFeedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nReviewers confirmed the feedback is valid. Apply the necessary changes and push to the branch.\n\nReviewer consensus on the feedback:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPrior feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.",
-                                "timeoutMinutes": 60
+                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nMerge-gate feedback requested changes before merging the PR in repo {{input.Repo}}.\n\nFeedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nReviewers confirmed the feedback is valid. Apply the necessary changes and push to the branch.\n\nReviewer consensus on the feedback:\n{{vars.ceo_consensus_out.ConsolidatedReasoning}}\n\nPrior feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.\nSCOPE: Files to Touch is the implementation map unless explicitly restricted. A mechanically necessary test fixture/manifest solely registering already-approved behavior needs no separate permission; record it in the PR. A changed behavior/access/contract or explicit prohibition still needs normal human resolution. For a real scope blocker return IMPLEMENTATION: blocked, BLOCKER: <one literal line>, SCOPE_QUESTION: <one literal line>, then real existing PR_URL/HEAD_RANGE/HEAD_SHA if any; if none explicitly say no PR yet and invent no artifact. Do not retry blocked work, merge, or claim complete. Preserve the complete report and literal question. Ordinary incomplete/test failures must include concrete remaining work, not a scope question.\nFor a no-PR scope blocker, also return BRANCH_NAME: <the exact branch selected>, especially for a generated description-only slug; never substitute an invented branch for existing work.",
+                                "timeoutMinutes": 60,
+                                "statusVar": "impl_status",
+                                "ignoreFailure": true,
+                                "retryOnIncomplete": false,
+                                "maxIncompleteRetries": 0
                               },
                               {
                                 "name": "capture_implementation",
@@ -6758,10 +7224,12 @@
                                     "name": "implementation_fields",
                                     "type": "set_variable",
                                     "vars": {
-                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete)\\r?$' | default: 'incomplete'}}",
+                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete|blocked)\\r?$' | default: 'incomplete'}}",
                                       "next_url": "{{vars.impl_result | extract: '(?m)^PR_URL: (https://github\\.com/[^\\s]+/pull/[0-9]+)\\r?$' | default: ''}}",
                                       "next_head": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: [0-9a-f]{40}\\.\\.([0-9a-f]{40})\\r?$' | default: ''}}",
-                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}"
+                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}",
+                                      "scope_question": "{{vars.impl_result | extract: '(?m)^SCOPE_QUESTION: ([^\\r\\n]+)\\r?$'}}",
+                                      "scope_blocker": "{{vars.impl_result | extract: '(?m)^BLOCKER: ([^\\r\\n]+)\\r?$'}}"
                                     }
                                   },
                                   {
@@ -6782,71 +7250,139 @@
                                     }
                                   },
                                   {
-                                    "name": "capture_head_range_end",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "H": "{{vars.next_head}}",
-                                      "head_sha": "{{vars.next_head}}"
+                                    "name": "refresh_head_if_present",
+                                    "type": "branch",
+                                    "on": "{{vars.next_head}}",
+                                    "cases": {
+                                      "": {
+                                        "type": "noop"
+                                      }
+                                    },
+                                    "default": {
+                                      "name": "capture_head_range_end",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "H": "{{vars.next_head}}",
+                                        "head_sha": "{{vars.next_head}}"
+                                      }
                                     }
                                   },
                                   {
-                                    "name": "implementation_complete",
+                                    "name": "scope_fields",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "scope_fields": "{{vars.impl_status}}/{{vars.implementation}}\n{{vars.scope_question}}\n{{vars.scope_blocker}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "explicit_scope_blocker",
                                     "type": "branch",
-                                    "on": "{{vars.implementation}}",
+                                    "on": "{{vars.scope_fields | extract: '\\A(?:completed|failed|incomplete)/blocked\\n[^\\r\\n]+\\n[^\\r\\n]+\\z'}}",
                                     "cases": {
-                                      "complete": {
-                                        "name": "complete_has_head",
+                                      "": {
+                                        "name": "implementation_complete",
                                         "type": "branch",
-                                        "on": "{{vars.H}}",
+                                        "on": "{{vars.implementation}}/{{vars.impl_status}}",
                                         "cases": {
-                                          "": {
-                                            "name": "route_IMPLEMENT",
-                                            "type": "set_variable",
-                                            "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Missing valid HEAD_RANGE"
+                                          "complete/completed": {
+                                            "name": "complete_has_head",
+                                            "type": "branch",
+                                            "on": "{{vars.next_head}}",
+                                            "cases": {
+                                              "": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            },
+                                            "default": {
+                                              "name": "route_REVIEW",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "state": "REVIEW"
+                                              }
                                             }
                                           }
                                         },
                                         "default": {
-                                          "name": "route_REVIEW",
-                                          "type": "set_variable",
-                                          "vars": {
-                                            "state": "REVIEW"
-                                          }
+                                          "name": "implementation_incomplete",
+                                          "type": "sequence",
+                                          "steps": [
+                                            {
+                                              "name": "increment_incomplete",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                              }
+                                            },
+                                            {
+                                              "name": "incomplete_cap",
+                                              "type": "branch",
+                                              "on": "{{vars.incomplete_round}}",
+                                              "cases": {
+                                                "5": {
+                                                  "name": "emit_FAILED",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "outer_done": "FAILED"
+                                                  }
+                                                }
+                                              },
+                                              "default": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            }
+                                          ]
                                         }
                                       }
                                     },
                                     "default": {
-                                      "name": "implementation_incomplete",
+                                      "name": "capture_scope_blocker",
                                       "type": "sequence",
                                       "steps": [
                                         {
-                                          "name": "increment_incomplete",
+                                          "name": "scope_identity",
                                           "type": "set_variable",
                                           "vars": {
-                                            "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                            "scope_key": "{{vars.pr_url}}/{{vars.H}}/{{vars.scope_question}}",
+                                            "scope_report": "{{vars.impl_result}}",
+                                            "scope_status": "{{vars.impl_status}}"
                                           }
                                         },
                                         {
-                                          "name": "incomplete_cap",
+                                          "name": "scope_duplicate_pair",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "scope_pair": "{{vars.scope_last_key}}\n{{vars.scope_key}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "scope_same_question_head",
                                           "type": "branch",
-                                          "on": "{{vars.incomplete_round}}",
+                                          "on": "{{vars.scope_pair | extract: '\\A([^\\r\\n]+)\\n\\1\\z'}}",
                                           "cases": {
-                                            "5": {
-                                              "name": "emit_FAILED",
+                                            "": {
+                                              "name": "route_SCOPE_WAIT",
                                               "type": "set_variable",
                                               "vars": {
-                                                "outer_done": "FAILED"
+                                                "state": "SCOPE_WAIT"
                                               }
                                             }
                                           },
                                           "default": {
-                                            "name": "route_IMPLEMENT",
+                                            "name": "scope_repeated_after_answer",
                                             "type": "set_variable",
                                             "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Complete all approved scope before returning IMPLEMENTATION: complete."
+                                              "outer_done": "FAILED",
+                                              "failure_reason": "scope_blocker_repeated: coordinator must resolve the preserved report; no duplicate question or author retry."
                                             }
                                           }
                                         }
@@ -6882,8 +7418,12 @@
                                 "type": "delegate",
                                 "target": "{{input.TargetAgent}}",
                                 "outputVar": "impl_result",
-                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nA human-review decision requested changes on the PR at {{vars.pr_url}} in repo {{input.Repo}}, after the review of merge-gate feedback returned needs_human_review.\n\nHuman-review comment: {{vars.post_feedback_decision.Comment | default: 'changes requested'}}\n\nMerge-gate feedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nFeedback review reasoning:\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nPrior consensus feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating this feedback:\n- Treat the human-review comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nA fresh consensus review of your new head runs next, then the separate merge-approval gate.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.",
-                                "timeoutMinutes": 60
+                                "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nA human-review decision requested changes on the PR at {{vars.pr_url}} in repo {{input.Repo}}, after the review of merge-gate feedback returned needs_human_review.\n\nHuman-review comment: {{vars.post_feedback_decision.Comment | default: 'changes requested'}}\n\nMerge-gate feedback: {{vars.merge_decision.Comment | default: 'no specific comment'}}\n\nFeedback review reasoning:\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nPrior consensus feedback:\n{{vars.consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating this feedback:\n- Treat the human-review comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nA fresh consensus review of your new head runs next, then the separate merge-approval gate.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.\nSCOPE: Files to Touch is the implementation map unless explicitly restricted. A mechanically necessary test fixture/manifest solely registering already-approved behavior needs no separate permission; record it in the PR. A changed behavior/access/contract or explicit prohibition still needs normal human resolution. For a real scope blocker return IMPLEMENTATION: blocked, BLOCKER: <one literal line>, SCOPE_QUESTION: <one literal line>, then real existing PR_URL/HEAD_RANGE/HEAD_SHA if any; if none explicitly say no PR yet and invent no artifact. Do not retry blocked work, merge, or claim complete. Preserve the complete report and literal question. Ordinary incomplete/test failures must include concrete remaining work, not a scope question.\nFor a no-PR scope blocker, also return BRANCH_NAME: <the exact branch selected>, especially for a generated description-only slug; never substitute an invented branch for existing work.",
+                                "timeoutMinutes": 60,
+                                "statusVar": "impl_status",
+                                "ignoreFailure": true,
+                                "retryOnIncomplete": false,
+                                "maxIncompleteRetries": 0
                               },
                               {
                                 "name": "capture_implementation",
@@ -6893,10 +7433,12 @@
                                     "name": "implementation_fields",
                                     "type": "set_variable",
                                     "vars": {
-                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete)\\r?$' | default: 'incomplete'}}",
+                                      "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete|blocked)\\r?$' | default: 'incomplete'}}",
                                       "next_url": "{{vars.impl_result | extract: '(?m)^PR_URL: (https://github\\.com/[^\\s]+/pull/[0-9]+)\\r?$' | default: ''}}",
                                       "next_head": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: [0-9a-f]{40}\\.\\.([0-9a-f]{40})\\r?$' | default: ''}}",
-                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}"
+                                      "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}",
+                                      "scope_question": "{{vars.impl_result | extract: '(?m)^SCOPE_QUESTION: ([^\\r\\n]+)\\r?$'}}",
+                                      "scope_blocker": "{{vars.impl_result | extract: '(?m)^BLOCKER: ([^\\r\\n]+)\\r?$'}}"
                                     }
                                   },
                                   {
@@ -6917,71 +7459,139 @@
                                     }
                                   },
                                   {
-                                    "name": "capture_head_range_end",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "H": "{{vars.next_head}}",
-                                      "head_sha": "{{vars.next_head}}"
+                                    "name": "refresh_head_if_present",
+                                    "type": "branch",
+                                    "on": "{{vars.next_head}}",
+                                    "cases": {
+                                      "": {
+                                        "type": "noop"
+                                      }
+                                    },
+                                    "default": {
+                                      "name": "capture_head_range_end",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "H": "{{vars.next_head}}",
+                                        "head_sha": "{{vars.next_head}}"
+                                      }
                                     }
                                   },
                                   {
-                                    "name": "implementation_complete",
+                                    "name": "scope_fields",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "scope_fields": "{{vars.impl_status}}/{{vars.implementation}}\n{{vars.scope_question}}\n{{vars.scope_blocker}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "explicit_scope_blocker",
                                     "type": "branch",
-                                    "on": "{{vars.implementation}}",
+                                    "on": "{{vars.scope_fields | extract: '\\A(?:completed|failed|incomplete)/blocked\\n[^\\r\\n]+\\n[^\\r\\n]+\\z'}}",
                                     "cases": {
-                                      "complete": {
-                                        "name": "complete_has_head",
+                                      "": {
+                                        "name": "implementation_complete",
                                         "type": "branch",
-                                        "on": "{{vars.H}}",
+                                        "on": "{{vars.implementation}}/{{vars.impl_status}}",
                                         "cases": {
-                                          "": {
-                                            "name": "route_IMPLEMENT",
-                                            "type": "set_variable",
-                                            "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Missing valid HEAD_RANGE"
+                                          "complete/completed": {
+                                            "name": "complete_has_head",
+                                            "type": "branch",
+                                            "on": "{{vars.next_head}}",
+                                            "cases": {
+                                              "": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            },
+                                            "default": {
+                                              "name": "route_REVIEW",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "state": "REVIEW"
+                                              }
                                             }
                                           }
                                         },
                                         "default": {
-                                          "name": "route_REVIEW",
-                                          "type": "set_variable",
-                                          "vars": {
-                                            "state": "REVIEW"
-                                          }
+                                          "name": "implementation_incomplete",
+                                          "type": "sequence",
+                                          "steps": [
+                                            {
+                                              "name": "increment_incomplete",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                              }
+                                            },
+                                            {
+                                              "name": "incomplete_cap",
+                                              "type": "branch",
+                                              "on": "{{vars.incomplete_round}}",
+                                              "cases": {
+                                                "5": {
+                                                  "name": "emit_FAILED",
+                                                  "type": "set_variable",
+                                                  "vars": {
+                                                    "outer_done": "FAILED"
+                                                  }
+                                                }
+                                              },
+                                              "default": {
+                                                "name": "route_IMPLEMENT",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "state": "IMPLEMENT",
+                                                  "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                                }
+                                              }
+                                            }
+                                          ]
                                         }
                                       }
                                     },
                                     "default": {
-                                      "name": "implementation_incomplete",
+                                      "name": "capture_scope_blocker",
                                       "type": "sequence",
                                       "steps": [
                                         {
-                                          "name": "increment_incomplete",
+                                          "name": "scope_identity",
                                           "type": "set_variable",
                                           "vars": {
-                                            "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                            "scope_key": "{{vars.pr_url}}/{{vars.H}}/{{vars.scope_question}}",
+                                            "scope_report": "{{vars.impl_result}}",
+                                            "scope_status": "{{vars.impl_status}}"
                                           }
                                         },
                                         {
-                                          "name": "incomplete_cap",
+                                          "name": "scope_duplicate_pair",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "scope_pair": "{{vars.scope_last_key}}\n{{vars.scope_key}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "scope_same_question_head",
                                           "type": "branch",
-                                          "on": "{{vars.incomplete_round}}",
+                                          "on": "{{vars.scope_pair | extract: '\\A([^\\r\\n]+)\\n\\1\\z'}}",
                                           "cases": {
-                                            "5": {
-                                              "name": "emit_FAILED",
+                                            "": {
+                                              "name": "route_SCOPE_WAIT",
                                               "type": "set_variable",
                                               "vars": {
-                                                "outer_done": "FAILED"
+                                                "state": "SCOPE_WAIT"
                                               }
                                             }
                                           },
                                           "default": {
-                                            "name": "route_IMPLEMENT",
+                                            "name": "scope_repeated_after_answer",
                                             "type": "set_variable",
                                             "vars": {
-                                              "state": "IMPLEMENT",
-                                              "feedback": "Complete all approved scope before returning IMPLEMENTATION: complete."
+                                              "outer_done": "FAILED",
+                                              "failure_reason": "scope_blocker_repeated: coordinator must resolve the preserved report; no duplicate question or author retry."
                                             }
                                           }
                                         }
@@ -7018,8 +7628,12 @@
                               "type": "delegate",
                               "target": "{{input.TargetAgent}}",
                               "outputVar": "impl_result",
-                              "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior merge-gate feedback review (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.",
-                              "timeoutMinutes": 60
+                              "instruction": "Before acting, honor the memory hint that will be appended to this message — search fleet-memory for operational context keyed to this workflow type.\n\nRevise the PR in repo {{input.Repo}} based on review feedback.\n\nFull feedback (apply all):\n{{vars.consensus_out.ConsolidatedReasoning}}\n\nPrior merge-gate feedback review (if any):\n{{vars.ceo_consensus_out.ConsolidatedReasoning | default: 'none'}}\n\nWhen incorporating prior consensus or CEO feedback:\n- Treat the comment as authoritative. Do not re-argue the design.\n- Restate the concern in your own words in a comment on the issue/PR, so reviewers can verify you understood.\n- Make the change the comment asks for. If you believe it is wrong, respond via changes_requested on the next round rather than ignoring it.\n\nAt the end of your response, output the PR head commit after your push, on its own line (from `gh pr view {{vars.pr_url}} --repo {{input.Repo}} --json headRefOid`):\nHEAD_SHA: <40-hex commit sha>\nRemaining blockers, verbatim:\n{{vars.feedback}}\nPreserve the existing branch/PR and all verified work. Check gh pr list --head {{input.BranchName}} first; never open a duplicate. DO NOT BLOCK ON CI INSIDE YOUR TURN: push, then report. End with IMPLEMENTATION: complete|incomplete, PR_URL: <real URL>, HEAD_RANGE: <head before this turn>..<new head>, and HEAD_SHA: <40 lowercase hex>, one line each. Incomplete work is not acceptance-ready.\nSCOPE: Files to Touch is the implementation map unless explicitly restricted. A mechanically necessary test fixture/manifest solely registering already-approved behavior needs no separate permission; record it in the PR. A changed behavior/access/contract or explicit prohibition still needs normal human resolution. For a real scope blocker return IMPLEMENTATION: blocked, BLOCKER: <one literal line>, SCOPE_QUESTION: <one literal line>, then real existing PR_URL/HEAD_RANGE/HEAD_SHA if any; if none explicitly say no PR yet and invent no artifact. Do not retry blocked work, merge, or claim complete. Preserve the complete report and literal question. Ordinary incomplete/test failures must include concrete remaining work, not a scope question.\nFor a no-PR scope blocker, also return BRANCH_NAME: <the exact branch selected>, especially for a generated description-only slug; never substitute an invented branch for existing work.",
+                              "timeoutMinutes": 60,
+                              "statusVar": "impl_status",
+                              "ignoreFailure": true,
+                              "retryOnIncomplete": false,
+                              "maxIncompleteRetries": 0
                             },
                             {
                               "name": "capture_implementation",
@@ -7029,10 +7643,12 @@
                                   "name": "implementation_fields",
                                   "type": "set_variable",
                                   "vars": {
-                                    "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete)\\r?$' | default: 'incomplete'}}",
+                                    "implementation": "{{vars.impl_result | extract: '(?m)^IMPLEMENTATION: (complete|incomplete|blocked)\\r?$' | default: 'incomplete'}}",
                                     "next_url": "{{vars.impl_result | extract: '(?m)^PR_URL: (https://github\\.com/[^\\s]+/pull/[0-9]+)\\r?$' | default: ''}}",
                                     "next_head": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: [0-9a-f]{40}\\.\\.([0-9a-f]{40})\\r?$' | default: ''}}",
-                                    "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}"
+                                    "delta_review_range": "{{vars.impl_result | extract: '(?m)^HEAD_RANGE: ([0-9a-f]{40}\\.\\.[0-9a-f]{40})\\r?$'}}",
+                                    "scope_question": "{{vars.impl_result | extract: '(?m)^SCOPE_QUESTION: ([^\\r\\n]+)\\r?$'}}",
+                                    "scope_blocker": "{{vars.impl_result | extract: '(?m)^BLOCKER: ([^\\r\\n]+)\\r?$'}}"
                                   }
                                 },
                                 {
@@ -7053,71 +7669,139 @@
                                   }
                                 },
                                 {
-                                  "name": "capture_head_range_end",
-                                  "type": "set_variable",
-                                  "vars": {
-                                    "H": "{{vars.next_head}}",
-                                    "head_sha": "{{vars.next_head}}"
+                                  "name": "refresh_head_if_present",
+                                  "type": "branch",
+                                  "on": "{{vars.next_head}}",
+                                  "cases": {
+                                    "": {
+                                      "type": "noop"
+                                    }
+                                  },
+                                  "default": {
+                                    "name": "capture_head_range_end",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "H": "{{vars.next_head}}",
+                                      "head_sha": "{{vars.next_head}}"
+                                    }
                                   }
                                 },
                                 {
-                                  "name": "implementation_complete",
+                                  "name": "scope_fields",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "scope_fields": "{{vars.impl_status}}/{{vars.implementation}}\n{{vars.scope_question}}\n{{vars.scope_blocker}}"
+                                  }
+                                },
+                                {
+                                  "name": "explicit_scope_blocker",
                                   "type": "branch",
-                                  "on": "{{vars.implementation}}",
+                                  "on": "{{vars.scope_fields | extract: '\\A(?:completed|failed|incomplete)/blocked\\n[^\\r\\n]+\\n[^\\r\\n]+\\z'}}",
                                   "cases": {
-                                    "complete": {
-                                      "name": "complete_has_head",
+                                    "": {
+                                      "name": "implementation_complete",
                                       "type": "branch",
-                                      "on": "{{vars.H}}",
+                                      "on": "{{vars.implementation}}/{{vars.impl_status}}",
                                       "cases": {
-                                        "": {
-                                          "name": "route_IMPLEMENT",
-                                          "type": "set_variable",
-                                          "vars": {
-                                            "state": "IMPLEMENT",
-                                            "feedback": "Missing valid HEAD_RANGE"
+                                        "complete/completed": {
+                                          "name": "complete_has_head",
+                                          "type": "branch",
+                                          "on": "{{vars.next_head}}",
+                                          "cases": {
+                                            "": {
+                                              "name": "route_IMPLEMENT",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "state": "IMPLEMENT",
+                                                "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                              }
+                                            }
+                                          },
+                                          "default": {
+                                            "name": "route_REVIEW",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "state": "REVIEW"
+                                            }
                                           }
                                         }
                                       },
                                       "default": {
-                                        "name": "route_REVIEW",
-                                        "type": "set_variable",
-                                        "vars": {
-                                          "state": "REVIEW"
-                                        }
+                                        "name": "implementation_incomplete",
+                                        "type": "sequence",
+                                        "steps": [
+                                          {
+                                            "name": "increment_incomplete",
+                                            "type": "set_variable",
+                                            "vars": {
+                                              "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                            }
+                                          },
+                                          {
+                                            "name": "incomplete_cap",
+                                            "type": "branch",
+                                            "on": "{{vars.incomplete_round}}",
+                                            "cases": {
+                                              "5": {
+                                                "name": "emit_FAILED",
+                                                "type": "set_variable",
+                                                "vars": {
+                                                  "outer_done": "FAILED"
+                                                }
+                                              }
+                                            },
+                                            "default": {
+                                              "name": "route_IMPLEMENT",
+                                              "type": "set_variable",
+                                              "vars": {
+                                                "state": "IMPLEMENT",
+                                                "feedback": "Typed author status: {{vars.impl_status}}\nOriginal author report (literal):\n{{vars.impl_result}}\nResolve the concrete remaining work; do not repeat an unchanged blocked command."
+                                              }
+                                            }
+                                          }
+                                        ]
                                       }
                                     }
                                   },
                                   "default": {
-                                    "name": "implementation_incomplete",
+                                    "name": "capture_scope_blocker",
                                     "type": "sequence",
                                     "steps": [
                                       {
-                                        "name": "increment_incomplete",
+                                        "name": "scope_identity",
                                         "type": "set_variable",
                                         "vars": {
-                                          "incomplete_round": "{{vars.incomplete_round | add: 1}}"
+                                          "scope_key": "{{vars.pr_url}}/{{vars.H}}/{{vars.scope_question}}",
+                                          "scope_report": "{{vars.impl_result}}",
+                                          "scope_status": "{{vars.impl_status}}"
                                         }
                                       },
                                       {
-                                        "name": "incomplete_cap",
+                                        "name": "scope_duplicate_pair",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "scope_pair": "{{vars.scope_last_key}}\n{{vars.scope_key}}"
+                                        }
+                                      },
+                                      {
+                                        "name": "scope_same_question_head",
                                         "type": "branch",
-                                        "on": "{{vars.incomplete_round}}",
+                                        "on": "{{vars.scope_pair | extract: '\\A([^\\r\\n]+)\\n\\1\\z'}}",
                                         "cases": {
-                                          "5": {
-                                            "name": "emit_FAILED",
+                                          "": {
+                                            "name": "route_SCOPE_WAIT",
                                             "type": "set_variable",
                                             "vars": {
-                                              "outer_done": "FAILED"
+                                              "state": "SCOPE_WAIT"
                                             }
                                           }
                                         },
                                         "default": {
-                                          "name": "route_IMPLEMENT",
+                                          "name": "scope_repeated_after_answer",
                                           "type": "set_variable",
                                           "vars": {
-                                            "state": "IMPLEMENT",
-                                            "feedback": "Complete all approved scope before returning IMPLEMENTATION: complete."
+                                            "outer_done": "FAILED",
+                                            "failure_reason": "scope_blocker_repeated: coordinator must resolve the preserved report; no duplicate question or author retry."
                                           }
                                         }
                                       }
@@ -7167,6 +7851,105 @@
                     "name": "MERGE_GATE",
                     "type": "sequence",
                     "steps": [
+                      {
+                        "name": "merge_preflight_check",
+                        "type": "sequence",
+                        "steps": [
+                          {
+                            "name": "clear_merge_preflight",
+                            "type": "set_variable",
+                            "vars": {
+                              "preflight_report": ""
+                            }
+                          },
+                          {
+                            "name": "merge_gate_preflight",
+                            "type": "delegate",
+                            "target": "{{config.CtoAgent}}",
+                            "instruction": "Read-only merge preflight for {{vars.pr_url}} in repo {{input.Repo}}, pinned head {{vars.review_ref}}. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergeStateStatus,mergeable,isDraft,headRefOid,reviewDecision,reviews\n\nThis turn only reads. Nothing here marks the PR ready, merges it, pushes, comments, approves, re-runs a check or changes anything; the merge command is a separate later turn.\nAnswer held only for an obstacle that exists now and that waiting can clear: required checks still pending (checks_pending), a merge queue or an ordering rule you have to wait for (queue), a closed merge window or freeze (window_closed), or another named obstacle (other). A draft PR is not an obstacle: report it in IS_DRAFT. Otherwise answer clear.\nReturn exactly these token lines: MERGE_PREFLIGHT: clear|held, HOLD_REASON: checks_pending|queue|window_closed|other|none, IS_DRAFT: true|false, then one line of evidence.\nFORMAL GITHUB REVIEW: Read reviewDecision and reviews from that same successful JSON read. Return GITHUB_REVIEW: APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN. NOT_REQUIRED requires reviewDecision explicitly present as null or empty, never missing or a failed/invalid read. Conflicting changes-requested evidence in reviews is CHANGES_REQUESTED; unknown or inconsistent data is UNKNOWN. REVIEW_REQUIRED, CHANGES_REQUESTED and UNKNOWN are held, never clear. Missing fields or failed reads cannot be converted to NOT_REQUIRED. Preserve exact head/state/draft/checks/queue/window checks. This is read-only, not an approval or merge action.",
+                            "timeoutMinutes": 10,
+                            "outputVar": "preflight_report",
+                            "ignoreFailure": true,
+                            "retryOnIncomplete": false,
+                            "maxIncompleteRetries": 0,
+                            "statusVar": "preflight_status"
+                          },
+                          {
+                            "name": "merge_preflight_fields",
+                            "type": "set_variable",
+                            "vars": {
+                              "preflight": "{{vars.preflight_report | extract: '(?m)^MERGE_PREFLIGHT: (clear|held)\\r?$' | default: 'held'}}",
+                              "hold_reason": "{{vars.preflight_report | extract: '(?m)^HOLD_REASON: (checks_pending|queue|window_closed|other)\\r?$' | default: 'other'}}",
+                              "pr_is_draft": "{{vars.preflight_report | extract: '(?m)^IS_DRAFT: (true|false)\\r?$' | default: 'unknown'}}",
+                              "github_review": "{{vars.preflight_report | extract: '(?m)^GITHUB_REVIEW: (APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN)\\r?$' | default: 'UNKNOWN'}}"
+                            }
+                          },
+                          {
+                            "name": "merge_preflight_answer",
+                            "type": "set_variable",
+                            "vars": {
+                              "preflight_answer": "{{vars.preflight}}/{{vars.pr_is_draft}}/{{vars.github_review}}/{{vars.preflight_status}}"
+                            }
+                          },
+                          {
+                            "name": "merge_preflight_result",
+                            "type": "set_variable",
+                            "vars": {
+                              "merge_ready": "{{vars.preflight_answer | extract: '^(clear)/(?:true|false)/(?:APPROVED|NOT_REQUIRED)/completed$' | default: 'held'}}"
+                            }
+                          },
+                          {
+                            "name": "merge_ready_command",
+                            "type": "branch",
+                            "on": "{{vars.pr_is_draft}}",
+                            "cases": {
+                              "true": {
+                                "name": "merge_ready_first",
+                                "type": "set_variable",
+                                "vars": {
+                                  "merge_ready_command": "gh pr ready {{vars.pr_url}} --repo {{input.Repo}}\n"
+                                }
+                              }
+                            },
+                            "default": {
+                              "name": "merge_ready_not_needed",
+                              "type": "set_variable",
+                              "vars": {
+                                "merge_ready_command": ""
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "name": "before_merge_gate_readiness",
+                        "type": "branch",
+                        "on": "{{vars.merge_ready}}",
+                        "cases": {
+                          "clear": {
+                            "type": "noop"
+                          }
+                        },
+                        "default": {
+                          "name": "hold_before_merge_gate",
+                          "type": "sequence",
+                          "steps": [
+                            {
+                              "name": "gate_still_owed",
+                              "type": "set_variable",
+                              "vars": {
+                                "state": "MERGE_HOLD",
+                                "merge_hold_mode": "wait",
+                                "merge_hold_phase": "",
+                                "merge_hold_resume": "MERGE_GATE"
+                              }
+                            },
+                            {
+                              "type": "continue"
+                            }
+                          ]
+                        }
+                      },
                       {
                         "name": "next_merge_gate",
                         "type": "set_variable",
@@ -7628,7 +8411,8 @@
                                     "vars": {
                                       "state": "MERGE_HOLD",
                                       "merge_hold_mode": "check",
-                                      "merge_hold_phase": ""
+                                      "merge_hold_phase": "",
+                                      "merge_hold_resume": "MERGE"
                                     }
                                   }
                                 },
@@ -7947,6 +8731,109 @@
                         ]
                       },
                       {
+                        "name": "after_delegated_approval_readiness",
+                        "type": "branch",
+                        "on": "{{vars.state}}",
+                        "cases": {
+                          "MERGE": {
+                            "name": "delegated_approval_readiness",
+                            "type": "sequence",
+                            "steps": [
+                              {
+                                "name": "merge_preflight_check",
+                                "type": "sequence",
+                                "steps": [
+                                  {
+                                    "name": "clear_merge_preflight",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "preflight_report": ""
+                                    }
+                                  },
+                                  {
+                                    "name": "merge_approval_preflight",
+                                    "type": "delegate",
+                                    "target": "{{config.CtoAgent}}",
+                                    "instruction": "Read-only merge preflight for {{vars.pr_url}} in repo {{input.Repo}}, pinned head {{vars.review_ref}}. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergeStateStatus,mergeable,isDraft,headRefOid,reviewDecision,reviews\n\nThis turn only reads. Nothing here marks the PR ready, merges it, pushes, comments, approves, re-runs a check or changes anything; the merge command is a separate later turn.\nAnswer held only for an obstacle that exists now and that waiting can clear: required checks still pending (checks_pending), a merge queue or an ordering rule you have to wait for (queue), a closed merge window or freeze (window_closed), or another named obstacle (other). A draft PR is not an obstacle: report it in IS_DRAFT. Otherwise answer clear.\nReturn exactly these token lines: MERGE_PREFLIGHT: clear|held, HOLD_REASON: checks_pending|queue|window_closed|other|none, IS_DRAFT: true|false, then one line of evidence.\nFORMAL GITHUB REVIEW: Read reviewDecision and reviews from that same successful JSON read. Return GITHUB_REVIEW: APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN. NOT_REQUIRED requires reviewDecision explicitly present as null or empty, never missing or a failed/invalid read. Conflicting changes-requested evidence in reviews is CHANGES_REQUESTED; unknown or inconsistent data is UNKNOWN. REVIEW_REQUIRED, CHANGES_REQUESTED and UNKNOWN are held, never clear. Missing fields or failed reads cannot be converted to NOT_REQUIRED. Preserve exact head/state/draft/checks/queue/window checks. This is read-only, not an approval or merge action.",
+                                    "timeoutMinutes": 10,
+                                    "outputVar": "preflight_report",
+                                    "ignoreFailure": true,
+                                    "retryOnIncomplete": false,
+                                    "maxIncompleteRetries": 0,
+                                    "statusVar": "preflight_status"
+                                  },
+                                  {
+                                    "name": "merge_preflight_fields",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "preflight": "{{vars.preflight_report | extract: '(?m)^MERGE_PREFLIGHT: (clear|held)\\r?$' | default: 'held'}}",
+                                      "hold_reason": "{{vars.preflight_report | extract: '(?m)^HOLD_REASON: (checks_pending|queue|window_closed|other)\\r?$' | default: 'other'}}",
+                                      "pr_is_draft": "{{vars.preflight_report | extract: '(?m)^IS_DRAFT: (true|false)\\r?$' | default: 'unknown'}}",
+                                      "github_review": "{{vars.preflight_report | extract: '(?m)^GITHUB_REVIEW: (APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN)\\r?$' | default: 'UNKNOWN'}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "merge_preflight_answer",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "preflight_answer": "{{vars.preflight}}/{{vars.pr_is_draft}}/{{vars.github_review}}/{{vars.preflight_status}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "merge_preflight_result",
+                                    "type": "set_variable",
+                                    "vars": {
+                                      "merge_ready": "{{vars.preflight_answer | extract: '^(clear)/(?:true|false)/(?:APPROVED|NOT_REQUIRED)/completed$' | default: 'held'}}"
+                                    }
+                                  },
+                                  {
+                                    "name": "merge_ready_command",
+                                    "type": "branch",
+                                    "on": "{{vars.pr_is_draft}}",
+                                    "cases": {
+                                      "true": {
+                                        "name": "merge_ready_first",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "merge_ready_command": "gh pr ready {{vars.pr_url}} --repo {{input.Repo}}\n"
+                                        }
+                                      }
+                                    },
+                                    "default": {
+                                      "name": "merge_ready_not_needed",
+                                      "type": "set_variable",
+                                      "vars": {
+                                        "merge_ready_command": ""
+                                      }
+                                    }
+                                  }
+                                ]
+                              },
+                              {
+                                "name": "delegated_formal_review",
+                                "type": "branch",
+                                "on": "{{vars.merge_ready}}",
+                                "cases": {
+                                  "clear": {
+                                    "type": "noop"
+                                  }
+                                },
+                                "default": {
+                                  "name": "delegated_review_hold",
+                                  "type": "set_variable",
+                                  "vars": {
+                                    "state": "MERGE_HOLD",
+                                    "merge_hold_mode": "wait",
+                                    "merge_hold_phase": "",
+                                    "merge_hold_resume": "MERGE"
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
                         "name": "merge_terminal",
                         "type": "branch",
                         "on": "{{vars.outer_done | extract: '(APPROVED|REJECTED|FAILED|TIMEOUT|STOPPED)' | default: ''}}",
@@ -8056,6 +8943,16 @@
                                         "vars": {
                                           "merge_hold_phase": "set"
                                         }
+                                      },
+                                      {
+                                        "name": "notify_merge_prerequisite",
+                                        "type": "delegate",
+                                        "target": "{{config.CtoAgent}}",
+                                        "instruction": "Notify the primary human once that PR {{vars.pr_url}}, head {{vars.H}}, is held, not merge-ready. Formal GitHub review: {{vars.github_review | default: 'UNKNOWN'}}; obstacle {{vars.hold_reason}}. REVIEW_REQUIRED needs an independent permitted GitHub reviewer approval, CHANGES_REQUESTED needs findings resolved, UNKNOWN needs a successful exact-head read. No author/merge command or approval action in this notice.",
+                                        "timeoutMinutes": 5,
+                                        "ignoreFailure": true,
+                                        "retryOnIncomplete": false,
+                                        "maxIncompleteRetries": 0
                                       }
                                     ]
                                   }
@@ -8312,12 +9209,13 @@
                                         "name": "merge_preflight",
                                         "type": "delegate",
                                         "target": "{{config.CtoAgent}}",
-                                        "instruction": "Read-only merge preflight for {{vars.pr_url}} in repo {{input.Repo}}, pinned head {{vars.review_ref}}. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergeStateStatus,mergeable,isDraft,headRefOid\n\nThis turn only reads. Nothing here marks the PR ready, merges it, pushes, comments, approves, re-runs a check or changes anything; the merge command is a separate later turn.\nAnswer held only for an obstacle that exists now and that waiting can clear: required checks still pending (checks_pending), a merge queue or an ordering rule you have to wait for (queue), a closed merge window or freeze (window_closed), or another named obstacle (other). A draft PR is not an obstacle: report it in IS_DRAFT. Otherwise answer clear.\nReturn exactly these token lines: MERGE_PREFLIGHT: clear|held, HOLD_REASON: checks_pending|queue|window_closed|other|none, IS_DRAFT: true|false, then one line of evidence.",
+                                        "instruction": "Read-only merge preflight for {{vars.pr_url}} in repo {{input.Repo}}, pinned head {{vars.review_ref}}. Run exactly:\ngh pr view {{vars.pr_url}} --repo {{input.Repo}} --json state,mergeStateStatus,mergeable,isDraft,headRefOid,reviewDecision,reviews\n\nThis turn only reads. Nothing here marks the PR ready, merges it, pushes, comments, approves, re-runs a check or changes anything; the merge command is a separate later turn.\nAnswer held only for an obstacle that exists now and that waiting can clear: required checks still pending (checks_pending), a merge queue or an ordering rule you have to wait for (queue), a closed merge window or freeze (window_closed), or another named obstacle (other). A draft PR is not an obstacle: report it in IS_DRAFT. Otherwise answer clear.\nReturn exactly these token lines: MERGE_PREFLIGHT: clear|held, HOLD_REASON: checks_pending|queue|window_closed|other|none, IS_DRAFT: true|false, then one line of evidence.\nFORMAL GITHUB REVIEW: Read reviewDecision and reviews from that same successful JSON read. Return GITHUB_REVIEW: APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN. NOT_REQUIRED requires reviewDecision explicitly present as null or empty, never missing or a failed/invalid read. Conflicting changes-requested evidence in reviews is CHANGES_REQUESTED; unknown or inconsistent data is UNKNOWN. REVIEW_REQUIRED, CHANGES_REQUESTED and UNKNOWN are held, never clear. Missing fields or failed reads cannot be converted to NOT_REQUIRED. Preserve exact head/state/draft/checks/queue/window checks. This is read-only, not an approval or merge action.",
                                         "timeoutMinutes": 10,
                                         "outputVar": "preflight_report",
                                         "ignoreFailure": true,
                                         "retryOnIncomplete": false,
-                                        "maxIncompleteRetries": 0
+                                        "maxIncompleteRetries": 0,
+                                        "statusVar": "preflight_status"
                                       },
                                       {
                                         "name": "merge_preflight_fields",
@@ -8325,21 +9223,22 @@
                                         "vars": {
                                           "preflight": "{{vars.preflight_report | extract: '(?m)^MERGE_PREFLIGHT: (clear|held)\\r?$' | default: 'held'}}",
                                           "hold_reason": "{{vars.preflight_report | extract: '(?m)^HOLD_REASON: (checks_pending|queue|window_closed|other)\\r?$' | default: 'other'}}",
-                                          "pr_is_draft": "{{vars.preflight_report | extract: '(?m)^IS_DRAFT: (true|false)\\r?$' | default: 'unknown'}}"
+                                          "pr_is_draft": "{{vars.preflight_report | extract: '(?m)^IS_DRAFT: (true|false)\\r?$' | default: 'unknown'}}",
+                                          "github_review": "{{vars.preflight_report | extract: '(?m)^GITHUB_REVIEW: (APPROVED|NOT_REQUIRED|REVIEW_REQUIRED|CHANGES_REQUESTED|UNKNOWN)\\r?$' | default: 'UNKNOWN'}}"
                                         }
                                       },
                                       {
                                         "name": "merge_preflight_answer",
                                         "type": "set_variable",
                                         "vars": {
-                                          "preflight_answer": "{{vars.preflight}}/{{vars.pr_is_draft}}"
+                                          "preflight_answer": "{{vars.preflight}}/{{vars.pr_is_draft}}/{{vars.github_review}}/{{vars.preflight_status}}"
                                         }
                                       },
                                       {
                                         "name": "merge_preflight_result",
                                         "type": "set_variable",
                                         "vars": {
-                                          "merge_ready": "{{vars.preflight_answer | extract: '^(clear)/(?:true|false)$' | default: 'held'}}"
+                                          "merge_ready": "{{vars.preflight_answer | extract: '^(clear)/(?:true|false)/(?:APPROVED|NOT_REQUIRED)/completed$' | default: 'held'}}"
                                         }
                                       },
                                       {
@@ -8412,10 +9311,24 @@
                         "on": "{{vars.merge_ready}}",
                         "cases": {
                           "clear": {
-                            "name": "route_MERGE",
-                            "type": "set_variable",
-                            "vars": {
-                              "state": "MERGE"
+                            "name": "resume_owned_merge_readiness",
+                            "type": "branch",
+                            "on": "{{vars.merge_hold_resume}}",
+                            "cases": {
+                              "MERGE": {
+                                "name": "route_MERGE",
+                                "type": "set_variable",
+                                "vars": {
+                                  "state": "MERGE"
+                                }
+                              }
+                            },
+                            "default": {
+                              "name": "route_MERGE_GATE",
+                              "type": "set_variable",
+                              "vars": {
+                                "state": "MERGE_GATE"
+                              }
                             }
                           },
                           "failure": {

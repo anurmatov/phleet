@@ -1056,3 +1056,25 @@ for (const colorScheme of ['light', 'dark'] as const) {
     })
   })
 }
+
+test.describe('usage in a browser east of UTC', () => {
+  test.use({ timezoneId: 'Asia/Bishkek' })   // UTC+6: a local formatter would show 16:00 for 10:00Z
+
+  test('chart axis labels and hour tooltips stay in UTC', async ({ page }) => {
+    await openUsage(page, () => usageAnswer([usageGroup('agent-a', {
+      buckets: [{ start: '2026-01-05T09:00:00Z', reported_value: '42', eligible_turns: 1, measured_turns: 1, reset_excluded: 0 }],
+    })]))
+
+    const scale = page.locator('.usage-chart-scale span')
+    await expect(scale.first()).toContainText('10:00')   // from 2026-01-04T10:00Z
+    await expect(scale.last()).toContainText('10:00')    // to 2026-01-05T10:00Z
+    await expect(page.locator('.usage-chart-scale')).not.toContainText('16:00')
+
+    const tooltips = await page.locator('.usage-chart-svg title').allTextContents()
+    expect(tooltips.length).toBeGreaterThan(0)
+    for (const tip of tooltips) {
+      expect(tip).toContain('09:00')
+      expect(tip).not.toContain('15:00')
+    }
+  })
+})

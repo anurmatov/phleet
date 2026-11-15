@@ -208,5 +208,13 @@ export function chartSeries(group: UsageGroup, from: string, to: string): ChartS
   return { slots: points.length, points, segments, max, maxRaw }
 }
 
+/**
+ * An hour of the chart, in UTC like the buckets themselves: the axis says "by UTC hour", so the
+ * browser's own zone must never shift it.
+ */
+export function utcHourLabel(iso: string): string {
+  return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
+}
+
 /** The identity of a group, for selection that survives a refresh. */
 export const groupKey = (g: Pick<UsageGroup, 'agent' | 'provider' | 'model'>) => `${g.agent}\u0000${g.provider}\u0000${g.model}`

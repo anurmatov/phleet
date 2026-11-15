@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DEFAULT_USAGE_FILTERS, chartSeries, coverageState, coverageText, formatValue, parseUsageSummary,
-  usageFailure, usageQuery, usageRange, valueLabel,
+  usageFailure, usageQuery, usageRange, utcHourLabel, valueLabel,
 } from './usage.ts'
 import type { UsageGroup, UsageSummary } from './usage.ts'
 
@@ -95,4 +95,20 @@ test('a week starting mid-hour is 169 slots, never more', () => {
   const series = chartSeries(group(), '2026-01-05T10:30:00.000Z', '2026-01-12T10:30:00.000Z')
   assert.equal(series.slots, 169)
   assert.equal(series.maxRaw, null)
+})
+
+test('chart hours stay UTC in a browser east of UTC', () => {
+  const previous = process.env.TZ
+  process.env.TZ = 'Asia/Bishkek'   // UTC+6, no DST
+  try {
+    // The zone really is UTC+6 here: a local formatter shows 16:00 for 10:00Z.
+    assert.match(new Date('2026-11-15T10:00:00Z').toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), /16:00/)
+
+    const label = utcHourLabel('2026-11-15T10:00:00Z')
+    assert.match(label, /10:00/)
+    assert.doesNotMatch(label, /04:00|16:00/)
+  } finally {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  }
 })

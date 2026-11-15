@@ -3,7 +3,7 @@ import type { FormEvent, KeyboardEvent } from 'react'
 import { useUsage } from '../hooks/useUsage'
 import {
   DEFAULT_USAGE_FILTERS, USAGE_METRICS, USAGE_PRESETS, chartSeries, coverageState, coverageText,
-  formatValue, groupKey, metricLabel, valueLabel,
+  formatValue, groupKey, metricLabel, utcHourLabel, valueLabel,
 } from '../usage'
 import type { UsageFailure, UsageFilters, UsageGroup, UsageMetric, UsagePreset, UsageSummary } from '../usage'
 
@@ -14,8 +14,6 @@ const FAILURE_TEXT: Record<UsageFailure, string> = {
 }
 
 const time = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-const hourLabel = (iso: string) =>
-  new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 
 /**
  * Per agent, model and provider token use and reported cost, by UTC hour. Recorded turns only:
@@ -173,7 +171,7 @@ function UsageChart({ summary, group }: { summary: UsageSummary; group: UsageGro
           <line className="usage-chart-axis" x1={PAD.left} x2={WIDTH - PAD.right} y1={HEIGHT - PAD.bottom} y2={HEIGHT - PAD.bottom} />
           {series.segments.map(seg => seg.length === 1 ? (
             <circle key={seg[0].index} className="usage-chart-dot" cx={x(seg[0].index)} cy={y(seg[0].value!)} r={3}>
-              <title>{`${hourLabel(seg[0].start)}: ${formatValue(seg[0].raw, summary.metric)}`}</title>
+              <title>{`${utcHourLabel(seg[0].start)}: ${formatValue(seg[0].raw, summary.metric)}`}</title>
             </circle>
           ) : (
             <polyline
@@ -184,15 +182,15 @@ function UsageChart({ summary, group }: { summary: UsageSummary; group: UsageGro
           ))}
           {series.points.filter(p => p.value !== null && p.bucket).map(p => (
             <circle key={`h${p.index}`} className="usage-chart-hit" cx={x(p.index)} cy={y(p.value!)} r={6}>
-              <title>{`${hourLabel(p.start)}: ${formatValue(p.raw, summary.metric)} · ${coverageText(p.bucket!)}`}</title>
+              <title>{`${utcHourLabel(p.start)}: ${formatValue(p.raw, summary.metric)} · ${coverageText(p.bucket!)}`}</title>
             </circle>
           ))}
         </svg>
       )}
       <div className="usage-chart-scale">
-        <span>{hourLabel(summary.from)}</span>
+        <span>{utcHourLabel(summary.from)}</span>
         <span>peak {formatValue(series.maxRaw, summary.metric)}</span>
-        <span>{hourLabel(summary.to)}</span>
+        <span>{utcHourLabel(summary.to)}</span>
       </div>
     </section>
   )

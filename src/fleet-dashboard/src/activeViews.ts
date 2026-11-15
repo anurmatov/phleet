@@ -8,7 +8,7 @@
 export const ACTIVE_VIEWS = [
   'agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles',
   'wf-definitions', 'alerts', 'schedules', 'namespaces', 'repositories', 'credentials',
-  'memory', 'epic-grants',
+  'memory', 'epic-grants', 'usage',
 ] as const
 
 export type ActiveView = (typeof ACTIVE_VIEWS)[number]

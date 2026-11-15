@@ -46,6 +46,7 @@ import SchedulesView from './components/SchedulesView'
 import NamespacesView from './components/NamespacesView'
 import RepositoriesView from './components/RepositoriesView'
 import EpicGrantsView from './components/EpicGrantsView'
+import UsageView from './components/UsageView'
 import OutputStylesView from './components/OutputStylesView'
 import CredentialsView from './components/CredentialsView'
 import MemoryView from './components/MemoryView'
@@ -514,6 +515,10 @@ export default function App() {
 
         {activeView === 'repositories' && (
           <RepositoriesView />
+        )}
+
+        {activeView === 'usage' && (
+          <UsageView />
         )}
 
         {activeView === 'epic-grants' && (

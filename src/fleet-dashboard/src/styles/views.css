@@ -362,3 +362,89 @@
   .log-ctrl-btn { order: 4; }
   .log-body { padding-right: 14px; padding-left: 14px; }
 }
+
+/* Usage: one group's hourly line above the top groups. Values are the receiver's own digits; an
+   unknown hour is a gap in the line, never a zero. */
+
+.usage-note { margin: 0 0 14px; color: var(--text-3); font-size: var(--fs-s); }
+.usage-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 16px; margin-bottom: 14px; }
+.usage-presets { display: flex; gap: 6px; }
+.usage-preset {
+  min-height: var(--control-s);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  cursor: pointer;
+}
+.usage-preset.active { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
+.usage-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--text-3); font-size: var(--fs-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.usage-field select, .usage-field input {
+  min-height: var(--control-s);
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-s);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.usage-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; min-width: 0; }
+.usage-filters .usage-field input { width: 9.5rem; }
+.usage-updated { margin: 0 0 10px; color: var(--text-3); font-size: var(--fs-xs); }
+.usage-stale, .usage-failure { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.usage-stale {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--r-l);
+  background: var(--warn-soft);
+  color: var(--text);
+  font-size: var(--fs-s);
+}
+
+.usage-chart { margin-bottom: 16px; padding: 16px; }
+.usage-chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.usage-chart-title { margin: 0; font-size: var(--fs-l); font-weight: 600; overflow-wrap: anywhere; }
+.usage-chart-value { font-variant-numeric: tabular-nums; font-weight: 600; }
+.usage-chart-meta { margin: 4px 0 10px; color: var(--text-3); font-size: var(--fs-xs); }
+.usage-chart-svg { display: block; width: 100%; height: 180px; overflow: visible; }
+.usage-chart-axis { stroke: var(--border-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.usage-chart-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.usage-chart-dot { fill: var(--accent); }
+.usage-chart-hit { fill: transparent; }
+.usage-chart-empty { padding: 28px 0; color: var(--text-3); font-size: var(--fs-s); text-align: center; }
+.usage-chart-scale { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--text-3); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; }
+
+.usage-table-caption { padding: 0 0 8px; color: var(--text-3); font-size: var(--fs-xs); text-align: left; caption-side: top; }
+.usage-row { cursor: pointer; }
+.usage-row.selected { background: var(--accent-soft); }
+.usage-select {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.usage-select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-xs); }
+.usage-value { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-value--not_reported, .usage-value--reset_only { color: var(--text-3); font-style: italic; }
+
+@media (max-width: 899px) {
+  .usage-controls { flex-direction: column; align-items: stretch; }
+  .usage-presets { flex-wrap: wrap; }
+  .usage-filters { flex-direction: column; align-items: stretch; }
+  .usage-filters .usage-field input { width: 100%; }
+  .usage-chart { padding: 12px; }
+  .usage-chart-svg { height: 140px; }
+}

@@ -1,6 +1,10 @@
 using Fleet.Orchestrator.Data;
+using Fleet.Orchestrator.Models;
 using Fleet.Orchestrator.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Http.Features;
+using System.Globalization;
+using Temporalio.Exceptions;
 
 namespace Fleet.Orchestrator.Endpoints;
 
@@ -100,6 +104,44 @@ public static class WorkflowEndpoints
             {
                 return Results.Problem($"Error fetching workflow history: {ex.Message}");
             }
+        });
+
+        // On-demand raw values are separate from the bounded history preview above.
+        app.MapGet("/api/workflows/{ns}/event-value/{**id}", async (
+            string ns, string? id, HttpContext context, TemporalClientRegistry temporal) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            var query = context.Request.Query;
+            string? Single(string key) => query[key].Count == 1 ? query[key][0] : null;
+            var runId = Single("runId");
+            var field = Single("field");
+
+            // Routing leaves encoded slashes intact but decodes other escapes. Decode the raw
+            // catch-all once instead, so both a slash and the literal text "%2F" keep their identity.
+            const string marker = "/event-value/";
+            var rawPath = context.Features.Get<IHttpRequestFeature>()?.RawTarget?.Split('?', 2)[0];
+            var prefixLength = context.Request.PathBase.ToUriComponent().Length + "/api/workflows/".Length;
+            var markerIndex = rawPath is not null && rawPath.Length >= prefixLength
+                ? rawPath.IndexOf(marker, prefixLength, StringComparison.OrdinalIgnoreCase) : -1;
+            var workflowId = markerIndex >= 0 ? Uri.UnescapeDataString(rawPath![(markerIndex + marker.Length)..]) : id;
+            if (string.IsNullOrWhiteSpace(workflowId) || string.IsNullOrWhiteSpace(runId)
+                || field is not ("input" or "output" or "failure")
+                || !long.TryParse(Single("eventId"), NumberStyles.None, CultureInfo.InvariantCulture, out var eventId) || eventId <= 0)
+                return Results.BadRequest(new { error = "invalid_request" });
+
+            try
+            {
+                return Results.Ok(await temporal.FetchWorkflowEventValueAsync(
+                    ns, workflowId, runId, eventId, field, context.RequestAborted));
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { throw; }
+            catch (KeyNotFoundException) { return Results.NotFound(new { error = "not_found" }); }
+            catch (RpcException ex) when (ex.Code == RpcException.StatusCode.NotFound)
+            { return Results.NotFound(new { error = "not_found" }); }
+            catch (WorkflowEventValueTimeoutException)
+            { return Results.Json(new { error = "history_timeout" }, statusCode: 503); }
+            catch (Exception)
+            { return Results.Json(new { error = "history_unavailable" }, statusCode: 503); }
         });
 
         // REST: recently failed/terminated/canceled workflows (last 1 hour by default)

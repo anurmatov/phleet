@@ -117,7 +117,7 @@ Each has its own page. Chat, push notifications, secret placeholders, primary-hu
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Upgrade notes for existing installations | [docs/upgrading/](docs/upgrading/README.md) |
 | Building and testing from source | [docs/development.md](docs/development.md) |
-| Client contracts | [docs/conversation-protocol.md](docs/conversation-protocol.md), [docs/first-party-api.md](docs/first-party-api.md) |
+| Client contracts | [docs/conversation-protocol.md](docs/conversation-protocol.md), [docs/first-party-api.md](docs/first-party-api.md), [workflow event values](docs/workflow-event-values.md) (control plane) |
 
 ## Community
 

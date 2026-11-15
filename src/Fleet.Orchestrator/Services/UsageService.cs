@@ -217,7 +217,12 @@ public sealed class UsageRelay(
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or InvalidOperationException)
         {
-            Drop(ex is OperationCanceledException ? "receiver_timeout" : ex.GetType().Name);
+            Drop(ex switch
+            {
+                OperationCanceledException => "receiver_timeout",
+                JsonException => "receiver_reply",
+                _ => ex.GetType().Name,
+            });
         }
     }
 
@@ -294,7 +299,12 @@ public sealed class UsageReader(
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or InvalidOperationException)
         {
-            return Unavailable(ex is OperationCanceledException ? "receiver_timeout" : ex.GetType().Name);
+            return Unavailable(ex switch
+            {
+                OperationCanceledException => "receiver_timeout",
+                JsonException => "receiver_response_shape",
+                _ => ex.GetType().Name,
+            });
         }
     }
 

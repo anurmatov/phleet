@@ -42,6 +42,7 @@ const VIEWS: { hash: string; shows: (page: Page) => Locator }[] = [
   { hash: 'memory', shows: p => p.locator('.app-main--memory') },
   { hash: 'epic-grants', shows: p => p.locator('.view-page-title', { hasText: 'Epic grants' }) },
   { hash: 'alerts', shows: p => p.getByText('No active alerts.') },
+  { hash: 'usage', shows: p => p.locator('.view-page-title', { hasText: 'Usage' }) },
 ]
 
 for (const view of VIEWS) {
@@ -880,3 +881,178 @@ test.describe('chat on a phone', () => {
     await expect(page.locator('.chat-thread')).toBeHidden()
   })
 })
+
+// ── Usage ───────────────────────────────────────────────────────────────────────────────────────
+
+type UsageAnswer = { status: number; json: unknown; delayMs?: number }
+
+const usageGroup = (agent: string, over: Record<string, unknown> = {}) => ({
+  agent, provider: 'claude', model: 'model-x',
+  reported_value: '150', eligible_turns: 3, measured_turns: 2, reset_excluded: 1,
+  buckets: [
+    { start: '2026-01-05T08:00:00Z', reported_value: '100', eligible_turns: 2, measured_turns: 2, reset_excluded: 0 },
+    { start: '2026-01-05T09:00:00Z', reported_value: '50', eligible_turns: 1, measured_turns: 0, reset_excluded: 1 },
+  ],
+  ...over,
+})
+
+const usageAnswer = (groups: unknown[], over: Record<string, unknown> = {}): UsageAnswer => ({
+  status: 200,
+  json: {
+    from: '2026-01-04T10:00:00.000Z', to: '2026-01-05T10:00:00.000Z', metric: 'output_tokens', bucket_seconds: 3600,
+    matched_groups: groups.length, groups_shown: groups.length, truncated: false, groups, ...over,
+  },
+})
+
+/** Opens #usage with `/api/usage` answered by `respond`, called with each request's query and its number. */
+async function openUsage(page: Page, respond: (query: URLSearchParams, n: number) => UsageAnswer) {
+  const fleet = new FakeFleet()
+  await fleet.install(page)
+  const requests: URLSearchParams[] = []
+  await page.route(url => url.pathname === '/api/usage', async route => {
+    const query = new URL(route.request().url()).searchParams
+    requests.push(query)
+    const answer = respond(query, requests.length)
+    if (answer.delayMs) await new Promise(r => setTimeout(r, answer.delayMs))
+    await route.fulfill({ status: answer.status, json: answer.json }).catch(() => { /* aborted by a newer request */ })
+  })
+  await page.goto('/#usage')
+  await expect(page.locator('.view-page-title', { hasText: 'Usage' })).toBeVisible()
+  return requests
+}
+
+const usageRow = (page: Page, agent: string) => page.locator('.usage-row', { has: page.locator('.usage-select', { hasText: agent }) })
+
+test('#usage loads once with the last 24 hours of output tokens, and rows select the chart by click and keyboard', async ({ page }) => {
+  const requests = await openUsage(page, () => usageAnswer([usageGroup('agent-a'), usageGroup('agent-b', { reported_value: '90', measured_turns: 3, reset_excluded: 0 })]))
+
+  await expect(page.locator('.usage-chart-title')).toHaveText('agent-a · claude · model-x')
+  await expect(usageRow(page, 'agent-a').locator('.usage-value')).toHaveText('150 (subtotal)')
+  await expect(usageRow(page, 'agent-a')).toContainText('2 of 3 turns reported · 1 turn reset, excluded')
+  await expect(page.locator('.usage-note').first()).toContainText('not a bill')
+
+  expect(requests).toHaveLength(1)
+  const [first] = requests
+  expect(first.get('metric')).toBe('output_tokens')
+  expect(first.get('from')).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/)
+  expect(Date.parse(first.get('to')!) - Date.parse(first.get('from')!)).toBe(24 * 3_600_000)
+
+  await usageRow(page, 'agent-b').click()
+  await expect(page.locator('.usage-chart-title')).toHaveText('agent-b · claude · model-x')
+
+  await page.locator('.usage-select', { hasText: 'agent-a' }).focus()
+  await page.keyboard.press('ArrowDown')
+  await expect(page.locator('.usage-select', { hasText: 'agent-b' })).toBeFocused()
+  await expect(page.locator('.usage-select', { hasText: 'agent-b' })).toHaveAttribute('aria-pressed', 'true')
+  await page.keyboard.press('ArrowUp')
+  await expect(page.locator('.usage-chart-title')).toHaveText('agent-a · claude · model-x')
+
+  // Nothing polls: only the explicit Refresh fetches again.
+  await page.waitForTimeout(1200)
+  expect(requests).toHaveLength(1)
+  await page.getByRole('button', { name: 'Refresh' }).click()
+  await expect.poll(() => requests.length).toBe(2)
+})
+
+test('#usage survives a reload and sends exact filters and the week preset only when asked', async ({ page }) => {
+  const requests = await openUsage(page, () => usageAnswer([usageGroup('agent-a')]))
+  await page.reload()
+  await expect(page.locator('.usage-chart-title')).toHaveText('agent-a · claude · model-x')
+  const afterReload = requests.length
+
+  const filters = page.locator('.usage-filters')
+  await filters.getByLabel('Agent').fill('agent-a')
+  await filters.getByLabel('Model').fill('model-x')
+  expect(requests).toHaveLength(afterReload)   // typing alone sends nothing
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect.poll(() => requests.length).toBe(afterReload + 1)
+  expect(requests.at(-1)!.get('agent')).toBe('agent-a')
+  expect(requests.at(-1)!.get('model')).toBe('model-x')
+  expect(requests.at(-1)!.has('provider')).toBe(false)
+
+  await page.getByRole('button', { name: 'Last 7 days' }).click()
+  await expect.poll(() => requests.length).toBe(afterReload + 2)
+  const week = requests.at(-1)!
+  expect(Date.parse(week.get('to')!) - Date.parse(week.get('from')!)).toBe(168 * 3_600_000)
+})
+
+test('an older answer never replaces a newer filter', async ({ page }) => {
+  await openUsage(page, query => query.get('metric') === 'output_tokens'
+    ? { ...usageAnswer([usageGroup('slow-agent')]), delayMs: 900 }
+    : usageAnswer([usageGroup('fast-agent')], { metric: 'cost_usd' }))
+
+  await page.getByLabel('Metric').selectOption('cost_usd')
+  await expect(page.locator('.usage-chart-title')).toHaveText('fast-agent · claude · model-x')
+  await page.waitForTimeout(1300)
+  await expect(page.locator('.usage-chart-title')).toHaveText('fast-agent · claude · model-x')
+  await expect(page.getByText('slow-agent')).toHaveCount(0)
+})
+
+for (const [error, text] of [
+  ['usage_disabled', 'Usage collection is off on this deployment.'],
+  ['usage_not_configured', 'Usage collection is on but not configured'],
+] as const) {
+  test(`#usage names ${error} and offers no fake data`, async ({ page }) => {
+    await openUsage(page, () => ({ status: 503, json: { error } }))
+    await expect(page.locator('.usage-failure')).toContainText(text)
+    await expect(page.locator('.usage-table')).toHaveCount(0)
+  })
+}
+
+test('#usage unavailable offers Retry for the current filters, and a failed refresh keeps the last answer as stale', async ({ page }) => {
+  const requests = await openUsage(page, (_, n) => n === 2 ? usageAnswer([usageGroup('agent-a')]) : { status: 503, json: { error: 'usage_unavailable' } })
+
+  await expect(page.locator('.usage-failure')).toContainText('Usage data is unavailable right now.')
+  await page.locator('.usage-failure').getByRole('button', { name: 'Retry' }).click()
+  await expect(page.locator('.usage-chart-title')).toHaveText('agent-a · claude · model-x')
+  expect(requests[1].get('metric')).toBe(requests[0].get('metric'))
+
+  await page.getByRole('button', { name: 'Refresh' }).click()
+  await expect(page.locator('.usage-stale')).toContainText(/Showing the last answer, fetched at/)
+  await expect(page.locator('.usage-chart-title')).toHaveText('agent-a · claude · model-x')
+  await expect(page.locator('.usage-stale').getByRole('button', { name: 'Retry' })).toBeVisible()
+})
+
+test('#usage shows not reported, reset-only and empty as states, never as 0', async ({ page }) => {
+  await openUsage(page, query => query.get('metric') === 'output_tokens'
+    ? usageAnswer([
+      usageGroup('agent-none', { reported_value: null, measured_turns: 0, reset_excluded: 0, buckets: [] }),
+      usageGroup('agent-reset', { reported_value: null, eligible_turns: 0, measured_turns: 0, reset_excluded: 2, buckets: [] }),
+    ])
+    : usageAnswer([]))
+
+  await expect(usageRow(page, 'agent-none').locator('.usage-value')).toHaveText('not reported')
+  await expect(usageRow(page, 'agent-reset').locator('.usage-value')).toHaveText('reset turns only')
+  await expect(page.locator('.usage-chart-empty')).toContainText('did not report')
+  await usageRow(page, 'agent-reset').click()
+  await expect(page.locator('.usage-chart-empty')).toContainText('Only reset turns')
+  await expect(page.locator('.usage-table td.usage-value', { hasText: /^0$/ })).toHaveCount(0)
+
+  await page.getByLabel('Metric').selectOption('input_tokens')
+  await expect(page.getByText('No recorded turns in this range.')).toBeVisible()
+})
+
+for (const colorScheme of ['light', 'dark'] as const) {
+  test.describe(`usage on a 360px phone, ${colorScheme}`, () => {
+    test.use({ viewport: { width: 360, height: 800 }, colorScheme })
+
+    test('is reachable under More and never scrolls sideways', async ({ page }, testInfo) => {
+      await openUsage(page, () => usageAnswer([usageGroup('agent-with-a-long-name-for-wrapping'), usageGroup('agent-b')], { truncated: true, matched_groups: 23 }))
+      await expect(page.locator('.usage-chart-title')).toContainText('agent-with-a-long-name-for-wrapping')
+      await expect(page.getByText('Showing the top 2 of 23 groups.')).toBeVisible()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+
+      await page.screenshot({ path: testInfo.outputPath(`usage-360-${colorScheme}.png`), fullPage: true })
+      const aria = await page.locator('.usage-view').ariaSnapshot()
+      await testInfo.attach(`usage-360-${colorScheme}.aria.yml`, { body: aria, contentType: 'text/yaml' })
+      expect(aria).toContain('table')
+      expect(aria).toContain('button "Refresh"')
+      expect(aria).toContain('img "Output tokens for agent-with-a-long-name-for-wrapping')
+
+      await page.goto('/#agents')
+      await page.locator('.tabbar').getByRole('button', { name: 'More' }).click()
+      await page.locator('.sidenav-item', { hasText: 'Usage' }).click()
+      await expect(page).toHaveURL(/#usage$/)
+    })
+  })
+}

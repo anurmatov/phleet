@@ -23,16 +23,21 @@ export function useUsage(filters: UsageFilters): { state: UsageState; reload: ()
   const [state, setState] = useState<UsageState>({ loading: true, data: null, fetchedAt: null, failure: null })
   const latest = useRef(0)
   const controller = useRef<AbortController | null>(null)
+  // The filters of the request in flight, so a repeated effect for the same filters (StrictMode's
+  // second mount) does not send it twice. Reload bypasses it on purpose.
+  const inFlight = useRef<string | null>(null)
 
   const load = useCallback((current: UsageFilters) => {
     const id = ++latest.current
     controller.current?.abort()
     const abort = new AbortController()
     controller.current = abort
+    inFlight.current = JSON.stringify(current)
     setState(s => ({ ...s, loading: true, failure: null }))
 
     const finish = (next: Partial<UsageState>) => {
       if (id !== latest.current) return
+      inFlight.current = null
       setState(s => ({ ...s, ...next, loading: false }))
     }
 
@@ -52,10 +57,10 @@ export function useUsage(filters: UsageFilters): { state: UsageState; reload: ()
 
   const { preset, metric, agent, provider, model } = filters
   useEffect(() => {
-    load({ preset, metric, agent, provider, model })
+    const next = { preset, metric, agent, provider, model }
+    if (inFlight.current === JSON.stringify(next)) return
+    load(next)
   }, [load, preset, metric, agent, provider, model])
-
-  useEffect(() => () => controller.current?.abort(), [])
 
   const reload = useCallback(() => load(filters), [load, filters])
   return { state, reload }

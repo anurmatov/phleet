@@ -149,3 +149,26 @@ checking unrelated rows and parked snapshots. An absent disposable database or
 local container daemon is a concrete blocker, not permission to use production
 or count InMemory seeder tests as that qualification. Report the exact-head
 blocker and leave preservation assertions unrun if those resources are absent.
+
+## PR scope clarification
+
+The PR seed owns one awaited approve-reject child for an explicit literal scope
+blocker, before incomplete retries. Its compact Context binds the actual parent
+run, issue/branch, existing PR/head or explicit no-PR state, author and coordinator.
+Original typed report remains in the parent. Mechanical fixtures registering
+already-approved behavior do not create a scope question unless explicitly
+restricted or changing behavior/access/contracts.
+
+A read-only coordinator runs the seed's deterministic Python validator over
+original awaited-result JSON bytes plus a separately fetched exact-run result
+wrapper. It validates canonical identity, complete original request, exact parent
+origin, `Delivery=parent-result` and Status/Value/Comment without model rewriting.
+The exact JSON is forwarded once as literal data after same-artifact readback;
+no answer text is executed or re-templated. Missing tools/reads, malformed results,
+changed artifacts and repeated same-head blockers stop with their owner rather
+than silently widening access or repeating work. Rejection, 1440-minute expiry,
+admission failure and parent cancellation retain their distinct meanings.
+
+Standalone callbacks remain report-only; a later recovery needs independent
+artifact/authority verification and an explicitly scoped owned handoff, never
+automatic revival or rewriting of a terminal run.

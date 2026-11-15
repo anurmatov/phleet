@@ -46,9 +46,10 @@ CI wait, the cleanup wait, a delegated approval's re-pin, and a human approval's
 re-pin in the merge hold and in the stall after it. In `off`, read only the actual head, every
 CI page and diff paths. Skip body hashing, design lookup, plans, receipts, prior
 rounds, owner and capability-map checks. Ignore missing/malformed acceptance
-tokens. After a delegated approval, unchanged head plus successful CI routes to
-MERGE and anything else invalidates the approval, as before; that re-pin step
-and its instruction are the ones that shipped before the holds. After a human
+tokens. After a delegated approval, unchanged head plus successful CI retains its
+existing re-pin routing, followed by the additional read-only formal-review
+check before merging; anything else invalidates the approval, as before. The
+re-pin subtree, its instruction and historical fixture remain unchanged. After a human
 approval a re-pin with the CI read tokens feeds the merge check described under
 "Holds and the technical stall". The required acceptance subtree is unchanged.
 The plan/receipt/lease sections below apply only in `required` mode. Empty JSON
@@ -729,3 +730,66 @@ payload behavior, even if their Phase publication failed. Replay evidence is
 required for additive engine/classification defaults. Do not treat design approval,
 source/seed acceptance, runtime deployment and live-definition acceptance as the
 same event.
+
+## Formal review and scope blockers
+
+GitHub formal review is independent of workflow consensus and the human merge
+judgment. The read-only preflight includes `reviewDecision` and `reviews` before
+offering merge approval and after approval. `GITHUB_REVIEW` is `APPROVED`,
+`NOT_REQUIRED`, `REVIEW_REQUIRED`, `CHANGES_REQUESTED` or `UNKNOWN`.
+`NOT_REQUIRED` means a successful response explicitly containing null/empty
+`reviewDecision`, never a missing field or failed read; contradictory clear
+results and non-completed typed preflights remain held.
+
+The existing bounded merge hold and technical stall own missing prerequisites,
+with one PR/head/action notice per hold. A pre-gate hold returns to the human
+gate, never directly to merge. A same-head post-approval hold may return to its
+approved merge turn; moved heads retain existing invalidation. Command-once and
+bounded readback guards are unchanged. No formal review is manufactured, and
+neither `--admin` nor `--auto` is a fallback.
+
+Every author path records typed status and original output. Textual `complete`
+with failed status is not attested. Ordinary incomplete work retains its
+five-round bound and concrete report rather than identical generic feedback.
+Files to Touch is the implementation map unless explicitly restricted. A
+mechanical test fixture/manifest solely registering approved behavior is not a
+new permission boundary; changed behavior, access, contracts or an explicit
+prohibition still need normal human resolution.
+
+An explicit `IMPLEMENTATION: blocked` with literal one-line `BLOCKER` and
+`SCOPE_QUESTION` enters `SCOPE_WAIT` before spending that retry budget. One awaited
+`UweHumanInputWorkflow` uses the supported namespace/task queue, approve-reject
+mode, actual parent origin and compact artifact/owner context. No artifact is
+invented when no PR exists. While waiting there is no author or merge call;
+child admission failure, the enriched 1800 UTF-16 bound and cancellation remain
+failures/cancellation, never permission to clone a question.
+
+The read-only coordinator executes the seed's Python standard-library validator
+against original returned JSON text and a separately fetched **exact-run** result
+wrapper, never latest-run. It checks duplicate keys, canonical identity, exact
+parent run, original Question/Context, mode, delivery and Status/Value/Comment.
+The validator's completed typed result selects only a fixed decision token.
+Original JSON, not a model paraphrase of Value/Comment, reaches the author once
+as literal data. Rejection remains rejection and expiry remains timeout. Invalid
+or unavailable evidence, a repeated blocker at the same head, or a changed/
+unreadable artifact stops with a concrete coordinator handoff for fresh-head
+verification; it cannot reuse the answer as stale author/merge authority.
+A valid same-artifact clarification resumes the existing author once, followed
+by fresh review/CI and reserved human gates, not inherited approval.
+
+Causal source evidence: the unmodified seed/engine produced three red cases
+(required formal review despite green CI, typed failed and incomplete scope
+reports with five unchanged-head author calls); those same causal assertions
+pass with the source routing correction. Focused tests also execute the exact
+embedded validator, exercise real awaited children on the isolated time-skipping
+server and preserve the existing once-command/readback/replay regressions.
+These are source/isolated results, not deployed workflow or model acceptance.
+
+Adoption is separate: capture exact current definition bytes/version/hash,
+routing metadata, notices, waits/reminders/retries and rollback bytes; prepare
+and independently review a candidate preserving custom 43200-minute human
+waits. Obtain explicit human adoption approval before writing a new version,
+read back its hash/metadata, and leave old running/failed snapshots untouched.
+Rollback restores captured definition bytes as a new version before compatible
+worker/pin rollback; pending human children still need compatible workers.
+`RequireAcceptance` and durable delegation remain default-off throughout.

@@ -644,13 +644,14 @@ internal sealed class SeedHarness
         Action<JsonNode>? mutateSeed = null,
         bool allowFailure = false,
         bool localServer = false,
-        Func<Call, object?[], Task<AgentTaskResult>?>? delegateOverride = null)
+        Func<Call, object?[], Task<AgentTaskResult>?>? delegateOverride = null,
+        bool humanInputNamespace = false)
     {
         // localServer: a real local Temporal dev server with wall-clock timers instead of the
         // time-skipping test server, for checks that must observe the server's own terminal status.
         await using var env = localServer
             ? await WorkflowEnvironment.StartLocalAsync()
-            : await WorkflowEnvironment.StartTimeSkippingAsync();
+            : await WorkflowEnvironment.StartTimeSkippingAsync(new() { Namespace = humanInputNamespace ? "fleet" : "default" });
         var register = new AddSearchAttributesRequest { Namespace = env.Client.Options.Namespace };
         foreach (var name in SearchAttributeTypeRegistry.GetNames())
         {
@@ -676,7 +677,7 @@ internal sealed class SeedHarness
                 // The run's own read-only turns: a script that says nothing about them gets a green
                 // CI probe at the latest head and a clear merge preflight.
                 if (reply == "ok" && call.Step == "ci_probe") return CiProbe(latestHead);
-                if (reply == "ok" && call.Step == "merge_preflight") return PreflightClear;
+                if (reply == "ok" && call.Step is "merge_preflight" or "merge_gate_preflight" or "merge_approval_preflight") return PreflightClear;
                 if (reply == "ok" && call.Step == "notify_invalidation") return $"HEAD_OID: {latestHead}";
                 if (call.Step == "phase1_implement" || call.Step.StartsWith("revise_", StringComparison.Ordinal))
                 {
@@ -794,10 +795,10 @@ internal sealed class SeedHarness
     internal static string CiProbe(string head, string ci = "success", string read = "ok") =>
         $"HEAD_OID: {head}\nCI_READ: {read}\nCI: {ci}\nCI_FAILING: none\nCI_DETAIL: {(ci == "pending" ? "running" : "none")}";
 
-    internal const string PreflightClear = "MERGE_PREFLIGHT: clear\nHOLD_REASON: none\nIS_DRAFT: false\nstate OPEN, mergeStateStatus CLEAN";
+    internal const string PreflightClear = "MERGE_PREFLIGHT: clear\nHOLD_REASON: none\nIS_DRAFT: false\nGITHUB_REVIEW: NOT_REQUIRED\nstate OPEN, mergeStateStatus CLEAN";
 
     internal static string PreflightHeld(string reason = "queue") =>
-        $"MERGE_PREFLIGHT: held\nHOLD_REASON: {reason}\nIS_DRAFT: false\nstate OPEN, mergeStateStatus BLOCKED";
+        $"MERGE_PREFLIGHT: held\nHOLD_REASON: {reason}\nIS_DRAFT: false\nGITHUB_REVIEW: NOT_REQUIRED\nstate OPEN, mergeStateStatus BLOCKED";
 
     internal async Task<WorkflowHandle> WaitForChildAsync(WorkflowHandle parent, string type)
     {

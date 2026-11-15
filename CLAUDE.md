@@ -407,6 +407,25 @@ has no factory loggers, which would log the URI and so the token); delete a devi
 any failure other than Apple saying the token is gone (`ApnsOutcome.Unregistered`). See
 `docs/push-notifications.md`.
 
+## Usage feed (#590)
+
+Off by default (`USAGE_ENABLED=false` → orchestrator `Usage__Enabled`, plus `Usage__ReceiverUrl` and
+`Usage__AuthToken`). Each executor opens a `UsageTurn` before the provider sees the input and completes it
+at that turn's own result, errors included, through `UsageReporter`. That freezes one
+`Fleet.Contracts.AgentTurnUsage` row (`ProviderUsageSnapshot` → nullable delta + `cum_*` + `delta_reset`)
+and queues it (128). `OrchestratorHeartbeatService` publishes it as `usage.{shortName}` on its own channel
+(60 s expiry, 2 s deadline). The orchestrator's consumer hands `usage.*` to `UsageRelay` before any
+heartbeat parsing. `UsageRelay` queues 512 and POSTs each row's exact bytes to the receiver, one at a
+time, with a 5 s deadline. `GET /api/usage` (`UsageReader`) validates the query and passes the receiver's
+JSON through unchanged. `UsageReadiness` decides once whether all three agree; disabled is
+`503 usage_disabled`, misconfigured `503 usage_not_configured`, any read failure `503 usage_unavailable`.
+Wire sample: `tests/fixtures/wire/orchestrator.usage.json`. Operator notes: README "Usage feed".
+
+MUST NOT: put message text, tool arguments or output in a row; send the receiver bearer or URL to an
+agent (only `Usage__Enabled=true`, and only when ready); re-serialize a row after the agent froze it;
+retry, spool or invent a row for a turn with no terminal result; render a null value as `0`; sum the
+`cum_*` columns.
+
 ## Sign-in and chat (#530)
 
 The orchestrator owns sign-in (`src/Fleet.Orchestrator/Auth/`, `docs/sign-in.md`): one user `owner`;

@@ -465,6 +465,11 @@ services:
       - Push__ApnsKeyId=${FLEET_PUSH_APNS_KEY_ID:-}
       - Push__ApnsTeamId=${FLEET_PUSH_APNS_TEAM_ID:-}
       - Push__ApnsTopic=${FLEET_PUSH_APNS_TOPIC:-}
+      # Usage feed: off unless USAGE_ENABLED=true with a receiver origin and its bearer. The bearer
+      # stays in the orchestrator. See README.md, "Usage feed".
+      - Usage__Enabled=${USAGE_ENABLED:-false}
+      - Usage__ReceiverUrl=${USAGE_RECEIVER_URL:-}
+      - Usage__AuthToken=${USAGE_AUTH_TOKEN:-}
       # Secret placeholders: off unless FLEET_SECRETS_ENABLED=true. The subnet and address must equal
       # the fleet-secrets-net definition and the fleet-secrets service below.
       - SecretProxy__Enabled=${FLEET_SECRETS_ENABLED:-false}

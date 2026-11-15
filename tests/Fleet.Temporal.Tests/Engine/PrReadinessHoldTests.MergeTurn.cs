@@ -297,21 +297,21 @@ public sealed partial class PrReadinessHoldTests
 
     /// <summary>
     /// The numbers the runbook states for a merge that stays held while CI stays green: one hour
-    /// of hold, then one stall of four reads three hours apart, each of them the merge check, one
+    /// of hold, then one stall of 24 reads 30 minutes apart, each of them the merge check, one
     /// notice, no merge command, and the outcome of a gate timeout. Green CI alone resumes nothing,
     /// so the run does not go round again and the delivery passes are not what ends it.
     /// </summary>
     [Fact]
-    public async Task MergeHeldUnderGreenCi_OneStallOfFourChecks_ThenTheTimeoutOutcome()
+    public async Task MergeHeldUnderGreenCi_OneStallOf24Checks_ThenTheTimeoutOutcome()
     {
         var script = new Script { Preflight = _ => "held" };
         var run = await RunAsync(script, ApproveFirstVisit, captureWaiter: true, allowFailure: true);
 
-        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 4)), FiredSeconds(run.History));
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(1800L, 24)), FiredSeconds(run.History));
         Assert.Single(run.Calls, c => c.Step == "notify_stalled");
-        // At most 12 + 4 re-pins after the one at approval, and as many preflights.
-        Assert.Equal(1 + 12 + 4, run.Calls.Count(c => c.Step == "pin_after_approval"));
-        Assert.Equal(1 + 12 + 4, run.Calls.Count(c => c.Step == "merge_preflight"));
+        // At most 12 + 24 re-pins after the one at approval, and as many preflights.
+        Assert.Equal(1 + 12 + 24, run.Calls.Count(c => c.Step == "pin_after_approval"));
+        Assert.Equal(1 + 12 + 24, run.Calls.Count(c => c.Step == "merge_preflight"));
         Assert.DoesNotContain(run.Calls, c => c.Step is "ci_probe" or "phase4_merge" or "phase4_merge_pinned" or "verify_merge_status" or "notify_merge_failed");
         Assert.Equal(["merge-approval:1"], run.Upserts("GateVisit").Where(v => v.Length > 0));
         Assert.Single(run.ConsensusInputs);

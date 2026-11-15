@@ -277,7 +277,7 @@ Recover a missing URL from the one branch's PR list, not by opening a duplicate.
 | UNRESOLVED | Report threads only; no push; unresolved threads → IMPLEMENT; none → PIN |
 | PIN | Re-read actual head, all CI pages, immutable plan evidence, owner access, prior receipts and counters |
 | CI_WAIT | Literal 300-second timer, maximum 12; repeat PIN; a reported different head → INVALIDATED; still not success → STALLED(ci_timeout) |
-| STALLED | Owned technical state, no gate and no signal: one coordinator notice, then four 10800-second timers each followed by one read. The read is a probe for `ci_timeout` and the merge check (re-pin, then preflight) for `merge_held`. Clear → resume route (REVIEW, PIN or MERGE), failure → IMPLEMENT, head moved → INVALIDATED, fourth read not clear → TIMEOUT |
+| STALLED | Owned technical state, no gate and no signal: one coordinator notice, then 24 1800-second timers each followed by one read. The read is a probe for `ci_timeout` and the merge check (re-pin, then preflight) for `merge_held`. Clear → resume route (REVIEW, PIN or MERGE), failure → IMPLEMENT, head moved → INVALIDATED, last read not clear → TIMEOUT |
 | CLEANUP_WAIT | Literal 1800-second timer, maximum 16; repeat PIN; still dirty → cleanup_pending |
 | ACCEPT | Enforce batch entry guard, update counters, W1, then one awaited exact-head child |
 | CLASSIFY | Code-validated unanimous classification of failed attempt receipts; no synthesizer verdict |
@@ -398,7 +398,7 @@ ACCEPT); BLOCKED continue always repeats PIN and cleanup verification.
 Caps are independent: delivery 60; consensus five per review entry; stale signals
 five per gate visit; CI 12 × 300 seconds; cleanup 16 × 1800 seconds; review hold
 12 × 300 seconds per head; merge hold 12 × 300 seconds per gate visit; stall
-4 × 10800 seconds; merged-state reads three, 60 seconds apart. Fix total and
+24 × 1800 seconds; merged-state reads three, 60 seconds apart. Fix total and
 merge visits have no separate cap, but remain inside delivery. Exhaustion is not
 a synthetic approval. STOPPED is terminal; EXHAUSTED means no sentinel, both wake
 the optional waiter with cancelled and leave the PR open.
@@ -477,10 +477,10 @@ REVIEW_HOLD (`ci_timeout`, resume REVIEW) and from MERGE_HOLD (`merge_held`,
 resume MERGE). Entry is one required write of Phase `technical-stalled` and
 Acceptance `result=blocked;block=<reason>`; GateRef is not written. One notice
 goes to the configured CTO and to nobody else: head, reason, the three read
-counters, the last CI detail and hold reason, the times of the four reads, and
+counters, the last CI detail and hold reason, how often the run reads again, and
 that a concrete authority, risk, cost or scope question is the CTO's to raise
-through its normal channel. Then four 10800-second timers (one sleep step in a
-loop of four), each followed by one read: 720 minutes, the timeout of the gate
+through its normal channel. Then 24 1800-second timers (one sleep step in a
+loop of 24), each followed by one read: 720 minutes, the timeout of the gate
 this replaces.
 
 What a read is depends on what stalled. For `ci_timeout` it is the probe, and
@@ -489,7 +489,7 @@ green CI at H resumes (a review resumes with a review, never the pause). For
 CI is success, because green CI alone says nothing about why the merge was
 held. A clear check restores the gate's Acceptance record under Phase
 `merge-hold` and goes to the merge turn; it does not go back to the hold. In
-both, a failure goes to IMPLEMENT, a moved head invalidates, and a fourth read
+both, a failure goes to IMPLEMENT, a moved head invalidates, and a 24th read
 that is not clear ends the run as TIMEOUT, the outcome of a gate timeout:
 waiter `cancelled`, PR open, run not Failed. The phase and the blocked record
 stay as written for as long as the stall waits. No signal is read; a signal of
@@ -505,17 +505,17 @@ checks_pending|queue|window_closed|other` and `IS_DRAFT: true|false`. An absent,
 failed or unparseable answer is held, never clear. Held writes Phase
 `merge-hold` and repeats timer, re-pin and preflight. The approval is kept
 throughout: one consensus round, one gate visit. When the passes are spent the
-run stalls with `merge_held`, and the stall's four reads are the same check.
+run stalls with `merge_held`, and the stall's 24 reads are the same check.
 
 The longest a held merge can take, whatever CI does:
 
 | step | count | time |
 |---|---|---|
 | hold after approval | 12 passes | 60 minutes |
-| stall | 4 reads | 720 minutes |
+| stall | 24 reads | 720 minutes |
 | total | | 780 minutes: 13 hours |
 
-In that time the configured CTO gets one stall notice and makes at most 12 + 4
+In that time the configured CTO gets one stall notice and makes at most 12 + 24
 re-pins after the one at approval, and as many preflights. No merge command is
 issued. The run then ends as TIMEOUT: waiter `cancelled`, PR open, run not
 Failed. The times do not include the turns themselves.
@@ -538,7 +538,7 @@ command needs a new review, a new gate visit and a new approval.
 A cancelled run sends no merge command. A cancellation that arrives during a
 re-pin, a probe or the preflight is swallowed by that step's `ignoreFailure`,
 leaves no answer and counts as held; the run then ends Canceled at its next
-timer, in the hold or in the stall. A stall's fourth read has no timer after
+timer, in the hold or in the stall. A stall's last read has no timer after
 it: a cancellation swallowed there ends the run as the TIMEOUT it was one read
 away from, Completed and not Canceled, still with no command. At the merge turn
 the engine ends the run itself: a `noRedelivery` step is not entered by a
@@ -549,10 +549,10 @@ unanswered read.
 Not covered:
 
 - Nothing wakes the run when CI finishes. It learns of a result at its next
-  timer, up to 300 seconds late in a wait or hold and up to three hours late in
+  timer, up to 300 seconds late in a wait or hold and up to 30 minutes late in
   a stall.
 - Each read is still a turn of the configured CTO. A wait costs twelve, a stall
-  four, and a stall of a held merge up to eight (a re-pin and a preflight per
+  24, and a stall of a held merge up to 48 (a re-pin and a preflight per
   read).
 - Who owns the change after it merged is not decided here.
 - `noRedelivery` bounds what the bridge sends, not what the agent executes; see

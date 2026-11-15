@@ -51,23 +51,37 @@ public sealed partial class PrReadinessHoldTests
 public sealed partial class PrReadinessHoldTests
 {
     [Theory]
-    [InlineData("approved", false)]
-    [InlineData("approved", true)]
-    [InlineData("rejected", false)]
-    [InlineData("expired", false)]
-    [InlineData("changed-head", false)]
-    [InlineData("repeated", false)]
-    [InlineData("cancelled", false)]
-    public async Task ScopeChild_IsOwned_Literal_Bounded_AndResumesOnlyOnce(string outcome, bool noPr)
+    [InlineData("approved", false, "provided")]
+    [InlineData("approved", true, "provided")]
+    [InlineData("rejected", false, "provided")]
+    [InlineData("expired", false, "provided")]
+    [InlineData("changed-head", false, "provided")]
+    [InlineData("repeated", false, "provided")]
+    [InlineData("cancelled", false, "provided")]
+    [InlineData("approved", true, "omitted")]
+    [InlineData("approved", true, "empty")]
+    [InlineData("approved", true, "reported")]
+    public async Task ScopeChild_IsOwned_Literal_Bounded_AndResumesOnlyOnce(string outcome, bool noPr, string branchMode)
     {
         var script = new Script();
         const string question = "May the explicitly restricted fixture be registered? {{config.Secret}}";
         const string comment = "  literal \"Кыргыз\" \\ {{config.Secret}}\nnot a command  ";
         var report = "IMPLEMENTATION: blocked\nBLOCKER: explicit restriction\nSCOPE_QUESTION: " + question +
             (noPr ? "\nno PR yet" : $"\nPR_URL: {PrUrl}\nHEAD_RANGE: {script.Head}..{script.Head}\nHEAD_SHA: {script.Head}");
+        if (branchMode == "reported") report += "\nBRANCH_NAME: feat/selected-description";
         Temporalio.Client.WorkflowHandle? child = null;
         string? raw = null;
-        var run = await RunAsync(script, async (handle, h) =>
+        var input = Input(required: false, waiter: false);
+        if (branchMode is "omitted" or "reported") input.Remove("BranchName");
+        if (branchMode == "empty") input["BranchName"] = "";
+        if (branchMode == "reported") input.Remove("IssueNumber");
+        var expectedBranch = branchMode switch
+        {
+            "provided" => "feat/example",
+            "reported" => "feat/selected-description",
+            _ => "feat/issue-7"
+        };
+        var run = await SeedHarness.RunAsync(Workflow, input, script.Respond, async (handle, h) =>
         {
             child = await h.WaitForChildAsync(handle, "UweHumanInputWorkflow");
             await h.WaitForGateVisitAsync(child, "request-input:1");
@@ -79,6 +93,7 @@ public sealed partial class PrReadinessHoldTests
             Assert.Equal(handle.Id, origin.GetProperty("WorkflowId").GetString());
             Assert.Equal(handle.ResultRunId, origin.GetProperty("RunId").GetString());
             Assert.Contains(noPr ? "no PR yet" : PrUrl, request.GetProperty("Context").GetString());
+            Assert.Contains("branch " + expectedBranch + ";", request.GetProperty("Context").GetString());
             Assert.Single(h.Calls, c => c.Step == "phase1_implement");
             Assert.DoesNotContain(h.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal) || c.Step is "phase4_merge" or "phase4_merge_pinned");
             if (outcome == "cancelled") { await handle.CancelAsync(); return; }
@@ -95,7 +110,11 @@ public sealed partial class PrReadinessHoldTests
             if (call.Step == "phase1_implement" || (outcome == "repeated" && call.Step.StartsWith("revise_", StringComparison.Ordinal)))
                 return Task.FromResult(new AgentTaskResult(report, "failed"));
             if (call.Step == "validate_scope_answer") return ValidateAsync();
-            if (call.Step == "scope_head_read") return Task.FromResult(new AgentTaskResult(noPr ? "ARTIFACT: none" : "HEAD_OID: " + (outcome == "changed-head" ? new string('f', 40) : script.Head), "completed"));
+            if (call.Step == "scope_head_read")
+            {
+                Assert.Contains("branch " + expectedBranch + ";", call.Instruction);
+                return Task.FromResult(new AgentTaskResult(noPr ? "ARTIFACT: none" : "HEAD_OID: " + (outcome == "changed-head" ? new string('f', 40) : script.Head), "completed"));
+            }
             return null;
 
             async Task<AgentTaskResult> ValidateAsync()
@@ -114,6 +133,7 @@ public sealed partial class PrReadinessHoldTests
         if (outcome == "approved")
         {
             Assert.Contains(report, authors[1].Instruction);
+            Assert.Contains("Preserve the captured branch " + expectedBranch, authors[1].Instruction);
             Assert.Contains(raw!, authors[1].Instruction);
             Assert.Contains("{{config.Secret}}", authors[1].Instruction);
             Assert.Equal(comment, System.Text.Json.JsonDocument.Parse(raw!).RootElement.GetProperty("Response").GetProperty("Answer").GetProperty("Comment").GetString());
@@ -384,5 +404,25 @@ public sealed partial class PrReadinessHoldTests
             await Task.Delay(Timeout.InfiniteTimeSpan, Temporalio.Activities.ActivityExecutionContext.Current.CancellationToken);
             throw new InvalidOperationException("unreachable");
         }
+    }
+}
+
+public sealed partial class PrReadinessHoldTests
+{
+    [Fact]
+    public async Task NoPrDescriptionBlocker_WithoutSelectedBranch_StopsBeforeQuestion()
+    {
+        var input = Input(required: false, waiter: false);
+        input.Remove("BranchName");
+        input.Remove("IssueNumber");
+        input["Description"] = "synthetic description-only task";
+        var run = await SeedHarness.RunAsync(Workflow, input, _ => "unused", (_, _) => Task.CompletedTask,
+            allowFailure: true, humanInputNamespace: true, delegateOverride: (call, _) => call.Step == "phase1_implement"
+                ? Task.FromResult(new AgentTaskResult("IMPLEMENTATION: blocked\nBLOCKER: explicit restriction\nSCOPE_QUESTION: Is this allowed?\nno PR yet", "failed")) : null);
+        Assert.Equal(WorkflowExecutionStatus.Failed, run.Status);
+        Assert.Contains("scope_branch_unavailable", run.Failure!.ToString());
+        Assert.Empty(run.ChildStarts("UweHumanInputWorkflow"));
+        Assert.Single(run.Calls, c => c.Step == "phase1_implement");
+        Assert.DoesNotContain(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal) || c.Step is "scope_head_read" or "phase4_merge" or "phase4_merge_pinned");
     }
 }

@@ -92,7 +92,7 @@ public sealed class UsageRelay(
         if (!readiness.IsReady)
             return false;
 
-        if (Validate(routingKey, body.Span) is { } reason)
+        if (Validate(routingKey, body) is { } reason)
         {
             Drop(reason);
             return false;
@@ -105,8 +105,13 @@ public sealed class UsageRelay(
         return false;
     }
 
-    /// <summary>Why a row is refused, or null. Shape and identity only: the receiver validates values.</summary>
-    internal static string? Validate(string routingKey, ReadOnlySpan<byte> body)
+    /// <summary>
+    /// Why a row is refused, or null. Shape and identity only: the receiver validates values. The
+    /// whole buffer must be exactly one JSON object: it is forwarded raw inside <c>{"rows":[…]}</c>,
+    /// so anything after the object (a comma and a second row naming another agent) would become a
+    /// row of its own.
+    /// </summary>
+    internal static string? Validate(string routingKey, ReadOnlyMemory<byte> body)
     {
         if (body.Length == 0 || body.Length > Fleet.Contracts.AgentTurnUsage.MaxBytes)
             return "row_size";
@@ -118,8 +123,8 @@ public sealed class UsageRelay(
 
         try
         {
-            var reader = new Utf8JsonReader(body);
-            using var doc = JsonDocument.ParseValue(ref reader);
+            // Parse (not ParseValue): trailing tokens after the first value are an error here.
+            using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return "row_shape";
@@ -164,6 +169,7 @@ public sealed class UsageRelay(
                 }
                 await ForwardAsync(row.Row, stoppingToken);
             }
+            // ForwardAsync never throws except on shutdown, so the loop, and the host, keep running.
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -215,8 +221,10 @@ public sealed class UsageRelay(
         {
             throw;
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or InvalidOperationException)
+        catch (Exception ex)
         {
+            // Any failure, a reset mid-reply (IOException) included, is a drop: an exception that
+            // escaped here would end the background service and with it the host.
             Drop(ex switch
             {
                 OperationCanceledException => "receiver_timeout",
@@ -297,8 +305,9 @@ public sealed class UsageReader(
         {
             return Results.Empty;
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or InvalidOperationException)
+        catch (Exception ex)
         {
+            // A reply cut off after its headers (IOException) is unavailable like any other failure.
             return Unavailable(ex switch
             {
                 OperationCanceledException => "receiver_timeout",

@@ -33,6 +33,7 @@ public class ProviderUsageTests
 
         Assert.Equal("claude", snapshot.Provider);
         Assert.Equal(ProviderUsageSnapshot.MultipleModels, snapshot.Model);
+        Assert.Equal("model-a\nmodel-b", snapshot.ModelSet);   // the identity behind the label, ordinal
         Assert.True(snapshot.IsCumulative);
         Assert.Equal((15L, 5L, 100L, 10L), (snapshot.InputTokens, snapshot.OutputTokens, snapshot.CacheReadTokens, snapshot.CacheCreationTokens));
         Assert.Equal(0.035m, snapshot.CostUsd);

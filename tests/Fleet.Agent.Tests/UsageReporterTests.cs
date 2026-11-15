@@ -93,6 +93,23 @@ public class UsageReporterTests
         Assert.Equal(130L, row.InputTokens);
     }
 
+    [Theory]
+    [InlineData("""{"model-a":{"inputTokens":10},"model-b":{"inputTokens":5}}""", """{"model-a":{"inputTokens":20},"model-c":{"inputTokens":9}}""", true)]
+    [InlineData("""{"model-a":{"inputTokens":10},"model-b":{"inputTokens":5}}""", """{"model-a":{"inputTokens":20},"model-b":{"inputTokens":7},"model-c":{"inputTokens":1}}""", true)]
+    [InlineData("""{"model-a":{"inputTokens":10}}""", """{"model-a":{"inputTokens":20},"model-b":{"inputTokens":7}}""", true)]
+    [InlineData("""{"model-b":{"inputTokens":5},"model-a":{"inputTokens":10}}""", """{"model-a":{"inputTokens":20},"model-b":{"inputTokens":7}}""", false)]
+    public void ClaudeModelSetChange_IsAReset_EvenWhenBothAreLabelledMultiple(string before, string after, bool reset)
+    {
+        var reporter = Reporter();
+        Complete(reporter, Claude(before));
+
+        var row = Complete(reporter, Claude(after));
+
+        Assert.Equal(reset, row.DeltaReset);
+        if (!reset)
+            Assert.Equal(12L, row.InputTokens);   // the same set, in another key order: differenced
+    }
+
     [Fact]
     public void DecreasingCounter_IsAReset_ClampedToZero_OnlyInTheDelta()
     {
@@ -243,6 +260,10 @@ public class UsageReporterTests
         Provider = "claude", Model = "model-a", SessionId = "session-1", ProcessGeneration = 1, IsCumulative = true,
         InputTokens = input, OutputTokens = output, CacheCreationTokens = cacheCreation, CostUsd = cost,
     };
+
+    private static ProviderUsageSnapshot Claude(string modelUsage) => ProviderUsageSnapshot.ForClaude(
+        new Dictionary<string, object> { ["modelUsage"] = JsonDocument.Parse(modelUsage).RootElement.Clone() },
+        numTurns: 1, sessionId: "session-1", configuredModel: "configured-model", processGeneration: 1);
 
     private static AgentTurnUsage Complete(UsageReporter reporter, ProviderUsageSnapshot snapshot)
     {

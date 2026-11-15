@@ -71,6 +71,29 @@ public sealed class UsageRelayTests
         Assert.Equal(reason, UsageRelay.Validate("usage.agent1", Encoding.UTF8.GetBytes(body)));
     }
 
+    [Theory]
+    [InlineData(",")]
+    [InlineData("],[")]
+    [InlineData(" ")]
+    public async Task TrailingRowForAnotherAgent_IsRefused_AndNothingIsForwarded(string separator)
+    {
+        // A valid row for this agent followed by a second row naming another agent. Forwarded raw
+        // inside {"rows":[…]}, the second would be inserted as that other agent's turn.
+        var other = Encoding.UTF8.GetString(Row).Replace("\"agent\":\"agent1\"", "\"agent\":\"agent2\"", StringComparison.Ordinal);
+        var body = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(Row) + separator + other);
+        var calls = 0;
+        var relay = Relay(new Handler(_ => { calls++; return Json(HttpStatusCode.OK, """{"accepted":2}"""); }));
+
+        Assert.Equal("row_json", UsageRelay.Validate("usage.agent1", body));
+        Assert.False(relay.TryEnqueue("usage.agent1", body));
+
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await relay.StartAsync(stop.Token);
+        await Task.Delay(100);
+        await relay.StopAsync(CancellationToken.None);
+        Assert.Equal(0, calls);
+    }
+
     [Fact]
     public void OversizedRow_IsRefused()
     {
@@ -154,6 +177,36 @@ public sealed class UsageRelayTests
     }
 
     [Fact]
+    public async Task Forward_ReplyCutOffAfterTheHeaders_IsADrop_NotAThrow()
+    {
+        var relay = Relay(new Handler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new BrokenContent() }));
+
+        await relay.ForwardAsync(Row, CancellationToken.None);
+
+        Assert.Equal((0L, 1L), (relay.Forwarded, relay.Dropped));
+    }
+
+    [Fact]
+    public async Task Worker_SurvivesABrokenReply_AndForwardsTheNextRow()
+    {
+        var calls = 0;
+        var relay = Relay(new Handler(_ => ++calls == 1
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new BrokenContent() }
+            : Json(HttpStatusCode.OK, """{"accepted":1}""")));
+        relay.TryEnqueue("usage.agent1", Row);
+        relay.TryEnqueue("usage.agent1", Row);
+
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await relay.StartAsync(stop.Token);
+        while (relay.Forwarded + relay.Dropped < 2 && !stop.IsCancellationRequested)
+            await Task.Delay(10);
+
+        Assert.Equal((1L, 1L), (relay.Forwarded, relay.Dropped));
+        Assert.False(relay.ExecuteTask!.IsCompleted);   // still running: the host was never stopped
+        await relay.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task Forward_SlowReceiver_IsDroppedAtTheDeadline()
     {
         var relay = Relay(new SlowHandler());
@@ -220,6 +273,28 @@ public sealed class UsageRelayTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
             Task.FromResult(respond(request));
+    }
+
+    /// <summary>A body whose headers arrived and whose stream then fails, as on a connection reset.</summary>
+    internal sealed class BrokenContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) =>
+            throw new IOException("connection reset");
+
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(new BrokenStream());
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        private sealed class BrokenStream : MemoryStream
+        {
+            public override int Read(byte[] buffer, int offset, int count) => throw new IOException("connection reset");
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) =>
+                ValueTask.FromException<int>(new IOException("connection reset"));
+        }
     }
 
     internal sealed class SlowHandler : HttpMessageHandler

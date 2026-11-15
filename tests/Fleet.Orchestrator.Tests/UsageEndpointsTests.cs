@@ -134,6 +134,23 @@ public sealed class UsageEndpointsTests
     }
 
     [Fact]
+    public async Task ReplyCutOffAfterTheHeaders_Is503_AndTheNextReadStillWorks()
+    {
+        var calls = 0;
+        await using var host = await Host.StartAsync(Readiness("true", Origin, Token), _ => ++calls == 1
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new BrokenContent() }
+            : Json(HttpStatusCode.OK, ReceiverBody));
+
+        var broken = await host.Client.GetAsync($"/api/usage?{Query}");
+        var next = await host.Client.GetAsync($"/api/usage?{Query}");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, broken.StatusCode);
+        Assert.Equal("usage_unavailable", await ErrorAsync(broken));
+        Assert.Equal(HttpStatusCode.OK, next.StatusCode);
+        Assert.Equal(ReceiverBody, await next.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task SlowReceiver_Is503AtTheDeadline()
     {
         await using var host = await Host.StartAsync(Readiness("true", Origin, Token), handler: new SlowHandler());

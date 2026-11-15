@@ -18,8 +18,9 @@ namespace Fleet.Agent.Models;
 /// </para>
 /// <para>
 /// <see cref="ProcessGeneration"/> counts the provider processes this executor has started; with
-/// <see cref="SessionId"/> and <see cref="Model"/> it decides whether two cumulative snapshots can be
-/// compared.
+/// <see cref="SessionId"/> and <see cref="ModelSet"/> it decides whether two cumulative snapshots can be
+/// compared. <see cref="Model"/> is only the row's label: two different sets of models are both
+/// labelled <see cref="MultipleModels"/>, and their totals are not comparable.
 /// </para>
 /// </remarks>
 public sealed record ProviderUsageSnapshot
@@ -31,7 +32,15 @@ public sealed record ProviderUsageSnapshot
     public const string UnknownModel = "unknown";
 
     public required string Provider { get; init; }
+
+    /// <summary>The row's model label: one name, <see cref="MultipleModels"/>, or the fallback.</summary>
     public required string Model { get; init; }
+
+    /// <summary>
+    /// Every model that contributed to the totals, sorted ordinally and joined by newlines; null
+    /// means the same as <see cref="Model"/>. Compared for a reset, never sent.
+    /// </summary>
+    public string? ModelSet { get; init; }
     public string? SessionId { get; init; }
     public long ProcessGeneration { get; init; }
     public bool IsCumulative { get; init; }
@@ -108,6 +117,9 @@ public sealed record ProviderUsageSnapshot
                 1 => ModelOrFallback(models[0].Name, configuredModel),
                 _ => MultipleModels,
             },
+            ModelSet = models.Count == 0
+                ? null
+                : string.Join('\n', models.Select(m => m.Name).Order(StringComparer.Ordinal)),
             SessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId,
             ProcessGeneration = processGeneration,
             IsCumulative = true,

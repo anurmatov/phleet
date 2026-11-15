@@ -50,8 +50,8 @@ public readonly record struct QueuedUsageRow(byte[] Body, DateTimeOffset FrozenA
 /// <remarks>
 /// <para>
 /// A cumulative snapshot is compared with the previous one for the same provider, process, session and
-/// model attribution, component by component. With no comparable previous snapshot, or when any
-/// counter went down, the row is marked <c>delta_reset</c>: the first known totals stand in as this
+/// set of models (not the row's model label), component by component. With no comparable previous
+/// snapshot, or when any counter went down, the row is marked <c>delta_reset</c>: the first known totals stand in as this
 /// turn's share and a negative difference becomes 0, in the delta columns only. A component the
 /// previous snapshot did not have stays null. The baseline moves on every completed turn, whether or
 /// not the row is ever delivered.
@@ -77,7 +77,7 @@ public sealed class UsageReporter
     private readonly Func<string> _newId;
     private readonly string _agent;
 
-    private (string Provider, long Generation, string? Session, string Model)? _baselineKey;
+    private (string Provider, long Generation, string? Session, string ModelSet)? _baselineKey;
     private ProviderUsageSnapshot? _baseline;
     private long _dropped;
 
@@ -154,7 +154,8 @@ public sealed class UsageReporter
 
         if (s.IsCumulative)
         {
-            var key = (s.Provider, s.ProcessGeneration, s.SessionId, s.Model);
+            // The model set, not the label: two different sets are both labelled "multiple".
+            var key = (s.Provider, s.ProcessGeneration, s.SessionId, s.ModelSet ?? s.Model);
             ProviderUsageSnapshot? previous;
             lock (_baselineLock)
             {

@@ -61,6 +61,7 @@ Get /api/workflow-types
 Get /api/workflows
 Get /api/workflows/completed
 Get /api/workflows/failures
+Get /api/workflows/{ns}/event-value/{**id}
 Get /api/workflows/{ns}/history/{**id}
 Get /health
 Get /internal/agent-project-access

@@ -3,6 +3,11 @@ using Fleet.Orchestrator.Endpoints;
 using Microsoft.Extensions.Options;
 using Temporalio.Client;
 using Temporalio.Common;
+using Fleet.Orchestrator.Models;
+using Temporalio.Api.History.V1;
+using Temporalio.Api.Common.V1;
+using Temporalio.Api.Enums.V1;
+using System.Text;
 
 namespace Fleet.Orchestrator.Services;
 
@@ -556,6 +561,136 @@ public sealed class TemporalClientRegistry(
         }
 
         return events;
+    }
+
+    /// <summary>
+    /// Read one exact-run field without collecting the whole history or using a lossy preview.
+    /// A completed activity's input needs a second scan for its own scheduled event only.
+    /// </summary>
+    public async Task<WorkflowEventValue> FetchWorkflowEventValueAsync(
+        string ns, string workflowId, string runId, long eventId, string field, CancellationToken ct = default)
+    {
+        // The legacy registry lookup is case-insensitive; this route's identity contract is not.
+        if (!_opts.Namespaces.Contains(ns, StringComparer.Ordinal)) throw new KeyNotFoundException();
+        if (!IsConfigured) throw new InvalidOperationException();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10), Time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+        var token = linked.Token;
+        try
+        {
+            var clients = await GetClientsAsync(token).WaitAsync(token);
+            // Do not let the legacy cache's case-insensitive key comparer select another namespace.
+            var client = clients.FirstOrDefault(pair => string.Equals(pair.Key, ns, StringComparison.Ordinal)).Value
+                ?? throw new InvalidOperationException();
+            var handle = client.GetWorkflowHandle(workflowId, runId: runId);
+            async Task<HistoryEvent?> Find(long id)
+            {
+                await using var events = handle.FetchHistoryEventsAsync(new WorkflowHistoryEventFetchOptions
+                {
+                    WaitNewEvent = false,
+                    Rpc = new RpcOptions { CancellationToken = token },
+                }).GetAsyncEnumerator(token);
+                while (await events.MoveNextAsync())
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (events.Current.EventId == id) return events.Current;
+                }
+                return null;
+            }
+
+            var selected = await Find(eventId) ?? throw new KeyNotFoundException();
+            var sourceId = eventId;
+            Payloads? payloads = null;
+            Temporalio.Api.Failure.V1.Failure? failure = null;
+            switch (selected.EventType)
+            {
+                case EventType.WorkflowExecutionStarted:
+                    var started = selected.WorkflowExecutionStartedEventAttributes ?? throw new InvalidOperationException();
+                    if (field == "input") payloads = started.Input;
+                    break;
+                case EventType.ActivityTaskScheduled:
+                    var scheduled = selected.ActivityTaskScheduledEventAttributes ?? throw new InvalidOperationException();
+                    if (field == "input") payloads = scheduled.Input;
+                    break;
+                case EventType.WorkflowExecutionSignaled:
+                    var signaled = selected.WorkflowExecutionSignaledEventAttributes ?? throw new InvalidOperationException();
+                    if (field == "input") payloads = signaled.Input;
+                    break;
+                case EventType.WorkflowExecutionCompleted:
+                    var completed = selected.WorkflowExecutionCompletedEventAttributes ?? throw new InvalidOperationException();
+                    if (field == "output") payloads = completed.Result;
+                    break;
+                case EventType.ActivityTaskCompleted:
+                    var activity = selected.ActivityTaskCompletedEventAttributes ?? throw new InvalidOperationException();
+                    if (field == "output") payloads = activity.Result;
+                    if (field == "input")
+                    {
+                        sourceId = activity.ScheduledEventId;
+                        if (sourceId <= 0 || sourceId >= eventId) throw new InvalidOperationException();
+                        var inputEvent = await Find(sourceId);
+                        if (inputEvent?.EventType != EventType.ActivityTaskScheduled
+                            || inputEvent.ActivityTaskScheduledEventAttributes is not { } inputAttrs)
+                            throw new InvalidOperationException();
+                        payloads = inputAttrs.Input;
+                    }
+                    break;
+                case EventType.WorkflowExecutionFailed:
+                    var failed = selected.WorkflowExecutionFailedEventAttributes ?? throw new InvalidOperationException();
+                    if (field == "failure") failure = failed.Failure;
+                    break;
+                case EventType.ActivityTaskFailed:
+                    var activityFailed = selected.ActivityTaskFailedEventAttributes ?? throw new InvalidOperationException();
+                    if (field == "failure") failure = activityFailed.Failure;
+                    break;
+                case EventType.WorkflowExecutionCanceled:
+                    break;
+                default:
+                    return Empty("unsupported", "event_type");
+            }
+
+            WorkflowEventValue Empty(string status, string reason) =>
+                new(ns, workflowId, runId, eventId, field, null, status, [], reason, WorkflowEventValue.MaximumBytes);
+            WorkflowEventValue Complete(IReadOnlyList<WorkflowEventText> values) =>
+                new(ns, workflowId, runId, eventId, field, sourceId, "complete", values, null, WorkflowEventValue.MaximumBytes);
+
+            var utf8 = new UTF8Encoding(false, true);
+            if (failure is not null)
+            {
+                try
+                {
+                    if (utf8.GetByteCount(failure.Message) > WorkflowEventValue.MaximumBytes)
+                        return Empty("too_large", "value_size");
+                }
+                catch (EncoderFallbackException) { return Empty("unsupported", "invalid_utf8"); }
+                if (failure.EncodedAttributes is not null) return Empty("unsupported", "encoded_failure");
+                return Complete([new("text/plain", failure.Message)]);
+            }
+            if (payloads?.Payloads_ is not { Count: > 0 } parts) return Empty("absent", "no_value");
+
+            // Size wins over encoding/UTF-8 classification, even for a mixed payload array.
+            long size = 0;
+            foreach (var payload in parts)
+            {
+                size += payload.Data.Length;
+                if (size > WorkflowEventValue.MaximumBytes) return Empty("too_large", "value_size");
+            }
+            var values = new List<WorkflowEventText>(parts.Count);
+            foreach (var payload in parts)
+            {
+                if (!payload.Metadata.TryGetValue("encoding", out var encoding)) return Empty("unsupported", "encoding");
+                var name = encoding.Span.SequenceEqual("json/plain"u8) ? "json/plain"
+                    : encoding.Span.SequenceEqual("json/protobuf"u8) ? "json/protobuf"
+                    : encoding.Span.SequenceEqual("text/plain"u8) ? "text/plain" : null;
+                if (name is null) return Empty("unsupported", "encoding");
+                try { values.Add(new(name, utf8.GetString(payload.Data.Span))); }
+                catch (DecoderFallbackException) { return Empty("unsupported", "invalid_utf8"); }
+            }
+            return Complete(values);
+        }
+        catch (Exception) when (ct.IsCancellationRequested)
+        { throw new OperationCanceledException(ct); }
+        catch (Exception) when (deadline.IsCancellationRequested)
+        { throw new WorkflowEventValueTimeoutException(); }
     }
 
     /// Decodes all payloads in a list, joins with newline. Returns null if empty.

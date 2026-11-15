@@ -286,8 +286,8 @@ public sealed partial class AcceptanceScenarioTests
         Assert.DoesNotContain(run.Calls, c => c.Step == "notify_acceptance_gate");
         Assert.Single(run.Calls, c => c.Step == "notify_stalled");
         Assert.Equal(12, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300));
-        // Nobody answers a stall: four reads three hours apart, then the outcome of a gate timeout.
-        Assert.Equal(4, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 10800));
+        // Nobody answers a stall: 24 reads 30 minutes apart, then the outcome of a gate timeout.
+        Assert.Equal(24, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 1800));
         Assert.Equal("cancelled", run.WaiterDecision); Assert.Equal(WorkflowExecutionStatus.Completed, run.Status); ValidWrites(run);
     }
 

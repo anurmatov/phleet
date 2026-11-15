@@ -34,6 +34,11 @@ public sealed partial class PrReadinessHoldTests
     private const string Coordinator = "cto-agent";
     private const string PrUrl = "https://github.com/example-org/example-repo/pull/7";
 
+    // The stall as shipped: a read every 30 minutes, 24 of them, the 720 minutes of the gate it
+    // replaces. Definition_HoldsAndStallAreOwnedStates_WithLiteralBounds pins both in the seed.
+    private const long StallSleepSeconds = 1800;
+    private const int StallReads = 24;
+
     // ── review path ──────────────────────────────────────────────────────────
 
     /// <summary>
@@ -56,7 +61,8 @@ public sealed partial class PrReadinessHoldTests
         Assert.DoesNotContain("human-review", run.Upserts("Phase"));
         Assert.DoesNotContain(run.Calls, IsHumanPauseNotice);
         Assert.Equal(12, Timers(run, 300));
-        Assert.Equal(18, run.Calls.Count(c => c.Step == "ci_probe"));
+        // Two verdicts' probes and twelve hold reads, then every read of the stall.
+        Assert.Equal(14 + StallReads, run.Calls.Count(c => c.Step == "ci_probe"));
         Assert.Contains(counted, Assert.Single(run.Calls, c => c.Step == "notify_stalled").Instruction);
         Assert.DoesNotContain(run.Calls, c => c.Step is "pin" or "phase4_merge" or "phase4_merge_pinned");
         Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
@@ -75,7 +81,7 @@ public sealed partial class PrReadinessHoldTests
         // Two review entries, then the stall; nothing in between asks a human.
         Assert.Equal(["implementing", "consensus-review", "consensus-review", "technical-stalled"], run.Upserts("Phase"));
         Assert.Equal($"v1;head={script.Head};result=blocked;iso=production;block=ci_timeout;fix=0;batch=0", run.Upserts("Acceptance").Last());
-        Assert.Equal(4, Timers(run, 10800));
+        Assert.Equal(StallReads, Timers(run, StallSleepSeconds));
         ValidWrites(run);
     }
 
@@ -156,7 +162,7 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(2, run.ConsensusInputs.Count);
         Assert.Equal(["implementing", "consensus-review", "technical-stalled", "consensus-review", "human-review"], Phases(run));
         Assert.Equal(12, Timers(run, 300));
-        Assert.Equal(1, Timers(run, 10800));
+        Assert.Equal(1, Timers(run, StallSleepSeconds));
         Assert.Equal(15, run.Calls.Count(c => c.Step == "ci_probe"));   // 13, the stall's read, the second verdict's
     }
 
@@ -212,8 +218,9 @@ public sealed partial class PrReadinessHoldTests
         var script = new Script { Review = _ => "needs_human_review", Probe = _ => "pending" };
         var run = await RunAsync(script, (_, _) => Task.CompletedTask);
 
-        // The whole hold and the stall after it ran: twelve passes, four reads, no human.
+        // The whole hold and the stall after it ran: twelve passes, 24 reads, no human.
         Assert.Equal(12, Timers(run, 300));
+        Assert.Equal(StallReads, Timers(run, StallSleepSeconds));
         Assert.Equal(["implementing", "consensus-review", "technical-stalled"], Phases(run));
         Assert.NotEmpty(run.Upserts("ReviewRef"));
         Assert.All(run.Upserts("ReviewRef"), value => Assert.Equal("", value));
@@ -247,24 +254,25 @@ public sealed partial class PrReadinessHoldTests
         Assert.Contains("Do not notify the primary human", notice.Instruction);
         Assert.Contains($"head {script.Head}, reason ci_timeout", notice.Instruction);
         Assert.Contains("pending 13, unavailable 0, silent 0", notice.Instruction);
-        Assert.Contains("180, 360, 540 and 720 minutes", notice.Instruction);
+        Assert.Contains("The run reads again every 30 minutes for 12 hours", notice.Instruction);
+        Assert.Contains("After the last read that is not clear it ends as a timeout", notice.Instruction);
         Assert.Equal(12, Timers(run, 300));
         Assert.Empty(run.ChildStarts("UwePrAcceptanceWorkflow"));
         ValidWrites(run);
     }
 
     [Fact]
-    public async Task Stalled_FourTimersOf10800_FourReads_ThenTimeoutOutcome()
+    public async Task Stalled_TwentyFourTimersOf1800_TwentyFourReads_ThenTimeoutOutcome()
     {
         var script = new Script { Pin = _ => "pending", Probe = _ => "pending" };
         var run = await RunAsync(script, (_, _) => Task.CompletedTask, captureWaiter: true);
 
-        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 4)), TimerSeconds(run.History));
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(1800L, 24)), TimerSeconds(run.History));
         Assert.Equal(TimerSeconds(run.History), FiredSeconds(run.History));
-        Assert.Equal(4, run.Calls.Count(c => c.Step == "ci_probe"));
+        Assert.Equal(24, run.Calls.Count(c => c.Step == "ci_probe"));
         // Each read follows its own timer.
         var afterStall = run.Calls.SkipWhile(c => c.Step != "notify_stalled").Skip(1).Select(c => c.Step).ToList();
-        Assert.Equal(["ci_probe", "ci_probe", "ci_probe", "ci_probe"], afterStall);
+        Assert.Equal(Enumerable.Repeat("ci_probe", 24), afterStall);
         // The outcome a gate timeout has: the waiter is told cancelled, the PR is open, the run is not Failed.
         Assert.Equal("cancelled", run.WaiterDecision);
         Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
@@ -273,7 +281,7 @@ public sealed partial class PrReadinessHoldTests
     }
 
     [Fact]
-    public async Task Stalled_GreenAtSecondRead_ResumesRoute()
+    public async Task Stalled_GreenAtSecondRead_ResumesRoute_60MinutesIntoTheStall()
     {
         // The PIN and its twelve waits are pending; the stall's second read is green and the PIN after it too.
         var script = new Script { Pin = n => n <= 13 ? "pending" : "success", Probe = n => n == 1 ? "pending" : "success" };
@@ -283,7 +291,10 @@ public sealed partial class PrReadinessHoldTests
             await h.SignalHumanApprovalAsync(handle);
         });
 
-        Assert.Equal(2, Timers(run, 10800));
+        // CI that turns green early in a stall is seen at the next read, not hours later: two
+        // 1800-second timers, so the run is on its way again 60 minutes into the stall.
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(1800L, 2)), FiredSeconds(run.History));
+        Assert.Equal(60 * 60, StallSeconds(run));
         Assert.Equal(2, run.Calls.Count(c => c.Step == "ci_probe"));
         Assert.Equal(14, run.Calls.Count(c => c.Step == "pin"));
         Assert.Single(run.ConsensusInputs);                       // the resume route is PIN, not a new review
@@ -305,7 +316,7 @@ public sealed partial class PrReadinessHoldTests
             await h.SignalHumanApprovalAsync(handle);
         });
 
-        Assert.Equal(1, Timers(run, 10800));
+        Assert.Equal(1, Timers(run, StallSleepSeconds));
         var revision = Assert.Single(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal));
         Assert.Contains($"CI failed at head {first}", revision.Instruction);
         Assert.Contains("build, lint", revision.Instruction);
@@ -324,7 +335,7 @@ public sealed partial class PrReadinessHoldTests
             await h.SignalHumanApprovalAsync(handle);
         });
 
-        Assert.Equal(1, Timers(run, 10800));
+        Assert.Equal(1, Timers(run, StallSleepSeconds));
         Assert.Single(run.Calls, c => c.Step == "notify_invalidation");
         Assert.DoesNotContain(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal));
         Assert.Equal([first, script.Head], run.ConsensusInputs.Select(i => i.ReviewRef));
@@ -337,7 +348,7 @@ public sealed partial class PrReadinessHoldTests
         SeedRun quiet = await RunAsync(new Script { Pin = _ => "pending", Probe = _ => "pending" }, (_, _) => Task.CompletedTask, captureWaiter: true);
         var signalled = await RunAsync(new Script { Pin = _ => "pending", Probe = _ => "pending" }, async (handle, h) =>
         {
-            await DriveToAsync(handle, h, history => h.LastUpsert(history, "Phase") == "technical-stalled" && TimerSeconds(history).Contains(10800));
+            await DriveToAsync(handle, h, history => h.LastUpsert(history, "Phase") == "technical-stalled" && TimerSeconds(history).Contains(StallSleepSeconds));
             await handle.SignalAsync("merge-approval", [Json(new { Decision = "approved" })]);
             await handle.SignalAsync("merge-approval", [Json(new { Decision = "approved", Ref = "merge:" + new string('1', 40) + ":1" })]);
             await handle.SignalAsync("acceptance-decision", [Json(new { Decision = "continue", Ref = "block:1:0:00000000" })]);
@@ -347,7 +358,7 @@ public sealed partial class PrReadinessHoldTests
             await handle.SignalAsync("technical-stalled", [Json(new { Decision = "continue" })]);
         }, captureWaiter: true);
 
-        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 4)), FiredSeconds(signalled.History));
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(1800L, 24)), FiredSeconds(signalled.History));
         Assert.Equal(TimerSeconds(quiet.History), TimerSeconds(signalled.History));
         Assert.Equal(quiet.Calls.Select(c => c.Step), signalled.Calls.Select(c => c.Step));
         Assert.Equal(quiet.Upserts("Phase"), signalled.Upserts("Phase"));
@@ -364,7 +375,7 @@ public sealed partial class PrReadinessHoldTests
         var ex = await Assert.ThrowsAsync<WorkflowFailedException>(() =>
             RunAsync(new Script { Pin = _ => "pending", Probe = _ => "pending" }, async (handle, h) =>
             {
-                await DriveToAsync(handle, h, history => h.LastUpsert(history, "Phase") == "technical-stalled" && TimerSeconds(history).Contains(10800));
+                await DriveToAsync(handle, h, history => h.LastUpsert(history, "Phase") == "technical-stalled" && TimerSeconds(history).Contains(StallSleepSeconds));
                 await handle.CancelAsync();
                 await Assert.ThrowsAsync<WorkflowFailedException>(() => handle.GetResultAsync<JsonElement?>());
                 status = (await handle.DescribeAsync()).Status;
@@ -584,11 +595,11 @@ public sealed partial class PrReadinessHoldTests
         var script = new Script { Preflight = _ => "held" };
         var run = await RunAsync(script, ApproveFirstVisit, captureWaiter: true);
 
-        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 4)), FiredSeconds(run.History));
-        // The check after approval, twelve passes, then the stall's four reads, each of them the
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(1800L, 24)), FiredSeconds(run.History));
+        // The check after approval, twelve passes, then the stall's 24 reads, each of them the
         // same check: a re-pin and a preflight. Green CI alone ends nothing here.
-        Assert.Equal(13 + 4, run.Calls.Count(c => c.Step == "merge_preflight"));
-        Assert.Equal(13 + 4, run.Calls.Count(c => c.Step == "pin_after_approval"));
+        Assert.Equal(13 + 24, run.Calls.Count(c => c.Step == "merge_preflight"));
+        Assert.Equal(13 + 24, run.Calls.Count(c => c.Step == "pin_after_approval"));
         Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
         Assert.DoesNotContain(run.Calls, c => c.Step == "notify_outer_loop_exhausted");
         Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled"], Phases(run));
@@ -613,7 +624,7 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(["notify_stalled", "pin_after_approval", "merge_preflight", "phase4_merge"],
             run.Calls.SkipWhile(c => c.Step != "notify_stalled").Select(c => c.Step).Take(4));
         Assert.Equal(12, Timers(run, 300));
-        Assert.Equal(1, Timers(run, 10800));
+        Assert.Equal(1, Timers(run, StallSleepSeconds));
         Assert.Equal(14, run.Calls.Count(c => c.Step == "merge_preflight"));
         Assert.Equal(["merge-approval:1"], run.Upserts("GateVisit").Where(v => v.Length > 0));
         Assert.Single(run.ConsensusInputs);
@@ -625,13 +636,16 @@ public sealed partial class PrReadinessHoldTests
     }
 
     [Fact]
-    public async Task MergeHoldStalled_HeldThenClearAtTheSecondRead_OneMergeSamePinnedHead()
+    public async Task MergeHoldStalled_HoldClearsAtTheSecondRead_Merges60MinutesIntoTheStall_OneMergeSamePinnedHead()
     {
         // Thirteen held answers in the hold, one more at the stall's first read, clear at its second.
         var script = new Script { Preflight = n => n <= 14 ? "held" : "clear" };
         var run = await RunAsync(script, ApproveFirstVisit);
 
-        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(10800L, 2)), FiredSeconds(run.History));
+        // A hold that clears early in a stall must not wait hours for the next read: the second
+        // read comes two 1800-second timers in, and the merge follows 60 minutes into the stall.
+        Assert.Equal(Enumerable.Repeat(300L, 12).Concat(Enumerable.Repeat(1800L, 2)), FiredSeconds(run.History));
+        Assert.Equal(60 * 60, StallSeconds(run));
         Assert.Single(run.Calls, c => c.Step == "notify_stalled");
         Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
         Assert.Equal(15, run.Calls.Count(c => c.Step == "merge_preflight"));
@@ -662,7 +676,7 @@ public sealed partial class PrReadinessHoldTests
             await h.SignalHumanApprovalAsync(handle);
         });
 
-        Assert.Equal(1, Timers(run, 10800));
+        Assert.Equal(1, Timers(run, StallSleepSeconds));
         Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
         Assert.Single(run.Calls, c => c.Step == "notify_stalled");
         var revision = Assert.Single(run.Calls, c => c.Step.StartsWith("revise_", StringComparison.Ordinal));
@@ -688,7 +702,7 @@ public sealed partial class PrReadinessHoldTests
         });
 
         Assert.NotEqual(first, script.Head);
-        Assert.Equal(1, Timers(run, 10800));
+        Assert.Equal(1, Timers(run, StallSleepSeconds));
         Assert.DoesNotContain(run.Calls, c => c.Step == "ci_probe");
         Assert.Single(run.Calls, c => c.Step == "notify_stalled");
         Assert.Single(run.Calls, c => c.Step == "notify_invalidation");
@@ -1053,16 +1067,17 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(12, loops["ci_wait_loop"].MaxIterations);
         Assert.Equal(12, loops["review_hold_loop"].MaxIterations);
         Assert.Equal(13, loops["merge_hold_loop"].MaxIterations);   // the check after approval, then twelve passes
-        Assert.Equal(4, loops["stalled_reads"].MaxIterations);
+        Assert.Equal(24, loops["stalled_reads"].MaxIterations);
         Assert.Equal(3, loops["merge_readback_loop"].MaxIterations);
 
         long Sleep(string name) => Assert.Single(steps.OfType<SleepStep>(), s => s.Name == name).Seconds!.Value;
         Assert.Equal(300, Sleep("review_hold_sleep"));
         Assert.Equal(300, Sleep("merge_hold_sleep"));
-        Assert.Equal(10800, Sleep("stalled_sleep"));
+        Assert.Equal(1800, Sleep("stalled_sleep"));
         Assert.Equal(60, Sleep("merge_readback_sleep"));
-        // Four reads three hours apart: the 720 minutes of the gate this state replaces.
+        // 24 reads 30 minutes apart: the 720 minutes of the gate this state replaces.
         Assert.Equal(720 * 60, loops["stalled_reads"].MaxIterations * Sleep("stalled_sleep"));
+        Assert.Equal((StallReads, StallSleepSeconds), (loops["stalled_reads"].MaxIterations, Sleep("stalled_sleep")));
 
         // The stall and the holds wait on timers only: no signal wait, no gate reference.
         foreach (var state in new[] { "STALLED", "REVIEW_HOLD", "MERGE_HOLD" })
@@ -1271,8 +1286,7 @@ public sealed partial class PrReadinessHoldTests
 
     /// <summary>
     /// The durations of the timers that fired, in order. A gate's reminder timer is cancelled when
-    /// its decision arrives, so this counts the run's own sleeps and not an answered gate (a merge
-    /// gate's reminder is 180 minutes, the same length as a stall's sleep).
+    /// its decision arrives, so this counts the run's own sleeps and not an answered gate.
     /// </summary>
     private static List<long> FiredSeconds(WorkflowHistory history)
     {
@@ -1285,6 +1299,28 @@ public sealed partial class PrReadinessHoldTests
     private static int Timers(WorkflowHistory history, long seconds) => FiredSeconds(history).Count(s => s == seconds);
 
     private static int Timers(SeedRun run, long seconds) => Timers(run.History, seconds);
+
+    /// <summary>
+    /// How long the run slept in its stall: the timers that fired between the stall's required
+    /// write and the next change of phase, or the end of the run.
+    /// </summary>
+    private static long StallSeconds(SeedRun run)
+    {
+        var started = run.History.Events.Where(e => e.EventType == EventType.TimerStarted)
+            .ToDictionary(e => e.EventId, e => e.TimerStartedEventAttributes.StartToFireTimeout.Seconds);
+        long total = 0;
+        var stalled = false;
+        foreach (var e in run.History.Events)
+        {
+            if (e.EventType == EventType.TimerFired && stalled) total += started[e.TimerFiredEventAttributes.StartedEventId];
+            if (e.EventType != EventType.UpsertWorkflowSearchAttributes) continue;
+            if (!e.UpsertWorkflowSearchAttributesEventAttributes.SearchAttributes.IndexedFields.TryGetValue("Phase", out var phase)) continue;
+            var now = Decode<string>(phase) == "technical-stalled";
+            if (stalled && !now) break;
+            stalled = now;
+        }
+        return total;
+    }
 
     private static async Task WaitPhaseAsync(WorkflowHandle handle, SeedHarness h, string phase)
     {
@@ -1308,9 +1344,14 @@ public sealed partial class PrReadinessHoldTests
 
     /// <summary>
     /// Lets the run's own sleeps pass until <paramref name="reached"/> holds. Only the definition's
-    /// literal sleeps are skipped (60, 300 and 10800 seconds), so a gate is still open when the
-    /// caller signals it. A merge gate's reminder is also 10800 seconds: once a scenario has opened
-    /// one, pass <paramref name="pastStall"/> false unless the gate has been answered.
+    /// literal sleeps are skipped (60, 300 and the stall's 1800 seconds), so a gate is still open
+    /// when the caller signals it: no gate of this definition starts a timer of one of those
+    /// lengths (its shortest is a human-review reminder, 3600 seconds; a merge gate's is 10800).
+    /// A scenario that must not go through a stall passes <paramref name="pastStall"/> false: the
+    /// stall's sleep is then left alone, and a run that stalls ends this wait with a timeout.
+    /// The cleanup wait sleeps 1800 seconds too, but it is entered only from a required-mode PIN
+    /// that reports a code change and an earlier attempt not clean, and <see cref="Script"/>
+    /// reports neither; a scenario that does must tell the two sleeps apart.
     /// </summary>
     private static async Task DriveToAsync(WorkflowHandle handle, SeedHarness h, Func<WorkflowHistory, bool> reached, bool pastStall = true)
     {
@@ -1327,7 +1368,7 @@ public sealed partial class PrReadinessHoldTests
             var sleeping = history.Events
                 .Where(e => e.EventType == EventType.TimerStarted && !done.Contains(e.TimerStartedEventAttributes.TimerId))
                 .Select(e => e.TimerStartedEventAttributes.StartToFireTimeout.Seconds)
-                .Where(s => s is 60 or 300 || (pastStall && s == 10800))
+                .Where(s => s is 60 or 300 || (pastStall && s == StallSleepSeconds))
                 .ToList();
             if (sleeping.Count > 0) await h.AdvanceAsync(TimeSpan.FromSeconds(sleeping.Max() + 1));
             else await Task.Delay(20);

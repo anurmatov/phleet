@@ -3887,7 +3887,7 @@
                         "name": "notify_stalled",
                         "type": "delegate",
                         "target": "{{config.CtoAgent}}",
-                        "instruction": "Technical stall, for you only. Do not notify the primary human and do not ask anyone for a decision: this state has no button and reads no signal.\nPR {{vars.pr_url}}, head {{vars.H}}, reason {{vars.stall_reason}}. Reads at this head that were not success: pending {{vars.ci_pending_reads}}, unavailable {{vars.ci_unavailable_reads}}, silent {{vars.ci_silent_reads}}; last CI detail {{vars.ci_detail | default: 'none'}}; merge hold reason {{vars.hold_reason | default: 'none'}}.\nThe run reads again at 180, 360, 540 and 720 minutes and goes on by itself when a read is clear: CI at this head for ci_timeout, and for merge_held the re-pin and the merge preflight. After the fourth read that is not clear it ends as a timeout and the PR stays open. A human can only cancel the run.\nIf you see a concrete authority, risk, cost or scope question here, raise it through your normal channel. Otherwise do nothing. No code, branch, PR or workflow change.\nFormal GitHub review prerequisite: {{vars.github_review | default: 'UNKNOWN'}} at PR {{vars.pr_url}}, head {{vars.H}}. If REVIEW_REQUIRED ask an independent permitted reviewer to approve on GitHub; CHANGES_REQUESTED needs its findings resolved; UNKNOWN needs a successful read. This notice is not a merge-ready gate.",
+                        "instruction": "Technical stall, for you only. Do not notify the primary human and do not ask anyone for a decision: this state has no button and reads no signal.\nPR {{vars.pr_url}}, head {{vars.H}}, reason {{vars.stall_reason}}. Reads at this head that were not success: pending {{vars.ci_pending_reads}}, unavailable {{vars.ci_unavailable_reads}}, silent {{vars.ci_silent_reads}}; last CI detail {{vars.ci_detail | default: 'none'}}; merge hold reason {{vars.hold_reason | default: 'none'}}.\nThe run reads again every 30 minutes for 12 hours and goes on by itself when a read is clear: CI at this head for ci_timeout, and for merge_held the re-pin and the merge preflight. After the last read that is not clear it ends as a timeout and the PR stays open. A human can only cancel the run.\nIf you see a concrete authority, risk, cost or scope question here, raise it through your normal channel. Otherwise do nothing. No code, branch, PR or workflow change.\nFormal GitHub review prerequisite: {{vars.github_review | default: 'UNKNOWN'}} at PR {{vars.pr_url}}, head {{vars.H}}. If REVIEW_REQUIRED ask an independent permitted reviewer to approve on GitHub; CHANGES_REQUESTED needs its findings resolved; UNKNOWN needs a successful read. This notice is not a merge-ready gate.",
                         "timeoutMinutes": 5,
                         "outputVar": "notify_stalled",
                         "ignoreFailure": true,
@@ -3904,12 +3904,12 @@
                       {
                         "name": "stalled_reads",
                         "type": "loop",
-                        "maxIterations": 4,
+                        "maxIterations": 24,
                         "steps": [
                           {
                             "name": "stalled_sleep",
                             "type": "sleep",
-                            "seconds": 10800
+                            "seconds": 1800
                           },
                           {
                             "name": "stalled_read_kind",

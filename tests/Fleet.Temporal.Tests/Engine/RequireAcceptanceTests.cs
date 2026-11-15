@@ -237,7 +237,7 @@ public sealed class RequireAcceptanceTests
         Assert.Equal(12, run.History.Events.Count(e => e.EventType == EventType.TimerStarted && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == 300));
         Assert.Contains("reason ci_timeout", Assert.Single(run.Calls, c => c.Step == "notify_stalled").Instruction);
         // The stall's reads are the CI-only probe in off mode too.
-        Assert.Equal(4, run.Calls.Count(c => c.Step == "ci_probe"));
+        Assert.Equal(24, run.Calls.Count(c => c.Step == "ci_probe"));
         Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
     }
 

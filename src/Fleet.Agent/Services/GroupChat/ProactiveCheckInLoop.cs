@@ -65,7 +65,8 @@ internal sealed class ProactiveCheckInLoop(
 
             var isAllMode = _agentConfig.GroupListenMode.Equals("all", StringComparison.OrdinalIgnoreCase);
 
-            if (isAllMode && _executor.IsProcessWarm)
+            // A provider that keeps the conversation has it whether or not its process is warm.
+            if (isAllMode && (_executor.KeepsConversation || _executor.IsProcessWarm))
             {
                 _startGroupCheckIn(groupId, "Proactive check-in", """
                     Review your memory and session context. Are there pending tasks,

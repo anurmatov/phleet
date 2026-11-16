@@ -1602,11 +1602,25 @@
                   }
                 },
                 "default": {
-                  "name": "capture_pr_url",
-                  "type": "set_variable",
-                  "vars": {
-                    "pr_url": "{{vars.next_url}}"
-                  }
+                  "name": "capture_pr_url_and_number",
+                  "type": "sequence",
+                  "steps": [
+                    {
+                      "name": "capture_pr_url",
+                      "type": "set_variable",
+                      "vars": {
+                        "pr_url": "{{vars.next_url}}"
+                      }
+                    },
+                    {
+                      "name": "set_pr_number_attr",
+                      "type": "set_attribute",
+                      "attributes": {
+                        "PrNumber": "{{vars.pr_url | extract: '/pull/([0-9]+)'}}"
+                      },
+                      "ignoreFailure": true
+                    }
+                  ]
                 }
               },
               {
@@ -6824,11 +6838,25 @@
                                       }
                                     },
                                     "default": {
-                                      "name": "capture_pr_url",
-                                      "type": "set_variable",
-                                      "vars": {
-                                        "pr_url": "{{vars.next_url}}"
-                                      }
+                                      "name": "capture_pr_url_and_number",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "capture_pr_url",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "pr_url": "{{vars.next_url}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "set_pr_number_attr",
+                                          "type": "set_attribute",
+                                          "attributes": {
+                                            "PrNumber": "{{vars.pr_url | extract: '/pull/([0-9]+)'}}"
+                                          },
+                                          "ignoreFailure": true
+                                        }
+                                      ]
                                     }
                                   },
                                   {
@@ -7033,11 +7061,25 @@
                                       }
                                     },
                                     "default": {
-                                      "name": "capture_pr_url",
-                                      "type": "set_variable",
-                                      "vars": {
-                                        "pr_url": "{{vars.next_url}}"
-                                      }
+                                      "name": "capture_pr_url_and_number",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "capture_pr_url",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "pr_url": "{{vars.next_url}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "set_pr_number_attr",
+                                          "type": "set_attribute",
+                                          "attributes": {
+                                            "PrNumber": "{{vars.pr_url | extract: '/pull/([0-9]+)'}}"
+                                          },
+                                          "ignoreFailure": true
+                                        }
+                                      ]
                                     }
                                   },
                                   {
@@ -7242,11 +7284,25 @@
                                       }
                                     },
                                     "default": {
-                                      "name": "capture_pr_url",
-                                      "type": "set_variable",
-                                      "vars": {
-                                        "pr_url": "{{vars.next_url}}"
-                                      }
+                                      "name": "capture_pr_url_and_number",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "capture_pr_url",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "pr_url": "{{vars.next_url}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "set_pr_number_attr",
+                                          "type": "set_attribute",
+                                          "attributes": {
+                                            "PrNumber": "{{vars.pr_url | extract: '/pull/([0-9]+)'}}"
+                                          },
+                                          "ignoreFailure": true
+                                        }
+                                      ]
                                     }
                                   },
                                   {
@@ -7451,11 +7507,25 @@
                                       }
                                     },
                                     "default": {
-                                      "name": "capture_pr_url",
-                                      "type": "set_variable",
-                                      "vars": {
-                                        "pr_url": "{{vars.next_url}}"
-                                      }
+                                      "name": "capture_pr_url_and_number",
+                                      "type": "sequence",
+                                      "steps": [
+                                        {
+                                          "name": "capture_pr_url",
+                                          "type": "set_variable",
+                                          "vars": {
+                                            "pr_url": "{{vars.next_url}}"
+                                          }
+                                        },
+                                        {
+                                          "name": "set_pr_number_attr",
+                                          "type": "set_attribute",
+                                          "attributes": {
+                                            "PrNumber": "{{vars.pr_url | extract: '/pull/([0-9]+)'}}"
+                                          },
+                                          "ignoreFailure": true
+                                        }
+                                      ]
                                     }
                                   },
                                   {
@@ -7661,11 +7731,25 @@
                                     }
                                   },
                                   "default": {
-                                    "name": "capture_pr_url",
-                                    "type": "set_variable",
-                                    "vars": {
-                                      "pr_url": "{{vars.next_url}}"
-                                    }
+                                    "name": "capture_pr_url_and_number",
+                                    "type": "sequence",
+                                    "steps": [
+                                      {
+                                        "name": "capture_pr_url",
+                                        "type": "set_variable",
+                                        "vars": {
+                                          "pr_url": "{{vars.next_url}}"
+                                        }
+                                      },
+                                      {
+                                        "name": "set_pr_number_attr",
+                                        "type": "set_attribute",
+                                        "attributes": {
+                                          "PrNumber": "{{vars.pr_url | extract: '/pull/([0-9]+)'}}"
+                                        },
+                                        "ignoreFailure": true
+                                      }
+                                    ]
                                   }
                                 },
                                 {

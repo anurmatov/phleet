@@ -177,6 +177,36 @@ public sealed class SeedPostFeedbackHumanReviewTests
         Assert.Equal(2, run.ConsensusInputs.Count);
     }
 
+    // ── the pull request's number ────────────────────────────────────────────
+
+    /// <summary>
+    /// The run publishes its pull request's number as the <c>PrNumber</c> search attribute as soon
+    /// as the implementer names the pull request. The dashboard and the phone app link a run to
+    /// its pull request from that attribute and from nothing else; without it they show only the
+    /// issue. The step was lost once in a rewrite of this definition, which is why it is pinned.
+    /// </summary>
+    [Fact]
+    public async Task TheRunPublishesItsPullRequestNumber()
+    {
+        List<long> published = [];
+
+        await SeedHarness.RunAsync(Workflow, PrInput(), Responder(), async (handle, h) =>
+        {
+            await EnterPauseAsync(handle, h);
+            published = (await handle.FetchHistoryAsync()).Events
+                .Where(e => e.EventType == EventType.UpsertWorkflowSearchAttributes)
+                .SelectMany(e => e.UpsertWorkflowSearchAttributesEventAttributes.SearchAttributes.IndexedFields
+                    .Where(kv => kv.Key == "PrNumber")
+                    .Select(kv => DataConverter.Default.PayloadConverter.ToValue<long>(kv.Value)))
+                .ToList();
+            await handle.SignalAsync("human-review", [Json("""{"Decision":"rejected"}""")]);
+        });
+
+        // PrUrl ends in /pull/7.
+        Assert.NotEmpty(published);
+        Assert.All(published, number => Assert.Equal(7, number));
+    }
+
     // ── T5 rejected ──────────────────────────────────────────────────────────
 
     [Fact]

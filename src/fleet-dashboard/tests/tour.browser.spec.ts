@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { answer, chatAnswer, chatPicture, chatSeen, pages, scenes } from './tourFixtures'
+import { answer, chatAnswer, chatPicture, chatSeen, mcpToolsAnswer, pages, scenes } from './tourFixtures'
 
 // A visual tour: every page, at a phone's width and a desktop's, drawn from synthetic data and
 // saved as a picture. It asserts two things a picture cannot be trusted to show at a glance —
@@ -33,6 +33,7 @@ async function open(page: Page, hash: string, override?: Record<string, unknown>
   await page.addInitScript(seen => { window.localStorage.setItem('fleet.chat.seen', JSON.stringify(seen)) }, chatSeen)
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url())
+    if (route.request().method() === 'POST' && url.pathname.endsWith('/mcp-tools')) { await route.fulfill({ json: mcpToolsAnswer }); return }
     if (route.request().method() !== 'GET') { await route.fulfill({ json: {} }); return }
     const body = answer(url.pathname, override)
     if (body === undefined) await route.fulfill({ status: 404, json: {} })
@@ -92,6 +93,11 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
       await row.getByRole('button', { name: 'Edit config' }).click()
     }
     await expect(page.getByRole('dialog')).toBeVisible()
+  },
+  'agent-tools': async (page, phone) => {
+    await reach['agent-config'](page, phone)
+    await page.getByRole('dialog').getByRole('tab', { name: /Tools/ }).click()
+    await expect(page.getByRole('table', { name: 'Tools of fleet-telegram' })).toBeVisible()
   },
   'new-agent': async page => {
     await page.getByRole('button', { name: 'New agent' }).click()

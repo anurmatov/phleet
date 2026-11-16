@@ -108,6 +108,11 @@ export class FakeFleet {
   projectAccess: Record<string, string[]> = { alpha: ['fleet'] }
   /** Stored agent configs; an agent without one reads `configOf`. A config save keeps its MCP endpoints here. */
   configs: Record<string, Record<string, unknown>> = {}
+  /**
+   * What `POST /api/agents/{name}/mcp-tools` answers, by agent: each saved MCP server's tools.
+   * An agent without an entry gets 404, as from an orchestrator that predates the route.
+   */
+  mcpTools: Record<string, unknown> = {}
 
   writes(method: string, pathPrefix: string): Call[] {
     return this.calls.filter(c => c.method === method && c.path.startsWith(pathPrefix))
@@ -266,6 +271,8 @@ export class FakeFleet {
       this.configs[m[1]] = { ...(this.configs[m[1]] ?? configOf(m[1])), mcpEndpoints: body!.mcpEndpoints }
       return { message: `Agent '${m[1]}' config updated` }
     }
+    m = path.match(/^\/api\/agents\/([^/]+)\/mcp-tools$/)
+    if (m) return this.mcpTools[m[1]]
     m = path.match(/^\/api\/agents\/([^/]+)\/project-access(?:\/(.+))?$/)
     if (m) {
       const current = this.projectAccess[m[1]] ?? []

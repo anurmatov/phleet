@@ -40,7 +40,7 @@ const TODAY: Record<string, { section: string; key: string }> = {
   'Output Style': { section: 'instructions', key: 'outputStyle' },
   'Memory Project Access': { section: 'instructions', key: 'memoryProjectAccess' },
   'Tools': { section: 'tools', key: 'tools' },
-  'MCP Endpoints': { section: 'tools', key: 'mcpEndpoints' },
+  'MCP servers': { section: 'tools', key: 'mcpEndpoints' },
   'Telegram Users': { section: 'telegram', key: 'telegramUsers' },
   'Telegram Groups': { section: 'telegram', key: 'telegramGroups' },
   'Group Listen Mode': { section: 'telegram', key: 'groupListenMode' },
@@ -159,7 +159,7 @@ test('rendered dialog: six tabs with counts, one visible panel, every label in i
   try {
     const { default: Modal } = await server.ssrLoadModule('/src/components/AgentConfigModal.tsx')
     const render = (e: ConfigEdits, configSaveState = 'idle', configSaveMsg = '') => renderToStaticMarkup(createElement(Modal, {
-      agentName: 'agent1', configData: { provider: e.provider, tools: [], harnessExtra: null } as unknown as AgentConfig, configEdits: e,
+      agentName: 'agent1', configData: { provider: e.provider, tools: [], mcpEndpoints: [], harnessExtra: null } as unknown as AgentConfig, configEdits: e,
       configSaveState, configSaveMsg, configLoading: false, configReprovisionConfirm: false,
       allInstructions: [], outputStyles: [], projectContexts: [], promptSizeLimits: null, projectAccess: [],
       projectAccessLoading: false, onEditsChange: () => {}, onSave: () => {}, onReprovisionConfirmToggle: () => {},

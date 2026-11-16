@@ -132,11 +132,129 @@ textarea { resize: vertical; }
 .config-actions, .config-save-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .config-save-row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .config-related-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+/* ── Tools & MCP: each server with the tools it offers ──────────────────────
+   A group is one server (or the built-in tools): its own fields at the top, then a table of
+   tools to tick. Groups are boxed so the eye finds where one server ends. */
+.tools-editor { display: flex; flex-direction: column; gap: 12px; }
+.tools-editor > .config-section-label { margin: 8px 0 0; }
+.tools-editor > .config-section-label:first-child { margin-top: 0; }
+.tools-editor > .config-field { margin-bottom: 0; }
+.tools-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.tools-filter { flex: 1 1 180px; min-width: 0; }
+.tools-count { color: var(--text-3); font-size: var(--fs-s); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The one dashed green button on the page is "add a server". The rest are plain. */
+.tool-quiet-btn.config-add-btn { border-style: solid; color: var(--text-2); }
+.tool-quiet-btn[aria-pressed='true'] { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
+/* A small action inside a group: words, no box. */
+.tool-link-btn {
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.tool-link-btn:hover { color: var(--accent); text-decoration-color: currentColor; }
+
+.tool-group { border: 1px solid var(--border); border-radius: var(--r-m); background: var(--surface); overflow: hidden; }
+.tool-group-head, .mcp-server-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+}
+.tool-group-head { flex-wrap: wrap; align-items: baseline; }
+.tool-group-title { font-size: var(--fs-s); font-weight: 600; }
+.tool-group-sub { color: var(--text-3); font-size: var(--fs-xs); }
+.mcp-add-server { align-self: flex-start; }
+.mcp-server-name { flex: 0 1 190px; min-width: 0; font-weight: 600; }
+.mcp-server-transport { flex: 0 0 auto; width: 84px; padding-right: 4px; }
+
 /* #593: an endpoint's header rows sit under it and wrap on a phone rather than scroll sideways. */
-.config-mcp-endpoint { margin-bottom: 12px; }
-.config-mcp-headers { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin: 0 0 4px 16px; }
+.config-mcp-headers {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 0 12px 10px;
+  background: var(--surface-2);
+}
 .config-mcp-header-row { flex-wrap: wrap; width: 100%; margin-bottom: 0; }
 .config-mcp-header-name, .config-mcp-header-ref { flex: 1 1 100px; min-width: 0; }
+
+.tool-list { border-top: 1px solid var(--border); }
+.tool-list-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 12px 0; }
+.tool-list-count { color: var(--text-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.tool-list-actions { display: flex; gap: 12px; }
+.tool-list-notice { padding: 8px 12px; color: var(--text-3); font-size: var(--fs-s); line-height: 1.45; overflow-wrap: anywhere; }
+.tool-list-notice strong { color: var(--text-2); font-weight: 600; }
+.tool-list-notice--problem { color: var(--text-2); }
+.tool-list-notice--problem strong { color: var(--warn); }
+.tools-editor > .tool-list-notice { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-m); }
+
+.tool-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.tool-table th {
+  padding: 8px 12px 4px;
+  color: var(--text-3);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+.tool-table td { padding: 7px 12px; border-top: 1px solid var(--border); vertical-align: top; }
+.tool-col-check { width: 42px; }
+.tool-col-name { width: 36%; }
+.tool-table td.tool-col-check { padding-right: 0; }
+.tool-table td.tool-col-check input { display: block; }
+.tool-name { font-family: var(--mono); font-size: var(--fs-s); overflow-wrap: anywhere; }
+.tool-name label { display: block; cursor: pointer; }
+.tool-row:not(.tool-row--granted) .tool-name { color: var(--text-2); }
+.tool-row:hover td { background: var(--hover); }
+.tool-desc {
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.tool-note { display: inline-block; color: var(--warn); font-size: var(--fs-xs); }
+.tool-desc:not(:empty) .tool-note:not(:first-child) { margin-left: 8px; }
+
+.tool-always { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.tool-always-label { margin-right: 4px; color: var(--text-3); font-size: var(--fs-xs); }
+.tool-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+.tool-add { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.tool-add-input { flex: 0 1 280px; min-width: 0; font-family: var(--mono); font-size: var(--fs-s); }
+
+@media (max-width: 720px) {
+  /* The name and the address each take a line; the transport and the remove button share one. */
+  .mcp-server-head { flex-wrap: wrap; }
+  .mcp-server-name { flex: 1 1 100%; }
+  .mcp-server-head .config-input-url { flex: 1 1 100%; }
+  .mcp-server-transport { margin-right: auto; }
+  /* A tool's description goes under its name instead of beside it. */
+  .tool-table thead { display: none; }
+  .tool-table, .tool-table tbody { display: block; }
+  .tool-table tr { display: grid; grid-template-columns: 42px minmax(0, 1fr); border-top: 1px solid var(--border); }
+  .tool-table td { border-top: 0; }
+  .tool-table td.tool-col-check { grid-row: span 2; }
+  .tool-table td.tool-name { padding-bottom: 0; }
+  .tool-table td.tool-desc { grid-column: 2; padding-top: 2px; }
+  .tool-table td.tool-desc:empty { display: none; }
+  .tool-table td.tool-name:has(+ .tool-desc:empty) { padding-bottom: 7px; }
+  .tool-add-input { flex: 1 1 auto; }
+}
 
 .config-panel { margin-top: 10px; padding: 14px 0 4px; border-top: 1px solid var(--border); }
 .config-section-label {

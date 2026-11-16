@@ -363,6 +363,25 @@ internal static class AgentConfigFiles
         return withoutQuery.TrimEnd('/');
     }
 
+    /// <summary>
+    /// The address an agent is given for one of its endpoints. Also what the tool listing asks, so
+    /// the page shows the tools of the server the agent will reach.
+    /// </summary>
+    /// <remarks>
+    /// Appends ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal URLs
+    /// so each server can identify the calling agent without relying on the LLM to pass it.
+    /// WithAgentParam strips any existing query string before appending to prevent
+    /// double-appending when the URL was stored in the DB with ?agent= already.
+    /// fleet-telegram also gets ?formatting_mode={n} so send tools can honour the agent's
+    /// FormattingMode without an extra orchestrator round-trip on every send.
+    /// </remarks>
+    internal static string AgentMcpUrl(Agent agent, AgentMcpEndpoint e) =>
+        e.McpName == "fleet-telegram"
+            ? WithAgentTelegramParams(e.Url, agent.Name, (byte)agent.FormattingMode)
+            : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
+                ? WithAgentParam(e.Url, agent.Name)
+                : e.Url;
+
     /// <param name="mappedHeaders">
     /// #593: each mapped endpoint's resolved headers (<see cref="ResolveMcpHeaders"/>), by endpoint name.
     /// An endpoint without an entry is written as it always was.
@@ -399,17 +418,7 @@ internal static class AgentConfigFiles
                         };
                     }
 
-                    // Append ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal URLs
-                    // so each server can identify the calling agent without relying on the LLM to pass it.
-                    // WithAgentParam strips any existing query string before appending to prevent
-                    // double-appending when the URL was stored in the DB with ?agent= already.
-                    // fleet-telegram also gets ?formatting_mode={n} so send tools can honour the agent's
-                    // FormattingMode without an extra orchestrator round-trip on every send.
-                    var url = e.McpName == "fleet-telegram"
-                        ? WithAgentTelegramParams(e.Url, agent.Name, (byte)agent.FormattingMode)
-                        : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
-                            ? WithAgentParam(e.Url, agent.Name)
-                            : e.Url;
+                    var url = AgentMcpUrl(agent, e);
                     return mappedHeaders is not null && mappedHeaders.TryGetValue(e.McpName, out var headers)
                         ? new { type = e.TransportType, url, headers }
                         : (object)new { type = e.TransportType, url };
@@ -492,7 +501,7 @@ internal static class AgentConfigFiles
     }
 
     /// <summary>Why the forwarder would refuse this binding's placeholder at this endpoint, or null.</summary>
-    private static string? DescribeBindingMismatch(string url, string headerName, SecretBinding binding)
+    internal static string? DescribeBindingMismatch(string url, string headerName, SecretBinding binding)
     {
         if (binding.Kind == SecretBindingRules.KindSshKey)
             return "an SSH key is never sent as a header";

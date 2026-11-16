@@ -29,6 +29,17 @@ OAuth tokens in `./fleet/.claude-credentials.json` and `./fleet/.codex-credentia
 
 Re-running `./setup.sh` also works — it re-copies the credentials and leaves the stack running.
 
+## An agent should forget its conversation
+
+A Claude or Codex agent keeps its provider session across a reprovision when its provider and instructions are unchanged. To make it start a new session, reprovision it with a new session: in the dashboard tick **New session** in the Reprovision question (also offered by **Reprovision all**), or from the CLI:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"session":"fresh"}' "http://localhost:3600/api/agents/$name/reprovision"
+```
+
+The MCP tool takes the same word: `reprovision_agent agent_name=<agent> session=fresh`. The orchestrator removes `workspaces/<container>/.fleet/session.json` after the old container is gone and before the new one starts. If it answers `session_file_not_removed`, the old container was removed and no new one was started: remove that file under the fleet base directory and reprovision again. Changed instructions start a new session without any of this.
+
 ## Gemini agents start returning "credentials not found"
 
 Gemini uses OAuth tokens stored in `~/.gemini/oauth_creds.json`. The container mounts this file writable so the Gemini CLI's `google-auth-library` can refresh tokens in-place — unlike Claude/Codex, **you should not need to manually refresh gemini credentials** as long as the container stays running. Note: all gemini agents share the same `./fleet/.gemini-credentials.json` on the host; concurrent token refreshes rely on `google-auth-library`'s atomic rename write.

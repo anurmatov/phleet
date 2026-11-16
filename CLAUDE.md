@@ -69,6 +69,24 @@ are byte-identical to what the script's former inline Node and Python wrote (`Sc
 only as the reference) beside the current one to prove it; change the output only on purpose, with
 that harness updated.
 
+### Reprovision and the session choice
+
+A reprovision keeps the agent's workspace, and with it the agent's session file
+(`Fleet.Shared.AgentSessionFile`, `.fleet/session.json` under the agent's `WorkDir`), so the new
+container may resume the provider session. A request may ask for a new one instead: `session` is
+`auto` (the default) or `fresh` on `POST /api/agents/{name}/reprovision` and
+`POST /api/agents/reprovision-running` (JSON body `{"session":"fresh"}` or `?session=fresh`, beside
+`?image=`) and on the MCP tool `reprovision_agent`. Any other value is a 400 (the tool's `✗` answer)
+and nothing is touched. `fresh` makes `ContainerProvisioningService.ReprovisionAsync` remove the file
+(`SessionFileRemoval`, the host side of the `/workspace` mount) after the old container is removed and
+before the new one is created. A missing file is success. A file that cannot be removed fails the
+reprovision with `session_file_not_removed` and no new container is started: the agent is down until
+the next reprovision, because starting it would resume the session the caller asked to end.
+
+MUST NOT: store the choice (it belongs to one request); remove the file while a container of the
+agent exists (the agent would write it again); remove it on any other path. Restart with an
+instruction version, deprovision, provision and delete leave the file alone.
+
 ## Provider Summary
 
 | Provider | Auth | Process model | System prompt delivery | MCP transport |

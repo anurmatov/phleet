@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using Fleet.Agent.Models;
 using Fleet.Agent.Services;
 using Fleet.Agent.Services.HostedProviders;
+using Fleet.Agent.Tests.Harness;
 using Microsoft.Extensions.Logging;
 
 namespace Fleet.Agent.Tests;
@@ -89,6 +90,62 @@ public partial class CodexExecutorTests
         var frames = capture.ReadFrames();
         Assert.Equal(["initialize", "initialized", "thread/resume"], frames.Select(f => f.Method));
         Assert.Equal("thread-1", (string?)frames[2].Params!["threadId"]);
+    }
+
+    /// <summary>
+    /// Run the real entrypoint's provider branch between two executor starts. Configuration
+    /// generation is stubbed here (covered by entrypoint-prepare), and the app-server is still
+    /// the stand-in: this guards bootstrap file retention, not real Codex or Docker acceptance.
+    /// </summary>
+    [Fact]
+    public async Task Session_EntrypointAuto_PreservesRolloutAndResumesSavedThread()
+    {
+        using var workspace = new TempWorkspace();
+        await StartFirstContainerAsync(workspace);
+        var savedSession = File.ReadAllText(SessionFilePath(workspace));
+        var home = Path.Combine(workspace.Path, "bootstrap", "root");
+        var rollout = Path.Combine(home, ".codex", "sessions", "rollout-thread-1.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(rollout)!);
+        const string savedRollout = """{"type":"session_meta","payload":{"id":"thread-1"}}""";
+        File.WriteAllText(rollout, savedRollout);
+
+        var entrypoint = File.ReadAllText(RepoPaths.Resolve("entrypoint.sh"));
+        var start = entrypoint.IndexOf("if [ \"$PROVIDER\" = \"gemini\" ]; then", StringComparison.Ordinal);
+        var end = entrypoint.IndexOf("# Git identity", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "entrypoint provider branch not found");
+        var branch = entrypoint[start..end].Replace("/root/", home + "/", StringComparison.Ordinal);
+        var info = new System.Diagnostics.ProcessStartInfo("/bin/bash")
+        {
+            UseShellExecute = false, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        info.Environment.Clear();
+        info.Environment["PATH"] = "/usr/bin:/bin";
+        info.Environment["HOME"] = home;
+        using var shell = System.Diagnostics.Process.Start(info)!;
+        var output = shell.StandardOutput.ReadToEndAsync();
+        var error = shell.StandardError.ReadToEndAsync();
+        await shell.StandardInput.WriteAsync(
+            "set -eu\nPROVIDER=codex\nHOSTED_PROVIDER=false\nfleet_prepare() { :; }\n" + branch);
+        shell.StandardInput.Close();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try { await shell.WaitForExitAsync(timeout.Token); }
+        finally { if (!shell.HasExited) shell.Kill(entireProcessTree: true); }
+        Assert.Equal(0, shell.ExitCode);
+        Assert.Empty(await output);
+        Assert.Empty(await error);
+        Assert.True(File.Exists(rollout), "entrypoint removed the saved Codex rollout");
+        Assert.Equal(savedRollout, File.ReadAllText(rollout));
+        Assert.Equal(savedSession, File.ReadAllText(SessionFilePath(workspace)));
+
+        using var capture = new ThreadStartCapture();
+        var executor = CreateExecutor(workDir: workspace.Path, environmentReader: _ => null, processStarter: capture.Start);
+        await StartAsync(executor, Ok(), Ok(ThreadAnswer("thread-1")));
+
+        Assert.Equal("resumed", executor.SessionOrigin);
+        var resume = Assert.Single(capture.ReadFrames(), frame => frame.Method == "thread/resume");
+        Assert.Equal("thread-1", (string?)resume.Params!["threadId"]);
+        Assert.Equal(savedSession, File.ReadAllText(SessionFilePath(workspace)));
     }
 
     [Theory]

@@ -155,17 +155,21 @@ public sealed class NewAgentSessionTests : IAsyncLifetime
         Assert.Empty(_harness.CreateBodies);
     }
 
-    [Fact]
-    public async Task Rest_ACreatedAgent_WithItsOwnContainerNameAndWorkDirectory_HasThatFileRemoved()
+    [Theory]
+    [InlineData("/workspace/repo", "repo")]
+    [InlineData("/root/.claude", "claude")]
+    [InlineData("/root/.codex", "codex")]
+    [InlineData("/root/.codex/repo", "codex/repo")]
+    public async Task Rest_ACreatedAgent_WithItsOwnContainerNameAndWorkDirectory_HasThatFileRemoved(string workDir, string hostSubdir)
     {
-        var file = Path.Combine(_harness.BaseDir, "workspaces", "custom-box", "repo", AgentSessionFile.RelativePath);
+        var file = Path.Combine(_harness.BaseDir, "workspaces", "custom-box", hostSubdir, AgentSessionFile.RelativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllTextAsync(file, "{}");
 
         var response = await PostAsync(new
         {
             name = "dev1", role = "developer", model = "sonnet", provision = false,
-            containerName = "custom-box", workDir = "/workspace/repo",
+            containerName = "custom-box", workDir,
         });
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);

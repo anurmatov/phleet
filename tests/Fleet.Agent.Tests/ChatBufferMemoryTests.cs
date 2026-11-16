@@ -163,20 +163,33 @@ public sealed class ChatBufferMemoryTests : IDisposable
     /// that keeps it has it on a process that just started too, so it is asked to review its
     /// session, not handed a "recent conversation" block.
     /// </summary>
-    [Fact]
-    public async Task TheProactiveSweep_TreatsAProviderThatKeepsTheConversation_AsHavingIt_OnAColdProcess()
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    public async Task ProactiveBeforeDebounce_ColdAllMode_DeliversUnreadInputOnce(string provider)
     {
-        var rig = Build("claude", keepsConversation: true, groupListenMode: "all", allowedGroups: [Group]);
+        var rig = Build(provider, keepsConversation: true, groupListenMode: "all", allowedGroups: [Group]);
         rig.Behavior.BufferMessage(Group, "@u", "a group message", replyTo: null, telegramMessageId: 11);
+        rig.Behavior.ScheduleDebounce(Group);
 
-        await rig.Behavior.RunProactiveSweepForTestAsync();
-        await rig.WaitForPromptsAsync(1);
+        try
+        {
+            await rig.Behavior.RunProactiveSweepForTestAsync();
+            await rig.WaitForPromptsAsync(1);
+            await rig.WaitUntilIdleAsync(Group);
 
-        var prompt = Assert.Single(rig.Prompts());
-        Assert.Contains("[Proactive check-in]", prompt);
-        Assert.Contains("Review your memory and session context.", prompt);
-        Assert.DoesNotContain("[Recent group conversation]", prompt);
-        Assert.DoesNotContain("a group message", prompt);
+            var prompt = Assert.Single(rig.Prompts());
+            Assert.Contains("[Proactive check-in]", prompt);
+            Assert.Contains("Review your memory and session context.", prompt);
+            Assert.DoesNotContain("[Recent group conversation]", prompt);
+            Assert.Contains("[New messages since last check-in]\n[telegram_message_id: 11] @u: a group message", prompt);
+
+            await rig.Behavior.TriggerDebouncedGroupBatchForTestAsync(Group);
+            await rig.WaitForPromptsAsync(2);
+            await rig.WaitUntilIdleAsync(Group);
+            Assert.DoesNotContain("a group message", rig.Prompts()[1]);
+        }
+        finally { rig.Behavior.CancelAllDebounce(); }
     }
 
     /// <summary>

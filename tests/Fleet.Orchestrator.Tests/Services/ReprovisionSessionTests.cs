@@ -140,6 +140,76 @@ public sealed class ReprovisionSessionTests : IAsyncLifetime
         Assert.True(File.Exists(SessionFile()));
     }
 
+    [Theory]
+    [InlineData("/root/.claude", "claude", "fresh")]
+    [InlineData("/root/.codex", "codex", "fresh")]
+    [InlineData("/root/.codex/repo", "codex/repo", "fresh")]
+    [InlineData("/root/.claude/../.codex", "codex", "fresh")]
+    [InlineData("/root/.claude", "claude", "auto")]
+    [InlineData("/root/.codex", "codex", "auto")]
+    public async Task PersistentHome_Reprovision_RemovesOnlyForFreshAfterContainerRemoval(
+        string workDir, string hostSubdir, string session)
+    {
+        var agent = Claude();
+        agent.WorkDir = workDir;
+        await _harness.SeedAsync(db => db.Agents.Add(agent));
+        _harness.ContainerExists = true;
+        var file = Path.Combine(WorkspaceDir(), hostSubdir, AgentSessionFile.RelativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllTextAsync(file, "saved session");
+        var fileAt = new Dictionary<string, bool>();
+        _harness.OnDockerRequest = call =>
+        {
+            if (call.StartsWith("DELETE ", StringComparison.Ordinal)) fileAt["remove"] = File.Exists(file);
+            if (call.EndsWith("/containers/create", StringComparison.Ordinal)) fileAt["create"] = File.Exists(file);
+            return Task.CompletedTask;
+        };
+
+        var home = hostSubdir.Split('/')[0];
+        Assert.Contains($"./workspaces/fleet-agent1/{home}:/root/.{home}",
+            ContainerProvisioningService.BuildBinds(agent, _harness.BaseDir));
+        Assert.Equal(file, SessionFileRemoval.HostPath(agent, _harness.BaseDir));
+        var result = await _harness.Service.ReprovisionAsync("agent1", session: session);
+
+        Assert.True(result.Success, result.Message);
+        Assert.True(fileAt["remove"]);
+        Assert.Equal(session == "auto", fileAt["create"]);
+        Assert.Equal(session == "auto", File.Exists(file));
+    }
+
+    [Theory]
+    [InlineData("/root/.claude", "claude", false)]
+    [InlineData("/root/.codex", "codex", false)]
+    [InlineData("/root/.claude", "claude", true)]
+    [InlineData("/root/.codex", "codex", true)]
+    public async Task PersistentHome_UnremovableOrLinkedSession_FreshLeavesAgentDown(
+        string workDir, string hostSubdir, bool linked)
+    {
+        var agent = Claude();
+        agent.WorkDir = workDir;
+        await _harness.SeedAsync(db => db.Agents.Add(agent));
+        _harness.ContainerExists = true;
+        var home = Path.Combine(WorkspaceDir(), hostSubdir);
+        var elsewhere = Path.Combine(_harness.BaseDir, "elsewhere");
+        Directory.CreateDirectory(home);
+        Directory.CreateDirectory(elsewhere);
+        if (linked)
+        {
+            await File.WriteAllTextAsync(Path.Combine(elsewhere, "session.json"), "untouched");
+            Directory.CreateSymbolicLink(Path.Combine(home, ".fleet"), elsewhere);
+        }
+        else
+            Directory.CreateDirectory(Path.Combine(home, AgentSessionFile.RelativePath));
+
+        var result = await _harness.Service.ReprovisionAsync("agent1", session: "fresh");
+
+        Assert.False(result.Success);
+        Assert.Contains("session_file_not_removed:", result.Message);
+        Assert.Contains("'agent1' is down", result.Message);
+        Assert.Empty(_harness.CreateBodies);
+        if (linked) Assert.Equal("untouched", await File.ReadAllTextAsync(Path.Combine(elsewhere, "session.json")));
+    }
+
     // ── REST: one agent ──────────────────────────────────────────────────────────────────────────
 
     [Fact]

@@ -171,9 +171,8 @@ elif [ "$PROVIDER" = "codex" ]; then
         mkdir -p /root/.codex
         cp /root/.codex-host/auth.json /root/.codex/auth.json
     fi
-    # Codex app-server threads are process-lifetime state only in phleet. Clear any stale
-    # persisted sessions on cold start so a reprovision cannot accidentally inherit old rollout state.
-    rm -rf /root/.codex/sessions/* 2>/dev/null || true
+    # Keep persisted rollouts: the agent resumes the thread named in .fleet/session.json.
+    # A fresh-session request invalidates that pointer, not the provider's whole session store.
     # ~/.codex/config.toml (#460): the orchestrator-generated root settings first, then one
     # [mcp_servers.<name>] table per URL server with its enabled_tools whitelist. Root keys and their
     # [analytics]/[history] tables must come before any [mcp_servers.*] table — a key written after a

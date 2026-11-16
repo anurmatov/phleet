@@ -78,7 +78,7 @@ container may resume the provider session. A request may ask for a new one inste
 `POST /api/agents/reprovision-running` (JSON body `{"session":"fresh"}` or `?session=fresh`, beside
 `?image=`) and on the MCP tool `reprovision_agent`. Any other value is a 400 (the tool's `✗` answer)
 and nothing is touched. `fresh` makes `ContainerProvisioningService.ReprovisionAsync` remove the file
-(`SessionFileRemoval`, the host side of the `/workspace` mount) after the old container is removed and
+(`SessionFileRemoval`, the host side of `/workspace`, `/root/.claude` and `/root/.codex`) after the old container is removed and
 before the new one is created. A missing file is success. A file that cannot be removed fails the
 reprovision with `session_file_not_removed` and no new container is started: the agent is down until
 the next reprovision, because starting it would resume the session the caller asked to end.

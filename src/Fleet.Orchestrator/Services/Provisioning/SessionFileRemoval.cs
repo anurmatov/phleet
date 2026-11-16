@@ -20,12 +20,12 @@ internal static class SessionFileRemoval
 
     /// <summary>
     /// The host path of the file the agent's next container reads as its session file, or null when
-    /// the agent's work directory is not inside the workspace mount: such a file lives in the
-    /// container's own filesystem and is gone with the container.
+    /// the agent's work directory is outside the workspace and provider-home mounts: such a file
+    /// lives in the container's own filesystem and is gone with the container.
     /// </summary>
     internal static string? HostPath(Agent agent, string baseDir)
     {
-        if (WorkDirInsideWorkspace(agent.WorkDir) is not { } below)
+        if (WorkDirInsidePersistentMount(agent.WorkDir) is not { } below)
             return null;
         return Path.Combine([WorkspaceDir(agent, baseDir), .. below, .. AgentSessionFile.RelativePath.Split('/')]);
     }
@@ -40,7 +40,7 @@ internal static class SessionFileRemoval
         if (HostPath(agent, baseDir) is not { } path)
         {
             logger.LogInformation(
-                "New session for '{Agent}': work directory '{WorkDir}' is outside the workspace mount, so no session file outlives its container",
+                "New session for '{Agent}': work directory '{WorkDir}' is outside the workspace and provider-home mounts, so no session file outlives its container",
                 agent.Name, agent.WorkDir);
             return null;
         }
@@ -84,10 +84,10 @@ internal static class SessionFileRemoval
         Path.Combine(baseDir, "workspaces", agent.ContainerName);
 
     /// <summary>
-    /// The directories of <paramref name="workDir"/> below the workspace mount (none for the mount
-    /// itself), or null when it is not an absolute path inside the mount.
+    /// Maps the workspace and the two persistent provider-home mounts in BuildBinds to their
+    /// paths below workspaces/{container}. Both home mounts exist for every provider.
     /// </summary>
-    private static string[]? WorkDirInsideWorkspace(string? workDir)
+    private static string[]? WorkDirInsidePersistentMount(string? workDir)
     {
         if (workDir is null || !workDir.StartsWith('/'))
             return null;
@@ -100,9 +100,14 @@ internal static class SessionFileRemoval
             segments.Add(segment);
         }
 
-        return segments.Count > 0 && segments[0] == WorkspaceMount.TrimStart('/')
-            ? [.. segments.Skip(1)]
-            : null;
+        if (segments.Count > 0 && segments[0] == WorkspaceMount.TrimStart('/'))
+            return [.. segments.Skip(1)];
+        if (segments.Count >= 2 && segments[0] == "root")
+        {
+            if (segments[1] == ".claude") return ["claude", .. segments.Skip(2)];
+            if (segments[1] == ".codex") return ["codex", .. segments.Skip(2)];
+        }
+        return null;
     }
 
     /// <summary>The first directory between the workspace and the file that is a link, or null.</summary>

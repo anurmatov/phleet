@@ -62,8 +62,7 @@ internal sealed class ProactiveCheckInLoop(
             if (!_buffers.TryGetExisting(groupId, out var buffer) || !buffer.HasMessagesSinceLastCheck())
                 continue;
 
-            buffer.MarkChecked();
-
+            // StartGroupCheckIn builds the unread prompt before advancing its watermark.
             var isAllMode = _agentConfig.GroupListenMode.Equals("all", StringComparison.OrdinalIgnoreCase);
 
             // A provider that keeps the conversation has it whether or not its process is warm.

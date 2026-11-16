@@ -236,7 +236,7 @@ WebSocket: `/ws/logs/{agentName}` — real-time container log streaming (Docker 
 ## orchestrator MCP tools
 
 container lifecycle management (CTO agent only):
-- `create_agent(agent_name, role, model, display_name?, memory_limit_mb?, container_name?, provider?)` — creates a DB record only, no container. use `manage_agent_*` tools to configure, then `provision_agent` to start.
+- `create_agent(agent_name, role, model, display_name?, memory_limit_mb?, container_name?, provider?)` — creates a DB record only, no container. use `manage_agent_*` tools to configure, then `provision_agent` to start. a session file left in that workspace by a deleted agent of the same name is removed, so the new agent never resumes its conversation.
 - `provision_agent(agent_name)` — creates and starts a container from DB config (image, memory, env, binds, networks). fails if container already exists.
 - `deprovision_agent(agent_name)` — stops and removes the container. workspace volume data preserved.
 - `reprovision_agent(agent_name, session?)` — deprovision + provision in sequence. use after config changes (model, tools, memory). the agent resumes its provider session when its provider and instructions are unchanged; `session=fresh` makes it start a new one (it forgets the conversation). `auto` is the default; any other value is refused.

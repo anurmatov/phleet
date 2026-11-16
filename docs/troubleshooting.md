@@ -38,7 +38,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
   -d '{"session":"fresh"}' "http://localhost:3600/api/agents/$name/reprovision"
 ```
 
-The MCP tool takes the same word: `reprovision_agent agent_name=<agent> session=fresh`. The orchestrator removes `workspaces/<container>/.fleet/session.json` after the old container is gone and before the new one starts. If it answers `session_file_not_removed`, the old container was removed and no new one was started: remove that file under the fleet base directory and reprovision again. Changed instructions start a new session without any of this.
+The MCP tool takes the same word: `reprovision_agent agent_name=<agent> session=fresh`. The orchestrator removes `workspaces/<container>/.fleet/session.json` after the old container is gone and before the new one starts. If it answers `session_file_not_removed`, the old container was removed and no new one was started: remove that file under the fleet base directory and reprovision again. Changed instructions start a new session without any of this. Creating an agent removes that file as well, so a new agent never resumes the conversation of a deleted agent that had the same name; `provision_agent` after `deprovision_agent` keeps it.
 
 ## Gemini agents start returning "credentials not found"
 

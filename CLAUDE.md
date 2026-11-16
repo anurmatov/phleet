@@ -83,9 +83,16 @@ before the new one is created. A missing file is success. A file that cannot be 
 reprovision with `session_file_not_removed` and no new container is started: the agent is down until
 the next reprovision, because starting it would resume the session the caller asked to end.
 
+Creating an agent removes the file too (`AgentCreator.DescribeInheritedSessionFaultAsync`, the last
+step before the row is saved, on `POST /api/agents` and `create_agent`): a deleted agent's workspace
+stays on disk, and a new agent with the same container name must not resume its conversation. A file
+that cannot be removed refuses the creation (500, the tool's fault sentence; no row). A container
+name another stored agent uses is that agent's workspace and is left alone.
+
 MUST NOT: store the choice (it belongs to one request); remove the file while a container of the
 agent exists (the agent would write it again); remove it on any other path. Restart with an
-instruction version, deprovision, provision and delete leave the file alone.
+instruction version, deprovision, provision and delete leave the file alone, so `provision_agent`
+after `deprovision_agent` keeps the session.
 
 ## Provider Summary
 

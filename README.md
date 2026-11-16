@@ -100,7 +100,7 @@ Each has its own page. Chat, push notifications, secret placeholders, primary-hu
 
 - **Chat in the dashboard and the [iOS app](https://github.com/anurmatov/phleet-ios)**, one thread per agent: [docs/comms-deployment.md](docs/comms-deployment.md).
 - **Phone connection and push notifications** for waiting gates, failed workflows and agents that went down: [docs/phone-setup-code.md](docs/phone-setup-code.md), [docs/push-notifications.md](docs/push-notifications.md).
-- **Secret placeholders**, so a bound secret is never written into an agent container: [docs/secret-placeholders.md](docs/secret-placeholders.md).
+- **Secret placeholders**, so a bound secret is never written into an agent container: [docs/secret-placeholders.md](docs/secret-placeholders.md). The same page covers **MCP endpoint headers**: an HTTP MCP endpoint sent headers whose values come from the agent's Env Refs, named but never typed. A bound Env Ref goes out as its placeholder and is never rendered; an unbound one is written as its `.env` value into the agent's owner-only MCP files.
 - **Primary-human priority**, which puts your messages ahead of routine queued work: [docs/primary-human-priority.md](docs/primary-human-priority.md).
 - **Epic grants**, which let the co-CTO approve gates inside one scope you approved: [docs/epic-grants.md](docs/epic-grants.md).
 - **Human input requests**, exact questions an agent can put to you: [docs/human-input-requests.md](docs/human-input-requests.md).

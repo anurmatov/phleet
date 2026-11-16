@@ -185,6 +185,61 @@ What it needs:
   the agent protocol without session binding, are refused.
 - **An agent name of at most 48 plain characters**, because it names the socket directory.
 
+## MCP endpoint headers
+
+An HTTP MCP endpoint of a Claude or Codex agent can be sent headers whose values come from the
+agent's own Env Refs. A mapping names a header and an Env Ref, never a value, so no credential is
+typed into the configuration. A synthetic example with two headers:
+
+```json
+{
+  "mcpName": "example",
+  "url": "https://mcp.example.test/mcp",
+  "transportType": "http",
+  "headerEnvRefs": [
+    { "headerName": "X-Example-Key", "envRefName": "EXAMPLE_KEY" },
+    { "headerName": "X-Example-Secret", "envRefName": "EXAMPLE_SECRET" }
+  ]
+}
+```
+
+Set it in the dashboard (Config → Tools & MCP → the endpoint's headers), on `PUT
+/api/agents/{name}/config` or `POST /api/agents` (`mcpEndpoints[].headerEnvRefs`), or with
+`manage_agent_mcp_endpoints` (`header_env_refs`). Omitted keeps an endpoint's mappings, `[]` clears
+them. `get_agent_config` and `GET /api/agents/{name}/config` show names only. A save changes the
+configuration only; the headers are written at the next reprovision.
+
+- **Who may map what.** Only an Env Ref the agent already holds. A mapping adds no Env Ref and no
+  binding; MCP may map only existing references, REST create only the Env Refs that request
+  supplies. A Telegram bot token or a hosted-model key is never a header.
+- **Where.** Transport `http` only, on Claude and Codex (the providers whose pinned CLI sends MCP
+  headers). Gemini, other transports and the built-in `fleet-comms-journal` and
+  `fleet-journal-files` endpoints are refused.
+- **Bound or not.** A bound Env Ref becomes its placeholder from that provision's plan, whatever
+  name the binding exposes it under; the real value is never read for a header. The endpoint must be
+  `https://` on port 443 at one of the binding's hosts, and the header must be the binding's header,
+  or provisioning refuses (`mcp_header_binding_mismatch`) rather than start an agent the forwarder
+  would turn away. An unbound Env Ref is its `.env` value, exactly as the container's variable would
+  be: that value is written into the agent's `.mcp.json` and Codex `config.toml`.
+- **The value is the whole header.** Nothing is added: an `Authorization` header that needs `Bearer `
+  needs it in the value itself.
+- **Files.** `.mcp.json` and the Codex `config.toml` are made owner-only (0600) before a value is
+  written. Both the orchestrator and the agent run as root, so the agent still reads them.
+
+Removing a mapped Env Ref stays allowed. The mapping is then dangling: it stays visible by name, and
+**every later reprovision of that agent is refused (`mcp_header_ref_missing`) until the mapping is
+corrected or removed**, even a reprovision for an unrelated change.
+
+| Fault | Meaning |
+|---|---|
+| `mcp_header_mapping_invalid` | A mapping is not two valid names, names a header twice, names a reserved endpoint, or the stored value cannot be read. |
+| `mcp_header_ref_missing` | The Env Ref is not one the agent holds. |
+| `mcp_header_value_missing` | An unbound Env Ref has no usable `.env` value: missing, empty, or with a line break or NUL. |
+| `mcp_headers_unsupported` | The transport is not `http`, or the provider does not send MCP headers. |
+| `mcp_header_binding_mismatch` | A bound Env Ref's binding would refuse this endpoint or header, or it is an SSH key. |
+
+Each is found while the old container still runs, and none names a value.
+
 ## Revocation and rotation
 
 | Action | Takes effect |
@@ -369,6 +424,13 @@ end-to-end harness. The cause was not established.
 - `tests/Fleet.Orchestrator.Tests/Services/SecretPlaceholderProvisioningTests.cs` and
   `Endpoints/SecretBindingEndpointsTests.cs`: what a container is created with, what is written to
   disk, and that a save revokes at once.
+- `tests/Fleet.Orchestrator.Tests/Services/McpHeaderEnvTests.cs` and
+  `Endpoints/AgentConfigMcpHeadersTests.cs`: MCP endpoint header mappings, from the save to the
+  rendered files and every refusal.
+- `AGENT_IMAGE=<agent image> bash tests/secret-proxy/mcp-headers.sh`: the pinned Claude and Codex
+  clients send MCP `initialize` with two mapped headers through the forwarder to a mock MCP server.
+  Needs Docker and `dotnet`; a missing daemon, image or CLI is an infrastructure failure (exit 2),
+  never a pass.
 - `bash tests/secret-proxy/run.sh`: the end-to-end harness. It runs the real `fleet-secrets` image, a
   fake HTTPS upstream, two real `sshd` servers that both accept the bound key, and a client
   container using `curl`, `git`, `gh`, node, python, `ssh` and `scp`. Set

@@ -210,12 +210,30 @@ public static partial class EntrypointPrepare
             var mcpJson = File.Exists(paths.McpJson) || Directory.Exists(paths.McpJson) ? File.ReadAllBytes(paths.McpJson) : null;
             var text = CodexConfigToml.Build(root, mcpJson, agent.AllowedTools, agent.McpHeaderSupport, stderr.WriteLine);
             Directory.CreateDirectory(paths.CodexHome);
-            File.WriteAllText(paths.CodexConfig, text, new UTF8Encoding(false));
+            WriteOwnerOnly(paths.CodexConfig, text);
         }
         catch (Exception ex)
         {
             stderr.WriteLine($"WARN: codex config.toml not written: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The Codex config can carry MCP header values (#593): the file is made readable and writable by
+    /// its owner only (0600) before a byte of it is written, whether it is new or already there.
+    /// </summary>
+    internal static void WriteOwnerOnly(string path, string text)
+    {
+        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows())
+        {
+            if (File.Exists(path))
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+        using var stream = new FileStream(path, options);
+        using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+        writer.Write(text);
     }
 
     private static void WriteGeminiSettings(AgentOptions agent, PreparePaths paths, TextWriter stdout, TextWriter stderr)

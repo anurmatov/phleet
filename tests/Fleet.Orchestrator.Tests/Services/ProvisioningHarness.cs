@@ -25,6 +25,9 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
 
     public string BaseDir { get; }
     public ServiceProvider Services { get; }
+
+    /// <summary>The open in-memory database, for a test host that needs its own context over the same rows.</summary>
+    public SqliteConnection Connection => _connection;
     public ContainerProvisioningService Service { get; }
     public ProvisioningLogSink Logs { get; } = new();
     public int DockerRequestCount => _dockerApi.RequestCount;

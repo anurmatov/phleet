@@ -5,14 +5,18 @@ namespace Fleet.Orchestrator.Services;
 
 /// <summary>
 /// Removes an agent's session file, <see cref="AgentSessionFile.RelativePath"/> under its work
-/// directory, from the host side of its workspace mount. Only a reprovision that was asked for a
-/// new session calls it, and only while no container of the agent exists, so nothing can write the
-/// file again between the removal and the new container's first read.
+/// directory, from the host side of its workspace mount. Two callers: a reprovision that was asked
+/// for a new session, between its two containers, and the creation of an agent, whose workspace
+/// may be the one a deleted agent of the same name left behind. Neither calls it while a container
+/// of the agent should exist, so nothing writes the file again before the next container reads it.
 /// </summary>
 internal static class SessionFileRemoval
 {
     /// <summary>Where <see cref="ContainerSpecBuilder.BuildBinds"/> mounts <c>workspaces/{container}</c>.</summary>
     internal const string WorkspaceMount = "/workspace";
+
+    /// <summary>The name every fault of <see cref="Remove"/> starts with.</summary>
+    internal const string FaultCode = "session_file_not_removed";
 
     /// <summary>
     /// The host path of the file the agent's next container reads as its session file, or null when
@@ -28,7 +32,8 @@ internal static class SessionFileRemoval
 
     /// <summary>
     /// Removes the file. A file that is not there is success. Returns the fault when it is there and
-    /// could not be removed, which the caller must report instead of starting the new container.
+    /// could not be removed: one sentence naming the file and why, to which the caller adds what
+    /// that means for its own operation. The caller must report it and start no container.
     /// </summary>
     internal static string? Remove(Agent agent, string baseDir, ILogger logger)
     {
@@ -72,10 +77,7 @@ internal static class SessionFileRemoval
 
         return reason is null
             ? null
-            : $"session_file_not_removed: {Path.GetRelativePath(baseDir, path)} could not be removed ({reason}). "
-              + $"The old container is gone and no new one was started, so '{agent.Name}' is down. "
-              + "Remove the file under the fleet base directory and reprovision again, "
-              + $"or reprovision without session={AgentSessionFile.Fresh} to keep the session.";
+            : $"{FaultCode}: {Path.GetRelativePath(baseDir, path)} could not be removed ({reason}).";
     }
 
     private static string WorkspaceDir(Agent agent, string baseDir) =>

@@ -565,7 +565,10 @@ public sealed class ContainerProvisioningService(
         // container is not started, because it would resume the session the caller asked to end.
         var fresh = AgentSessionFile.IsFresh(session);
         if (fresh && SessionFileRemoval.Remove(prepared.Agent, prepared.BaseDir, logger) is { } sessionFault)
-            return ProvisionResult.Fail(agentName, sessionFault);
+            return ProvisionResult.Fail(agentName,
+                $"{sessionFault} The old container is gone and no new one was started, so '{agentName}' is down. "
+                + "Remove the file under the fleet base directory and reprovision again, "
+                + $"or reprovision without session={AgentSessionFile.Fresh} to keep the session.");
 
         var provision = await CreateAsync(prepared, ct);
         if (!provision.Success)

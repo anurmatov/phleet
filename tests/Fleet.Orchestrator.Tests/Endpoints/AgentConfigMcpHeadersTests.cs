@@ -320,6 +320,63 @@ public sealed class AgentConfigMcpHeadersTests : IAsyncLifetime
         Assert.Null(await StoredJsonAsync());
     }
 
+    // M2: a mapped endpoint carries its credentials in headers, never in its URL, whatever its references.
+    [Theory]
+    [InlineData("https://user:synthetic-pw@mcp.example.test/mcp")]
+    [InlineData("http://user:synthetic-pw@plain.example.test/mcp")]
+    [InlineData("http://synthetic-pw@plain.example.test/mcp")]
+    [InlineData("ftp://plain.example.test/mcp")]
+    [InlineData("/mcp")]
+    public async Task A_mapped_endpoint_url_with_user_info_or_not_http_is_refused_on_every_write_path(string url)
+    {
+        // EXAMPLE_SECRET is unbound here: the rule does not depend on a binding.
+        var unbound = new[] { new { headerName = "X-Example-Secret", envRefName = "EXAMPLE_SECRET" } };
+
+        var put = await _client.PutAsJsonAsync("/api/agents/agent1/config", new
+        {
+            mcpEndpoints = new[] { new { mcpName = "example", url, transportType = "http", headerEnvRefs = unbound } },
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, put.StatusCode);
+        var putError = await ErrorAsync(put);
+        Assert.StartsWith(McpHeaderMappings.Invalid, putError);
+        Assert.DoesNotContain("synthetic-pw", putError);
+        Assert.Null(await StoredJsonAsync());
+
+        var create = await _client.PostAsJsonAsync("/api/agents", new
+        {
+            name = "agent3", role = "developer", model = "claude-opus-5-5", provision = false,
+            envRefs = new[] { "EXAMPLE_SECRET" },
+            mcpEndpoints = new[] { new { mcpName = "example", url, transportType = "http", headerEnvRefs = unbound } },
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, create.StatusCode);
+        Assert.DoesNotContain("synthetic-pw", await ErrorAsync(create));
+
+        var tool = new ManageAgentMcpEndpointsTool(Scopes);
+        var added = await tool.ManageAgentMcpEndpointsAsync("agent1", "add", "second", url, "http", [new("X-Example-Secret", "EXAMPLE_SECRET")]);
+        Assert.StartsWith(McpHeaderMappings.Invalid, added);
+        Assert.DoesNotContain("synthetic-pw", added);
+        await SetStoredAsync("""[{"headerName":"X-Example-Secret","envRefName":"EXAMPLE_SECRET"}]""");
+        var moved = await tool.ManageAgentMcpEndpointsAsync("agent1", "update", "example", url);
+        Assert.StartsWith(McpHeaderMappings.Invalid, moved);
+
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
+        Assert.False(await db.Agents.AnyAsync(a => a.Name == "agent3"));
+        Assert.False(await db.AgentMcpEndpoints.AnyAsync(e => e.McpName == "second"));
+        Assert.Equal(Url, (await db.AgentMcpEndpoints.AsNoTracking().SingleAsync(e => e.McpName == "example" && e.Agent.Name == "agent1")).Url);
+    }
+
+    [Fact]
+    public async Task A_headerless_endpoint_url_is_unchanged_by_the_rule()
+    {
+        // Only a mapped endpoint is held to it: a headerless one saves what it always did.
+        var response = await _client.PutAsJsonAsync("/api/agents/agent1/config", new
+        {
+            mcpEndpoints = new[] { new { mcpName = "example", url = "sse-name-only", transportType = "sse" } },
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     [Fact]
     public async Task A_provider_change_is_checked_against_the_mappings_the_agent_keeps()
     {

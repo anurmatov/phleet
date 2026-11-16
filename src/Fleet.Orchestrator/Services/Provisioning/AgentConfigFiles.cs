@@ -454,7 +454,7 @@ internal static class AgentConfigFiles
             // A row edited by hand is held to the rules every write path applies.
             if (McpHeaderMappings.DescribeShapeFault(mappings) is { } shapeFault)
                 return (resolved, $"{shapeFault} (MCP endpoint '{endpoint.McpName}')");
-            if (McpHeaderMappings.DescribeEndpointFault(endpoint.McpName, endpoint.TransportType, agent.Provider) is { } endpointFault)
+            if (McpHeaderMappings.DescribeEndpointFault(endpoint.McpName, endpoint.Url, endpoint.TransportType, agent.Provider) is { } endpointFault)
                 return (resolved, endpointFault.Message);
 
             var headers = new Dictionary<string, string>(StringComparer.Ordinal);

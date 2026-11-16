@@ -46,7 +46,7 @@ public sealed class ManageAgentMcpEndpointsTool(IServiceScopeFactory scopeFactor
 
                 // #593: only references the agent already holds; this tool never adds one.
                 IReadOnlyList<McpHeaderEnvRef?> mappings = header_env_refs ?? [];
-                if (McpHeaderMappings.Check(mcp_name, transport_type, agent.Provider, mappings, [], HeldRefs(agent)) is { } addFault)
+                if (McpHeaderMappings.Check(mcp_name, url, transport_type, agent.Provider, mappings, [], HeldRefs(agent)) is { } addFault)
                     return $"{addFault.Message} Nothing was changed.";
 
                 agent.McpEndpoints.Add(new AgentMcpEndpoint
@@ -76,7 +76,7 @@ public sealed class ManageAgentMcpEndpointsTool(IServiceScopeFactory scopeFactor
                 if (transport_type is not null && transport_type != existing.TransportType) { changed.Add($"transport_type: {existing.TransportType} → {transport_type}"); existing.TransportType = transport_type; }
 
                 IReadOnlyList<McpHeaderEnvRef?> resulting = (IReadOnlyList<McpHeaderEnvRef?>?)header_env_refs ?? stored;
-                if (McpHeaderMappings.Check(existing.McpName, existing.TransportType, agent.Provider, resulting, stored, HeldRefs(agent)) is { } updateFault)
+                if (McpHeaderMappings.Check(existing.McpName, existing.Url, existing.TransportType, agent.Provider, resulting, stored, HeldRefs(agent)) is { } updateFault)
                     return $"{updateFault.Message} Nothing was changed.";
                 if (header_env_refs is not null)
                 {

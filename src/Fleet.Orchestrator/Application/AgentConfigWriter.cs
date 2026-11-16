@@ -580,7 +580,7 @@ public sealed class AgentConfigWriter(
         foreach (var (endpoint, supplied, stored) in mappingChecks)
         {
             var resulting = supplied ?? stored;
-            if (McpHeaderMappings.Check(endpoint.McpName, endpoint.TransportType, agent.Provider, resulting, stored, resultingRefs) is { } mappingFault)
+            if (McpHeaderMappings.Check(endpoint.McpName, endpoint.Url, endpoint.TransportType, agent.Provider, resulting, stored, resultingRefs) is { } mappingFault)
                 return mappingFault;
             if (supplied is not null)
                 endpoint.HeaderEnvRefsJson = McpHeaderMappings.Serialize([.. supplied.Select(m => m!)]);

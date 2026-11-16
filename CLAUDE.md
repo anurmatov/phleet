@@ -282,7 +282,8 @@ validation failed in the harness, cause not established. Tests: `tests/Fleet.Sec
 MCP endpoint headers (#593): `agent_mcp_endpoints.HeaderEnvRefsJson` (migration `AddMcpHeaderEnvRefs`,
 null = none) holds `[{headerName, envRefName}]`, names only. REST `mcpEndpoints[].headerEnvRefs`, MCP
 `manage_agent_mcp_endpoints header_env_refs`; omitted keeps, `[]` clears. `McpHeaderMappings` is the
-one rule set (shape, `http` + Claude/Codex only, no reserved endpoint, a new pair only for an Env Ref
+one rule set (shape, `http` + Claude/Codex only, an absolute `http(s)` URL without user info, no
+reserved endpoint, a new pair only for an Env Ref
 the resulting agent holds; a kept pair is not re-authorized, so removing an Env Ref stays allowed).
 `AgentConfigFiles.ResolveMcpHeaders` resolves in `PrepareAsync` from the captured env values and
 `SecretPlan`: bound → that plan's placeholder (binding's HTTPS:443 host and header must match),

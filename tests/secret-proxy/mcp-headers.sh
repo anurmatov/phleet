@@ -37,7 +37,7 @@ cleanup() {
     if [ -n "${KEEP:-}" ]; then echo "kept: $ID ($WORK)" >&2; return; fi
     timeout 60 docker rm -f "$ID-agent" "$ID-proxy" "$ID-upstream" > /dev/null 2>&1 || true
     timeout 30 docker network rm "$ID-secrets" "$ID-egress" > /dev/null 2>&1 || true
-    timeout 60 docker run --rm -v "$WORK:/work" "$TOOL_IMAGE" sh -c 'rm -rf /work/*' > /dev/null 2>&1 || true
+    timeout 60 docker run --rm --network none -v "$WORK:/work" "$TOOL_IMAGE" sh -c 'rm -rf /work/*' > /dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -64,7 +64,8 @@ if [ -z "${PROXY_IMAGE:-}" ]; then
         || fail_infra "could not build the fleet-secrets image"
 fi
 timeout 900 docker build -q -t "$TOOL_IMAGE" -f "$HERE/client.Dockerfile" "$HERE" > /dev/null || fail_infra "could not build the tool image"
-tool() { timeout 120 docker run --rm -i --entrypoint bash -v "$WORK:/work" -w /work "$TOOL_IMAGE" -c "$1"; }
+# Fixtures, state writes and log reads run with no network at all.
+tool() { timeout 120 docker run --rm -i --network none --entrypoint bash -v "$WORK:/work" -w /work "$TOOL_IMAGE" -c "$1"; }
 tool '
 set -e
 cd fixture
@@ -96,7 +97,8 @@ mv state/.state.tmp state/state.json
 write_state both
 
 # ── Topology: the agent reaches only the forwarder; only the forwarder reaches the mock ──────────
-timeout 30 docker network create --subnet "$EGRESS.0/24" "$ID-egress" > /dev/null || fail_infra "could not create the egress network (set EGRESS_SUBNET)"
+# Both networks are internal: no container in this harness has a route off the host.
+timeout 30 docker network create --internal --subnet "$EGRESS.0/24" "$ID-egress" > /dev/null || fail_infra "could not create the egress network (set EGRESS_SUBNET)"
 timeout 30 docker network create --internal --subnet "$SECRETS.0/24" "$ID-secrets" > /dev/null || fail_infra "could not create the secrets network (set SECRETS_SUBNET)"
 
 timeout 60 docker run -d --name "$ID-upstream" --network "$ID-egress" --ip "$UPSTREAM_IP" --entrypoint python3 \
@@ -132,6 +134,22 @@ timeout 60 docker create --name "$ID-agent" --network "$ID-secrets" --ip "$AGENT
     "$AGENT_IMAGE" infinity > /dev/null || fail_infra "could not create the agent container"
 timeout 30 docker start "$ID-agent" > /dev/null || fail_infra "could not start the agent container"
 agent() { timeout "${2:-180}" docker exec -u 0 "$ID-agent" bash -c "$1"; }
+
+# ── Isolation, before any client runs: both networks internal, no container with a default route ─
+for network in "$ID-egress" "$ID-secrets"; do
+    [ "$(timeout 30 docker network inspect -f '{{.Internal}}' "$network")" = true ] || fail_assert "network $network is not internal"
+done
+for container in "$ID-upstream" "$ID-proxy" "$ID-agent"; do
+    routes="$(timeout 30 docker exec "$container" cat /proc/net/route)" || fail_infra "could not read the routes of $container"
+    # Field 2 is the destination; 00000000 is a default route.
+    awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit found ? 0 : 1 }' <<< "$routes" \
+        && fail_assert "$container has a default route off the host"
+    [ "$(timeout 30 docker inspect -f '{{len .NetworkSettings.Networks}}' "$container")" -ge 1 ] || fail_infra "$container has no network"
+    for attached in $(timeout 30 docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}' "$container"); do
+        [ "$attached" = "$ID-egress" ] || [ "$attached" = "$ID-secrets" ] || fail_assert "$container is attached to $attached"
+    done
+done
+pass "isolation: both networks internal, no container has a default route or another network"
 agent 'update-ca-certificates > /dev/null 2>&1 && mkdir -p /tmp/home' || fail_infra "could not trust the forwarder CA in the agent"
 agent "claude --version" | grep -q "^$CLAUDE_PIN " || fail_infra "the agent image does not carry Claude CLI $CLAUDE_PIN"
 

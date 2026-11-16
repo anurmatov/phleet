@@ -79,7 +79,7 @@ public static class McpHeaderMappings
     /// </summary>
     /// <param name="authorizedRefs">The Env Refs the caller may map: the resulting agent's own, never a global key.</param>
     public static WriteFault? Check(
-        string mcpName, string transportType, string? provider,
+        string mcpName, string url, string transportType, string? provider,
         IReadOnlyList<McpHeaderEnvRef?> mappings, IReadOnlyList<McpHeaderEnvRef> stored,
         IReadOnlyCollection<string> authorizedRefs)
     {
@@ -87,7 +87,7 @@ public static class McpHeaderMappings
             return null;
         if (DescribeShapeFault(mappings) is { } shape)
             return WriteFaults.Invalid(Invalid, $"{shape} (MCP endpoint '{mcpName}')");
-        if (DescribeEndpointFault(mcpName, transportType, provider) is { } endpoint)
+        if (DescribeEndpointFault(mcpName, url, transportType, provider) is { } endpoint)
             return WriteFaults.Invalid(endpoint.Code, endpoint.Message);
 
         foreach (var mapping in mappings)
@@ -131,13 +131,20 @@ public static class McpHeaderMappings
     /// <summary>
     /// Where mapped headers are supported: an HTTP endpoint, on a provider whose pinned CLI sends
     /// headers (<see cref="AgentConfigFiles.McpHeaderSupport"/>), and not one of the built-in
-    /// authenticated endpoints, whose headers provisioning writes itself.
+    /// authenticated endpoints, whose headers provisioning writes itself. Its URL is an absolute
+    /// <c>http(s)://</c> address with no user info: a mapped endpoint carries its credentials in
+    /// headers, never in the URL, whether its references are bound or not. The URL is never echoed.
     /// </summary>
-    public static (string Code, string Message)? DescribeEndpointFault(string mcpName, string transportType, string? provider)
+    public static (string Code, string Message)? DescribeEndpointFault(string mcpName, string url, string transportType, string? provider)
     {
         if (string.Equals(mcpName, AgentConfigFiles.JournalMcpServerName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(mcpName, AgentConfigFiles.JournalFilesServerName, StringComparison.OrdinalIgnoreCase))
             return (Invalid, $"{Invalid}: {mcpName} is a built-in endpoint whose headers are provisioned; it takes no header mappings");
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp)
+            || uri.UserInfo.Length != 0)
+            return (Invalid, $"{Invalid}: MCP endpoint '{mcpName}' has header mappings, so its URL must be an absolute "
+                + "http:// or https:// address with no user name or password in it");
         if (!string.Equals(transportType, HttpTransport, StringComparison.Ordinal))
             return (Unsupported, $"{Unsupported}: MCP endpoint '{mcpName}' has transport '{transportType}'; "
                 + $"header mappings are supported only on transport '{HttpTransport}'");

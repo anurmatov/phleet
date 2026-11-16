@@ -213,7 +213,8 @@ configuration only; the headers are written at the next reprovision.
   binding; MCP may map only existing references, REST create only the Env Refs that request
   supplies. A Telegram bot token or a hosted-model key is never a header.
 - **Where.** Transport `http` only, on Claude and Codex (the providers whose pinned CLI sends MCP
-  headers). Gemini, other transports and the built-in `fleet-comms-journal` and
+  headers), at an absolute `http://` or `https://` URL with no user name or password in it, bound
+  references or not. Gemini, other transports and the built-in `fleet-comms-journal` and
   `fleet-journal-files` endpoints are refused.
 - **Bound or not.** A bound Env Ref becomes its placeholder from that provision's plan, whatever
   name the binding exposes it under; the real value is never read for a header. The endpoint must be
@@ -232,7 +233,7 @@ corrected or removed**, even a reprovision for an unrelated change.
 
 | Fault | Meaning |
 |---|---|
-| `mcp_header_mapping_invalid` | A mapping is not two valid names, names a header twice, names a reserved endpoint, or the stored value cannot be read. |
+| `mcp_header_mapping_invalid` | A mapping is not two valid names, names a header twice, names a reserved endpoint, sits on a URL with user info or not `http(s)`, or the stored value cannot be read. |
 | `mcp_header_ref_missing` | The Env Ref is not one the agent holds. |
 | `mcp_header_value_missing` | An unbound Env Ref has no usable `.env` value: missing, empty, or with a line break or NUL. |
 | `mcp_headers_unsupported` | The transport is not `http`, or the provider does not send MCP headers. |

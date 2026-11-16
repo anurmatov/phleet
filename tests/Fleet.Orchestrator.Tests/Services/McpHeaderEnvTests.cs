@@ -218,6 +218,9 @@ public class McpHeaderEnvTests
         { "plain-http", McpHeaderMappings.BindingMismatch },
         { "other-port", McpHeaderMappings.BindingMismatch },
         { "ssh", McpHeaderMappings.BindingMismatch },
+        { "userinfo-unbound", McpHeaderMappings.Invalid },
+        { "userinfo-bound", McpHeaderMappings.Invalid },
+        { "not-http", McpHeaderMappings.Invalid },
     };
 
     [Theory]
@@ -249,6 +252,10 @@ public class McpHeaderEnvTests
                 case "other-header": example.HeaderEnvRefsJson = Mappings(("X-Example-Key", KeyRef), ("X-Other", SecretRef)); break;
                 case "plain-http": example.Url = "http://mcp.example.test/mcp"; break;
                 case "other-port": example.Url = "https://mcp.example.test:8443/mcp"; break;
+                // A credential in a hand-edited URL is refused whether the endpoint's references are bound or not.
+                case "userinfo-unbound": agent.McpEndpoints.Single(e => e.McpName == "plain").Url = "http://user:synthetic-pw@plain.example.test/mcp"; break;
+                case "userinfo-bound": example.Url = "https://user:synthetic-pw@mcp.example.test/mcp"; break;
+                case "not-http": agent.McpEndpoints.Single(e => e.McpName == "plain").Url = "ftp://plain.example.test/mcp"; break;
                 case "ssh":
                     binding.Kind = SecretBindingRules.KindSshKey;
                     binding.Hosts = "deploy@" + Host;
@@ -261,7 +268,7 @@ public class McpHeaderEnvTests
 
         Assert.False(result.Success);
         Assert.StartsWith(code, result.Message);
-        foreach (var secret in new[] { KeyValue, SecretValue, PlainValue })
+        foreach (var secret in new[] { KeyValue, SecretValue, PlainValue, "synthetic-pw" })
             Assert.DoesNotContain(secret, result.Message);
         Assert.Equal(creates, first.CreateBodies.Count);
         Assert.DoesNotContain(first.DockerRequests.Skip(requests), r => r.StartsWith("DELETE ", StringComparison.Ordinal) || r.EndsWith("/stop", StringComparison.Ordinal));

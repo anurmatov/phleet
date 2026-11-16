@@ -196,7 +196,7 @@ public sealed class AgentCreator(
         foreach (var endpoint in (request.McpEndpoints ?? []).DistinctBy(e => e.McpName, StringComparer.OrdinalIgnoreCase))
         {
             IReadOnlyList<McpHeaderEnvRef?> mappings = endpoint.HeaderEnvRefs ?? [];
-            if (McpHeaderMappings.Check(endpoint.McpName, endpoint.TransportType, agent.Provider, mappings, [], suppliedRefs) is { } mappingFault)
+            if (McpHeaderMappings.Check(endpoint.McpName, endpoint.Url, endpoint.TransportType, agent.Provider, mappings, [], suppliedRefs) is { } mappingFault)
                 return mappingFault;
             agent.McpEndpoints.Add(new AgentMcpEndpoint
             {

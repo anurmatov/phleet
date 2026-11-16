@@ -167,8 +167,8 @@ exceeds the context window is out of reach regardless of tool-call quality.
   - The server rejects the oversized prompt with HTTP 400. Codex does not treat that 400 as a
     context overflow, so it never trims the history to compact. Every later turn fails with
     `Failed to run pre-sampling compact` or `context_length_exceeded`.
-  - Recovery is to reset the thread: `/cancel all`, then `/reset`, or restart the agent. The
-    agent then starts a new codex thread without the old conversation.
+  - Recovery is to reset the thread: `/cancel all`, then `/reset`. The agent then starts a new
+    codex thread without the old conversation. A restart alone resumes the same thread.
 
   The upstream report is openai/codex#48870; automatic recovery is #385. See `local-models.md`
   §6.

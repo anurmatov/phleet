@@ -133,8 +133,8 @@ property.
   does not echo which effort it used, and its own Codex catalog defaults to `max`, the deepest,
   slowest and most quota-hungry setting. Codex has no `max`.
 - **Context window.** Codex does not know the `glm-5.3` slug. It falls back to a 272K window and no
-  default effort. If a thread outgrows the model's real window, Z.ai's error ends the turn. Restart
-  the agent to start a fresh thread.
+  default effort. If a thread outgrows the model's real window, Z.ai's error ends the turn. Send
+  `/reset` to start a fresh thread; a restart alone resumes the same one.
 - **Mid-turn steering is delivered, but whether GLM obeys is up to the model.** Codex finishes the
   current request, then sends a follow-up request carrying the correction, and the reply is the turn's
   last message. In the #335 trials GLM followed 28 of 28 injected corrections in the executor

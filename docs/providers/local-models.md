@@ -259,9 +259,10 @@ Codex there is one exception: the agent's Env Refs contain exactly `CODEX_OSS_BA
     Codex does not treat that 400 as a context overflow, so it never trims the history to
     compact. Every later turn fails with `Failed to run pre-sampling compact` or
     `context_length_exceeded`.
-  - **Recovery: reset the thread.** Send `/cancel all`, then `/reset`, or restart the agent.
-    The agent then starts a new codex thread without the old conversation. The upstream report
-    is openai/codex#48870; automatic recovery is #385.
+  - **Recovery: reset the thread.** Send `/cancel all`, then `/reset`. The agent then starts a
+    new codex thread without the old conversation. Restarting the agent is not enough: it
+    resumes the same thread while the instructions are unchanged, so reprovision only with a
+    new session. The upstream report is openai/codex#48870; automatic recovery is #385.
 - **No wedge guard.** A server that accepts a request and never answers blocks the whole agent,
   not one turn. Recover with `/cancel`. Details: `codex-local-models.md`, "Operational cautions".
 - **LM Studio.** Pick **Server → LM Studio** and enter its origin, for example
@@ -433,8 +434,8 @@ The `CodexExecutor: local inference — provider …, model …` line now ends w
 | `Information` "codex reports modelContextWindow N (configured W)" | once per thread. N is the window codex works with. It is at or a little below W | if it says `configured unset`, set the context window |
 | `Warning` "codex did not apply model_context_window" | N is higher than W. Codex ignored the setting and will not compact in time | check that the agent image is current and report it. Expect `context_length_exceeded` on long threads until it is fixed |
 | `Information` "codex compacted the thread context" | codex shrank the thread before the limit | nothing. This is the intended behaviour |
-| turn error `context_length_exceeded`, or HTTP 400 from the server, and the context window is unset or higher than the server's | codex compacts too late or not at all | make the agent's context window equal to the server's, never higher. Reprovision; that also resets the thread |
-| the same error on a Codex local agent whose context window equals the server's | one step was larger than the space left under the limit, and the thread is now over it (§6). It stays stuck | reset the thread: `/cancel all`, then `/reset`, or restart the agent. Keep single messages and tool outputs well under 13k tokens |
+| turn error `context_length_exceeded`, or HTTP 400 from the server, and the context window is unset or higher than the server's | codex compacts too late or not at all | make the agent's context window equal to the server's, never higher. Reprovision with a new session, or reprovision and send `/reset`: a plain reprovision resumes the same thread |
+| the same error on a Codex local agent whose context window equals the server's | one step was larger than the space left under the limit, and the thread is now over it (§6). It stays stuck | reset the thread: `/cancel all`, then `/reset` (a restart resumes the same thread). Keep single messages and tool outputs well under 13k tokens |
 | `Failed to run pre-sampling compact` from codex | codex tried to compact, but the compaction request itself was over the server's limit | reset the thread, as above |
 
 ### Agent startup exits

@@ -119,3 +119,21 @@ test('every view has a hash, #memory included, and a bad hash never throws', () 
   // Runs while the page first renders: malformed percent-encoding is kept as written, not thrown.
   assert.deepEqual(parseViewHash('#output-styles/%E0%A4%A'), { view: 'output-styles', param: '%E0%A4%A' })
 })
+
+test('#593: copying an agent keeps its MCP header mappings, names only, through to the create body', () => {
+  const headerEnvRefs = [
+    { headerName: 'X-Example-Key', envRefName: 'EXAMPLE_KEY' },
+    { headerName: 'X-Example-Secret', envRefName: 'EXAMPLE_SECRET' },
+  ]
+  const source: AgentConfig = {
+    ...cloudConfig,
+    envRefs: ['EXAMPLE_KEY', 'EXAMPLE_SECRET'],
+    mcpEndpoints: [{ mcpName: 'example', url: 'https://mcp.example.test/mcp', transportType: 'http', headerEnvRefs }],
+  }
+  const form = named(createFormFromConfig(DEFAULT_CREATE_FORM, source, 'developer'))
+  const sent = body(form)
+  // The references go with the copy; the server authorizes each mapping against them.
+  assert.deepEqual(sent.envRefs, ['EXAMPLE_KEY', 'EXAMPLE_SECRET'])
+  assert.deepEqual(sent.mcpEndpoints, [{ mcpName: 'example', url: 'https://mcp.example.test/mcp', transportType: 'http', headerEnvRefs }])
+  assert.doesNotMatch(JSON.stringify(sent), /"value"/)
+})

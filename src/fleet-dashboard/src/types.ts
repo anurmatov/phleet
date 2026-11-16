@@ -119,10 +119,21 @@ export interface Alert {
   agentName?: string
 }
 
+/** One header an HTTP MCP endpoint is sent with, and the Env Ref whose value it carries (#593). Names only. */
+export interface McpHeaderEnvRef {
+  headerName: string
+  envRefName: string
+}
+
 export interface McpEndpointEntry {
   mcpName: string
   url: string
   transportType: string
+  /**
+   * #593. Absent from an older orchestrator, and then never sent: an omitted list keeps the stored
+   * mappings. `[]` clears them.
+   */
+  headerEnvRefs?: McpHeaderEnvRef[]
 }
 
 export interface CreateForm {

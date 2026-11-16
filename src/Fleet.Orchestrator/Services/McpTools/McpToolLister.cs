@@ -16,12 +16,12 @@ public interface IMcpToolLister
 /// <remarks>
 /// MUST NOT log or return a header value, and nothing here logs at all: the client and the HTTP
 /// handler are given no logger, because a request log would carry the address and the headers.
-/// A redirect is never followed, so a header is sent to the saved address and to no other. Every
+/// Redirects and off-origin requests are refused before adding saved headers. Every
 /// failure becomes a status and a fixed sentence; an exception's own text is never returned.
 /// </remarks>
 public sealed class McpToolLister(Func<HttpMessageHandler>? handlerFactory = null, TimeSpan? deadline = null) : IMcpToolLister
 {
-    /// <summary>How long one server has to connect and answer.</summary>
+    /// <summary>Total budget for connecting, listing and closing the session.</summary>
     public static readonly TimeSpan DefaultDeadline = TimeSpan.FromSeconds(10);
 
     private TimeSpan Deadline { get; } = deadline ?? DefaultDeadline;
@@ -35,13 +35,16 @@ public sealed class McpToolLister(Func<HttpMessageHandler>? handlerFactory = nul
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
         limit.CancelAfter(Deadline);
 
-        using var handler = handlerFactory?.Invoke() ?? new SocketsHttpHandler
+        var handler = handlerFactory?.Invoke() ?? new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             UseCookies = false,
             ConnectTimeout = TimeSpan.FromSeconds(5),
         };
-        using var http = new HttpClient(handler, disposeHandler: false);
+        using var confined = new SavedOriginHandler(target, limit.Token, handler);
+        using var http = new HttpClient(confined, disposeHandler: false);
+        // Also cancel HTTP response-body reads, which happen above the message handler.
+        using var stopRequests = limit.Token.Register(http.CancelPendingRequests);
 
         try
         {
@@ -51,25 +54,36 @@ public sealed class McpToolLister(Func<HttpMessageHandler>? handlerFactory = nul
                     Endpoint = target.Url,
                     Name = target.Name,
                     TransportMode = target.Sse ? HttpTransportMode.Sse : HttpTransportMode.StreamableHttp,
-                    AdditionalHeaders = new Dictionary<string, string>(target.Headers, StringComparer.Ordinal),
                     ConnectionTimeout = Deadline,
                 },
                 http, loggerFactory: null, ownsHttpClient: false);
 
-            await using var client = await McpClient.CreateAsync(
+            var client = await McpClient.CreateAsync(
                 transport,
                 new McpClientOptions { ClientInfo = new Implementation { Name = "fleet-orchestrator", Version = "1" } },
                 loggerFactory: null,
                 cancellationToken: limit.Token);
 
-            var offered = await client.ListToolsAsync(cancellationToken: limit.Token);
-            var tools = offered
-                .Where(tool => !string.IsNullOrWhiteSpace(tool.Name) && tool.Name.Length <= MaxNameChars)
-                .OrderBy(tool => tool.Name, StringComparer.Ordinal)
-                .Take(MaxTools)
-                .Select(tool => new McpToolInfo(tool.Name, Bounded(tool.Description)))
-                .ToList();
-            return new McpServerTools(target.Name, McpServerTools.Ok, null, tools, Truncated: offered.Count > tools.Count);
+            McpServerTools result;
+            try
+            {
+                var offered = await client.ListToolsAsync(cancellationToken: limit.Token);
+                var tools = offered
+                    .Where(tool => !string.IsNullOrWhiteSpace(tool.Name) && tool.Name.Length <= MaxNameChars)
+                    .OrderBy(tool => tool.Name, StringComparer.Ordinal)
+                    .Take(MaxTools)
+                    .Select(tool => new McpToolInfo(tool.Name, Bounded(tool.Description)))
+                    .ToList();
+                result = new McpServerTools(target.Name, McpServerTools.Ok, null, tools, Truncated: offered.Count > tools.Count);
+            }
+            finally
+            {
+                // SDK disposal sends session DELETE with its own token. The handler also links
+                // that request to our original budget, so cleanup cannot get a fresh timeout.
+                await client.DisposeAsync();
+            }
+            limit.Token.ThrowIfCancellationRequested();
+            return result;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -95,6 +109,26 @@ public sealed class McpToolLister(Func<HttpMessageHandler>? handlerFactory = nul
         catch (Exception) when (!ct.IsCancellationRequested)
         {
             return NotAsked(target, McpServerTools.Error, "The address did not answer as an MCP server.");
+        }
+    }
+
+    private sealed class SavedOriginHandler(
+        McpListTarget target, CancellationToken budget, HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var uri = request.RequestUri;
+            if (uri is null || !uri.IsAbsoluteUri
+                || !string.Equals(uri.Scheme, target.Url.Scheme, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(uri.IdnHost, target.Url.IdnHost, StringComparison.OrdinalIgnoreCase)
+                || uri.Port != target.Url.Port)
+                throw new HttpRequestException("The server requested a different origin.");
+
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, budget);
+            linked.Token.ThrowIfCancellationRequested();
+            foreach (var (name, value) in target.Headers)
+                request.Headers.TryAddWithoutValidation(name, value);
+            return await base.SendAsync(request, linked.Token);
         }
     }
 

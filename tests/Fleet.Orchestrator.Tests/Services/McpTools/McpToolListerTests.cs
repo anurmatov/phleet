@@ -165,6 +165,119 @@ public sealed class McpToolListerTests : IAsyncLifetime
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => lister.ListAsync(Target(), soon.Token));
     }
 
+    [Theory]
+    [InlineData("http://other.test/messages")]
+    [InlineData("https://localhost/messages")]
+    [InlineData("http://localhost:8081/messages")]
+    public async Task Sse_OffOriginMessageEndpoint_NeverReceivesHeaders(string endpoint)
+    {
+        var handler = new SseEndpointHandler(endpoint);
+        var lister = new McpToolLister(() => handler, TimeSpan.FromMilliseconds(500));
+        var target = Target(headers: new() { ["X-Example-Key"] = HeaderValue }) with { Sse = true };
+
+        var answer = await lister.ListAsync(target, CancellationToken.None);
+
+        Assert.NotEqual(McpServerTools.Ok, answer.Status);
+        Assert.True(handler.SawSavedOriginHeader);
+        Assert.Equal(0, handler.OffOriginRequests);
+        Assert.DoesNotContain(HeaderValue, System.Text.Json.JsonSerializer.Serialize(answer));
+    }
+
+    [Fact]
+    public async Task SessionDelete_Stalls_IsCancelledWithinTheTotalBudget()
+    {
+        var handler = new StalledDeleteHandler(_app.GetTestServer().CreateHandler());
+        var budget = TimeSpan.FromSeconds(1);
+        var lister = new McpToolLister(() => handler, budget);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        var answer = await lister.ListAsync(Target(), CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.True(handler.DeleteStarted);
+        Assert.True(handler.DeleteCancelled);
+        Assert.Equal(McpServerTools.TimedOut, answer.Status);
+        Assert.Empty(answer.Tools);
+        Assert.InRange(watch.Elapsed, budget, TimeSpan.FromSeconds(2.5));
+    }
+
+    [Fact]
+    public async Task SessionDelete_CallerCancels_CancellationIsNotATimeout()
+    {
+        var handler = new StalledDeleteHandler(_app.GetTestServer().CreateHandler());
+        var lister = new McpToolLister(() => handler);
+        using var caller = new CancellationTokenSource();
+        var listing = lister.ListAsync(Target(), caller.Token);
+        await handler.DeleteReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        caller.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listing);
+        Assert.True(handler.DeleteCancelled);
+    }
+
+    [Theory]
+    [InlineData("/messages")]
+    [InlineData("http://localhost/messages")]
+    public async Task Sse_SameOriginMessageEndpoint_ReceivesSavedHeaders(string endpoint)
+    {
+        var handler = new SseEndpointHandler(endpoint);
+        var lister = new McpToolLister(() => handler, TimeSpan.FromSeconds(1));
+        await lister.ListAsync(
+            Target(headers: new() { ["X-Example-Key"] = HeaderValue }) with { Sse = true },
+            CancellationToken.None);
+
+        Assert.True(handler.SawMessageHeader);
+        Assert.Equal(0, handler.OffOriginRequests);
+    }
+
+    private sealed class SseEndpointHandler(string endpoint) : HttpMessageHandler
+    {
+        public bool SawSavedOriginHeader { get; private set; }
+        public bool SawMessageHeader { get; private set; }
+        public int OffOriginRequests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.GetLeftPart(UriPartial.Authority) != "http://localhost")
+            {
+                OffOriginRequests++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+            }
+            if (request.Method == HttpMethod.Post)
+            {
+                SawMessageHeader = request.Headers.TryGetValues("X-Example-Key", out var posted)
+                    && posted.Contains(HeaderValue);
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest));
+            }
+            SawSavedOriginHeader |= request.Headers.TryGetValues("X-Example-Key", out var values)
+                && values.Contains(HeaderValue);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"event: endpoint\ndata: {endpoint}\n\n",
+                    System.Text.Encoding.UTF8, "text/event-stream"),
+            });
+        }
+    }
+
+    private sealed class StalledDeleteHandler(HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        public TaskCompletionSource DeleteReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool DeleteStarted { get; private set; }
+        public bool DeleteCancelled { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.Method != HttpMethod.Delete)
+                return await base.SendAsync(request, ct);
+            DeleteStarted = true;
+            DeleteReached.TrySetResult();
+            try { await Task.Delay(Timeout.Infinite, ct); }
+            catch (OperationCanceledException) { DeleteCancelled = true; throw; }
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
+    }
+
     private sealed class ThrowingHandler(Exception error) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>

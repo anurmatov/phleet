@@ -1111,10 +1111,10 @@ test('MCP header mappings: add, edit, save, reopen and remove send and show name
   let headers = await openToolsTab(page)
   const dialog = page.locator('.config-modal-sectioned')
 
-  await headers.getByRole('button', { name: '+ add header' }).click()
+  await headers.getByRole('button', { name: 'Add header' }).click()
   await headers.getByLabel('Header name 1 of example').fill('X-Example-Key')
   await headers.getByLabel('Env Ref of header 1 of example').selectOption('EXAMPLE_KEY')
-  await headers.getByRole('button', { name: '+ add header' }).click()
+  await headers.getByRole('button', { name: 'Add header' }).click()
   await headers.getByLabel('Header name 2 of example').fill('X-Example-Secret')
   await headers.getByLabel('Env Ref of header 2 of example').selectOption('EXAMPLE_SECRET')
   // The reference is picked from the agent's own Env Refs; there is no field for a value.
@@ -1190,7 +1190,204 @@ for (const colorScheme of ['light', 'dark'] as const) {
       await testInfo.attach(`mcp-headers-360-${colorScheme}.aria.yml`, { body: aria, contentType: 'text/yaml' })
       expect(aria).toContain('textbox "Header name 1 of example"')
       expect(aria).toContain('combobox "Env Ref of header 2 of example"')
-      expect(aria).toContain('button "+ add header"')
+      expect(aria).toContain('button "Add header"')
+    })
+  })
+}
+
+// ── Picking tools from each MCP server's own list ───────────────────────────────────────────────
+
+const ALWAYS_ON = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep']
+
+/** alpha with two servers: one that lists its tools, and one whose header carries a bound secret. */
+function withServers(fleet: FakeFleet) {
+  fleet.configs.alpha = {
+    ...configOf('alpha'),
+    envRefs: ['EXAMPLE_KEY'],
+    tools: ['Read', 'WebFetch', 'mcp__example__zeta_lookup', 'mcp__guarded__orders_get', 'mcp__removed__thing']
+      .map(toolName => ({ toolName, isEnabled: true })),
+    mcpEndpoints: [
+      { mcpName: 'example', url: MCP_URL, transportType: 'http', headerEnvRefs: [] },
+      { mcpName: 'guarded', url: 'https://guarded.example.test/mcp', transportType: 'http', headerEnvRefs: [{ headerName: 'X-Example-Key', envRefName: 'EXAMPLE_KEY' }] },
+    ],
+  }
+  fleet.mcpTools.alpha = {
+    agent: 'alpha',
+    alwaysOn: ALWAYS_ON,
+    servers: [
+      { name: 'example', status: 'ok', reason: null, truncated: false, tools: [
+        { name: 'alpha_list', description: 'Lists every thing the account holds.' },
+        { name: 'zeta_lookup', description: 'Looks one thing up by its id.\nReturns null when there is none.' },
+      ] },
+      { name: 'fleet-memory', status: 'ok', reason: null, truncated: false, tools: [{ name: 'memory_search', description: 'Searches shared memory.' }] },
+      { name: 'guarded', status: 'needs_agent_secret', reason: 'Header X-Example-Key carries the bound secret EXAMPLE_KEY, which only the agent\u2019s own requests can use.', tools: [], truncated: false },
+    ],
+  }
+}
+
+async function openTools(page: Page, phone = false) {
+  await openToolsTab(page, phone)
+  return page.locator('.config-modal-sectioned .config-section-panel[data-section="tools"]')
+}
+
+function sentTools(fleet: FakeFleet, index = 0): string[] {
+  return (fleet.writes('PUT', '/api/agents/alpha/config')[index].body as { tools: string[] }).tools
+}
+
+test('tools: each server lists its tools with descriptions, and a tick is what gets saved', async ({ page }, testInfo) => {
+  const fleet = await open(page, 'agents', withServers)
+  const panel = await openTools(page)
+  const dialog = page.locator('.config-modal-sectioned')
+
+  const asked = () => fleet.writes('POST', '/api/agents/alpha/mcp-tools').length
+
+  const example = panel.getByRole('region', { name: 'MCP server example' })
+  const table = example.getByRole('table', { name: 'Tools of example' })
+  await expect(table.getByRole('row')).toHaveCount(3)
+  await expect(table.getByRole('row', { name: /alpha_list/ })).toContainText('Lists every thing the account holds.')
+  // A row shows the description's first line.
+  await expect(table.getByRole('row', { name: /zeta_lookup/ })).toContainText('Looks one thing up by its id.')
+  await expect(table.getByRole('row', { name: /zeta_lookup/ })).not.toContainText('Returns null')
+  await expect(example.getByText('1 of 2 granted')).toBeVisible()
+  await expect(panel.getByRole('checkbox', { name: 'mcp__example__zeta_lookup' })).toBeChecked()
+  await expect(panel.getByRole('checkbox', { name: 'mcp__example__alpha_list' })).not.toBeChecked()
+
+  const askedBeforeSave = asked()
+  expect(askedBeforeSave).toBeGreaterThan(0)
+
+  // The six tools every agent has are shown as that, not as boxes to untick.
+  const builtIn = panel.getByRole('region', { name: 'Built-in tools' })
+  await expect(builtIn.locator('.tool-chip')).toHaveText(ALWAYS_ON)
+  await expect(builtIn.getByRole('checkbox', { name: 'WebFetch' })).toBeChecked()
+  await expect(builtIn.getByRole('checkbox', { name: 'Read' })).toHaveCount(0)
+
+  // A server every agent is given is listed although alpha has no endpoint for it.
+  await expect(panel.getByRole('region', { name: 'MCP server fleet-memory' }).getByRole('row', { name: /memory_search/ })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('tools-desktop.png'), fullPage: true })
+
+  await panel.getByRole('checkbox', { name: 'mcp__example__alpha_list' }).check()
+  await panel.getByRole('checkbox', { name: 'mcp__fleet-memory__memory_search' }).check()
+  await builtIn.getByRole('checkbox', { name: 'WebFetch' }).uncheck()
+  await expect(example.getByText('2 of 2 granted')).toBeVisible()
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.locator('.config-modal-footer .config-feedback-success')).toHaveText('Saved')
+
+  // The saved list is the old one with exactly those changes: nothing typed, nothing lost.
+  expect(sentTools(fleet)).toEqual([
+    'Read', 'mcp__example__zeta_lookup', 'mcp__guarded__orders_get', 'mcp__removed__thing',
+    'mcp__example__alpha_list', 'mcp__fleet-memory__memory_search',
+  ])
+  // A save asks the servers again: the saved endpoints may have changed.
+  await expect.poll(asked).toBeGreaterThan(askedBeforeSave)
+})
+
+test('tools: a server that cannot be listed says why, keeps what is granted, and takes a name', async ({ page }) => {
+  const fleet = await open(page, 'agents', withServers)
+  const panel = await openTools(page)
+  const dialog = page.locator('.config-modal-sectioned')
+
+  const guarded = panel.getByRole('region', { name: 'MCP server guarded' })
+  await expect(guarded.getByRole('status')).toContainText('Its tools cannot be listed from here.')
+  await expect(guarded.getByRole('status')).toContainText('bound secret EXAMPLE_KEY')
+  // What the agent is granted there is still shown. It is not called missing: nobody asked the server.
+  const granted = guarded.getByRole('row', { name: /orders_get/ })
+  await expect(granted.getByRole('checkbox')).toBeChecked()
+  await expect(granted).not.toContainText('not listed')
+
+  await guarded.getByLabel('Tool name to grant on guarded').fill('quotes_get')
+  await guarded.getByRole('button', { name: 'Add', exact: true }).click()
+  await expect(panel.getByRole('checkbox', { name: 'mcp__guarded__quotes_get' })).toBeChecked()
+
+  // A granted tool of a server the agent no longer has is kept apart, not dropped.
+  const other = panel.getByRole('region', { name: 'Granted tools of no server' })
+  await expect(other.getByRole('checkbox', { name: 'mcp__removed__thing' })).toBeChecked()
+  await other.getByRole('checkbox', { name: 'mcp__removed__thing' }).uncheck()
+
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.locator('.config-modal-footer .config-feedback-success')).toHaveText('Saved')
+  expect(sentTools(fleet)).toEqual(['Read', 'WebFetch', 'mcp__example__zeta_lookup', 'mcp__guarded__orders_get', 'mcp__guarded__quotes_get'])
+})
+
+test('tools: the filter narrows every list, All and None act on what is shown, and the text field is the same list', async ({ page }) => {
+  await open(page, 'agents', withServers)
+  const panel = await openTools(page)
+
+  await panel.getByLabel('Filter tools').fill('lookup')
+  const example = panel.getByRole('region', { name: 'MCP server example' })
+  await expect(example.getByRole('table').getByRole('row')).toHaveCount(2)
+  await expect(panel.getByRole('region', { name: 'MCP server fleet-memory' })).toContainText('No tool here matches the filter.')
+  await panel.getByLabel('Filter tools').fill('')
+
+  await example.getByRole('button', { name: 'All', exact: true }).click()
+  await expect(example.getByText('2 of 2 granted')).toBeVisible()
+  await example.getByRole('button', { name: 'None', exact: true }).click()
+  await expect(example.getByText('0 of 2 granted')).toBeVisible()
+
+  // A granted tool a server answered without is marked as that, and stays.
+  await panel.getByRole('button', { name: 'Edit as text' }).click()
+  await panel.getByLabel('Tools', { exact: true }).fill('Read, WebFetch, mcp__example__gone, mcp__guarded__orders_get, mcp__removed__thing')
+  await panel.getByRole('button', { name: 'Pick from lists' }).click()
+  await expect(example.getByRole('row', { name: /gone/ })).toContainText('not listed by its server')
+  await example.getByRole('checkbox', { name: 'mcp__example__gone' }).uncheck()
+
+  // The same list as text, for pasting: what was unticked is gone from it, the rest is as it was.
+  await panel.getByRole('button', { name: 'Edit as text' }).click()
+  const field = panel.getByLabel('Tools', { exact: true })
+  await expect(field).toHaveValue('Read, WebFetch, mcp__guarded__orders_get, mcp__removed__thing')
+  await expect(panel.getByRole('table')).toHaveCount(0)
+  await field.fill('Read, mcp__example__alpha_list')
+  await panel.getByRole('button', { name: 'Pick from lists' }).click()
+  await expect(panel.getByRole('checkbox', { name: 'mcp__example__alpha_list' })).toBeChecked()
+  await expect(panel.getByRole('checkbox', { name: 'mcp__example__zeta_lookup' })).not.toBeChecked()
+})
+
+test('tools: a server not saved yet is not asked, and an older orchestrator leaves the page usable', async ({ page }) => {
+  // No `mcpTools` entry: the route answers 404, as an orchestrator from before it does.
+  const fleet = await open(page, 'agents', f => withMappings(f, []))
+  const panel = await openTools(page)
+  const dialog = page.locator('.config-modal-sectioned')
+
+  await expect(panel.getByText('This orchestrator does not list a server’s tools yet.')).toBeVisible()
+  await panel.getByRole('button', { name: '+ add server' }).click()
+  await panel.getByLabel('MCP endpoint name').last().fill('fresh')
+  const fresh = panel.getByRole('region', { name: 'MCP server fresh' })
+  await expect(fresh.getByRole('status')).toContainText('Save to list this server’s tools.')
+  // A new server is http unless chosen otherwise, and its transport is a choice, not free text.
+  await expect(fresh.getByLabel('Transport of fresh')).toHaveValue('http')
+  await expect(fresh.getByLabel('Transport of fresh').locator('option')).toHaveText(['http', 'sse'])
+
+  await fresh.getByLabel('Tool name to grant on fresh').fill('do_thing')
+  await fresh.getByLabel('Tool name to grant on fresh').press('Enter')
+  await panel.getByLabel('Built-in tool name to grant').fill('WebSearch')
+  await panel.getByRole('region', { name: 'Built-in tools' }).getByRole('button', { name: 'Add', exact: true }).click()
+  await fresh.getByLabel('URL of fresh').fill('https://fresh.example.test/mcp')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.locator('.config-modal-footer .config-feedback-success')).toHaveText('Saved')
+  expect(sentTools(fleet)).toEqual(['Read', 'Bash', 'mcp__fresh__do_thing', 'WebSearch'])
+})
+
+for (const colorScheme of ['light', 'dark'] as const) {
+  test.describe(`tool lists on a 360px phone, ${colorScheme}`, () => {
+    test.use({ viewport: { width: 360, height: 800 }, colorScheme })
+
+    test('fit without sideways scroll, with each description under its tool', async ({ page }, testInfo) => {
+      const fleet = new FakeFleet()
+      withServers(fleet)
+      await fleet.install(page)
+      await page.goto('/#agents')
+      await expect(agentRow(page, 'alpha')).toBeVisible()
+      const panel = await openTools(page, true)
+
+      const row = panel.getByRole('row', { name: /alpha_list/ })
+      await expect(row).toContainText('Lists every thing the account holds.')
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+      for (const control of [panel.getByLabel('Filter tools'), panel.getByRole('checkbox', { name: 'mcp__example__alpha_list' }),
+        panel.getByLabel('URL of example'), panel.getByLabel('Transport of guarded'), panel.getByRole('button', { name: 'Remove guarded' })]) {
+        const box = (await control.boundingBox())!
+        expect(box.x).toBeGreaterThanOrEqual(0)
+        expect(box.x + box.width).toBeLessThanOrEqual(360)
+      }
+      await page.screenshot({ path: testInfo.outputPath(`tools-360-${colorScheme}.png`), fullPage: true })
     })
   })
 }

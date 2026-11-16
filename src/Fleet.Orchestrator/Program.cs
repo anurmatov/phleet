@@ -44,6 +44,9 @@ builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<DockerService>();
 builder.Services.AddSingleton<ContainerProvisioningService>();
 builder.Services.AddSingleton<JournalTokenService>();
+builder.Services.AddSingleton<Fleet.Orchestrator.Services.McpTools.IMcpToolLister>(
+    _ => new Fleet.Orchestrator.Services.McpTools.McpToolLister());
+builder.Services.AddSingleton<Fleet.Orchestrator.Services.McpTools.McpToolDiscovery>();
 builder.Services.AddSingleton(_ => new TelegramMembershipClient());
 builder.Services.AddSingleton<CommsJournalStatusProxy>();
 builder.Services.AddSingleton<SetupService>();
@@ -239,6 +242,8 @@ app.MapAgentListEndpoints();
 app.MapAgentConfigEndpoints();
 // REST: GET /api/agents/{name}/effective-harness — the computed harness plan and drift (#460).
 app.MapAgentHarnessEndpoints();
+// REST: POST /api/agents/{name}/mcp-tools — the tools each saved MCP endpoint offers, asked now.
+app.MapAgentMcpToolsEndpoints();
 app.MapJournalCrossChatAuthorization();
 app.MapCommsJournalEndpoints();
 

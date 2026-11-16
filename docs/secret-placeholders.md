@@ -241,6 +241,26 @@ corrected or removed**, even a reprovision for an unrelated change.
 
 Each is found while the old container still runs, and none names a value.
 
+### Listing a server's tools
+
+The agent config dialog's **Tools & MCP** section shows, under each saved MCP endpoint, the tools
+that server offers, with the server's own descriptions, to tick rather than type. The dashboard
+gets them from `POST /api/agents/{name}/mcp-tools`: the orchestrator connects to each saved
+endpoint as an MCP client, at the address the agent is given, and asks `tools/list`. It is a POST
+because it makes the orchestrator send requests, so it needs a credential on every path.
+
+| Endpoint | What is sent | Result |
+|---|---|---|
+| No headers | Nothing but the request | Its tools |
+| A header mapped to an unbound Env Ref | That `.env` value, the one provisioning writes into the agent's MCP configuration | Its tools |
+| A header mapped to a bound secret | Nothing: the endpoint is not asked | `needs_agent_secret`; its tools are granted by name |
+| `fleet-comms-journal` | A read token for that agent, as provisioning mints | Its tools |
+
+Only saved endpoints are asked: an address typed into the dialog is asked after it is saved, never
+before. A redirect is not followed, each server has 10 seconds, and the answer holds tool names,
+descriptions and fixed sentences. The orchestrator never sends a bound secret anywhere, so an
+endpoint that needs one stays a list of names until an agent-side listing exists.
+
 ## Revocation and rotation
 
 | Action | Takes effect |

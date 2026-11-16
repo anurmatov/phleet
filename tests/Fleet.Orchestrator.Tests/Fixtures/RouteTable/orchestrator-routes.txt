@@ -71,6 +71,7 @@ Post /api/agents/reprovision-running
 Post /api/agents/{name}/cancel
 Post /api/agents/{name}/cancel/{**taskId}
 Post /api/agents/{name}/cancel_bg/{taskId}
+Post /api/agents/{name}/mcp-tools
 Post /api/agents/{name}/project-access
 Post /api/agents/{name}/reprovision
 Post /api/agents/{name}/restart

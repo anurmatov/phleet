@@ -190,13 +190,46 @@ const history = [
   { eventId: 12, eventType: 'ActivityTaskScheduled', timestamp: minutesAgo(11), activityType: 'DelegateToAgent', agent: 'reviewer', inputSummary: 'Review PR #409' },
 ]
 
+/** An agent's tools and MCP servers: two of the fleet's own, and one outside it that needs a header. */
+const toolsConfig = {
+  envRefs: ['GH_TOKEN', 'EXAMPLE_API_KEY'],
+  tools: [
+    'Read', 'Bash', 'WebFetch', 'mcp__fleet-memory__memory_search', 'mcp__fleet-telegram__send_message',
+    'mcp__example__orders_get_current', 'mcp__example__quotes_get',
+  ].map(toolName => ({ toolName, isEnabled: true })),
+  mcpEndpoints: [
+    { mcpName: 'fleet-telegram', url: 'http://fleet-telegram:3800/mcp', transportType: 'http', headerEnvRefs: [] },
+    { mcpName: 'example', url: 'https://mcp.example.test/mcp', transportType: 'http', headerEnvRefs: [{ headerName: 'X-Example-Key', envRefName: 'EXAMPLE_API_KEY' }] },
+  ],
+}
+
+/** What `POST /api/agents/{name}/mcp-tools` answers: each saved server's tools, as the server lists them. */
+export const mcpToolsAnswer = {
+  agent: 'agent1',
+  alwaysOn: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
+  servers: [
+    { name: 'example', status: 'needs_agent_secret', tools: [], truncated: false,
+      reason: 'Header X-Example-Key carries the bound secret EXAMPLE_API_KEY, which only the agent\u2019s own requests can use.' },
+    { name: 'fleet-memory', status: 'ok', reason: null, truncated: false, tools: [
+      { name: 'memory_get', description: 'Reads one memory by its id.' },
+      { name: 'memory_list', description: 'Lists the memories of a project, newest first.' },
+      { name: 'memory_search', description: 'Searches shared memory by meaning and returns the closest entries.' },
+    ] },
+    { name: 'fleet-telegram', status: 'ok', reason: null, truncated: false, tools: [
+      { name: 'send_message', description: 'Sends a text message to a chat this agent may write to.' },
+      { name: 'send_photo', description: 'Sends a picture with an optional caption.' },
+      { name: 'set_reaction', description: 'Sets an emoji reaction on a message.' },
+    ] },
+  ],
+}
+
 /** What a GET answers: the fixed routes above, then the ones with a name in the path. */
 export function answer(path: string, override?: Record<string, unknown>): unknown {
   if (override && path in override) return override[path]
   if (path in routes) return routes[path]
   let m = path.match(/^\/api\/agents\/([^/]+)\/(history|config|project-access)$/)
   if (m) {
-    if (m[2] === 'config') return { ...configOf(m[1]), model: 'claude-opus-5-5', projects: ['project'] }
+    if (m[2] === 'config') return { ...configOf(m[1]), model: 'claude-opus-5-5', projects: ['project'], ...toolsConfig }
     if (m[2] === 'history') return [
       { taskText: 'Reviewed the design for issue #398 and asked for a smaller first step', startedAt: minutesAgo(190), durationSeconds: 840 },
       { taskText: 'Answered a question about the release checklist', startedAt: minutesAgo(400), durationSeconds: 95 },
@@ -312,6 +345,7 @@ export const pages = [
 export const scenes = [
   { name: 'agent-open', hash: 'agents' },
   { name: 'agent-config', hash: 'agents' },
+  { name: 'agent-tools', hash: 'agents' },
   { name: 'new-agent', hash: 'agents' },
   { name: 'logs', hash: 'agents' },
   { name: 'instruction-open', hash: 'instructions' },

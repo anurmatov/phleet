@@ -1,13 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type {
-  AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, McpEndpointEntry, OutputStyleSummary,
+  AgentConfig, ConfigEdits, ConfigSaveState, InstructionSummary, OutputStyleSummary,
   ProjectContextSummary, PromptSizeLimits,
 } from '../types'
 import { CLAUDE_PERMISSION_MODES, CODEX_SANDBOX_MODES, PROVIDER_OPTIONS } from '../constants'
 import { harnessExtraPlaceholder } from '../effectiveHarness'
 import { crossChatDisabledReason, editedTools } from '../journalCrossChat'
-import { effortChoices, effortOptions, isLocalHarness, parseEnvRefs, switchProvider } from '../localModel'
-import { addHeaderRow, danglingMappings, envRefChoices, isMcpHeaderFault, removeHeaderRow, updateHeaderRow } from '../mcpHeaders'
+import { effortChoices, effortOptions, isLocalHarness, switchProvider } from '../localModel'
+import { isMcpHeaderFault } from '../mcpHeaders'
 import { apiGet } from '../utils'
 import ModelSelector from './ModelSelector'
 import FieldHint from './FieldHint'
@@ -16,6 +16,7 @@ import LocalModelFields from './LocalModelFields'
 import InstructionPicker from './InstructionPicker'
 import ProjectAssignmentTable from './ProjectAssignmentTable'
 import EffectiveHarnessView from './EffectiveHarnessView'
+import ToolsEditor from './ToolsEditor'
 import { CONFIG_SECTIONS, DEFAULT_SECTION, sectionCustomizedCount, visibleFields, type SectionId } from './AgentConfigSections'
 import Icon from './Icon'
 
@@ -345,87 +346,16 @@ export default function AgentConfigModal({
                   </div>
                 </SectionPanel>
                 <SectionPanel {...panel('tools')}>
-                  <div className="config-field">
-                    <label className="config-label">Tools</label>
-                    <FieldHint>Comma-separated list of allowed tool names (e.g. <code>Read,Glob,mcp__fleet-memory__memory_search</code>). Controls exactly which tools Claude can call.</FieldHint>
-                    <textarea className="config-textarea" value={configEdits.tools} onChange={e => onEditsChange({ tools: e.target.value })} placeholder="comma-separated tool names" rows={3} />
-                  </div>
-                  <div className="config-section-label">MCP Endpoints</div>
-                  <FieldHint>MCP Transport Type: <code>http</code> = streamable HTTP (preferred); <code>sse</code> = Server-Sent Events (legacy).</FieldHint>
-                  <FieldHint>Headers (<code>http</code> only, Claude and Codex): each header carries the value of one of this agent&apos;s Env Refs, picked by name — never typed here. A bound secret is sent as its placeholder and swapped in by fleet-secrets. <strong>Takes effect on reprovision.</strong></FieldHint>
-                  {configEdits.mcpEndpoints.map((ep, i) => {
-                    const setEndpoint = (next: McpEndpointEntry) =>
-                      onEditsChange({ mcpEndpoints: configEdits.mcpEndpoints.map((x, j) => j === i ? next : x) })
-                    const envRefs = parseEnvRefs(configEdits.envRefs)
-                    const dangling = danglingMappings(ep, envRefs).filter(m => m.envRefName !== '')
-                    const endpointLabel = ep.mcpName || `endpoint ${i + 1}`
-                    return (
-                    <div key={i} className="config-mcp-endpoint">
-                    <div className="config-related-row">
-                      <input
-                        className="config-input config-input-sm"
-                        value={ep.mcpName}
-                        onChange={e => setEndpoint({ ...ep, mcpName: e.target.value })}
-                        placeholder="name"
-                        aria-label="MCP endpoint name"
-                      />
-                      <input
-                        className="config-input config-input-url"
-                        value={ep.url}
-                        onChange={e => setEndpoint({ ...ep, url: e.target.value })}
-                        placeholder="url"
-                        aria-label={`URL of ${endpointLabel}`}
-                      />
-                      <input
-                        className="config-input config-input-sm"
-                        value={ep.transportType}
-                        onChange={e => setEndpoint({ ...ep, transportType: e.target.value })}
-                        placeholder="sse"
-                        aria-label={`Transport of ${endpointLabel}`}
-                      />
-                      <button className="config-remove-btn" aria-label={`Remove ${endpointLabel}`} onClick={() => {
-                        const eps = configEdits.mcpEndpoints.filter((_, j) => j !== i)
-                        onEditsChange({ mcpEndpoints: eps })
-                      }}>✕</button>
-                    </div>
-                    <div className="config-mcp-headers" role="group" aria-label={`Headers of ${endpointLabel}`}>
-                      {(ep.headerEnvRefs ?? []).map((h, k) => (
-                        <div key={k} className="config-related-row config-mcp-header-row">
-                          <input
-                            className="config-input config-mcp-header-name"
-                            value={h.headerName}
-                            onChange={e => setEndpoint(updateHeaderRow(ep, k, { headerName: e.target.value }))}
-                            placeholder="X-Example-Key"
-                            aria-label={`Header name ${k + 1} of ${endpointLabel}`}
-                          />
-                          <select
-                            className="config-input config-mcp-header-ref"
-                            value={h.envRefName}
-                            onChange={e => setEndpoint(updateHeaderRow(ep, k, { envRefName: e.target.value }))}
-                            aria-label={`Env Ref of header ${k + 1} of ${endpointLabel}`}
-                          >
-                            <option value="">choose an Env Ref…</option>
-                            {envRefChoices(envRefs, h.envRefName).map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
-                          </select>
-                          <button className="config-remove-btn" aria-label={`Remove header ${k + 1} of ${endpointLabel}`}
-                            onClick={() => setEndpoint(removeHeaderRow(ep, k))}>✕</button>
-                        </div>
-                      ))}
-                      {dangling.length > 0 && (
-                        <div className="config-feedback config-feedback-error">
-                          {dangling.map(m => m.envRefName).join(', ')} {dangling.length === 1 ? 'is' : 'are'} not an Env Ref of this agent: pick another or remove the header. Reprovisioning refuses until then.
-                        </div>
-                      )}
-                      <button className="config-add-btn" onClick={() => setEndpoint(addHeaderRow(ep))}>+ add header</button>
-                    </div>
-                    </div>
-                    )
-                  })}
-                  <button className="config-add-btn" onClick={() => {
-                    const ep: McpEndpointEntry = { mcpName: '', url: '', transportType: 'sse' }
-                    onEditsChange({ mcpEndpoints: [...configEdits.mcpEndpoints, ep] })
-                  }}>+ add endpoint</button>
-                  {mcpHeaderError && <div className="config-feedback config-feedback-error">{mcpHeaderError}</div>}
+                  <ToolsEditor
+                    agentName={agentName}
+                    active={section === 'tools'}
+                    refreshKey={saveCount}
+                    configEdits={configEdits}
+                    savedEndpointNames={configData.mcpEndpoints.map(e => e.mcpName)}
+                    headersSupported={isClaude || isCodex}
+                    mcpHeaderError={mcpHeaderError}
+                    onEditsChange={onEditsChange}
+                  />
                 </SectionPanel>
                 <SectionPanel {...panel('telegram')}>
                   <div className="config-section-label">Telegram Users</div>

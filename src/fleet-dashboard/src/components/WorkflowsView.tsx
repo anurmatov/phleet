@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from 'react'
 import type { WorkflowSummary, SignalDef, SignalButton } from '../types'
 import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import type { WorkflowLists } from '../hooks/useWorkflowLists'
 import { useTick } from '../hooks/useTick'
 import { temporalUiUrl, heartbeatAge } from '../utils'
 import { PHASE_LABELS } from '../constants'
+import { arrangeRuns, linkWords } from '../workflowTree'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import Icon from './Icon'
 import { PhaseChip, WorkflowRefs, shortWorkflowId } from './WorkflowBits'
@@ -283,7 +284,7 @@ export default function WorkflowsView({
         </div>
       ) : (
         <div className="wf-table">
-          {mainTableWorkflows.map(wf => {
+          {arrangeRuns(mainTableWorkflows, workflows).map(({ run: wf, depth, link, elsewhere }) => {
             const url = temporalUiUrl(wf)
             const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)
@@ -294,9 +295,20 @@ export default function WorkflowsView({
             const menuOpen = wfMenuOpen[k] ?? false
 
             return (
-              <div key={`${wf.namespace}/${wf.workflowId}`} ref={el => setRowRef(wf.workflowId, el)} className={`wf-row ${wfClass}`}>
+              <div
+                key={`${wf.namespace}/${wf.workflowId}`} ref={el => setRowRef(wf.workflowId, el)}
+                className={`wf-row ${wfClass}${depth > 0 ? ' wf-row--nested' : ''}`}
+                data-depth={depth} style={depth > 0 ? { '--wf-depth': depth } as CSSProperties : undefined}
+              >
+                {/* The elbow that ties a run to the one above it. The words are for a screen reader. */}
+                {depth > 0 && link && <span className="wf-nest" role="img" aria-label={`${linkWords(link)} the run above`} />}
                 <div className="wf-type wf-type-clickable" onClick={() => onWfClick(wf)} title="Click to view execution history">{wf.workflowType}</div>
                 <div className="wf-meta">
+                  {elsewhere && (
+                    <span className="wf-owner" title={elsewhere.workflowId}>
+                      {linkWords(elsewhere.link)} {elsewhere.run?.workflowType ?? shortWorkflowId(elsewhere.workflowId)}
+                    </span>
+                  )}
                   <PhaseChip phase={wf.phase} />
                   <span className="pill wf-ns-badge">{wf.namespace}</span>
                   {wf.taskQueue && wf.taskQueue !== wf.namespace && <span className="pill wf-queue">{wf.taskQueue}</span>}

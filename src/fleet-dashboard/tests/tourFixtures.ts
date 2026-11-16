@@ -42,8 +42,12 @@ const run = (over: Record<string, unknown>) => ({
 export const workflows = [
   run({ workflowId: 'pr-impl-415', runId: 'r-415', prNumber: 415, issueNumber: 412, phase: 'merge-approval', gateRef: 'g-415', startTime: minutesAgo(190) }),
   run({ workflowId: 'design-418', runId: 'r-418', workflowType: 'UweDesignWorkflow', issueNumber: 418, phase: 'design-approval', gateRef: 'g-418', startTime: minutesAgo(64) }),
-  run({ workflowId: 'pr-impl-409', runId: 'r-409', prNumber: 409, issueNumber: 401, phase: 'implementation', startTime: minutesAgo(31) }),
-  run({ workflowId: 'consensus-402', runId: 'r-402', workflowType: 'UweConsensusReviewWorkflow', prNumber: 402, phase: 'review-round-2', startTime: minutesAgo(12) }),
+  // One piece of work in three runs: a driver, the run it started, and that run's review.
+  run({ workflowId: 'consensus-402', runId: 'r-402', workflowType: 'UweConsensusReviewWorkflow', prNumber: 409, phase: 'review-round-2', startTime: minutesAgo(12),
+    parentWorkflowId: 'pr-impl-409', parentRunId: 'r-409' }),
+  run({ workflowId: 'epic-driver-400', runId: 'r-400', workflowType: 'UweCarteBlancheWorkflow', issueNumber: 400, phase: 'driving-epic', startTime: minutesAgo(33) }),
+  run({ workflowId: 'pr-impl-409', runId: 'r-409', prNumber: 409, issueNumber: 401, phase: 'implementation', startTime: minutesAgo(31),
+    waiterWorkflowId: 'epic-driver-400' }),
   run({ workflowId: 'human-input-123e4567-e89b-42d3-a456-426614174000', runId: 'r-hi', workflowType: 'UweHumanInputWorkflow', repo: null,
     phase: 'request-input', gateRef: 'r-hi', startTime: minutesAgo(7) }),
 ]

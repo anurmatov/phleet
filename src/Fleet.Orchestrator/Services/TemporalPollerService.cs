@@ -14,6 +14,7 @@ public sealed class TemporalPollerService(
     WorkflowStore store,
     AgentRegistry registry,
     TemporalClientRegistry clientRegistry,
+    WorkflowWaiterIndex waiters,
     ILogger<TemporalPollerService> logger) : BackgroundService
 {
     private readonly TemporalOptions _opts = opts.Value;
@@ -100,7 +101,10 @@ public sealed class TemporalPollerService(
                                 Repo:         repo,
                                 DocPrs:       docPrs,
                                 Phase:        phase,
-                                GateRef:      gateRef));
+                                GateRef:      gateRef,
+                                ParentWorkflowId: wf.ParentId,
+                                ParentRunId:      wf.ParentRunId,
+                                WaiterWorkflowId: await waiters.WaiterOfAsync(client, ns, wf.Id, wf.RunId ?? "", ct)));
                         }
                         covered.Add(ns);
                     }

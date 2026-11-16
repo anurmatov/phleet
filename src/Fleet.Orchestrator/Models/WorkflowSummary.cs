@@ -17,4 +17,13 @@ public sealed record WorkflowSummary(
     string? Repo = null,
     string? DocPrs = null,
     string? Phase = null,
-    string? GateRef = null);
+    string? GateRef = null,
+    // What a run belongs to. Appended, and null for a run that stands alone, so a client from before
+    // them reads what it always did.
+    //
+    // The Temporal parent: the run that started this one as a child workflow.
+    string? ParentWorkflowId = null,
+    string? ParentRunId = null,
+    // The run that waits for this one (its input's WaiterWorkflowId): a driver that started it
+    // through the start tool, which Temporal does not record as a parent.
+    string? WaiterWorkflowId = null);

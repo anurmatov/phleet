@@ -133,7 +133,8 @@ public class TemporalClientRegistryReconnectTests
         var agents = new AgentRegistry(new TaskHistoryStore(), NullLogger<AgentRegistry>.Instance);
         var poller = new TemporalPollerService(
             Options.Create(new TemporalOptions { Address = "temporal.example:7233", Namespaces = ["fleet"], PollIntervalSeconds = 1 }),
-            store, agents, temporal.Registry, NullLogger<TemporalPollerService>.Instance);
+            store, agents, temporal.Registry, new WorkflowWaiterIndex(NullLogger<WorkflowWaiterIndex>.Instance),
+            NullLogger<TemporalPollerService>.Instance);
 
         await poller.StartAsync(CancellationToken.None);
         try

@@ -57,7 +57,14 @@ public sealed class AgentOptions
     public string? Effort { get; set; }
     public string? JsonSchema { get; set; }
     public string? AgentsJson { get; set; }
-    public int ToolArgsTruncateLength { get; set; } = 300;
+    /// <summary>
+    /// The most characters of one tool call's text shown in the chat: its arguments, and equally
+    /// its summary (a shell command, a path, a query), in the tool lines sent while a turn runs and
+    /// in the list under its answer. Longer text is cut there and ends in "...". The lines sit in
+    /// a collapsed blockquote, so the default leaves commands and paths whole and only cuts bulk
+    /// (a written file's content, a patch, a long MCP argument). <c>0</c> or less means no limit.
+    /// </summary>
+    public int ToolArgsTruncateLength { get; set; } = 1000;
     public string Provider { get; set; } = "claude";
     public string? CodexSandboxMode { get; set; }
 

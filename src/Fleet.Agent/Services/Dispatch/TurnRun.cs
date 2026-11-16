@@ -69,9 +69,10 @@ internal sealed class TurnRun(
     private const int ToolLinesPerMessage = 5;
 
     /// <summary>
-    /// The size one tool message is kept under where its lines allow: the sender cuts a longer
-    /// HTML text at this length wherever the cut falls, so a message is ended between two lines
-    /// instead. Only a single line that is longer by itself is left to that cut.
+    /// The size every tool message is kept under: the sender cuts a longer HTML text at this
+    /// length wherever the cut falls, inside an entity or a closing tag, and Telegram refuses the
+    /// result. A message is ended between two lines instead, and a single line that is longer by
+    /// itself is cut in its text and sent over several messages.
     /// </summary>
     private const int ToolMessageMaxChars = 4000;
 
@@ -835,7 +836,8 @@ internal sealed class TurnRun(
     /// <summary>
     /// Sends the collected tool lines to the chat and empties the collection: one expandable
     /// blockquote, one line per call, in the shape a single call always had. Lines that would
-    /// take a message past <see cref="ToolMessageMaxChars"/> start another message.
+    /// take a message past <see cref="ToolMessageMaxChars"/> start another message, and a line
+    /// that does not fit one message by itself is sent whole over several.
     /// A failed send is the caller's to handle; the lines it held are not sent again.
     /// </summary>
     private async Task SendToolLinesAsync()
@@ -872,12 +874,53 @@ internal sealed class TurnRun(
 
             if (body.Length > 0)
                 messages.Add($"{htmlPrefix}{open}{body}{close}");
-            body.Clear().Append(System.Net.WebUtility.HtmlEncode($"{taskPrefix}... {line}"));
+
+            // A line too long for a message of its own goes out over several, each a whole
+            // blockquote, so none is left to the sender's cut. The lines after it may share its
+            // last message.
+            var pieces = EncodeInPieces($"{taskPrefix}... {line}", room);
+            foreach (var piece in pieces.SkipLast(1))
+                messages.Add($"{htmlPrefix}{open}{piece}{close}");
+            body.Clear().Append(pieces[^1]);
         }
         messages.Add($"{htmlPrefix}{open}{body}{close}");
 
         foreach (var message in messages)
             await _sink.SendHtmlTextByOriginAsync(chatId, message, _origin);
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> HTML-encoded, in order, in pieces of at most
+    /// <paramref name="maxEncodedLength"/> characters; one piece when it fits. The cuts are made in
+    /// the text and each piece is encoded on its own, so no piece ends inside an encoded character
+    /// or a surrogate pair. A piece holds at least one character, however small the limit.
+    /// </summary>
+    private static List<string> EncodeInPieces(string text, int maxEncodedLength)
+    {
+        var whole = System.Net.WebUtility.HtmlEncode(text);
+        if (whole.Length <= maxEncodedLength)
+            return [whole];
+
+        var pieces = new List<string>();
+        var start = 0;
+        var encodedLength = 0;
+        for (var i = 0; i < text.Length;)
+        {
+            var width = char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]) ? 2 : 1;
+            var cost = System.Net.WebUtility.HtmlEncode(text.Substring(i, width)).Length;
+            if (i > start && encodedLength + cost > maxEncodedLength)
+            {
+                pieces.Add(System.Net.WebUtility.HtmlEncode(text[start..i]));
+                start = i;
+                encodedLength = 0;
+            }
+
+            encodedLength += cost;
+            i += width;
+        }
+
+        pieces.Add(System.Net.WebUtility.HtmlEncode(text[start..]));
+        return pieces;
     }
 
     /// <summary>

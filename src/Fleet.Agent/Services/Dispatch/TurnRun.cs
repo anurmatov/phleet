@@ -59,12 +59,34 @@ internal sealed class TurnRun(
 
     private string? _lastResult;
     private string? _lastError;
-    private int _significantUpdates;
     private readonly List<string> _allAssistantTexts = [];
     private ExecutionStats? _stats;
     private bool _errorResult;
     private bool _processExitResult;
     private List<(string Name, string Args)> _toolCalls = [];
+
+    /// <summary>After the first tool call of an executor turn, this many calls go to the chat as one message.</summary>
+    private const int ToolLinesPerMessage = 5;
+
+    /// <summary>
+    /// The size every tool message is kept under: the sender cuts a longer HTML text at this
+    /// length wherever the cut falls, inside an entity or a closing tag, and Telegram refuses the
+    /// result. A message is ended between two lines instead, and a single line that is longer by
+    /// itself is cut in its text and sent over several messages.
+    /// </summary>
+    private const int ToolMessageMaxChars = 4000;
+
+    /// <summary>
+    /// The most a tool call's summary may take in the description handed to
+    /// <see cref="IDispatchHost.RaiseToolUse"/>, which is kept in the persisted chat buffer.
+    /// </summary>
+    private const int ToolUseDescriptionMaxChars = 200;
+
+    /// <summary>Tool calls of the executor turn in flight that the chat has not been shown yet, one line each.</summary>
+    private readonly List<string> _pendingToolLines = [];
+
+    /// <summary>The executor turn in flight has sent its first tool line. Each executor turn starts with it false.</summary>
+    private bool _firstToolLineSent;
 
     /// <summary>The inbox for this task, to receive mid-execution messages.</summary>
     private ChannelReader<MidTurnMessage>? _inboxReader;
@@ -136,6 +158,12 @@ internal sealed class TurnRun(
                 _stall.Dispose();
                 _stall = null;
 
+                // The tool calls still collected go out before anything this executor turn is
+                // answered with: its result, or the turn that follows it here (a merged
+                // continuation, a resume after a process exit), whose first call is again sent
+                // at once.
+                await FlushToolLinesAsync();
+
                 if (!await FinishExecutorTurnAsync())
                     break;
             }
@@ -153,6 +181,7 @@ internal sealed class TurnRun(
             _logger.LogError(
                 "Task #{TaskId} for chat {ChatId} stalled: no executor event for {Minutes} minutes; turn stopped (source={Source}, provider={Provider})",
                 taskId, chatId, (int)_stall.Timeout.TotalMinutes, source, _agentConfig.Provider);
+            await FlushToolLinesAsync();
             await SendWithStatsAsync($"{Prefix()}{errorMsg}");
             _host.RaiseTaskCompleted(chatId, errorMsg, relaySender, source, true, correlationId, relayTaskId, CompletionKind.Failed);
             PublishTerminalError(chatId, taskId, _identity, ProtocolErrorCode.ExecutorError);
@@ -160,6 +189,7 @@ internal sealed class TurnRun(
         catch (OperationCanceledException)
         {
             _logger.LogInformation("Task #{TaskId} cancelled for chat {ChatId}", taskId, chatId);
+            await FlushToolLinesAsync();
             await SendWithStatsAsync($"{Prefix()}Task cancelled.");
             _host.RaiseTaskCompleted(chatId, "Task cancelled.", relaySender, source, false, correlationId, relayTaskId, CompletionKind.Failed);
 
@@ -173,6 +203,7 @@ internal sealed class TurnRun(
         {
             _logger.LogError(ex, "Error processing task #{TaskId} for chat {ChatId}", taskId, chatId);
             var errorMsg = $"Error: {ex.Message}";
+            await FlushToolLinesAsync();
             await SendWithStatsAsync($"{Prefix()}{errorMsg}");
             if (isSessionTask)
                 _sessions.ClearSession(chatId);
@@ -255,33 +286,26 @@ internal sealed class TurnRun(
         }
         else if (progress.IsSignificant && progress.ToolName is not null)
         {
-            _significantUpdates++;
             _toolCalls.Add((ShortenToolName(progress.ToolName), TruncateArgs(progress.ToolArgs ?? "{}", _agentConfig.ToolArgsTruncateLength)));
             // Suppress progress messages for check-ins — they may end up IDLE
             // Also suppress when SuppressToolMessages is configured (e.g. for non-technical users)
-            if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch) && _significantUpdates % 5 == 1)
+            if (!_agentConfig.SuppressToolMessages && source is not (TaskSource.CheckIn or TaskSource.DebouncedGroupBatch))
             {
-                var summaryText = progress.Summary;
-                if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)
-                {
-                    var argsSnippet = TruncateArgs(rawArgs, _agentConfig.ToolArgsTruncateLength);
-                    summaryText = $"{progress.Summary}({argsSnippet})";
-                }
-                var htmlPrefix = "";
-                if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
-                {
-                    var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
-                    htmlPrefix = $"<b>{displayName}:</b>\n";
-                }
-                var encoded = System.Net.WebUtility.HtmlEncode($"{Prefix()}... {summaryText}");
-                await _sink.SendHtmlTextByOriginAsync(chatId, $"{htmlPrefix}<blockquote expandable>{encoded}</blockquote>", _origin);
+                // Every call is shown, none sampled away. The first of an executor turn goes out
+                // at once, so the chat sees that work has begun; after it they are collected and
+                // sent ToolLinesPerMessage to a message, and what is left over when the executor
+                // turn ends is sent by FlushToolLinesAsync, ahead of the answer.
+                _pendingToolLines.Add(ToolLine(progress));
+                if (!_firstToolLineSent || _pendingToolLines.Count >= ToolLinesPerMessage)
+                    await SendToolLinesAsync();
             }
-            _host.RaiseToolUse(chatId, progress.ToolName, progress.Summary);
+            _host.RaiseToolUse(chatId, progress.ToolName, TruncateArgs(progress.Summary, ToolUseDescriptionMaxChars));
 
-            // Only the tool NAME leaves the runtime. The Telegram string built a few
-            // lines above appends truncated tool ARGUMENTS, and reusing it here is
+            // Only the tool NAME leaves the runtime. The Telegram line built by ToolLine
+            // carries the call's summary and its truncated ARGUMENTS, and reusing it here is
             // specifically prohibited — arguments routinely carry absolute paths and
-            // secret-shaped values.
+            // secret-shaped values. An executor must therefore never put a command line or any
+            // other argument text in ToolName (a Codex shell call is `shell`).
             PublishEvent(chatId, ConversationEventKind.TurnProgress, _identity,
                 new TurnProgressPayload
                 {
@@ -793,6 +817,141 @@ internal sealed class TurnRun(
         return lastSep > 4 ? name[(lastSep + 2)..] : name;
     }
 
-    private static string TruncateArgs(string args, int maxLength = 300) =>
-        args.Length <= maxLength ? args : args[..maxLength] + "...";
+    /// <summary>
+    /// One tool call as the chat shows it: the executor's summary, and for a call the summary only
+    /// names ("Using …") its arguments in parentheses. Summary and arguments are each cut at
+    /// <see cref="AgentOptions.ToolArgsTruncateLength"/>, so one call cannot take an unbounded
+    /// message whichever of the two carries its bulk. Always a single line: a message holds one
+    /// line per call.
+    /// </summary>
+    private string ToolLine(AgentProgress progress)
+    {
+        var limit = _agentConfig.ToolArgsTruncateLength;
+        var line = TruncateArgs(progress.Summary, limit);
+        if (progress.Summary.StartsWith("Using") && progress.ToolArgs is { } rawArgs)
+            line = $"{line}({TruncateArgs(rawArgs, limit)})";
+        return line.ReplaceLineEndings(" ");
+    }
+
+    /// <summary>
+    /// Sends the collected tool lines to the chat and empties the collection: one expandable
+    /// blockquote, one line per call, in the shape a single call always had. Lines that would
+    /// take a message past <see cref="ToolMessageMaxChars"/> start another message, and a line
+    /// that does not fit one message by itself is sent whole over several.
+    /// A failed send is the caller's to handle; the lines it held are not sent again.
+    /// </summary>
+    private async Task SendToolLinesAsync()
+    {
+        if (_pendingToolLines.Count == 0) return;
+        var lines = _pendingToolLines.ToList();
+        _pendingToolLines.Clear();
+        _firstToolLineSent = true;
+
+        var htmlPrefix = "";
+        if (_agentConfig.PrefixMessages && _agentConfig.ShortName.Length > 0)
+        {
+            var displayName = $"{char.ToUpperInvariant(_agentConfig.ShortName[0])}{_agentConfig.ShortName[1..]}";
+            htmlPrefix = $"<b>{displayName}:</b>\n";
+        }
+
+        const string open = "<blockquote expandable>";
+        const string close = "</blockquote>";
+        var room = ToolMessageMaxChars - htmlPrefix.Length - open.Length - close.Length;
+        var taskPrefix = Prefix();
+
+        var messages = new List<string>();
+        var body = new System.Text.StringBuilder();
+        foreach (var line in lines)
+        {
+            // The cut is between lines and each line is encoded whole, so no message ends inside
+            // an HTML entity.
+            var next = System.Net.WebUtility.HtmlEncode($"... {line}");
+            if (body.Length > 0 && body.Length + 1 + next.Length <= room)
+            {
+                body.Append('\n').Append(next);
+                continue;
+            }
+
+            if (body.Length > 0)
+                messages.Add($"{htmlPrefix}{open}{body}{close}");
+
+            // A line too long for a message of its own goes out over several, each a whole
+            // blockquote, so none is left to the sender's cut. The lines after it may share its
+            // last message.
+            var pieces = EncodeInPieces($"{taskPrefix}... {line}", room);
+            foreach (var piece in pieces.SkipLast(1))
+                messages.Add($"{htmlPrefix}{open}{piece}{close}");
+            body.Clear().Append(pieces[^1]);
+        }
+        messages.Add($"{htmlPrefix}{open}{body}{close}");
+
+        foreach (var message in messages)
+            await _sink.SendHtmlTextByOriginAsync(chatId, message, _origin);
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> HTML-encoded, in order, in pieces of at most
+    /// <paramref name="maxEncodedLength"/> characters; one piece when it fits. The cuts are made in
+    /// the text and each piece is encoded on its own, so no piece ends inside an encoded character
+    /// or a surrogate pair. A piece holds at least one character, however small the limit.
+    /// </summary>
+    private static List<string> EncodeInPieces(string text, int maxEncodedLength)
+    {
+        var whole = System.Net.WebUtility.HtmlEncode(text);
+        if (whole.Length <= maxEncodedLength)
+            return [whole];
+
+        var pieces = new List<string>();
+        var start = 0;
+        var encodedLength = 0;
+        for (var i = 0; i < text.Length;)
+        {
+            var width = char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]) ? 2 : 1;
+            var cost = System.Net.WebUtility.HtmlEncode(text.Substring(i, width)).Length;
+            if (i > start && encodedLength + cost > maxEncodedLength)
+            {
+                pieces.Add(System.Net.WebUtility.HtmlEncode(text[start..i]));
+                start = i;
+                encodedLength = 0;
+            }
+
+            encodedLength += cost;
+            i += width;
+        }
+
+        pieces.Add(System.Net.WebUtility.HtmlEncode(text[start..]));
+        return pieces;
+    }
+
+    /// <summary>
+    /// Sends what <see cref="SendToolLinesAsync"/> has not sent yet, at the end of an executor
+    /// turn, and lets the next executor turn of this run send its first call at once again.
+    /// This must NEVER throw: it runs ahead of the turn's answer and of every terminal status
+    /// line, and a tool line that could not be delivered must not cost the turn its outcome.
+    /// </summary>
+    private async Task FlushToolLinesAsync()
+    {
+        try
+        {
+            await SendToolLinesAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FlushToolLinesAsync: failed to deliver tool lines for chat {ChatId} (task #{TaskId}) — continuing", chatId, taskId);
+        }
+        finally
+        {
+            _pendingToolLines.Clear();
+            _firstToolLineSent = false;
+        }
+    }
+
+    /// <summary>
+    /// Cuts <paramref name="text"/> at <paramref name="maxLength"/> characters and marks the cut
+    /// with "...". <c>0</c> or less means no limit. Never cuts inside a surrogate pair.
+    /// </summary>
+    private static string TruncateArgs(string text, int maxLength) =>
+        maxLength <= 0 || text.Length <= maxLength
+            ? text
+            : text[..Fleet.Shared.TextTruncation.SafeCutIndex(text, maxLength)] + "...";
 }

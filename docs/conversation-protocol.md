@@ -683,4 +683,5 @@ Two ordering facts a client must not assume away, both measured:
 
 This section is a pointer. Nothing in the contract changes because of it. One further gap —
 `GeminiExecutor` having no test seam below `ExecuteAsync`, so its start and terminal events cannot
-be verified — is tracked in #288, and the Codex `ToolName` leak in #287.
+be verified — is tracked in #288. The Codex `ToolName` leak (#287) is fixed: a Codex shell call
+reaches a client as the tool name `shell`, never as its command line.

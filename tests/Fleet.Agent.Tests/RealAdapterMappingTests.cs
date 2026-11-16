@@ -207,16 +207,16 @@ public class RealAdapterMappingTests
     }
 
     /// <summary>
-    /// AC8 — the Codex <c>commandExecution</c> → <c>ToolName</c> leak, pinned byte-for-byte. The
-    /// runner asserts the client-visible name equals the first 64 UTF-16 units of the fixture's
-    /// command; this pins the verdict so a later fix flips a red test.
+    /// AC8 — a Codex <c>commandExecution</c> reaches the client as the tool name <c>shell</c>. The
+    /// row was <c>leaky</c> while the client received the first 64 UTF-16 units of the command
+    /// itself (#287); the runner asserts that nothing of the fixture's command is in the event.
     /// </summary>
     [Fact]
-    public void CodexCommandExecutionToolNameIsRecordedAsLeaky()
+    public void CodexCommandExecutionToolNameIsRecordedAsSupported()
     {
         var row = CapabilityMatrix.Parse().Row(CapabilityMatrix.Codex, ScenarioRunner.CodexLeakScenario);
 
-        Assert.Equal(Verdict.Leaky, row.Verdict);
-        Assert.Contains("shell command", row.Note, StringComparison.Ordinal);
+        Assert.Equal(Verdict.Supported, row.Verdict);
+        Assert.Contains("tool=shell", row.AgentProgress, StringComparison.Ordinal);
     }
 }

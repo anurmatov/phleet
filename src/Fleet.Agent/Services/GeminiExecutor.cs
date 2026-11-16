@@ -568,9 +568,9 @@ public sealed class GeminiExecutor : IAgentExecutor
                 Summary = $"Using {toolName}",
                 ToolName = toolName ?? "",
                 ToolArgs = toolArgs,
-                // Tool calls ARE significant — TaskManager gates them via the
-                // user-side SuppressToolMessages flag and a 1-in-5 sampling
-                // counter. Matches ClaudeExecutor's MapAssistantEvent behavior.
+                // Tool calls ARE significant — the turn gates them via the
+                // user-side SuppressToolMessages flag and shows every one of
+                // them, a few to a message. Matches ClaudeExecutor's behavior.
                 // (Streaming text deltas remain IsSignificant=false; only the
                 // terminal FinalResult event delivers the assistant response.)
                 IsSignificant = true,

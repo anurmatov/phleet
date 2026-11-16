@@ -18,7 +18,10 @@ public sealed class AgentProgress
     /// <summary>Tool name if this progress relates to a tool call.</summary>
     public string? ToolName { get; init; }
 
-    /// <summary>Serialized JSON args for the tool call (truncated to 500 chars). Null for non-tool events.</summary>
+    /// <summary>
+    /// The tool call's arguments as text, in full: serialized JSON, or the command line of a shell
+    /// call. Whoever shows it cuts it (<c>AgentOptions.ToolArgsTruncateLength</c>). Null for non-tool events.
+    /// </summary>
     public string? ToolArgs { get; init; }
 
     /// <summary>Set when the stream is complete. Contains final assistant text.</summary>

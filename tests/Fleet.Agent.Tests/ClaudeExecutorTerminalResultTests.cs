@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
@@ -251,6 +252,104 @@ public class ClaudeExecutorTerminalResultTests
             ["Held from the message before.\n\nWritten beside the call."],
             events.Where(e => e.Narration is not null).Select(e => e.Narration));
     }
+
+    // ── every tool call of a message ─────────────────────────────────────────
+
+    /// <summary>
+    /// One assistant event may hold several <c>tool_use</c> blocks (tool calls made in parallel).
+    /// Each is a tool call of its own, reported in the order of the blocks. Only the first block
+    /// used to be reported, so the chat, the tool list and a client saw one call where there were three.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_SeveralToolCallsInOneMessage_AreEachReported_InOrder()
+    {
+        var events = await RunEventsAsync(
+            TextAssistant("Held from the message before."),
+            Frame("""
+                {"type":"assistant","message":{"content":[
+                  {"type":"text","text":"Reading both at once."},
+                  {"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/workspace/example/a.txt"}},
+                  {"type":"tool_use","id":"toolu_2","name":"Grep","input":{"pattern":"synthetic-marker"}},
+                  {"type":"tool_use","id":"toolu_3","name":"mcp__files__read_file","input":{"path":"/workspace/example/b.txt"}}
+                ]},"parent_tool_use_id":null}
+                """),
+            new ClaudeStreamEvent { Type = "result", Result = "done", NumTurns = 1 });
+
+        var calls = events.Where(e => e.ToolName is not null).ToList();
+        Assert.Equal(["Read", "Grep", "mcp__files__read_file"], calls.Select(c => c.ToolName));
+        Assert.Equal(
+            ["Reading /workspace/example/a.txt", "Searching for \"synthetic-marker\"", "Using read_file"],
+            calls.Select(c => c.Summary));
+        Assert.Equal(
+            ["{\"file_path\":\"/workspace/example/a.txt\"}", "{\"pattern\":\"synthetic-marker\"}", "{\"path\":\"/workspace/example/b.txt\"}"],
+            calls.Select(c => c.ToolArgs));
+        Assert.All(calls, c => Assert.True(c.IsSignificant));
+
+        // The text before the calls belongs to the first of them and to no other.
+        Assert.Equal("Held from the message before.\n\nReading both at once.", calls[0].Narration);
+        Assert.All(calls.Skip(1), c => Assert.Null(c.Narration));
+    }
+
+    /// <summary>The nested rule is per event, whatever the number of calls: none of them carries narration.</summary>
+    [Fact]
+    public async Task ExecuteAsync_SeveralNestedToolCallsInOneMessage_AreEachReported_AndCarryNoNarration()
+    {
+        var events = await RunEventsAsync(
+            TextAssistant("PARENT-TEXT"),
+            Frame("""
+                {"type":"assistant","message":{"content":[
+                  {"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/workspace/example/a.txt"}},
+                  {"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/workspace/example/b.txt"}}
+                ]},"parent_tool_use_id":"toolu_nested"}
+                """),
+            ToolUseAssistant(),
+            new ClaudeStreamEvent { Type = "result", Result = "done", NumTurns = 1 });
+
+        var calls = events.Where(e => e.ToolName is not null).ToList();
+        Assert.Equal(["Read", "Read", "Bash"], calls.Select(c => c.ToolName));
+        Assert.Null(calls[0].Narration);
+        Assert.Null(calls[1].Narration);
+        Assert.Equal("PARENT-TEXT", calls[2].Narration);
+    }
+
+    /// <summary>
+    /// A Bash command is described whole, on one line. It was cut at 80 characters, and because
+    /// the chat shows this summary and not the arguments, those 80 were all anyone saw of it.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_ABashCommand_IsDescribedWhole_OnOneLine()
+    {
+        const string command = "cd /workspace/example &&\n  dotnet test tests/Example.Tests --filter \"FullyQualifiedName~Synthetic\" --logger \"console;verbosity=detailed\" | tail -40";
+        var input = new JsonObject { ["command"] = command, ["description"] = "Run the synthetic tests" };
+
+        var events = await RunEventsAsync(
+            Frame($$"""{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{{input.ToJsonString()}}}]},"parent_tool_use_id":null}"""),
+            new ClaudeStreamEvent { Type = "result", Result = "done", NumTurns = 1 });
+
+        var call = Assert.Single(events, e => e.ToolName == "Bash");
+        Assert.Equal("Running: " + command.Replace("\n", " "), call.Summary);
+        Assert.True(call.Summary.Length > 100);
+    }
+
+    /// <summary>
+    /// The arguments leave the executor in full. They were cut at 500 characters here, ahead of the
+    /// one setting that decides how much of them is shown (<c>AgentOptions.ToolArgsTruncateLength</c>).
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_ToolArguments_AreNotCutByTheExecutor()
+    {
+        var input = new JsonObject { ["path"] = "/workspace/example/notes.txt", ["text"] = new string('n', 2000) };
+
+        var events = await RunEventsAsync(
+            Frame($$"""{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"mcp__files__write_file","input":{{input.ToJsonString()}}}]},"parent_tool_use_id":null}"""),
+            new ClaudeStreamEvent { Type = "result", Result = "done", NumTurns = 1 });
+
+        var call = Assert.Single(events, e => e.ToolName is not null);
+        Assert.Equal(input.ToJsonString(), call.ToolArgs);
+    }
+
+    private static ClaudeStreamEvent Frame(string json) =>
+        JsonSerializer.Deserialize<ClaudeStreamEvent>(json) ?? throw new InvalidOperationException("The frame deserialized to null.");
 
     /// <summary>
     /// A nested (subagent) tool call or text says nothing about the parent turn's text: it neither

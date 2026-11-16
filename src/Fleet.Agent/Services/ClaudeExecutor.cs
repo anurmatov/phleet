@@ -423,7 +423,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
     /// <para>System events were already processed for side effects (background task tracking) by the
     /// background reader; calling ParseProgress again is safe because all mutations are idempotent
     /// (ConcurrentDictionary set/remove). It is called here for every event, in the order
-    /// classify-then-parse, to get the AgentProgress value and to move the final-answer gate.</para>
+    /// classify-then-parse, to get the AgentProgress value and to move the final-answer gate.
+    /// An assistant event that calls several tools is handed on as one step per call.</para>
     /// <para>A completed channel yields one <see cref="TurnEvent.ProcessExited"/> step and ends.</para>
     /// <para><paramref name="endQuietlyOnCancel"/>: a token already cancelled between two events ends
     /// the loop without reading and without throwing. Off, the read itself observes the token.</para>
@@ -459,9 +460,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 yield break;
             }
 
+            // One step per progress value: an assistant event with several tool_use blocks is
+            // several tool calls, and each is handed on in order. Every other event is one step.
             var isCurrentTurnResult = IsCurrentTurnResult(evt);
-            var progress = ParseProgress(evt);
-            yield return new TurnEvent(evt, isCurrentTurnResult, progress);
+            foreach (var progress in ParseAllProgress(evt))
+                yield return new TurnEvent(evt, isCurrentTurnResult, progress);
         }
     }
 
@@ -799,6 +802,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
         useLock ? WriteStdinLineAsync(message, ct) : WriteStdinLineUnlockedAsync(message, ct);
 
     internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
+
+    internal IReadOnlyList<AgentProgress> ParseAllProgressForTests(ClaudeStreamEvent evt) => ParseAllProgress(evt);
     internal string BuildArgsForTests(string? resumeSessionId = null) => BuildArgs(resumeSessionId);
     internal AgentHarness HarnessForTests => _harness;
     internal bool ExitedBeforeInitForTests => _exitedBeforeInit;
@@ -1384,6 +1389,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
         return delta;
     }
 
+    /// <summary>
+    /// Every progress value of one event, in order, parsed once. Only an assistant event with more
+    /// than one <c>tool_use</c> block has more than one: a value per tool call.
+    /// </summary>
+    private IReadOnlyList<AgentProgress> ParseAllProgress(ClaudeStreamEvent evt) =>
+        evt.Type == "assistant" ? ParseAssistantEvent(this, evt) : [ParseProgress(evt)];
+
+    /// <summary>The event's progress value; for an assistant event that calls several tools, the first call's.</summary>
     private AgentProgress ParseProgress(ClaudeStreamEvent evt)
     {
         // Handle system events — route subtype-specific ones before the generic case
@@ -1474,7 +1487,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         return evt.Type switch
         {
-            "assistant" => ParseAssistantEvent(this, evt),
+            "assistant" => ParseAssistantEvent(this, evt)[0],
 
             "result" => HandleResultEvent(evt),
 
@@ -1487,24 +1500,27 @@ public sealed class ClaudeExecutor : IAgentExecutor
         };
     }
 
-    private static AgentProgress ParseAssistantEvent(ClaudeExecutor self, ClaudeStreamEvent evt)
+    private static readonly JsonSerializerOptions ToolArgsJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    /// <summary>
+    /// The progress of one assistant event: never empty, and one value except when the event holds
+    /// several <c>tool_use</c> blocks (parallel tool calls in one message), which are reported one
+    /// value per block, in the order of the blocks.
+    /// </summary>
+    private static IReadOnlyList<AgentProgress> ParseAssistantEvent(ClaudeExecutor self, ClaudeStreamEvent evt)
     {
         var blocks = evt.Message?.Content;
         if (blocks is null or [])
-            return new AgentProgress { IsSignificant = false, Summary = "Assistant (empty)", EventType = evt.Type };
+            return [new AgentProgress { IsSignificant = false, Summary = "Assistant (empty)", EventType = evt.Type }];
 
         // Check for tool_use blocks
-        var toolUse = blocks.FirstOrDefault(b => b.Type == "tool_use");
-        if (toolUse is not null)
+        var toolUses = blocks.Where(b => b.Type == "tool_use").ToList();
+        if (toolUses.Count > 0)
         {
-            var argsJson = toolUse.Input is not null
-                ? TruncateText(JsonSerializer.Serialize(toolUse.Input, new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }), 500)
-                : "{}";
-            self._logger.LogInformation("Tool call: {ToolName}({Args})", toolUse.Name ?? "unknown", argsJson);
-
             // #429 reopen rule: a top-level, current-origin tool call means the text-only event
             // before it was narration, not the final answer, so the turn accepts input again. Never
             // after the turn's own result, and never for nested or background events (#236, #254).
+            // Once per event, however many tools it calls.
             if (self._turnCommittedToFinalAnswer &&
                 evt.ParentToolUseId is null &&
                 IsCurrentOrigin(evt) &&
@@ -1517,9 +1533,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
             }
 
             // The same rule as the reopen above, read the other way: text followed by a top-level
-            // tool call of this turn was a mid-turn message. It leaves with this event, together
-            // with any text written in the same message as the call. Nested and background calls
-            // prove nothing about this turn's text and carry none.
+            // tool call of this turn was a mid-turn message. It leaves with the event's first tool
+            // call, together with any text written in the same message as the calls. Nested and
+            // background calls prove nothing about this turn's text and carry none.
             string? narration = null;
             if (evt.ParentToolUseId is null && IsCurrentOrigin(evt) && !self._currentTurnResultSeen)
             {
@@ -1528,15 +1544,26 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 self._pendingNarration = null;
             }
 
-            return new AgentProgress
+            var calls = new List<AgentProgress>(toolUses.Count);
+            foreach (var toolUse in toolUses)
             {
-                IsSignificant = true,
-                Summary = DescribeToolUse(toolUse.Name ?? "unknown", toolUse.Input),
-                EventType = evt.Type,
-                ToolName = toolUse.Name,
-                ToolArgs = argsJson,
-                Narration = narration,
-            };
+                // The arguments in full: what is shown of them is cut where it is shown
+                // (AgentOptions.ToolArgsTruncateLength). Only the log line is cut here.
+                var argsJson = toolUse.Input is not null ? JsonSerializer.Serialize(toolUse.Input, ToolArgsJson) : "{}";
+                self._logger.LogInformation("Tool call: {ToolName}({Args})", toolUse.Name ?? "unknown", TruncateText(argsJson, 500));
+
+                calls.Add(new AgentProgress
+                {
+                    IsSignificant = true,
+                    Summary = DescribeToolUse(toolUse.Name ?? "unknown", toolUse.Input),
+                    EventType = evt.Type,
+                    ToolName = toolUse.Name,
+                    ToolArgs = argsJson,
+                    Narration = calls.Count == 0 ? narration : null,
+                });
+            }
+
+            return calls;
         }
 
         // Extract text blocks — no tool_use means this is Claude's terminal answer for the turn.
@@ -1545,27 +1572,33 @@ public sealed class ClaudeExecutor : IAgentExecutor
         {
             if (evt.ParentToolUseId is not null)
             {
-                return new AgentProgress
-                {
-                    IsSignificant = false,
-                    Summary = "Subagent assistant progress",
-                    EventType = evt.Type,
-                };
+                return
+                [
+                    new AgentProgress
+                    {
+                        IsSignificant = false,
+                        Summary = "Subagent assistant progress",
+                        EventType = evt.Type,
+                    },
+                ];
             }
 
             self._turnCommittedToFinalAnswer = true;
             self._currentTurnAssistantText = text;
             if (IsCurrentOrigin(evt) && !self._currentTurnResultSeen)
                 self._pendingNarration = text;
-            return new AgentProgress
-            {
-                IsSignificant = true,
-                Summary = TruncateText(text, 500),
-                EventType = evt.Type,
-            };
+            return
+            [
+                new AgentProgress
+                {
+                    IsSignificant = true,
+                    Summary = TruncateText(text, 500),
+                    EventType = evt.Type,
+                },
+            ];
         }
 
-        return new AgentProgress { IsSignificant = false, Summary = "Assistant event", EventType = evt.Type };
+        return [new AgentProgress { IsSignificant = false, Summary = "Assistant event", EventType = evt.Type }];
     }
 
     private AgentProgress HandleResultEvent(ClaudeStreamEvent evt)
@@ -1651,8 +1684,9 @@ public sealed class ClaudeExecutor : IAgentExecutor
             case "Bash":
                 if (GetInput("command") is { } cmd)
                 {
+                    // Whole and on one line: the chat shows it in a collapsed blockquote, and
+                    // whoever shows it cuts it (AgentOptions.ToolArgsTruncateLength).
                     cmd = cmd.ReplaceLineEndings(" ").Trim();
-                    if (cmd.Length > 80) cmd = cmd[..80] + "...";
                     return $"Running: {cmd}";
                 }
                 break;

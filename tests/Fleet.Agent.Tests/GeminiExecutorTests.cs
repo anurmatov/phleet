@@ -202,8 +202,8 @@ public class GeminiExecutorTests
         Assert.NotNull(result);
         Assert.Equal("tool_use", result!.EventType);
         Assert.Equal("memory_get", result.ToolName);
-        // Tool-call events ARE significant — TaskManager gates them via the user-side
-        // SuppressToolMessages flag and a 1-in-5 sampling counter (matches ClaudeExecutor).
+        // Tool-call events ARE significant — the turn gates them via the user-side
+        // SuppressToolMessages flag and shows every one of them (matches ClaudeExecutor).
         // Streaming text deltas remain non-significant; only FinalResult triggers the
         // assistant Telegram message.
         Assert.True(result.IsSignificant);

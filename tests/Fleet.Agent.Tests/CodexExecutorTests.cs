@@ -242,7 +242,8 @@ public class CodexExecutorTests
 
         var narrated = Assert.Single(progress, p => p.Narration is not null);
         Assert.Equal("Checking the build first.", narrated.Narration);
-        Assert.Equal("dotnet build", narrated.ToolName);
+        Assert.Equal("shell", narrated.ToolName);
+        Assert.Equal("dotnet build", narrated.ToolArgs);
         Assert.Equal("The build is green.", progress.Last(p => p.FinalResult is not null).FinalResult);
     }
 
@@ -413,22 +414,303 @@ public class CodexExecutorTests
         var capturer = new CapturingLogger<CodexExecutor>();
         var executor = CreateExecutor(logger: capturer);
 
-        var @params = new JsonObject
-        {
-            ["item"] = new JsonObject
-            {
-                ["type"] = "commandExecution",
-                ["command"] = "Bash",
-                ["args"] = new JsonArray { "ls", "-la" },
-            },
-        };
-
-        var progress = executor.BuildItemStartedProgressForTests(@params);
+        var progress = executor.BuildItemStartedProgressForTests(Item("commandExecution", item => item["command"] = "ls -la"));
 
         Assert.NotNull(progress);
         Assert.Equal("tool_use", progress.EventType);
 
-        Assert.Contains(capturer.Messages, m => m.Contains("[codex tool_use:Bash"));
+        Assert.Contains(capturer.Messages, m => m == "[codex tool_use:shell] ls -la");
+    }
+
+    // ── tool items: names, summaries, and the kinds beyond the first three ───
+
+    // `command` is the whole command line (the item has no separate arguments), so it is the
+    // call's ARGUMENT. As the tool name it reached clients in turn.progress, and the chat line
+    // printed it twice.
+    [Fact]
+    public void CommandExecution_IsAShellCall_AndTheCommandIsItsArgument_NeverItsName()
+    {
+        const string command = "cd /workspace/example &&\ndotnet build --nologo";
+
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(Item("commandExecution", item => item["command"] = command))!;
+
+        Assert.Equal("shell", progress.ToolName);
+        Assert.Equal("Running: cd /workspace/example && dotnet build --nologo", progress.Summary);
+        Assert.Equal("cd /workspace/example && dotnet build --nologo", progress.ToolArgs);
+        // "Using …" is what makes the chat line append the arguments: a shell call must not, or
+        // the command is shown twice.
+        Assert.False(progress.Summary.StartsWith("Using", StringComparison.Ordinal));
+        Assert.True(progress.IsSignificant);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("\"\"")]
+    [InlineData("42")]
+    [InlineData("[\"ls\"]")]
+    public void CommandExecution_WithoutAUsableCommand_IsStillAShellCall(string? commandJson)
+    {
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(Item("commandExecution", item =>
+        {
+            if (commandJson is not null) item["command"] = JsonNode.Parse(commandJson);
+        }))!;
+
+        Assert.Equal("shell", progress.ToolName);
+        Assert.Equal("Running a shell command", progress.Summary);
+        Assert.Equal("{}", progress.ToolArgs);
+    }
+
+    [Fact]
+    public void FileChange_IsAnEdit_NamingTheChangedPaths_AndNeverTheDiff()
+    {
+        static JsonObject Change(string path, JsonObject kind) => new()
+        {
+            ["path"] = path, ["kind"] = kind, ["diff"] = "@@ -1 +1 @@\n-synthetic-old-line\n+synthetic-new-line",
+        };
+
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(Item("fileChange", item =>
+        {
+            item["status"] = "inProgress";
+            item["changes"] = new JsonArray
+            {
+                Change("/workspace/example/src/A.cs", new JsonObject { ["type"] = "update", ["move_path"] = null }),
+                Change("/workspace/example/src/B.cs", new JsonObject { ["type"] = "add" }),
+                Change("/workspace/example/src/C.cs", new JsonObject { ["type"] = "delete" }),
+                Change("/workspace/example/src/D.cs", new JsonObject { ["type"] = "update", ["move_path"] = "/workspace/example/src/E.cs" }),
+            };
+        }))!;
+
+        const string paths = "/workspace/example/src/A.cs, /workspace/example/src/B.cs (new), "
+            + "/workspace/example/src/C.cs (deleted), /workspace/example/src/D.cs → /workspace/example/src/E.cs";
+        Assert.Equal("tool_use", progress.EventType);
+        Assert.Equal("edit", progress.ToolName);
+        Assert.Equal("Editing " + paths, progress.Summary);
+        Assert.Equal(paths, progress.ToolArgs);
+        Assert.True(progress.IsSignificant);
+        Assert.DoesNotContain("synthetic-old-line", progress.Summary + progress.ToolArgs, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WebSearch_WithItsQuery_IsReportedWhenItStarts()
+    {
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(Item("webSearch", item => item["query"] = "synthetic query"))!;
+
+        Assert.Equal("web_search", progress.ToolName);
+        Assert.Equal("Searching web: \"synthetic query\"", progress.Summary);
+        Assert.Equal("synthetic query", progress.ToolArgs);
+        Assert.True(progress.IsSignificant);
+    }
+
+    // The item may start before its query is known. Reporting it then would put an empty search
+    // in the chat; it is reported once, when the completed item carries the query.
+    [Fact]
+    public void WebSearch_StartingWithoutAQuery_IsReportedOnce_WhenItCompletes()
+    {
+        var executor = CreateExecutor();
+
+        Assert.Null(executor.BuildItemStartedProgressForTests(Item("webSearch", item => item["query"] = "")));
+
+        JsonObject Completed() => Item("webSearch", item =>
+        {
+            item["query"] = "synthetic query";
+            item["action"] = new JsonObject { ["type"] = "search", ["query"] = "synthetic query" };
+        });
+        var reported = executor.BuildItemCompletedProgressForTests(Completed())!;
+        Assert.Equal("tool_use", reported.EventType);
+        Assert.Equal("web_search", reported.ToolName);
+        Assert.Equal("Searching web: \"synthetic query\"", reported.Summary);
+        Assert.True(reported.IsSignificant);
+
+        var again = executor.BuildItemCompletedProgressForTests(Completed())!;
+        Assert.Equal("tool_result", again.EventType);
+        Assert.Null(again.ToolName);
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"openPage\",\"url\":\"https://example.com/docs\"}", "Opening page: https://example.com/docs")]
+    [InlineData("{\"type\":\"findInPage\",\"url\":\"https://example.com/docs\",\"pattern\":\"marker\"}", "Finding in page: \"marker\" in https://example.com/docs")]
+    [InlineData("{\"type\":\"search\",\"queries\":[\"first\",\"second\"]}", "Searching web: \"first; second\"")]
+    public void WebSearch_ShowsWhatItsActionDoes(string actionJson, string summary)
+    {
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(Item("webSearch", item =>
+        {
+            item["query"] = "";
+            item["action"] = JsonNode.Parse(actionJson);
+        }))!;
+
+        Assert.Equal("web_search", progress.ToolName);
+        Assert.Equal(summary, progress.Summary);
+    }
+
+    [Fact]
+    public void CollabAgentToolCall_IsAnAgentCall_WithItsToolAndAShortFormOfThePrompt()
+    {
+        var prompt = "Find every caller of the synthetic method\nand report them. " + new string('x', 300);
+
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(Item("collabAgentToolCall", item =>
+        {
+            item["tool"] = "spawnAgent";
+            item["status"] = "inProgress";
+            item["model"] = "model-a";
+            item["prompt"] = prompt;
+        }))!;
+
+        var singleLine = prompt.Replace('\n', ' ');
+        Assert.Equal("agent", progress.ToolName);
+        Assert.Equal("Agent spawnAgent: " + singleLine[..120] + "...", progress.Summary);
+        var args = JsonNode.Parse(progress.ToolArgs!)!;
+        Assert.Equal("spawnAgent", args["tool"]!.GetValue<string>());
+        Assert.Equal("model-a", args["model"]!.GetValue<string>());
+        Assert.Equal(prompt, args["prompt"]!.GetValue<string>());
+        Assert.True(progress.IsSignificant);
+    }
+
+    [Fact]
+    public void CollabAgentToolCall_WithoutAPrompt_NamesItsTool()
+    {
+        var progress = CreateExecutor().BuildItemStartedProgressForTests(Item("collabAgentToolCall", item => item["tool"] = "wait"))!;
+
+        Assert.Equal("agent", progress.ToolName);
+        Assert.Equal("Agent wait", progress.Summary);
+        Assert.Equal("{\"tool\":\"wait\"}", progress.ToolArgs);
+    }
+
+    [Fact]
+    public void ImageView_AndImageGeneration_AreOneShortLineEach()
+    {
+        var executor = CreateExecutor();
+
+        var view = executor.BuildItemStartedProgressForTests(Item("imageView", item => item["path"] = "/workspace/example/shot.png"))!;
+        Assert.Equal("image_view", view.ToolName);
+        Assert.Equal("Viewing image /workspace/example/shot.png", view.Summary);
+        Assert.Equal("/workspace/example/shot.png", view.ToolArgs);
+
+        var generation = executor.BuildItemStartedProgressForTests(Item("imageGeneration", item => item["status"] = "in_progress"))!;
+        Assert.Equal("image_generation", generation.ToolName);
+        Assert.Equal("Generating an image", generation.Summary);
+        Assert.True(view.IsSignificant && generation.IsSignificant);
+    }
+
+    [Theory]
+    [InlineData("reasoning")]
+    [InlineData("plan")]
+    [InlineData("userMessage")]
+    [InlineData("contextCompaction")]
+    [InlineData("sleep")]
+    [InlineData("subAgentActivity")]
+    public void AnItemThatIsNotAToolCall_IsNotReported(string itemType)
+    {
+        var executor = CreateExecutor();
+
+        Assert.Null(executor.BuildItemStartedProgressForTests(Item(itemType)));
+        Assert.Null(executor.BuildItemCompletedProgressForTests(Item(itemType)));
+    }
+
+    public static TheoryData<string, string> ToolItems() => new()
+    {
+        { "{\"type\":\"commandExecution\",\"id\":\"item_1\",\"command\":\"dotnet build\"}", "shell" },
+        { "{\"type\":\"mcpToolCall\",\"id\":\"item_1\",\"tool\":\"read_file\",\"arguments\":{}}", "read_file" },
+        { "{\"type\":\"dynamicToolCall\",\"id\":\"item_1\",\"tool\":\"lookup\",\"arguments\":{}}", "lookup" },
+        { "{\"type\":\"fileChange\",\"id\":\"item_1\",\"status\":\"inProgress\",\"changes\":[{\"path\":\"/workspace/example/a.txt\",\"kind\":{\"type\":\"add\"},\"diff\":\"\"}]}", "edit" },
+        { "{\"type\":\"webSearch\",\"id\":\"item_1\",\"query\":\"synthetic query\"}", "web_search" },
+        { "{\"type\":\"collabAgentToolCall\",\"id\":\"item_1\",\"tool\":\"spawnAgent\",\"prompt\":\"synthetic prompt\"}", "agent" },
+        { "{\"type\":\"imageView\",\"id\":\"item_1\",\"path\":\"/workspace/example/shot.png\"}", "image_view" },
+        { "{\"type\":\"imageGeneration\",\"id\":\"item_1\",\"status\":\"in_progress\"}", "image_generation" },
+    };
+
+    [Theory]
+    [MemberData(nameof(ToolItems))]
+    public void EveryToolItem_IsLoggedUnderItsToolName(string itemJson, string toolName)
+    {
+        var capturer = new CapturingLogger<CodexExecutor>();
+        var executor = CreateExecutor(logger: capturer);
+
+        var progress = executor.BuildItemStartedProgressForTests(new JsonObject { ["item"] = JsonNode.Parse(itemJson) })!;
+
+        Assert.Equal(toolName, progress.ToolName);
+        Assert.Contains(capturer.Messages, m => m.StartsWith($"[codex tool_use:{toolName}] ", StringComparison.Ordinal));
+    }
+
+    // Mid-turn text before a tool item of ANY mapped kind leaves as that item's narration. Before
+    // the other kinds were mapped, text written ahead of a file edit waited for the next shell or
+    // MCP call and was attributed to it, or was never sent at all.
+    [Theory]
+    [MemberData(nameof(ToolItems))]
+    public async Task StreamTurn_TextBeforeAToolItemOfAnyKind_IsThatItemsNarration(string itemJson, string toolName)
+    {
+        var executor = CreateExecutor();
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        JsonObject ItemNotification(string method) => new()
+        {
+            ["method"] = method,
+            ["params"] = new JsonObject { ["turnId"] = "turn-1", ["item"] = JsonNode.Parse(itemJson) },
+        };
+        await channel.Writer.WriteAsync(TurnStarted("turn-1"));
+        await channel.Writer.WriteAsync(ItemCompleted("turn-1", "agentMessage", "Doing the next step now."));
+        await channel.Writer.WriteAsync(ItemNotification("item/started"));
+        await channel.Writer.WriteAsync(ItemNotification("item/completed"));
+        await channel.Writer.WriteAsync(ToolStarted("turn-1", "dotnet test"));
+        await channel.Writer.WriteAsync(ItemCompleted("turn-1", "agentMessage", "All done."));
+        await channel.Writer.WriteAsync(TurnCompletedNoItems("turn-1"));
+        channel.Writer.TryComplete();
+
+        var progress = await CollectAsync(executor.StreamTurnForTests("turn-1"));
+
+        var narrated = Assert.Single(progress, p => p.Narration is not null);
+        Assert.Equal("Doing the next step now.", narrated.Narration);
+        Assert.Equal(toolName, narrated.ToolName);
+        // One tool_use per item, and the started item's completion is a tool_result like any other.
+        Assert.Equal([toolName, "shell"], progress.Where(p => p.EventType == "tool_use").Select(p => p.ToolName));
+        var completion = Assert.Single(progress, p => p.EventType == "tool_result");
+        Assert.False(completion.IsSignificant);
+        Assert.Equal("All done.", progress.Last(p => p.FinalResult is not null).FinalResult);
+    }
+
+    // Through the turn reader: a search that starts without its query is one tool_use, raised by
+    // its completion, and the text written before it is its narration.
+    [Fact]
+    public async Task StreamTurn_ASearchWhoseQueryArrivesWithItsCompletion_IsReportedOnce_WithItsNarration()
+    {
+        var executor = CreateExecutor();
+        var channel = Channel.CreateUnbounded<JsonObject>();
+        executor.SetNotificationChannelForTests(channel);
+        executor.SetThreadStateForTests("thread-1", "turn-1");
+
+        JsonObject Search(string method, string query) => new()
+        {
+            ["method"] = method,
+            ["params"] = new JsonObject
+            {
+                ["turnId"] = "turn-1",
+                ["item"] = new JsonObject { ["type"] = "webSearch", ["id"] = "ws_1", ["query"] = query },
+            },
+        };
+        await channel.Writer.WriteAsync(TurnStarted("turn-1"));
+        await channel.Writer.WriteAsync(ItemCompleted("turn-1", "agentMessage", "Looking it up."));
+        await channel.Writer.WriteAsync(Search("item/started", ""));
+        await channel.Writer.WriteAsync(Search("item/completed", "synthetic query"));
+        await channel.Writer.WriteAsync(ItemCompleted("turn-1", "agentMessage", "Found it."));
+        await channel.Writer.WriteAsync(TurnCompletedNoItems("turn-1"));
+        channel.Writer.TryComplete();
+
+        var progress = await CollectAsync(executor.StreamTurnForTests("turn-1"));
+
+        var search = Assert.Single(progress, p => p.EventType == "tool_use");
+        Assert.Equal("web_search", search.ToolName);
+        Assert.Equal("Searching web: \"synthetic query\"", search.Summary);
+        Assert.Equal("Looking it up.", search.Narration);
+        Assert.DoesNotContain(progress, p => p.EventType == "tool_result");
+    }
+
+    /// <summary>An item of the pinned protocol's <c>ThreadItem</c> shape, wrapped as notification params.</summary>
+    private static JsonObject Item(string type, Action<JsonObject>? fill = null)
+    {
+        var item = new JsonObject { ["type"] = type, ["id"] = "item_1" };
+        fill?.Invoke(item);
+        return new JsonObject { ["item"] = item };
     }
 
     private static JsonObject AgentMessageParams(string? phase, string? text = null) =>

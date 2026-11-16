@@ -49,6 +49,15 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
     if (agent is null)
         return Results.NotFound(new { error = $"Agent '{name}' not found in DB" });
 
+    // #593: names only, always an array. A stored value that cannot be read is refused, never shown as none.
+    var mappings = new Dictionary<int, IReadOnlyList<McpHeaderEnvRef>>();
+    foreach (var endpoint in agent.McpEndpoints)
+    {
+        if (!McpHeaderMappings.TryRead(endpoint, out var read, out var fault))
+            return Results.Problem(fault, statusCode: StatusCodes.Status500InternalServerError, title: McpHeaderMappings.Invalid);
+        mappings[endpoint.Id] = read;
+    }
+
     return Results.Ok(new
     {
         agent.Name,
@@ -91,7 +100,7 @@ app.MapGet("/api/agents/{name}/config", async (string name, IServiceScopeFactory
         agent.MountDockerSock,
         Tools = agent.Tools.Select(t => new { t.ToolName, t.IsEnabled }),
         Projects = agent.Projects.Select(p => p.ProjectName),
-        McpEndpoints = agent.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType }),
+        McpEndpoints = agent.McpEndpoints.Select(e => new { e.McpName, e.Url, e.TransportType, HeaderEnvRefs = mappings[e.Id] }),
         Networks = agent.Networks.Select(n => n.NetworkName),
         EnvRefs = agent.EnvRefs.Select(r => r.EnvKeyName),
         TelegramUsers = agent.TelegramUsers.Select(u => u.UserId),
@@ -215,7 +224,7 @@ internal sealed record AgentConfigUpdateRequest(
         HarnessExtra = HarnessExtra,
         Tools = Tools,
         Projects = Projects,
-        McpEndpoints = McpEndpoints?.Select(e => new McpEndpointSpec(e.McpName, e.Url, e.TransportType)).ToList(),
+        McpEndpoints = McpEndpoints?.Select(e => e.ToSpec()).ToList(),
         Networks = Networks,
         EnvRefs = EnvRefs,
         TelegramUsers = TelegramUsers,
@@ -225,7 +234,11 @@ internal sealed record AgentConfigUpdateRequest(
 }
 
 /// <summary>One MCP endpoint, as the config PUT and the create POST both take it.</summary>
-internal sealed record McpEndpointEntry(string McpName, string Url, string TransportType);
+/// <param name="HeaderEnvRefs">#593: omitted or null keeps an existing endpoint's mappings, <c>[]</c> clears them.</param>
+internal sealed record McpEndpointEntry(string McpName, string Url, string TransportType, McpHeaderEnvRef?[]? HeaderEnvRefs = null)
+{
+    internal McpEndpointSpec ToSpec() => new(McpName, Url, TransportType, HeaderEnvRefs);
+}
 
 /// <summary>One instruction assignment, as the config PUT takes it.</summary>
 internal sealed record InstructionAssignmentEntry(string InstructionName, int LoadOrder);

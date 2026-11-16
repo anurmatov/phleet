@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 using Microsoft.EntityFrameworkCore;
@@ -69,7 +70,14 @@ public sealed class GetAgentConfigTool(IServiceScopeFactory scopeFactory)
 
         sb.AppendLine("### MCP Endpoints");
         if (agent.McpEndpoints.Count == 0) sb.AppendLine("(none)");
-        else foreach (var e in agent.McpEndpoints) sb.AppendLine($"- {e.McpName}: {e.Url} ({e.TransportType})");
+        else foreach (var e in agent.McpEndpoints)
+        {
+            // #593: mapping names only; a value is never stored, so none can be shown.
+            var headers = !McpHeaderMappings.TryRead(e, out var mappings, out var fault) ? $" — {fault}"
+                : mappings.Count == 0 ? ""
+                : " — headers: " + string.Join(", ", mappings.Select(m => $"{m.HeaderName} ← {m.EnvRefName}"));
+            sb.AppendLine($"- {e.McpName}: {e.Url} ({e.TransportType}){headers}");
+        }
         sb.AppendLine();
 
         sb.AppendLine("### Instructions");

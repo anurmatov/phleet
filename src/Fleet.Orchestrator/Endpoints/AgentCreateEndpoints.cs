@@ -93,7 +93,7 @@ public static class AgentCreateEndpoints
         HarnessExtra = body.HarnessExtra,
         Tools = body.Tools,
         Projects = body.Projects,
-        McpEndpoints = body.McpEndpoints?.Select(e => new McpEndpointSpec(e.McpName, e.Url, e.TransportType)).ToList(),
+        McpEndpoints = body.McpEndpoints?.Select(e => e.ToSpec()).ToList(),
         Networks = body.Networks,
         EnvRefs = body.EnvRefs,
         TelegramUsers = body.TelegramUsers,

@@ -316,6 +316,9 @@ namespace Fleet.Orchestrator.Migrations
                     b.Property<int>("AgentId")
                         .HasColumnType("int");
 
+                    b.Property<string>("HeaderEnvRefsJson")
+                        .HasColumnType("text");
+
                     b.Property<string>("McpName")
                         .IsRequired()
                         .HasMaxLength(100)

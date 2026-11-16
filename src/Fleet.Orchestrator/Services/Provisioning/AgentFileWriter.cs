@@ -24,7 +24,7 @@ internal sealed class AgentFileWriter(ILogger logger)
         await WriteOutputStyleFileAsync(agent, generatedDir, files.Style);
 
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "appsettings.json"), files.Appsettings);
-        await File.WriteAllTextAsync(Path.Combine(generatedDir, ".mcp.json"),        files.McpJson);
+        await WriteOwnerOnlyAsync(Path.Combine(generatedDir, ".mcp.json"), files.McpJson);
         await File.WriteAllTextAsync(Path.Combine(generatedDir, "settings.json"),    files.SettingsJson);
 
         if (files.CodexRootToml is not null)
@@ -33,6 +33,27 @@ internal sealed class AgentFileWriter(ILogger logger)
         logger.LogInformation(
             "Generated config files for '{Agent}' in {Dir}",
             agent.Name, generatedDir);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="text"/> to a file only its owner can read or write (0600), made so before
+    /// a byte of it is written: <c>.mcp.json</c> can carry header values (#593) and the journal token.
+    /// The owner is this process's user, which is the agent container's user (both run as root), and
+    /// the file reaches the agent through a read-only bind mount.
+    /// </summary>
+    internal static async Task WriteOwnerOnlyAsync(string path, string text)
+    {
+        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows())
+        {
+            // UnixCreateMode applies only to a new file; an existing one keeps its mode unless changed first.
+            if (File.Exists(path))
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+        await using var stream = new FileStream(path, options);
+        await using var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false));
+        await writer.WriteAsync(text);
     }
 
     private async Task WriteOutputStyleFileAsync(Agent agent, string generatedDir, OutputStyle? style)

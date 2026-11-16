@@ -28,7 +28,8 @@ internal sealed class AgentFileRenderer(
         string ctoAgentName,
         OutputStyle? style,
         ProjectContextPlan projectContexts,
-        IReadOnlyDictionary<string, int>? instructionVersionOverrides)
+        IReadOnlyDictionary<string, int>? instructionVersionOverrides,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders = null)
     {
         var enabledTools  = agent.Tools.Where(t => t.IsEnabled).Select(t => t.ToolName).OrderBy(t => t).ToList();
         var mcpEndpoints  = agent.McpEndpoints.Select(e => e.McpName).OrderBy(e => e).ToList();
@@ -50,8 +51,11 @@ internal sealed class AgentFileRenderer(
                 agent.Name);
 
         var chat = ChatAgents.BuildProvisioning(agent, journalTokens, config["Chat:SouthUrl"], _policy.PrimaryHumanUserIdOrNull());
-        var appsettings = AgentConfigFiles.GenerateAppsettingsJson(agent, ctoAgentName, style, journal, _policy.PrimaryHumanRawValue(), chat);
-        var mcpJson     = AgentConfigFiles.GenerateMcpJson(agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled);
+        var hasMappedHeaders = mappedHeaders is { Count: > 0 };
+        var appsettings = AgentConfigFiles.GenerateAppsettingsJson(
+            agent, ctoAgentName, style, journal, _policy.PrimaryHumanRawValue(), chat, hasMappedHeaders);
+        var mcpJson     = AgentConfigFiles.GenerateMcpJson(
+            agent, fleetMemoryMcpUrl, journal.ReadToken, journal.FilesEnabled || journal.SendEnabled, mappedHeaders);
         var settings    = AgentConfigFiles.GenerateSettingsJson(agent, ctoAgentName, style);
 
         // #460: the same plan the effective-settings view serves. Written for codex agents only,

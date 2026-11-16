@@ -70,6 +70,9 @@ public sealed class ContainerProvisioningService(
             ? ["container not found — not running"]
             : ContainerSpecDiff.ComputeDiff(desired, actual);
         if (secretFault is not null) diffs = [.. diffs, secretFault];
+        // #593: the fault only; resolved header values never leave provisioning.
+        else if (AgentConfigFiles.ResolveMcpHeaders(agent, envValues, bindings, secretPlan!).Fault is { } headerFault)
+            diffs = [.. diffs, headerFault];
 
         if (ProvisioningFaults.FilesWarning(agent) is { } warning) diffs = [.. diffs, warning];
         diffs = [.. diffs, .. ProvisioningFaults.SendWarnings(agent)];
@@ -205,13 +208,20 @@ public sealed class ContainerProvisioningService(
         if (ProvisioningFaults.DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
             return Refuse(serverUrlFault);
 
+        // #593: mapped MCP headers, from the env-file values and the secret plan captured above, so
+        // what is checked here is what is written. A fault refuses before any file or container changes.
+        var (mappedHeaders, headerFault) = AgentConfigFiles.ResolveMcpHeaders(agent, envValues, secretBindings, secretPlan);
+        if (headerFault is not null)
+            return Refuse(headerFault);
+
         var projectContexts = await _renderer.ResolveProjectContextsAsync(agent);
         var style = await _renderer.ResolveOutputStyleAsync(agent);
 
         GeneratedFiles files;
         try
         {
-            files = _renderer.RenderGeneratedFiles(agent, ctoAgentName ?? "", style, projectContexts, instructionVersionOverrides);
+            files = _renderer.RenderGeneratedFiles(
+                agent, ctoAgentName ?? "", style, projectContexts, instructionVersionOverrides, mappedHeaders);
         }
         catch (InvalidOperationException ex)
         {
@@ -790,12 +800,14 @@ public sealed class ContainerProvisioningService(
 
     internal static string GenerateAppsettingsJson(
         Agent agent, string ctoAgentName, OutputStyle? style = null,
-        JournalProvisioning? journal = null, string? primaryHumanUserId = null, ChatProvisioning? chat = null) =>
-        AgentConfigFiles.GenerateAppsettingsJson(agent, ctoAgentName, style, journal, primaryHumanUserId, chat);
+        JournalProvisioning? journal = null, string? primaryHumanUserId = null, ChatProvisioning? chat = null,
+        bool mappedMcpHeaders = false) =>
+        AgentConfigFiles.GenerateAppsettingsJson(agent, ctoAgentName, style, journal, primaryHumanUserId, chat, mappedMcpHeaders);
 
     internal static string GenerateMcpJson(
-        Agent agent, string fleetMemoryMcpUrl, string? journalReadToken = null, bool filesEnabled = false) =>
-        AgentConfigFiles.GenerateMcpJson(agent, fleetMemoryMcpUrl, journalReadToken, filesEnabled);
+        Agent agent, string fleetMemoryMcpUrl, string? journalReadToken = null, bool filesEnabled = false,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders = null) =>
+        AgentConfigFiles.GenerateMcpJson(agent, fleetMemoryMcpUrl, journalReadToken, filesEnabled, mappedHeaders);
 
     internal static string GenerateSettingsJson(Agent agent, string ctoAgentName, OutputStyle? style = null) =>
         AgentConfigFiles.GenerateSettingsJson(agent, ctoAgentName, style);

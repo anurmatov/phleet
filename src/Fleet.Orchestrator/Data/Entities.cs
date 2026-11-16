@@ -200,6 +200,14 @@ public class AgentMcpEndpoint
     public required string Url { get; set; }
     public required string TransportType { get; set; }
 
+    /// <summary>
+    /// The headers this endpoint is sent with, as a JSON array of <c>{ headerName, envRefName }</c>
+    /// (#593): names only, never a value. Null is none. Read and written only through
+    /// <see cref="Application.McpHeaderMappings"/>, which refuses a malformed value instead of
+    /// reading it as none.
+    /// </summary>
+    public string? HeaderEnvRefsJson { get; set; }
+
     public Agent Agent { get; set; } = null!;
 }
 

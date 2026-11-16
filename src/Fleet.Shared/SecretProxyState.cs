@@ -198,6 +198,13 @@ public static partial class SecretBindingRules
 
     public static bool IsHostName(string? value) => value is not null && HostName().IsMatch(value);
 
+    /// <summary>
+    /// One request header a credential may be carried in: a header token that does not route or frame
+    /// the request. The same rule a binding's header is held to.
+    /// </summary>
+    public static bool IsCredentialHeaderName([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? value) =>
+        value is not null && HeaderToken().IsMatch(value) && !ForbiddenHeaders.Contains(value);
+
     // An SSH host: lowercase DNS labels (one label is enough on a LAN) or an IPv4 address. No port,
     // no IPv6, no wildcard.
     private const string SshHostPattern =
@@ -248,7 +255,7 @@ public static partial class SecretBindingRules
                 + "with no scheme, port, path, wildcard or IP address";
         if (hosts.Distinct(StringComparer.Ordinal).Count() != hosts.Count)
             return "secret_binding_hosts_invalid: a host is listed twice";
-        if (header is null || !HeaderToken().IsMatch(header) || ForbiddenHeaders.Contains(header))
+        if (!IsCredentialHeaderName(header))
             return "secret_binding_header_invalid: name one request header that carries the credential, such as "
                 + DefaultHeader;
         if (kind == KindGitHubApp && !string.Equals(header, DefaultHeader, StringComparison.OrdinalIgnoreCase))

@@ -190,8 +190,20 @@ public sealed class AgentCreator(
         foreach (var project in projects)
             agent.Projects.Add(new AgentProject { ProjectName = project });
 
+        // #593: a new endpoint maps only Env Refs this request itself supplies; never the default bot
+        // token added below, a global key or another agent's reference.
+        var suppliedRefs = Clean(request.EnvRefs);
         foreach (var endpoint in (request.McpEndpoints ?? []).DistinctBy(e => e.McpName, StringComparer.OrdinalIgnoreCase))
-            agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = endpoint.McpName, Url = endpoint.Url, TransportType = endpoint.TransportType });
+        {
+            IReadOnlyList<McpHeaderEnvRef?> mappings = endpoint.HeaderEnvRefs ?? [];
+            if (McpHeaderMappings.Check(endpoint.McpName, endpoint.TransportType, agent.Provider, mappings, [], suppliedRefs) is { } mappingFault)
+                return mappingFault;
+            agent.McpEndpoints.Add(new AgentMcpEndpoint
+            {
+                McpName = endpoint.McpName, Url = endpoint.Url, TransportType = endpoint.TransportType,
+                HeaderEnvRefsJson = McpHeaderMappings.Serialize([.. mappings.Select(m => m!)]),
+            });
+        }
 
         // Every agent needs the fleet network to reach RabbitMQ, fleet-memory and the other fleet
         // services, so an agent created without one gets the default (Provisioning:DefaultNetwork).

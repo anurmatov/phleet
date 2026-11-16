@@ -106,6 +106,8 @@ export class FakeFleet {
     ],
   }
   projectAccess: Record<string, string[]> = { alpha: ['fleet'] }
+  /** Stored agent configs; an agent without one reads `configOf`. A config save keeps its MCP endpoints here. */
+  configs: Record<string, Record<string, unknown>> = {}
 
   writes(method: string, pathPrefix: string): Call[] {
     return this.calls.filter(c => c.method === method && c.path.startsWith(pathPrefix))
@@ -192,7 +194,7 @@ export class FakeFleet {
     let m = path.match(/^\/api\/agents\/([^/]+)\/(history|config|project-access)$/)
     if (m) {
       if (m[2] === 'history') return this.history[m[1]] ?? []
-      if (m[2] === 'config') return configOf(m[1])
+      if (m[2] === 'config') return this.configs[m[1]] ?? configOf(m[1])
       return { projects: this.projectAccess[m[1]] ?? [] }
     }
     m = path.match(/^\/api\/(instructions|project-contexts)\/([^/]+)$/)
@@ -257,6 +259,12 @@ export class FakeFleet {
     if (path === '/api/agents' && method === 'POST') {
       this.agents = [...this.agents, agent(String(body!.name), { effectiveStatus: 'dead' })]
       return null
+    }
+    m = path.match(/^\/api\/agents\/([^/]+)\/config$/)
+    if (m && method === 'PUT') {
+      // Only the endpoints are kept: the PUT body's other lists are not the GET shape.
+      this.configs[m[1]] = { ...(this.configs[m[1]] ?? configOf(m[1])), mcpEndpoints: body!.mcpEndpoints }
+      return { message: `Agent '${m[1]}' config updated` }
     }
     m = path.match(/^\/api\/agents\/([^/]+)\/project-access(?:\/(.+))?$/)
     if (m) {

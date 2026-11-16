@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
-import { FakeFleet, EDITED_DEFINITION } from './support/fakeFleet'
+import { FakeFleet, EDITED_DEFINITION, configOf } from './support/fakeFleet'
 import { FakeChat, PIXEL } from './support/fakeChat'
 
 // What the dashboard's views do, driven through the production App against a substituted
@@ -1078,3 +1078,119 @@ test.describe('usage in a browser east of UTC', () => {
     }
   })
 })
+
+// ── MCP header mappings (#593) ──────────────────────────────────────────────────────────────────
+
+const MCP_URL = 'https://mcp.example.test/mcp'
+
+function withMappings(fleet: FakeFleet, headerEnvRefs: { headerName: string; envRefName: string }[]) {
+  fleet.configs.alpha = {
+    ...configOf('alpha'),
+    envRefs: ['EXAMPLE_KEY', 'EXAMPLE_SECRET'],
+    mcpEndpoints: [{ mcpName: 'example', url: MCP_URL, transportType: 'http', headerEnvRefs }],
+  }
+}
+
+async function openToolsTab(page: Page, phone = false) {
+  const alpha = agentRow(page, 'alpha')
+  if (phone) {
+    // A phone has no row icons: the opened row lists its actions by name.
+    await alpha.locator('.agent-row-summary').click()
+    await alpha.locator('.agent-row-detail-actions').getByRole('button', { name: 'Edit config' }).click()
+  } else {
+    await overflow(alpha).click()
+    await alpha.locator('.agent-row-overflow').getByRole('button', { name: 'edit config' }).click()
+  }
+  const dialog = page.locator('.config-modal-sectioned')
+  await dialog.getByRole('tab', { name: /Tools/ }).click()
+  return dialog.getByRole('group', { name: 'Headers of example' })
+}
+
+test('MCP header mappings: add, edit, save, reopen and remove send and show names only', async ({ page }, testInfo) => {
+  const fleet = await open(page, 'agents', f => withMappings(f, []))
+  let headers = await openToolsTab(page)
+  const dialog = page.locator('.config-modal-sectioned')
+
+  await headers.getByRole('button', { name: '+ add header' }).click()
+  await headers.getByLabel('Header name 1 of example').fill('X-Example-Key')
+  await headers.getByLabel('Env Ref of header 1 of example').selectOption('EXAMPLE_KEY')
+  await headers.getByRole('button', { name: '+ add header' }).click()
+  await headers.getByLabel('Header name 2 of example').fill('X-Example-Secret')
+  await headers.getByLabel('Env Ref of header 2 of example').selectOption('EXAMPLE_SECRET')
+  // The reference is picked from the agent's own Env Refs; there is no field for a value.
+  await expect(headers.getByLabel('Env Ref of header 1 of example').locator('option')).toHaveText(['choose an Env Ref…', 'EXAMPLE_KEY', 'EXAMPLE_SECRET'])
+  await page.screenshot({ path: testInfo.outputPath('mcp-headers-desktop.png'), fullPage: true })
+
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.locator('.config-modal-footer .config-feedback-success')).toHaveText('Saved')
+  const sent = fleet.writes('PUT', '/api/agents/alpha/config')[0].body as { mcpEndpoints: unknown[] }
+  expect(sent.mcpEndpoints).toEqual([{ mcpName: 'example', url: MCP_URL, transportType: 'http', headerEnvRefs: [
+    { headerName: 'X-Example-Key', envRefName: 'EXAMPLE_KEY' },
+    { headerName: 'X-Example-Secret', envRefName: 'EXAMPLE_SECRET' },
+  ] }])
+
+  await dialog.getByTitle('Close').click()
+  headers = await openToolsTab(page)
+  await expect(headers.getByLabel('Header name 2 of example')).toHaveValue('X-Example-Secret')
+  await expect(headers.getByLabel('Env Ref of header 2 of example')).toHaveValue('EXAMPLE_SECRET')
+
+  await headers.getByRole('button', { name: 'Remove header 1 of example' }).click()
+  await headers.getByRole('button', { name: 'Remove header 1 of example' }).click()
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.locator('.config-modal-footer .config-feedback-success')).toHaveText('Saved')
+  // Removing every row sends [], which clears the stored mappings.
+  expect((fleet.writes('PUT', '/api/agents/alpha/config')[1].body as { mcpEndpoints: { headerEnvRefs: unknown }[] }).mcpEndpoints[0].headerEnvRefs).toEqual([])
+})
+
+test('MCP header mappings: a dangling reference stays visible, and a refused save keeps the draft', async ({ page }) => {
+  const fleet = await open(page, 'agents', f => withMappings(f, [{ headerName: 'X-Example-Key', envRefName: 'REMOVED_KEY' }]))
+  const headers = await openToolsTab(page)
+  const dialog = page.locator('.config-modal-sectioned')
+
+  await expect(headers.getByLabel('Env Ref of header 1 of example')).toHaveValue('REMOVED_KEY')
+  await expect(headers.getByLabel('Env Ref of header 1 of example').locator('option:checked')).toHaveText('REMOVED_KEY (not an Env Ref of this agent)')
+  await expect(headers.getByText('REMOVED_KEY is not an Env Ref of this agent')).toBeVisible()
+
+  fleet.refuse['PUT /api/agents/alpha/config'] = { status: 400, json: { error: "mcp_header_ref_missing: MCP endpoint 'example' maps X-Other to OTHER_KEY, which is not an Env Ref of this agent." } }
+  await headers.getByLabel('Header name 1 of example').fill('X-Other')
+  await dialog.getByRole('tab', { name: /General/ }).click()
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  // The refusal brings the endpoints back into view, beside the draft it refused.
+  const panel = dialog.locator('.config-section-panel[data-section="tools"]')
+  await expect(panel.locator('.config-feedback-error', { hasText: 'mcp_header_ref_missing' })).toBeVisible()
+  await expect(headers.getByLabel('Header name 1 of example')).toHaveValue('X-Other')
+})
+
+for (const colorScheme of ['light', 'dark'] as const) {
+  test.describe(`MCP header editor on a 360px phone, ${colorScheme}`, () => {
+    test.use({ viewport: { width: 360, height: 800 }, colorScheme })
+
+    test('fits without sideways scroll and names every control', async ({ page }, testInfo) => {
+      // The phone layout has no side navigation to wait for: wait for the agent instead.
+      const fleet = new FakeFleet()
+      withMappings(fleet, [
+        { headerName: 'X-Example-Key', envRefName: 'EXAMPLE_KEY' },
+        { headerName: 'X-Example-Secret-With-A-Long-Name', envRefName: 'EXAMPLE_SECRET' },
+      ])
+      await fleet.install(page)
+      await page.goto('/#agents')
+      await expect(agentRow(page, 'alpha')).toBeVisible()
+      const headers = await openToolsTab(page, true)
+      await expect(headers.getByLabel('Header name 2 of example')).toBeVisible()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+      for (const control of [headers.getByLabel('Header name 2 of example'), headers.getByLabel('Env Ref of header 2 of example'),
+        headers.getByRole('button', { name: 'Remove header 2 of example' })]) {
+        const box = (await control.boundingBox())!
+        expect(box.x).toBeGreaterThanOrEqual(0)
+        expect(box.x + box.width).toBeLessThanOrEqual(360)
+      }
+
+      await page.screenshot({ path: testInfo.outputPath(`mcp-headers-360-${colorScheme}.png`), fullPage: true })
+      const aria = await headers.ariaSnapshot()
+      await testInfo.attach(`mcp-headers-360-${colorScheme}.aria.yml`, { body: aria, contentType: 'text/yaml' })
+      expect(aria).toContain('textbox "Header name 1 of example"')
+      expect(aria).toContain('combobox "Env Ref of header 2 of example"')
+      expect(aria).toContain('button "+ add header"')
+    })
+  })
+}

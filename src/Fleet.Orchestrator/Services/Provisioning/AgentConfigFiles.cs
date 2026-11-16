@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Data;
 using Fleet.Shared;
 
@@ -146,7 +147,7 @@ internal static class AgentConfigFiles
         string ctoAgentName,
         OutputStyle? style = null,
         JournalProvisioning? journal = null, string? primaryHumanUserId = null,
-        ChatProvisioning? chat = null)
+        ChatProvisioning? chat = null, bool mappedMcpHeaders = false)
     {
         var primaryId = ParsePrimaryHumanUserId(primaryHumanUserId);
         if (!string.IsNullOrWhiteSpace(agent.OutputStyle) && style is null)
@@ -239,7 +240,8 @@ internal static class AgentConfigFiles
             && !codexLocal
             && !HasTelegramBot(agent)
             && agent.HarnessExtra is null
-            && chat is null)
+            && chat is null
+            && !mappedMcpHeaders)
             return json;
 
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
@@ -250,8 +252,11 @@ internal static class AgentConfigFiles
         }
         if (style is not null && !HasStyleFile(agent))
             node["Agent"]!.AsObject()["OutputStyleBody"] = OutputStyleRenderer.ForPrompt(style);
-        if (journal?.ReadToken is not null && SupportsMcpHeaders(agent.Provider)
-            && agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase)))
+        // #593: mapped headers are resolved only for a provider that sends them, so the flag follows
+        // them without the journal too.
+        if ((journal?.ReadToken is not null && SupportsMcpHeaders(agent.Provider)
+                && agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalMcpServerName, StringComparison.OrdinalIgnoreCase)))
+            || mappedMcpHeaders)
             node["Agent"]!.AsObject()["McpHeaderSupport"] = true;
 
         // #382: codex local mode only, so every other agent keeps its bytes. The agent sets the URL
@@ -358,10 +363,15 @@ internal static class AgentConfigFiles
         return withoutQuery.TrimEnd('/');
     }
 
+    /// <param name="mappedHeaders">
+    /// #593: each mapped endpoint's resolved headers (<see cref="ResolveMcpHeaders"/>), by endpoint name.
+    /// An endpoint without an entry is written as it always was.
+    /// </param>
     internal static string GenerateMcpJson(
         Agent agent,
         string fleetMemoryMcpUrl,
-        string? journalReadToken = null, bool filesEnabled = false)
+        string? journalReadToken = null, bool filesEnabled = false,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders = null)
     {
         if (agent.McpEndpoints.Any(e => string.Equals(e.McpName, JournalFilesServerName, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("journal_files_endpoint_reserved");
@@ -400,7 +410,9 @@ internal static class AgentConfigFiles
                         : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
                             ? WithAgentParam(e.Url, agent.Name)
                             : e.Url;
-                    return (object)new { type = e.TransportType, url };
+                    return mappedHeaders is not null && mappedHeaders.TryGetValue(e.McpName, out var headers)
+                        ? new { type = e.TransportType, url, headers }
+                        : (object)new { type = e.TransportType, url };
                 });
 
         // Every agent gets fleet-memory access for memory_get, even if not in DB.
@@ -415,6 +427,83 @@ internal static class AgentConfigFiles
             && !string.IsNullOrWhiteSpace(journalReadToken))
             mcpServers[JournalFilesServerName] = new { type = "http", url = "http://127.0.0.1:8091/journal-files/v1/mcp" };
         return JsonSerializer.Serialize(new { mcpServers }, IndentedJson);
+    }
+
+    /// <summary>
+    /// Every mapped endpoint's header values (#593), from the env-file values and the secret plan this
+    /// provision already captured: no second read, and no placeholder minted here. Returns the fault
+    /// instead, before anything is written or any container removed. A fault names names, never a value.
+    /// </summary>
+    /// <remarks>
+    /// A bound reference resolves to its placeholder in <paramref name="plan"/>, by its original Env Ref
+    /// name whatever the binding exposes it as; its real value is never read. The endpoint must be the
+    /// HTTPS (port 443) address of one of the binding's hosts, and the header the binding's header,
+    /// or the forwarder would refuse every request. An unbound reference resolves to its env-file
+    /// value, exactly as the container's own variable would be. The value is the entire header value.
+    /// </remarks>
+    internal static (Dictionary<string, IReadOnlyDictionary<string, string>> Headers, string? Fault) ResolveMcpHeaders(
+        Agent agent, IReadOnlyDictionary<string, string> envValues, IReadOnlyCollection<SecretBinding> bindings, SecretPlan plan)
+    {
+        var resolved = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        foreach (var endpoint in agent.McpEndpoints.OrderBy(e => e.McpName, StringComparer.Ordinal))
+        {
+            if (!McpHeaderMappings.TryRead(endpoint, out var mappings, out var readFault))
+                return (resolved, readFault);
+            if (mappings.Count == 0)
+                continue;
+            // A row edited by hand is held to the rules every write path applies.
+            if (McpHeaderMappings.DescribeShapeFault(mappings) is { } shapeFault)
+                return (resolved, $"{shapeFault} (MCP endpoint '{endpoint.McpName}')");
+            if (McpHeaderMappings.DescribeEndpointFault(endpoint.McpName, endpoint.Url, endpoint.TransportType, agent.Provider) is { } endpointFault)
+                return (resolved, endpointFault.Message);
+
+            var headers = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var mapping in mappings)
+            {
+                var where = $"MCP endpoint '{endpoint.McpName}' header {mapping.HeaderName}";
+                if (!agent.EnvRefs.Any(r => string.Equals(r.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)))
+                    return (resolved, $"{McpHeaderMappings.RefMissing}: {where} maps {mapping.EnvRefName}, which is not an Env Ref "
+                        + "of this agent. Correct or remove the mapping (it blocks every provision of this agent until then).");
+
+                string value;
+                if (bindings.FirstOrDefault(b => string.Equals(b.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)) is { } binding)
+                {
+                    if (DescribeBindingMismatch(endpoint.Url, mapping.HeaderName, binding) is { } mismatch)
+                        return (resolved, $"{McpHeaderMappings.BindingMismatch}: {where} maps bound secret {mapping.EnvRefName}, but {mismatch}.");
+                    if (plan.Grants.FirstOrDefault(g => string.Equals(g.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)) is not { } grant)
+                        return (resolved, $"{McpHeaderMappings.BindingMismatch}: {where} maps bound secret {mapping.EnvRefName}, "
+                            + "which has no placeholder in this provision.");
+                    value = grant.Placeholder;
+                }
+                else
+                {
+                    // "<secret>" is what a container variable gets when .env has no value: never a header.
+                    if (!envValues.TryGetValue(mapping.EnvRefName, out var raw) || raw.Length == 0 || raw == "<secret>"
+                        || raw.AsSpan().IndexOfAny('\r', '\n', '\0') >= 0)
+                        return (resolved, $"{McpHeaderMappings.ValueMissing}: {where} maps {mapping.EnvRefName}, which has no usable "
+                            + "value in .env (missing, empty, or containing a line break or NUL).");
+                    value = raw;
+                }
+                headers[mapping.HeaderName] = value;
+            }
+            resolved[endpoint.McpName] = headers;
+        }
+        return (resolved, null);
+    }
+
+    /// <summary>Why the forwarder would refuse this binding's placeholder at this endpoint, or null.</summary>
+    private static string? DescribeBindingMismatch(string url, string headerName, SecretBinding binding)
+    {
+        if (binding.Kind == SecretBindingRules.KindSshKey)
+            return "an SSH key is never sent as a header";
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps || uri.Port != 443
+            || uri.UserInfo.Length != 0)
+            return "the endpoint is not an https:// address on port 443";
+        if (!binding.HostList.Contains(uri.Host, StringComparer.Ordinal))
+            return "the endpoint's host is not one of the binding's hosts";
+        if (!string.Equals(binding.HeaderName, headerName, StringComparison.OrdinalIgnoreCase))
+            return "the binding injects it only in its own header";
+        return null;
     }
 
     internal static long? ParsePrimaryHumanUserId(string? value)

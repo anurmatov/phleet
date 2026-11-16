@@ -159,6 +159,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             e.Property(x => x.McpName).HasMaxLength(100).IsRequired();
             e.Property(x => x.Url).HasMaxLength(500).IsRequired();
             e.Property(x => x.TransportType).HasMaxLength(50).IsRequired();
+            e.Property(x => x.HeaderEnvRefsJson).HasColumnType("text");
             e.HasIndex(x => new { x.AgentId, x.McpName }).IsUnique();
             e.HasOne(x => x.Agent)
              .WithMany(a => a.McpEndpoints)

@@ -59,7 +59,10 @@ function formFromTemplate(t: AgentTemplateDetail): CreateForm {
     projects: (t.projects ?? []).join('\n'),
     networks: (t.networks ?? []).join('\n'),
     envRefs: (t.envRefs ?? []).join('\n'),
-    mcpEndpoints: (t.mcpEndpoints ?? []).map(e => ({ mcpName: e.mcpName, url: e.url, transportType: e.transportType })),
+    mcpEndpoints: (t.mcpEndpoints ?? []).map(e => ({
+      mcpName: e.mcpName, url: e.url, transportType: e.transportType,
+      ...(e.headerEnvRefs ? { headerEnvRefs: e.headerEnvRefs.map(m => ({ headerName: m.headerName, envRefName: m.envRefName })) } : {}),
+    })),
     instructions: (t.instructions ?? []).map(i => ({ name: i.name, loadOrder: i.loadOrder })),
   }
 }

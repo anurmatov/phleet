@@ -279,6 +279,20 @@ validation failed in the harness, cause not established. Tests: `tests/Fleet.Sec
 | `FLEET_SECRETS_SUBNET` | `10.213.96.0/22` | `fleet-secrets-net`; change only if it overlaps a host network |
 | `FLEET_SECRETS_ADDRESS` | `10.213.96.2` | The forwarder's fixed address in that subnet |
 
+MCP endpoint headers (#593): `agent_mcp_endpoints.HeaderEnvRefsJson` (migration `AddMcpHeaderEnvRefs`,
+null = none) holds `[{headerName, envRefName}]`, names only. REST `mcpEndpoints[].headerEnvRefs`, MCP
+`manage_agent_mcp_endpoints header_env_refs`; omitted keeps, `[]` clears. `McpHeaderMappings` is the
+one rule set (shape, `http` + Claude/Codex only, an absolute `http(s)` URL without user info, no
+reserved endpoint, a new pair only for an Env Ref
+the resulting agent holds; a kept pair is not re-authorized, so removing an Env Ref stays allowed).
+`AgentConfigFiles.ResolveMcpHeaders` resolves in `PrepareAsync` from the captured env values and
+`SecretPlan`: bound → that plan's placeholder (binding's HTTPS:443 host and header must match),
+unbound → the `.env` value. Its faults (`mcp_header_*`, `mcp_headers_unsupported`) refuse before
+the old container is touched; a dangling mapping blocks every reprovision of that agent until fixed.
+Mapped headers set `Agent.McpHeaderSupport` without the journal. `.mcp.json` and the Codex
+`config.toml` are written 0600. MUST NOT store, return or log a header value, or add a literal-value
+field. Docker acceptance: `AGENT_IMAGE=… bash tests/secret-proxy/mcp-headers.sh`.
+
 The stock OpenShell integration (manual enrollment, managed sandbox runtime, saved sandbox policies,
 identity signer, epoch broker lanes) was removed. `ManagedRuntimeRemovalPreflight` runs in `DbSeeder`
 before migration `RemoveManagedStockRuntime` and blocks, migrating nothing, while any agent's selected

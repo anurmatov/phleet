@@ -132,6 +132,11 @@ textarea { resize: vertical; }
 .config-actions, .config-save-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .config-save-row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .config-related-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+/* #593: an endpoint's header rows sit under it and wrap on a phone rather than scroll sideways. */
+.config-mcp-endpoint { margin-bottom: 12px; }
+.config-mcp-headers { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin: 0 0 4px 16px; }
+.config-mcp-header-row { flex-wrap: wrap; width: 100%; margin-bottom: 0; }
+.config-mcp-header-name, .config-mcp-header-ref { flex: 1 1 100px; min-width: 0; }
 
 .config-panel { margin-top: 10px; padding: 14px 0 4px; border-top: 1px solid var(--border); }
 .config-section-label {

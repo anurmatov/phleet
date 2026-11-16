@@ -30,7 +30,12 @@ public readonly record struct WriteCaller(WriteSurface Surface, WriteAuthority A
     internal string Name(string rest, string mcp) => Surface == WriteSurface.Rest ? rest : mcp;
 }
 
-public sealed record McpEndpointSpec(string McpName, string Url, string TransportType);
+/// <param name="HeaderEnvRefs">
+/// #593: null keeps an existing endpoint's mappings (matched by name, any letter case) and gives a new
+/// one none; <c>[]</c> clears them; a non-empty list replaces them.
+/// </param>
+public sealed record McpEndpointSpec(
+    string McpName, string Url, string TransportType, IReadOnlyList<McpHeaderEnvRef?>? HeaderEnvRefs = null);
 
 public sealed record InstructionAssignment(string InstructionName, int LoadOrder);
 
@@ -453,14 +458,41 @@ public sealed class AgentConfigWriter(
             changes.Add($"- projects replaced ({names.Count} projects)");
         }
 
+        // #593: what each endpoint is left mapping, checked below against the resulting agent (its
+        // provider and its Env Refs), so a refusal saves nothing.
+        var mappingChecks = new List<(AgentMcpEndpoint Endpoint, IReadOnlyList<McpHeaderEnvRef?>? Supplied, IReadOnlyList<McpHeaderEnvRef> Stored)>();
         if (patch.McpEndpoints is not null)
         {
+            var previous = agent.McpEndpoints.ToDictionary(e => e.McpName, StringComparer.OrdinalIgnoreCase);
             db.AgentMcpEndpoints.RemoveRange(agent.McpEndpoints);
-            agent.McpEndpoints = patch.McpEndpoints
-                .DistinctBy(e => e.McpName, StringComparer.OrdinalIgnoreCase)
-                .Select(e => new AgentMcpEndpoint { AgentId = agent.Id, McpName = e.McpName, Url = e.Url, TransportType = e.TransportType })
-                .ToList();
+            agent.McpEndpoints = [];
+            foreach (var spec in patch.McpEndpoints.DistinctBy(e => e.McpName, StringComparer.OrdinalIgnoreCase))
+            {
+                var endpoint = new AgentMcpEndpoint { AgentId = agent.Id, McpName = spec.McpName, Url = spec.Url, TransportType = spec.TransportType };
+                IReadOnlyList<McpHeaderEnvRef> stored = [];
+                if (previous.TryGetValue(spec.McpName, out var old))
+                {
+                    // Kept unchanged when the field is omitted, which needs a readable stored value. A
+                    // supplied list replaces it, so an unreadable one is then simply not carried over.
+                    if (!McpHeaderMappings.TryRead(old, out stored, out var storedFault) && spec.HeaderEnvRefs is null)
+                        return WriteFaults.Invalid(McpHeaderMappings.Invalid, storedFault!);
+                    if (spec.HeaderEnvRefs is null)
+                        endpoint.HeaderEnvRefsJson = old.HeaderEnvRefsJson;
+                }
+                agent.McpEndpoints.Add(endpoint);
+                mappingChecks.Add((endpoint, spec.HeaderEnvRefs, stored));
+            }
             changes.Add($"- mcp_endpoints replaced ({agent.McpEndpoints.Count} endpoints)");
+        }
+        else if (patch.Provider is not null)
+        {
+            // A provider change is checked against the mappings the agent keeps.
+            foreach (var endpoint in agent.McpEndpoints)
+            {
+                if (!McpHeaderMappings.TryRead(endpoint, out var stored, out var storedFault))
+                    return WriteFaults.Invalid(McpHeaderMappings.Invalid, storedFault!);
+                mappingChecks.Add((endpoint, null, stored));
+            }
         }
 
         if (patch.Networks is not null)
@@ -540,6 +572,18 @@ public sealed class AgentConfigWriter(
                 })
                 .ToList();
             changes.Add($"- instructions replaced ({agent.Instructions.Count} instructions)");
+        }
+
+        // #593: against the resulting provider and Env Refs. A kept pair is not authorized again, so
+        // a list that still carries a dangling mapping never blocks the removal of its Env Ref.
+        var resultingRefs = agent.EnvRefs.Select(r => r.EnvKeyName).ToList();
+        foreach (var (endpoint, supplied, stored) in mappingChecks)
+        {
+            var resulting = supplied ?? stored;
+            if (McpHeaderMappings.Check(endpoint.McpName, endpoint.Url, endpoint.TransportType, agent.Provider, resulting, stored, resultingRefs) is { } mappingFault)
+                return mappingFault;
+            if (supplied is not null)
+                endpoint.HeaderEnvRefsJson = McpHeaderMappings.Serialize([.. supplied.Select(m => m!)]);
         }
 
         var previousBaseUrl = agent.LocalBaseUrl;

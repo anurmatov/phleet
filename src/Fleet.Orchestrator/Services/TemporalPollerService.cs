@@ -103,8 +103,7 @@ public sealed class TemporalPollerService(
                                 Phase:        phase,
                                 GateRef:      gateRef,
                                 ParentWorkflowId: wf.ParentId,
-                                ParentRunId:      wf.ParentRunId,
-                                WaiterWorkflowId: await waiters.WaiterOfAsync(client, ns, wf.Id, wf.RunId ?? "", ct)));
+                                ParentRunId:      wf.ParentRunId));
                         }
                         covered.Add(ns);
                     }
@@ -114,6 +113,9 @@ public sealed class TemporalPollerService(
                     }
                 }
 
+                // History is optional metadata: one budget for the complete snapshot, and every
+                // listed run is published even when that budget expires.
+                await waiters.EnrichAsync(clients, workflows, ct);
                 var changed = store.Update(workflows, covered);
                 if (changed)
                 {

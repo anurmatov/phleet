@@ -9,18 +9,18 @@ const shape = (placed: ReturnType<typeof arrangeRuns<LinkedRun>>) =>
   placed.map(p => `${'  '.repeat(p.depth)}${p.run.workflowId}${p.link ? ` (${p.link})` : ''}`)
 
 test('a driver, the run it started and that run’s review read as one tree', () => {
-  const review = run('review-1', { parentWorkflowId: 'pr-601', parentRunId: 'run-pr-601' })
-  const driver = run('driver-1325')
-  const pr = run('pr-601', { waiterWorkflowId: 'driver-1325' })
-  const other = run('pr-1323')
-  const blocked = run('driver-1273')
+  const review = run('review-1', { parentWorkflowId: 'implementation-2', parentRunId: 'run-implementation-2' })
+  const driver = run('driver-7')
+  const pr = run('implementation-2', { waiterWorkflowId: 'driver-7' })
+  const other = run('unrelated-3')
+  const blocked = run('blocked-4')
 
   assert.deepEqual(shape(arrangeRuns([review, driver, pr, other, blocked])), [
-    'driver-1325',
-    '  pr-601 (started)',
+    'driver-7',
+    '  implementation-2 (started)',
     '    review-1 (child)',
-    'pr-1323',
-    'driver-1273',
+    'unrelated-3',
+    'blocked-4',
   ])
 })
 
@@ -114,4 +114,18 @@ test('an orchestrator from before the links gives a flat list', () => {
 test('the words for a link', () => {
   assert.equal(linkWords('child'), 'child of')
   assert.equal(linkWords('started'), 'started by')
+})
+
+
+test('a reused parent id with a different run id cannot capture the child', () => {
+  const old = run('parent', { runId: 'old-run' })
+  const child = run('child', { parentWorkflowId: 'parent', parentRunId: 'new-run' })
+  const placed = arrangeRuns([old, child])
+  assert.deepEqual(placed.map(p => p.depth), [0, 0])
+  assert.deepEqual(placed[1].elsewhere, { workflowId: 'parent', link: 'child', run: null })
+})
+
+test('explicit null links from a newer server are flat just like absent links', () => {
+  const runs = [run('a', { parentWorkflowId: null, parentRunId: null, waiterWorkflowId: null }), run('b')]
+  assert.deepEqual(arrangeRuns(runs).map(p => [p.run.workflowId, p.depth]), [['a', 0], ['b', 0]])
 })

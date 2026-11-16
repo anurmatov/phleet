@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using Fleet.Orchestrator.Models;
 using Temporalio.Api.Common.V1;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Api.WorkflowService.V1;
@@ -37,44 +38,89 @@ public sealed class WorkflowWaiterIndex(ILogger<WorkflowWaiterIndex> logger)
     private readonly ConcurrentDictionary<string, string> _known = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _order = new();
     private long _noReadBeforeTicks;
+    private readonly SemaphoreSlim _readGate = new(1, 1);
+    internal TimeProvider Time { get; init; } = TimeProvider.System;
+
+    /// <summary>
+    /// Adds links within one shared budget, never dropping a run when history is unavailable.
+    /// A cold snapshot with many slow successful reads must not cost three seconds per run.
+    /// </summary>
+    public async Task EnrichAsync(
+        IReadOnlyDictionary<string, ITemporalClient> clients, List<WorkflowSummary> runs, CancellationToken ct)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(ReadBound);
+        try
+        {
+            for (var i = 0; i < runs.Count; i++)
+            {
+                budget.Token.ThrowIfCancellationRequested();
+                var run = runs[i];
+                runs[i] = run with
+                {
+                    WaiterWorkflowId = await WaiterOfAsync(
+                        clients[run.Namespace], run.Namespace, run.WorkflowId, run.RunId, budget.Token),
+                };
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            PauseReads();
+        }
+    }
+
+    private void PauseReads() =>
+        Interlocked.Exchange(ref _noReadBeforeTicks, Time.GetTimestamp() + (long)(Backoff.TotalSeconds * Time.TimestampFrequency));
 
     /// <summary>The waiter's workflow id, or null when the run names none or could not be read yet.</summary>
     public async Task<string?> WaiterOfAsync(
         ITemporalClient client, string @namespace, string workflowId, string runId, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (runId.Length == 0) return null;
         var key = @namespace + "\n" + runId;
         if (_known.TryGetValue(key, out var known)) return known.Length == 0 ? null : known;
-        if (Environment.TickCount64 < Interlocked.Read(ref _noReadBeforeTicks)) return null;
-
-        string? waiter;
+        // No queue: another caller still receives its flat list while one history read is active.
+        if (!await _readGate.WaitAsync(0, ct)) return null;
         try
         {
-            var response = await client.WorkflowService.GetWorkflowExecutionHistoryAsync(
-                new GetWorkflowExecutionHistoryRequest
-                {
-                    Namespace = client.Options.Namespace,
-                    Execution = new Temporalio.Api.Common.V1.WorkflowExecution { WorkflowId = workflowId, RunId = runId },
-                    MaximumPageSize = 1,
-                },
-                new RpcOptions { CancellationToken = ct, Timeout = ReadBound });
-            var started = response?.History?.Events
-                .FirstOrDefault(e => e.EventType == EventType.WorkflowExecutionStarted)
-                ?.WorkflowExecutionStartedEventAttributes;
-            if (started is null) return null;
-            waiter = started.Input?.Payloads_ is { Count: > 0 } payloads ? WaiterIn(payloads[0]) : null;
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex)
-        {
-            // The run's identity and the kind of failure, never the input.
-            logger.LogDebug("Waiter read failed workflow={WorkflowId} run={RunId} error={Error}", workflowId, runId, ex.GetType().Name);
-            Interlocked.Exchange(ref _noReadBeforeTicks, Environment.TickCount64 + (long)Backoff.TotalMilliseconds);
-            return null;
-        }
+            if (_known.TryGetValue(key, out known)) return known.Length == 0 ? null : known;
+            if (Time.GetTimestamp() < Interlocked.Read(ref _noReadBeforeTicks)) return null;
 
-        Remember(key, waiter ?? "");
-        return waiter;
+            string? waiter;
+            try
+            {
+                var response = await client.WorkflowService.GetWorkflowExecutionHistoryAsync(
+                    new GetWorkflowExecutionHistoryRequest
+                    {
+                        Namespace = client.Options.Namespace,
+                        Execution = new Temporalio.Api.Common.V1.WorkflowExecution { WorkflowId = workflowId, RunId = runId },
+                        MaximumPageSize = 1,
+                    },
+                    new RpcOptions { CancellationToken = ct, Timeout = ReadBound });
+                var started = response?.History?.Events
+                    .FirstOrDefault(e => e.EventType == EventType.WorkflowExecutionStarted)
+                    ?.WorkflowExecutionStartedEventAttributes;
+                if (started is null)
+                {
+                    PauseReads();
+                    return null;
+                }
+                waiter = started.Input?.Payloads_ is { Count: > 0 } payloads ? WaiterIn(payloads[0]) : null;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                // The run's identity and the kind of failure, never the input.
+                logger.LogDebug("Waiter read failed workflow={WorkflowId} run={RunId} error={Error}", workflowId, runId, ex.GetType().Name);
+                PauseReads();
+                return null;
+            }
+
+            Remember(key, waiter ?? "");
+            return waiter;
+        }
+        finally { _readGate.Release(); }
     }
 
     private void Remember(string key, string value)

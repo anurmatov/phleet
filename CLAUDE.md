@@ -487,8 +487,9 @@ Each `WorkflowSummary` (`/api/workflows`, the dashboard socket, the phone app) s
 belongs to: `parentWorkflowId`/`parentRunId`, the Temporal parent as the list returns it, and
 `waiterWorkflowId`, the `WaiterWorkflowId` of the run's start input (a driver that started it
 through the start tool is not its Temporal parent). `WorkflowWaiterIndex` reads that input once per
-run, the first history event alone, with a 3 s bound, remembers the answer, and after a failed read
-tries no other for a minute; the list goes out without the link rather than late. Appended and
+run, the first history event alone, with a 3 s bound shared across each snapshot's enrichment,
+remembers the answer, and after a failed or empty read tries no other for a minute.
+Only one history read is in flight, with no queued callers; the full list goes out with any unknown links absent rather than late. Appended and
 nullable, so an older client reads what it did. MUST NOT log or keep anything else of the input.
 The dashboard lays the running list out as a tree from these (`workflowTree.ts`).
 

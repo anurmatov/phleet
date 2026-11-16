@@ -156,5 +156,6 @@ two groups separated by ` ‖ `, and ordering across that separator is explicitl
 - No `turn.delta` / incremental assistant text. The spike **recommends** it (see
   `voice-feasibility-protocol.md`); adding it is a separate protocol change, tracked as **#286**.
 - No seam on `GeminiExecutor`. Opening one is a `src/` change, tracked as **#288**.
-- No fix for tool completion (**#285**) or the Codex `ToolName` leak (**#287**). Each is pinned by a
-  test so a later fix is a visible, deliberate change.
+- No fix for tool completion (**#285**), which is pinned by a test so a later fix is a visible,
+  deliberate change. The Codex `ToolName` leak (**#287**) was pinned the same way and has since
+  been fixed.

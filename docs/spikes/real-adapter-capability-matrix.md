@@ -141,7 +141,7 @@ rendering turn state renders late, and one that treats it as a stream position i
 | S16 | — | — | submission.accepted(ran) → submission.accepted(ran) ‖ turn.started → turn.final(completed) → turn.started → turn.final(completed) | inferred | fixture-only | restart is a local process action; no provider frame acknowledges it |
 | G1 | `tool completion` | `tool_result` | turn.progress(tool) | unsupported | fixture-only | the provider DOES emit a completion frame; the runtime maps it with `IsSignificant = false`, and `TaskManager` publishes `turn.progress` only when `IsSignificant && ToolName is not null`. A client sees a tool START and never a tool FINISH, so a per-tool spinner has no event that clears it. |
 | G2 | `turn/started` + `item/agentMessage/delta` + `item/agentMessage/delta` + `item/agentMessage/delta` + `agentMessage` + `turn/completed` | `assistant`(sig) + `assistant`(sig) + `assistant`(sig) | turn.final(completed) | unsupported | fixture-only | `ConversationEventKind` has no delta kind. Three assistant chunks in, exactly one `turn.final` out — a client cannot begin rendering, or speaking, before the whole answer exists. |
-| G3 | `turn/started` + `commandExecution` + `commandExecution` + `agentMessage` + `turn/completed` | `tool_use`(sig,tool=grep -rn --include=*.cs "synthetic-marker" /workspace/example/src /workspace/example/tests) | turn.progress(tool) | leaky | fixture-only | `ToolName` is the executed shell command, not a tool name. `BoundToolName` only BOUNDS it to 64 UTF-16 units — it does not classify it — so the client receives the first 64 characters of a real command, which routinely contains absolute paths and can contain secret-shaped values. Pinned, deliberately NOT fixed here. |
+| G3 | `turn/started` + `commandExecution` + `commandExecution` + `agentMessage` + `turn/completed` | `tool_use`(sig,tool=shell) | turn.progress(tool) | supported | fixture-only | a `commandExecution` is the tool `shell`; its `command` (the whole command line) is the call's argument and stays in the runtime. The row was `leaky` until #287 was fixed: `ToolName` held the command, and `BoundToolName` only bounds a name to 64 UTF-16 units, so the client received the first 64 characters of it. |
 
 ## gemini
 
@@ -166,7 +166,7 @@ rendering turn state renders late, and one that treats it as a stream position i
 
 `G1`, `G2` and `G3` are not turn scenarios. They record the three per-provider facts the design
 required the harness to **confirm or refute** rather than discover by accident. All three were
-confirmed:
+confirmed, and G3 has since been fixed:
 
 - **G1 — tool completion is invisible to clients on every provider.** Confirmed. Tracked as #285.
 - **G2 — there is no incremental assistant-text event in v1.** Confirmed. This is a structural
@@ -174,10 +174,11 @@ confirmed:
   before the entire answer exists. Tracked as #286. (Since then `turn.message` carries whole
   mid-turn messages that a tool call followed; the G2 rows above are unchanged by it, because
   text chunks with no tool call between them are still one `turn.final`.)
-- **G3 — Codex's `ToolName` is not a tool name.** Confirmed, and pinned byte-for-byte. Tracked as
-  #287.
+- **G3 — Codex's `ToolName` was not a tool name.** Confirmed, pinned byte-for-byte, and then fixed
+  (#287): a `commandExecution` is now the tool `shell` and its command line is the call's
+  argument, so the row is `supported` and asserts that nothing of the command reaches the client.
 
-None of the three is fixed here. Each is a behaviour change with its own client-visible
+G1 and G2 are not fixed here. Each is a behaviour change with its own client-visible
 consequences and its own review; the rows exist so a later fix flips a red test rather than
 silently changing behaviour. The fourth follow-up — a `GeminiExecutor` seam that would let its
 start and terminal rows be observed at L1 instead of `inferred` — is #288.

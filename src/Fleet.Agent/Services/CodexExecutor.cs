@@ -83,6 +83,10 @@ public sealed class CodexExecutor : IAgentExecutor
     // it out as AgentProgress.Narration. The turn's last message is never followed by a tool, so
     // the answer is never sent this way (#286).
     private string? _pendingNarration;
+    // The ids of the running turn's tool items already reported as a tool_use. A tool item that
+    // completes without being in here is reported then. Replaced, never cleared in place: only the
+    // turn reader adds to it.
+    private HashSet<string> _reportedToolItems = new(StringComparer.Ordinal);
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
     private volatile bool _turnHasFinalAnswerPhase;
@@ -263,7 +267,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 _usageTotal = null;
                 _usageContextWindow = null;
                 _currentTurnAssistantText = "";
-                _pendingNarration = null;
+                ResetTurnItems();
             }
             catch (RpcErrorException ex)
             {
@@ -441,7 +445,7 @@ public sealed class CodexExecutor : IAgentExecutor
             await SendRequestAsync(ThreadShellCommandMethod, shellParams, ct);
             _lastTurnUsage = null;
             _currentTurnAssistantText = "";
-            _pendingNarration = null;
+            ResetTurnItems();
         }
         catch (RpcErrorException ex)
         {
@@ -1289,6 +1293,16 @@ public sealed class CodexExecutor : IAgentExecutor
         };
     }
 
+    /// <summary>
+    /// Forgets what the turn reader holds about a turn's items: the message waiting to be proved
+    /// narration, and which tool items were reported. Called at every turn boundary.
+    /// </summary>
+    private void ResetTurnItems()
+    {
+        _pendingNarration = null;
+        _reportedToolItems = new HashSet<string>(StringComparer.Ordinal);
+    }
+
     private AgentProgress? BuildItemStartedProgress(JsonObject @params)
     {
         var item = @params["item"] as JsonObject;
@@ -1302,56 +1316,208 @@ public sealed class CodexExecutor : IAgentExecutor
             return null;
         }
 
-        // A tool after an assistant message: the message was mid-turn text, and leaves with this event.
-        string? narration = null;
-        if (itemType is "commandExecution" or "mcpToolCall" or "dynamicToolCall")
-        {
-            narration = _pendingNarration;
-            _pendingNarration = null;
-        }
+        if (item is null || DescribeToolCall(itemType, item) is not { } call)
+            return null;
 
-        AgentProgress? progress = itemType switch
-        {
-            "commandExecution" => new AgentProgress
-            {
-                Narration = narration,
-                EventType = "tool_use",
-                Summary = $"Using {item?["command"]?.GetValue<string>() ?? "command"}",
-                ToolName = item?["command"]?.GetValue<string>(),
-                ToolArgs = item?["args"]?.ToJsonString() ?? item?["command"]?.GetValue<string>() ?? "{}",
-                IsSignificant = true,
-            },
-            "mcpToolCall" => new AgentProgress
-            {
-                Narration = narration,
-                EventType = "tool_use",
-                Summary = $"Using {item?["tool"]?.GetValue<string>() ?? "mcp tool"}",
-                ToolName = item?["tool"]?.GetValue<string>(),
-                ToolArgs = item?["arguments"]?.ToJsonString(),
-                IsSignificant = true,
-            },
-            "dynamicToolCall" => new AgentProgress
-            {
-                Narration = narration,
-                EventType = "tool_use",
-                Summary = $"Using {item?["tool"]?.GetValue<string>() ?? "tool"}",
-                ToolName = item?["tool"]?.GetValue<string>(),
-                ToolArgs = item?["arguments"]?.ToJsonString(),
-                IsSignificant = true,
-            },
-            _ => null,
-        };
+        // An item that starts with nothing to show yet (a web search whose query arrives only
+        // with its completion) is reported when it completes: see BuildItemCompletedProgress.
+        if (!call.Ready && ItemId(item) is not null)
+            return null;
 
-        if (progress is not null)
-        {
-            var toolName = progress.ToolName ?? itemType ?? "unknown";
-            var rawArgs = progress.ToolArgs ?? "";
-            var argsPreview = rawArgs.Length > 200 ? rawArgs[..200] + "…" : rawArgs;
-            _logger.LogInformation("[codex tool_use:{Tool}] {Args}", toolName, argsPreview);
-        }
-
-        return progress;
+        return ReportToolCall(itemType, item, call);
     }
+
+    /// <summary>
+    /// The one place a Codex tool item becomes a <c>tool_use</c> event, whichever notification
+    /// reported it. A tool after an assistant message proves the message was mid-turn text, and it
+    /// leaves with this event as <see cref="AgentProgress.Narration"/>.
+    /// </summary>
+    private AgentProgress ReportToolCall(string? itemType, JsonObject item, ToolCall call)
+    {
+        if (ItemId(item) is { } id)
+            _reportedToolItems.Add(id);
+
+        var narration = _pendingNarration;
+        _pendingNarration = null;
+
+        var rawArgs = call.Args ?? "";
+        var argsPreview = rawArgs.Length > 200 ? rawArgs[..TextTruncation.SafeCutIndex(rawArgs, 200)] + "…" : rawArgs;
+        _logger.LogInformation("[codex tool_use:{Tool}] {Args}", call.Name ?? itemType ?? "unknown", argsPreview);
+
+        return new AgentProgress
+        {
+            Narration = narration,
+            EventType = "tool_use",
+            Summary = call.Summary,
+            ToolName = call.Name,
+            ToolArgs = call.Args,
+            IsSignificant = true,
+        };
+    }
+
+    /// <summary>
+    /// A tool item as a tool call. <paramref name="Name"/> is a tool NAME and nothing else: it
+    /// reaches clients in <c>turn.progress</c>, so no command line, path or query may be in it.
+    /// <paramref name="Ready"/> is false while the item carries nothing worth showing yet.
+    /// </summary>
+    private readonly record struct ToolCall(string? Name, string Summary, string? Args, bool Ready = true);
+
+    // Tool names of the item kinds that have none of their own. Plain words, kept stable: they
+    // are shown in the chat, logged, and sent to clients.
+    internal const string ShellToolName = "shell";
+    internal const string EditToolName = "edit";
+    internal const string WebSearchToolName = "web_search";
+    internal const string AgentToolName = "agent";
+    internal const string ImageViewToolName = "image_view";
+    internal const string ImageGenerationToolName = "image_generation";
+
+    /// <summary>How much of a sub-agent prompt the summary of a <c>collabAgentToolCall</c> shows.</summary>
+    private const int AgentPromptSummaryChars = 120;
+
+    private static readonly JsonSerializerOptions RelaxedJson = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    /// <summary>
+    /// Maps a <c>ThreadItem</c> of the pinned protocol to a tool call, or null for an item that is
+    /// not one (a message, reasoning, a plan, …). Summaries are single lines; none carries a diff,
+    /// a file's content or a tool's output.
+    /// </summary>
+    private static ToolCall? DescribeToolCall(string? itemType, JsonObject item)
+    {
+        switch (itemType)
+        {
+            case "commandExecution":
+            {
+                // `command` is the whole command line; the item has no separate arguments. It is
+                // the call's argument, never its name.
+                var command = SingleLine(StringOf(item["command"]));
+                return command.Length == 0
+                    ? new ToolCall(ShellToolName, "Running a shell command", "{}")
+                    : new ToolCall(ShellToolName, $"Running: {command}", command);
+            }
+
+            case "mcpToolCall":
+                return new ToolCall(
+                    StringOf(item["tool"]), $"Using {StringOf(item["tool"]) ?? "mcp tool"}", item["arguments"]?.ToJsonString());
+
+            case "dynamicToolCall":
+                return new ToolCall(
+                    StringOf(item["tool"]), $"Using {StringOf(item["tool"]) ?? "tool"}", item["arguments"]?.ToJsonString());
+
+            case "fileChange":
+            {
+                var paths = DescribeFileChanges(item["changes"] as JsonArray);
+                return paths.Length == 0
+                    ? new ToolCall(EditToolName, "Editing files", "{}", Ready: false)
+                    : new ToolCall(EditToolName, $"Editing {paths}", paths);
+            }
+
+            case "webSearch":
+            {
+                var action = item["action"] as JsonObject;
+                var url = SingleLine(StringOf(action?["url"]));
+                var pattern = SingleLine(StringOf(action?["pattern"]));
+                switch (StringOf(action?["type"]))
+                {
+                    case "openPage" when url.Length > 0:
+                        return new ToolCall(WebSearchToolName, $"Opening page: {url}", url);
+                    case "findInPage" when pattern.Length > 0:
+                        return new ToolCall(
+                            WebSearchToolName,
+                            url.Length > 0 ? $"Finding in page: \"{pattern}\" in {url}" : $"Finding in page: \"{pattern}\"",
+                            pattern);
+                }
+
+                var query = SingleLine(StringOf(item["query"]));
+                if (query.Length == 0 && action?["queries"] is JsonArray queries)
+                    query = string.Join("; ", queries.Select(q => SingleLine(StringOf(q))).Where(q => q.Length > 0));
+                return query.Length == 0
+                    ? new ToolCall(WebSearchToolName, "Searching web", "{}", Ready: false)
+                    : new ToolCall(WebSearchToolName, $"Searching web: \"{query}\"", query);
+            }
+
+            case "collabAgentToolCall":
+            {
+                var tool = StringOf(item["tool"]) ?? "call";
+                var prompt = StringOf(item["prompt"]);
+                var args = new JsonObject { ["tool"] = tool };
+                if (StringOf(item["model"]) is { Length: > 0 } model)
+                    args["model"] = model;
+                if (!string.IsNullOrEmpty(prompt))
+                    args["prompt"] = prompt;
+
+                var brief = SingleLine(prompt);
+                if (brief.Length > AgentPromptSummaryChars)
+                    brief = brief[..TextTruncation.SafeCutIndex(brief, AgentPromptSummaryChars)] + "...";
+                return new ToolCall(
+                    AgentToolName,
+                    brief.Length == 0 ? $"Agent {tool}" : $"Agent {tool}: {brief}",
+                    args.ToJsonString(RelaxedJson));
+            }
+
+            case "imageView":
+            {
+                var path = SingleLine(StringOf(item["path"]));
+                return path.Length == 0
+                    ? new ToolCall(ImageViewToolName, "Viewing an image", "{}")
+                    : new ToolCall(ImageViewToolName, $"Viewing image {path}", path);
+            }
+
+            case "imageGeneration":
+                return new ToolCall(ImageGenerationToolName, "Generating an image", "{}");
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// The paths of a <c>fileChange</c> item's <c>changes</c> (<c>FileUpdateChange</c>: path, kind,
+    /// diff), comma-separated, each marked when it is added, deleted or moved. Never the diff.
+    /// </summary>
+    private static string DescribeFileChanges(JsonArray? changes)
+    {
+        if (changes is null)
+            return "";
+
+        var paths = new List<string>();
+        foreach (var change in changes)
+        {
+            if (change is not JsonObject entry)
+                continue;
+            var path = SingleLine(StringOf(entry["path"]));
+            if (path.Length == 0)
+                continue;
+
+            var kind = entry["kind"] as JsonObject;
+            var moved = SingleLine(StringOf(kind?["move_path"]));
+            paths.Add((StringOf(kind?["type"]) ?? StringOf(entry["kind"])) switch
+            {
+                "add" => $"{path} (new)",
+                "delete" => $"{path} (deleted)",
+                _ when moved.Length > 0 => $"{path} → {moved}",
+                _ => path,
+            });
+        }
+
+        return string.Join(", ", paths);
+    }
+
+    /// <summary>The item kinds reported on completion when their start was not: they may start with nothing to show.</summary>
+    private static bool IsReportedLate(string? itemType) =>
+        itemType is "fileChange" or "webSearch" or "collabAgentToolCall" or "imageView" or "imageGeneration";
+
+    private static string? ItemId(JsonObject item) =>
+        StringOf(item["id"]) is { Length: > 0 } id ? id : null;
+
+    /// <summary>The node's string, or null when it is absent or not a string.</summary>
+    private static string? StringOf(JsonNode? node) =>
+        node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
+
+    private static string SingleLine(string? text) =>
+        string.IsNullOrEmpty(text) ? "" : text.ReplaceLineEndings(" ").Trim();
 
     private AgentProgress? BuildItemCompletedProgress(JsonObject @params)
     {
@@ -1379,11 +1545,24 @@ public sealed class CodexExecutor : IAgentExecutor
             return null;
         }
 
+        // A tool item whose start was not reported — it started with nothing to show, or its
+        // start never arrived — is reported now, with what the completed item carries.
+        if (item is not null && IsReportedLate(itemType)
+            && ItemId(item) is { } id && !_reportedToolItems.Contains(id)
+            && DescribeToolCall(itemType, item) is { } late)
+        {
+            return ReportToolCall(itemType, item, late);
+        }
+
+        // Every reported tool item ends in a tool_result, as the first three kinds always did.
+        // The kinds without output text carry their final status, or nothing.
         var text = itemType switch
         {
             "commandExecution" => item?["aggregatedOutput"]?.GetValue<string>() ?? "",
             "mcpToolCall" => ExtractMcpToolResultText(item),
             "dynamicToolCall" => ExtractDynamicToolResultText(item),
+            "fileChange" or "collabAgentToolCall" or "imageGeneration" => StringOf(item?["status"]) ?? "",
+            "webSearch" or "imageView" => "",
             _ => null,
         };
 
@@ -1403,7 +1582,7 @@ public sealed class CodexExecutor : IAgentExecutor
         if (@params["turn"] is not JsonObject turn)
         {
             _currentTurnAssistantText = "";
-            _pendingNarration = null;
+            ResetTurnItems();
             CompleteUsage(null);
             return new AgentProgress
             {
@@ -1421,7 +1600,7 @@ public sealed class CodexExecutor : IAgentExecutor
             ? ExtractAssistantText(turn)
             : _currentTurnAssistantText;
         _currentTurnAssistantText = "";
-        _pendingNarration = null;
+        ResetTurnItems();
         var durationMs = turn["durationMs"]?.GetValue<int?>() ?? 0;
         CompleteUsage(turn);
         var stats = _lastTurnUsage is null
@@ -1630,7 +1809,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 if (method == "turn/completed")
                 {
                     _currentTurnAssistantText = "";
-                    _pendingNarration = null;
+                    ResetTurnItems();
                     // An interrupted turn still reached its own terminal: it gets its row.
                     CompleteUsage(@params["turn"] as JsonObject);
                     return DrainOutcome.Completed;
@@ -1678,7 +1857,7 @@ public sealed class CodexExecutor : IAgentExecutor
         // No terminal arrived: the turn gets no row.
         _usageTurn = null;
         _currentTurnAssistantText = "";
-        _pendingNarration = null;
+        ResetTurnItems();
         _messageCount = 0;
     }
 

@@ -37,7 +37,7 @@ internal static class ScenarioRunner
     /// </summary>
     public static readonly IReadOnlyList<string> GapScenarios = ["G1", "G2"];
 
-    /// <summary>Codex-only: the <c>commandExecution</c> → <c>ToolName</c> leak.</summary>
+    /// <summary>Codex-only: a <c>commandExecution</c> reaches the client as the <c>shell</c> tool name and nothing else.</summary>
     public const string CodexLeakScenario = "G3";
 
     /// <summary>Every (provider, scenario) pair the mapping tests assert.</summary>
@@ -578,31 +578,40 @@ internal static class ScenarioRunner
     }
 
     /// <summary>
-    /// G3 — Codex's <c>ToolName</c> is not a tool name. For <c>commandExecution</c> it is the
-    /// executed shell command, and <c>ProtocolSanitizer.BoundToolName</c> only BOUNDS it to 64
-    /// UTF-16 units — it does not classify it. The protocol doc states that only the tool name
-    /// leaves the runtime and arguments never do; on this path that invariant is satisfied in
-    /// letter and violated in substance.
+    /// G3 — a Codex <c>commandExecution</c> is a <c>shell</c> call. Its <c>command</c> is the whole
+    /// command line and is the call's argument: it stays in the runtime, and the client receives
+    /// the tool name only.
     ///
-    /// <para>This row PINS the leak so a later fix flips a red test rather than silently changing
-    /// behaviour. Fixing it here is forbidden (MUST NOT #6).</para>
+    /// <para>The row was <c>leaky</c> while <c>ToolName</c> held the command itself:
+    /// <c>ProtocolSanitizer.BoundToolName</c> only bounds a name to 64 UTF-16 units, so the client
+    /// received the first 64 characters of a real command (#287).</para>
     /// </summary>
     private static async Task<ScenarioObservation> CommandExecutionToolNameAsync(CancellationToken ct)
     {
-        var (frames, progress) = await ReplayAsync(CapabilityMatrix.Codex, "command-execution-turn", ct);
+        const string fixture = "command-execution-turn";
+        var (frames, progress) = await ReplayAsync(CapabilityMatrix.Codex, fixture, ct);
+
+        var command = ProviderFrameReplay.ReadCodexFrames(FixtureName(CapabilityMatrix.Codex, fixture))
+            .Select(frame => frame["params"]?["item"] as JsonObject)
+            .First(item => item?["type"]?.GetValue<string>() == "commandExecution")!["command"]!.GetValue<string>();
+        Assert.True(command.Length > ProtocolLimits.MaxToolNameChars,
+            "The fixture command must exceed the 64-unit bound, or its absence below proves less than it should.");
 
         var toolUse = Assert.Single(progress, p => p.EventType == "tool_use");
-        var command = toolUse.ToolName!;
-        Assert.True(command.Length > ProtocolLimits.MaxToolNameChars,
-            "The fixture command must exceed the 64-unit bound, or the truncation assertion proves nothing.");
+        Assert.Equal("shell", toolUse.ToolName);
+        // The command is still what the chat shows: as the call's argument.
+        Assert.Equal(command, toolUse.ToolArgs);
 
         var events = await ProjectAsync(progress, ct);
         var toolProgress = Assert.Single(
             events, e => e.Kind == ConversationEventKind.TurnProgress
                          && e.PayloadAs<TurnProgressPayload>()?.Activity == ProgressActivity.Tool);
 
-        var clientVisible = toolProgress.PayloadAs<TurnProgressPayload>()!.ToolName;
-        Assert.Equal(command[..ProtocolLimits.MaxToolNameChars], clientVisible);
+        Assert.Equal("shell", toolProgress.PayloadAs<TurnProgressPayload>()!.ToolName);
+        // Nothing of the command reaches the client: not its first word, not a path.
+        var payload = toolProgress.Payload!.ToJsonString();
+        Assert.DoesNotContain("grep", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("/workspace", payload, StringComparison.Ordinal);
 
         return Observe(frames, [toolUse], [toolProgress]);
     }

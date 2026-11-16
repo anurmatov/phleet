@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { configSaveBody } from './agentConfigSave.ts'
 import { DEFAULT_CREATE_FORM, createAgentBody } from './agentCreate.ts'
 import { agentNamesFromList } from './agentList.ts'
+import { FRESH_SESSION, reprovisionBody } from './reprovision.ts'
 import type { AgentConfig, AgentState, ConfigEdits, CreateForm } from './types'
 
 const ORCHESTRATOR = fileURLToPath(new URL('../../Fleet.Orchestrator/', import.meta.url))
@@ -225,4 +226,24 @@ test('the New Agent dialog sends only fields the create route accepts', () => {
     assert.deepEqual(unknownKeys(Object.keys(create.body), accepted), [], name)
   }
   assert.ok(accepted.has('localBaseUrl') && accepted.has('contextWindow'))
+})
+
+test('a reprovision asks for a new session in the field the routes read and the word the agent side defines', () => {
+  // Resuming sends no body at all: the request every caller sent before the choice existed.
+  assert.equal(reprovisionBody(false), undefined)
+
+  const body = reprovisionBody(true)
+  assert.deepEqual(body, { session: 'fresh' })
+
+  const route = sourceWith('record ReprovisionRequest(')
+  const parameters = /record ReprovisionRequest\(([^)]*)\)/.exec(route)
+  assert.ok(parameters, 'could not read record ReprovisionRequest')
+  const accepted = splitTopLevel(parameters[1]).map(p => camel(p.split(/\s+/).pop()!))
+  assert.deepEqual(Object.keys(body!), accepted)
+
+  // One definition of the word, shared by the orchestrator and the agent.
+  const shared = readFileSync(join(ORCHESTRATOR, '..', 'Fleet.Shared', 'AgentSessionFile.cs'), 'utf8')
+  const fresh = /public const string Fresh = "([^"]+)";/.exec(shared)
+  assert.ok(fresh, 'could not read AgentSessionFile.Fresh')
+  assert.equal(FRESH_SESSION, fresh[1])
 })

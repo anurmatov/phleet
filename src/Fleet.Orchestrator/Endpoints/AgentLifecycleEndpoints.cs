@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Services;
 
@@ -53,10 +54,16 @@ public static class AgentLifecycleEndpoints
 
         // REST: reprovision an agent's container (deprovision + provision from DB config)
         // Optional ?image= query param overrides the DB-configured image (used by CI for PR-specific tags)
+        // Optional session choice (auto | fresh), see ReadSessionChoiceAsync
         app.MapPost("/api/agents/{name}/reprovision", async (string name, HttpRequest request, ContainerProvisioningService provisioning) =>
         {
+            var (session, refusal) = await ReadSessionChoiceAsync(request);
+            if (refusal is not null) return refusal;
+
             var imageOverride = request.Query["image"].FirstOrDefault();
-            var result = await provisioning.ReprovisionAsync(name, imageOverride);
+            var result = await provisioning.ReprovisionAsync(name, imageOverride, session: session);
+            if (result.Failure == ProvisionFailure.InvalidSessionChoice)
+                return Results.BadRequest(new { error = result.Message });
             return result.Success
                 ? Results.Ok(new { message = result.Message })
                 : Results.Problem(result.Message);
@@ -64,10 +71,16 @@ public static class AgentLifecycleEndpoints
 
         // REST: bulk reprovision all currently running agents
         // Optional ?image= query param overrides the image for all agents (e.g. bulk image upgrade)
+        // Optional session choice (auto | fresh) applies to every agent it reprovisions
         app.MapPost("/api/agents/reprovision-running", async (HttpRequest request, ContainerProvisioningService provisioning) =>
         {
+            var (session, refusal) = await ReadSessionChoiceAsync(request);
+            if (refusal is not null) return refusal;
+
             var imageOverride = request.Query["image"].FirstOrDefault();
-            var results = await provisioning.ReprovisionRunningAsync(imageOverride);
+            var results = await provisioning.ReprovisionRunningAsync(imageOverride, session);
+            if (results is [{ Failure: ProvisionFailure.InvalidSessionChoice } refused])
+                return Results.BadRequest(new { error = refused.Message });
 
             var failed = results.Where(r => !r.Success).ToList();
             return failed.Count == 0
@@ -88,6 +101,38 @@ public static class AgentLifecycleEndpoints
 
         return app;
     }
+
+    /// <summary>
+    /// The session choice a reprovision request carries: <c>session</c> in a JSON body, or
+    /// <c>?session=</c> beside <c>?image=</c>. No body, an empty one and an object without the field
+    /// mean no choice, which is every request from before the choice existed. Whether the word is
+    /// one of the two is the service's check; this refuses only a request that cannot be read, so
+    /// that a choice the caller tried to make is never dropped in silence.
+    /// </summary>
+    private static async Task<(string? Session, IResult? Refusal)> ReadSessionChoiceAsync(HttpRequest request)
+    {
+        static (string?, IResult?) Refuse(string message) => (null, Results.BadRequest(new { error = message }));
+
+        string? fromBody = null;
+        using (var reader = new StreamReader(request.Body, leaveOpen: true))
+        {
+            var text = await reader.ReadToEndAsync(request.HttpContext.RequestAborted);
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                try { fromBody = JsonSerializer.Deserialize<ReprovisionRequest>(text, JsonSerializerOptions.Web)?.Session; }
+                catch (JsonException) { return Refuse("the request body must be a JSON object, and session a string"); }
+            }
+        }
+
+        var fromQuery = request.Query.TryGetValue("session", out var values) ? values.ToString() : null;
+        if (fromQuery is not null && fromBody is not null && fromQuery != fromBody)
+            return Refuse("session is given in the query and in the body with different values");
+
+        return (fromQuery ?? fromBody, null);
+    }
 }
 
 internal sealed record RestartWithVersionRequest(string InstructionName, int VersionNumber, bool? Pin);
+
+/// <summary>The optional body of the two reprovision routes. <c>Session</c> is <c>auto</c> or <c>fresh</c>.</summary>
+internal sealed record ReprovisionRequest(string? Session);

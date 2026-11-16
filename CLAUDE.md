@@ -69,6 +69,31 @@ are byte-identical to what the script's former inline Node and Python wrote (`Sc
 only as the reference) beside the current one to prove it; change the output only on purpose, with
 that harness updated.
 
+### Reprovision and the session choice
+
+A reprovision keeps the agent's workspace, and with it the agent's session file
+(`Fleet.Shared.AgentSessionFile`, `.fleet/session.json` under the agent's `WorkDir`), so the new
+container may resume the provider session. A request may ask for a new one instead: `session` is
+`auto` (the default) or `fresh` on `POST /api/agents/{name}/reprovision` and
+`POST /api/agents/reprovision-running` (JSON body `{"session":"fresh"}` or `?session=fresh`, beside
+`?image=`) and on the MCP tool `reprovision_agent`. Any other value is a 400 (the tool's `✗` answer)
+and nothing is touched. `fresh` makes `ContainerProvisioningService.ReprovisionAsync` remove the file
+(`SessionFileRemoval`, the host side of the `/workspace` mount) after the old container is removed and
+before the new one is created. A missing file is success. A file that cannot be removed fails the
+reprovision with `session_file_not_removed` and no new container is started: the agent is down until
+the next reprovision, because starting it would resume the session the caller asked to end.
+
+Creating an agent removes the file too (`AgentCreator.DescribeInheritedSessionFaultAsync`, the last
+step before the row is saved, on `POST /api/agents` and `create_agent`): a deleted agent's workspace
+stays on disk, and a new agent with the same container name must not resume its conversation. A file
+that cannot be removed refuses the creation (500, the tool's fault sentence; no row). A container
+name another stored agent uses is that agent's workspace and is left alone.
+
+MUST NOT: store the choice (it belongs to one request); remove the file while a container of the
+agent exists (the agent would write it again); remove it on any other path. Restart with an
+instruction version, deprovision, provision and delete leave the file alone, so `provision_agent`
+after `deprovision_agent` keeps the session.
+
 ## Provider Summary
 
 | Provider | Auth | Process model | System prompt delivery | MCP transport |

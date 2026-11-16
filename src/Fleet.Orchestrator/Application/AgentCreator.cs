@@ -235,6 +235,14 @@ public sealed class AgentCreator(
         // A co-cto created while no other exists becomes the fleet's CTO agent.
         var isFirstCoCto = isCoCto && !await db.Agents.AnyAsync(a => a.Role.ToLower() == "co-cto", ct);
 
+        // The last refusal, and the only one that changes anything: a deleted agent's workspace
+        // stays on disk, and a new agent given the same container name takes it over, session file
+        // included. The file goes before the row exists, so no provision of this agent, now or
+        // later through provision_agent, can resume the deleted agent's conversation. If it
+        // cannot be removed, the agent is not created.
+        if (await DescribeInheritedSessionFaultAsync(db, agent, ct) is { } sessionFault)
+            return WriteFaults.Failed(SessionFileRemoval.FaultCode, sessionFault);
+
         db.Agents.Add(agent);
         await db.SaveChangesAsync(ct);
         // Committed: the port is taken. What follows (the memory grant, the registry, the container)
@@ -277,6 +285,30 @@ public sealed class AgentCreator(
         return WriteOutcome<AgentCreated>.Ok(new AgentCreated(
             name, role, model, agent.ContainerName, agent.MemoryLimitMb, agent.HostPort!.Value,
             networks, envRefs, request.Provision, provisionFailure));
+    }
+
+    /// <summary>
+    /// Removes the session file left in the workspace <paramref name="agent"/> is about to take
+    /// over, and returns the fault when it is there and cannot be removed.
+    /// </summary>
+    /// <remarks>
+    /// Here and not in <c>ProvisionAsync</c>: a provision cannot tell a new agent's first container
+    /// from <c>provision_agent</c> after <c>deprovision_agent</c>, which must keep the session. A
+    /// workspace another stored agent uses (the same container name) is that agent's, not a deleted
+    /// one's, and is left alone. Without a base directory there is no workspace to look in, and no
+    /// provision either.
+    /// </remarks>
+    private async Task<string?> DescribeInheritedSessionFaultAsync(OrchestratorDbContext db, Agent agent, CancellationToken ct)
+    {
+        if (ProvisioningOptions.From(configuration).BaseDir is not { } baseDir || string.IsNullOrWhiteSpace(baseDir))
+            return null;
+        if (await db.Agents.AnyAsync(a => a.ContainerName == agent.ContainerName, ct))
+            return null;
+
+        return SessionFileRemoval.Remove(agent, baseDir, logger) is { } fault
+            ? $"{fault} Agent '{agent.Name}' was not created: that file is the session a deleted agent left in this workspace, "
+              + "and the new agent would resume it. Remove the file under the fleet base directory and create the agent again."
+            : null;
     }
 
     /// <summary>

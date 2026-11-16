@@ -16,6 +16,9 @@ namespace Fleet.Agent.Services;
 /// Manages a persistent `claude -p` process with streaming I/O.
 /// Messages are sent via stdin NDJSON; responses stream from stdout.
 /// The process stays alive between tasks, avoiding session replay overhead.
+/// The session outlives it: its id is kept in the session file (<see cref="ProviderSessionFile"/>),
+/// and a later process, in this container or the next, resumes it while the instructions are the
+/// same.
 /// </summary>
 public sealed class ClaudeExecutor : IAgentExecutor
 {
@@ -33,6 +36,26 @@ public sealed class ClaudeExecutor : IAgentExecutor
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly SemaphoreSlim _stdinWriteLock = new(1, 1);
     private string? _lastSessionId;
+
+    // The session, all under the send lock. _session is the one this executor goes back to: set
+    // when a process reports its session, dropped by /reset, /stop and a failed resume. A process
+    // start resumes it, or the one the session file names, only for the same instructions.
+    private readonly ProviderSessionFile _sessionFile;
+    private HeldSession? _session;
+    // SHA-256 of the instructions the current process was started with.
+    private string _instructionsHash = "";
+    // The id the current process was started with (--resume) until that process has reported its
+    // session, which is what shows the resume worked. Null for a new session and afterwards.
+    private string? _unconfirmedResumeId;
+    private bool _resumeIsFromFile;
+    // The current process has reported its session.
+    private bool _sessionReported;
+    // Why the last resume failed: the reason of the new session that follows it, then cleared.
+    private string? _resumeFailure;
+    // A new session has started and no turn has carried PromptAssembler.NewSessionLine yet.
+    private bool _newSessionLinePending;
+    private string? _sessionOrigin;
+
     private int _messageCount;
     private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
     private volatile bool _restartRequested;
@@ -88,6 +111,14 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     public string? LastSessionId => _lastSessionId;
     public DateTimeOffset LastActivity => _lastActivity;
+
+    /// <summary>The session holds the conversation, in this process and across a resume.</summary>
+    public bool KeepsConversation => true;
+
+    public string? SessionOrigin => _sessionOrigin;
+
+    /// <summary>A session and the hash of the instructions it was started with.</summary>
+    private sealed record HeldSession(string Id, string InstructionsHash);
 
     /// <summary>
     /// Returns a snapshot of currently active background (subagent) tasks.
@@ -161,11 +192,16 @@ public sealed class ClaudeExecutor : IAgentExecutor
         _promptBuilder = promptBuilder;
         _usage = usage;
         _harness = harness ?? new AgentHarness(_config, Environment.GetEnvironmentVariable, logger);
+        _sessionFile = new ProviderSessionFile(
+            _config.WorkDir, AgentProviders.Claude,
+            ClaudeLocalModel.IsEnabled(_config.Provider, _config.AnthropicBaseUrl) ? "local" : ProviderSessionFile.Cloud,
+            logger);
     }
 
     /// <summary>
     /// Send a message to the persistent Claude process, streaming progress events.
     /// The process is started automatically if not running, or restarted with --resume if crashed.
+    /// A resume that fails becomes a new session inside this same call (see <see cref="EnsureProcess"/>).
     /// </summary>
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
         string task,
@@ -178,7 +214,8 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         try
         {
-            var message = await BuildUserMessageJsonAsync(task, images, documents, ct);
+            string? message = null;
+            var messageHasNewSessionLine = false;
 
             var attempt = 0;
             UsageTurn? usageTurn = null;
@@ -187,6 +224,15 @@ public sealed class ClaudeExecutor : IAgentExecutor
             {
                 attempt++;
                 EnsureProcess();
+
+                // Built after the start, and again when a failed resume has turned this start into
+                // a new session: only then is it known whether the first-turn line belongs here.
+                if (message is null || _newSessionLinePending && !messageHasNewSessionLine)
+                {
+                    messageHasNewSessionLine = _newSessionLinePending;
+                    message = await BuildUserMessageJsonAsync(
+                        messageHasNewSessionLine ? PromptAssembler.WithNewSessionLine(task) : task, images, documents, ct);
+                }
 
                 // Discard any events buffered between the previous turn and now
                 // (e.g. background subagent task_notification + stale result events).
@@ -227,9 +273,18 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     _pendingNarration = null;
                     usageTurn = _usage?.BeginTurn();
                     await WriteStdinLineAsync(message, ct);
+                    // The session now holds the line, whatever becomes of this turn.
+                    if (messageHasNewSessionLine)
+                        _newSessionLinePending = false;
                 }
-                catch (IOException) when (attempt < 2)
+                catch (IOException) when (attempt < 2 || ResumeIsUnconfirmed)
                 {
+                    if (await AbandonFailedResumeAsync("claude closed its input before reporting the session"))
+                    {
+                        attempt--;
+                        continue;
+                    }
+
                     _logger.LogWarning("Write to stdin failed (attempt {Attempt}), restarting process", attempt);
                     await KillProcessAsync();
                     continue;
@@ -244,6 +299,16 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 {
                     if (read.ProcessExited)
                     {
+                        // A process started with --resume that ends before reporting its session
+                        // did not load it. The session is given up and the same message goes to a
+                        // new one; that start does not count as this turn's one restart.
+                        if (await AbandonFailedResumeAsync("claude exited before reporting the session"))
+                        {
+                            attempt--;
+                            needsRetry = true;
+                            break;
+                        }
+
                         // Process died mid-response
                         if (attempt < 2)
                         {
@@ -267,6 +332,26 @@ public sealed class ClaudeExecutor : IAgentExecutor
                     var evt = read.Event!;
                     var isCurrentTurnResult = read.IsCurrentTurnResult;
                     var progress = read.Progress!;
+
+                    if (evt.Type == "system" && evt.Subtype == "init")
+                        OnSessionReported(evt.SessionId);
+
+                    if (isCurrentTurnResult && ResumeIsUnconfirmed)
+                    {
+                        // An error in place of the init is how the CLI refuses a session it cannot
+                        // load; it is not this turn's answer and is not passed on.
+                        if (progress.IsErrorResult
+                            && await AbandonFailedResumeAsync("claude answered with an error before reporting the session"))
+                        {
+                            attempt--;
+                            needsRetry = true;
+                            break;
+                        }
+                    }
+
+                    // A turn that reached its own result ran in a session, init seen or not.
+                    if (isCurrentTurnResult && !progress.IsErrorResult)
+                        OnSessionReported(evt.SessionId ?? _lastSessionId);
 
                     // Detect max-turns exhaustion: NumTurns == MaxTurns means
                     // Claude used all allocated turns and may have stopped mid-task
@@ -674,15 +759,16 @@ public sealed class ClaudeExecutor : IAgentExecutor
     }
 
     /// <summary>
-    /// Stop the persistent process (used by /reset and shutdown).
-    /// Next call to ExecuteAsync will start a fresh process.
+    /// Stop the persistent process and forget the session (/reset and /stop): the session file is
+    /// removed, so the next call to ExecuteAsync starts a new session, in this container or the next.
     /// </summary>
     public async Task StopProcessAsync()
     {
         await _sendLock.WaitAsync();
         try
         {
-            await StopAndForgetSessionAsync();
+            await StopAsync();
+            ForgetSession();
         }
         finally
         {
@@ -690,25 +776,100 @@ public sealed class ClaudeExecutor : IAgentExecutor
         }
     }
 
+    /// <summary>
+    /// Stops the process for a credential change. The session is kept, so the next process
+    /// resumes it and the conversation goes on under the new credentials.
+    /// </summary>
     public async Task<bool> TryStopProcessAsync()
     {
         if (!await _sendLock.WaitAsync(TimeSpan.Zero))
             return false;
         try
         {
-            await StopAndForgetSessionAsync();
+            await StopAsync();
             return true;
         }
         finally { _sendLock.Release(); }
     }
 
-    /// <summary>Kills the process and drops the session, so the next start is fresh. Send lock held.</summary>
-    private async Task StopAndForgetSessionAsync()
+    /// <summary>Kills the process. The session, in memory and in its file, is left alone. Send lock held.</summary>
+    private async Task StopAsync()
     {
         await KillProcessAsync();
         _messageCount = 0;
         _previousCumulativeStats = null;
+    }
+
+    /// <summary>Drops the session in memory and removes its file. Send lock held.</summary>
+    private void ForgetSession()
+    {
         _lastSessionId = null;
+        _session = null;
+        _unconfirmedResumeId = null;
+        _resumeFailure = null;
+        _sessionOrigin = null;
+        _sessionFile.Remove();
+    }
+
+    /// <summary>True while the current process was started with --resume and has not reported its session.</summary>
+    private bool ResumeIsUnconfirmed => _unconfirmedResumeId is not null && !_sessionReported;
+
+    /// <summary>
+    /// The current process has told which session it runs: its <c>system/init</c>, or failing that
+    /// its first turn's own result. For a process started with --resume this is the proof that the
+    /// session was loaded. The session file is written when what it should say has changed, which
+    /// is the first time a new session's id is known. Send lock held.
+    /// </summary>
+    private void OnSessionReported(string? sessionId)
+    {
+        // No hash means no start of this executor's own decided the session; there is nothing to
+        // bind the id to, so nothing is recorded.
+        if (string.IsNullOrEmpty(sessionId) || _instructionsHash.Length == 0)
+            return;
+
+        if (!_sessionReported)
+        {
+            _sessionReported = true;
+            if (_unconfirmedResumeId is null)
+            {
+                _sessionOrigin = "new";
+            }
+            else if (_resumeIsFromFile)
+            {
+                _sessionOrigin = "resumed";
+                _logger.LogInformation("Claude session resumed: {SessionId}", sessionId);
+            }
+            _unconfirmedResumeId = null;
+        }
+
+        if (_session is { } held && held.Id == sessionId && held.InstructionsHash == _instructionsHash)
+            return;
+
+        _session = new HeldSession(sessionId, _instructionsHash);
+        _sessionFile.Save(sessionId, _instructionsHash);
+    }
+
+    /// <summary>
+    /// Gives up a resume that did not work: the process is killed, the session is forgotten and its
+    /// file removed, and the next start is a new session. Returns false, and does nothing, when the
+    /// current process was not resuming or has already reported its session, so it can run at most
+    /// once per resume and a new session is never abandoned by it. Send lock held.
+    /// </summary>
+    private async Task<bool> AbandonFailedResumeAsync(string why)
+    {
+        if (!ResumeIsUnconfirmed)
+            return false;
+
+        _unconfirmedResumeId = null;
+        _session = null;
+        _resumeFailure = why;
+        _sessionFile.Remove();
+        await KillProcessAsync();
+        // The exit was the resume's, not the harnessExtra start failure (#460); and whatever id the
+        // failed process printed is not a session to go back to.
+        _exitedBeforeInit = false;
+        _lastSessionId = null;
+        return true;
     }
 
     public void RequestRestart()
@@ -804,7 +965,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
     internal AgentProgress ParseProgressForTests(ClaudeStreamEvent evt) => ParseProgress(evt);
 
     internal IReadOnlyList<AgentProgress> ParseAllProgressForTests(ClaudeStreamEvent evt) => ParseAllProgress(evt);
-    internal string BuildArgsForTests(string? resumeSessionId = null) => BuildArgs(resumeSessionId);
+    internal string BuildArgsForTests(string? resumeSessionId = null) =>
+        BuildArgs(resumeSessionId, _promptBuilder.WriteSystemPromptFile());
+    /// <summary>Starts the claude child. Replaced in tests by a stand-in process.</summary>
+    internal Func<ProcessStartInfo, Process?> ProcessStarter { get; set; } = Process.Start;
     internal AgentHarness HarnessForTests => _harness;
     internal bool ExitedBeforeInitForTests => _exitedBeforeInit;
     internal void FallBackIfExitedBeforeInitForTests() => FallBackIfExitedBeforeInit();
@@ -901,6 +1065,11 @@ public sealed class ClaudeExecutor : IAgentExecutor
             {
                 discardedByType[stale.Type] = discardedByType.GetValueOrDefault(stale.Type) + 1;
             }
+            else if (stale.Subtype == "init")
+            {
+                // An init that arrived between turns still says which session the process runs.
+                OnSessionReported(stale.SessionId);
+            }
         }
         EndSegment(RecoveredSegment.Open);
         if (discardedByType.Count > 0)
@@ -992,7 +1161,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
         CloseTurnFlags();
 
         // Process died or first start — clean up old state
-        var resumeId = _lastSessionId;
         _process?.Dispose();
         _process = null;
         _stdin = null;
@@ -1002,7 +1170,10 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
         FallBackIfExitedBeforeInit();
 
-        var args = BuildArgs(resumeId);
+        var systemPromptFile = _promptBuilder.WriteSystemPromptFile();
+        var resumeId = DecideSession(File.ReadAllText(systemPromptFile));
+
+        var args = BuildArgs(resumeId, systemPromptFile);
         _logger.LogInformation("Starting persistent claude process: {Args}", args);
 
         var psi = ProviderChildProcess.CreateStartInfo("claude", _config.WorkDir);
@@ -1025,7 +1196,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
                 _config.Effort == "off" ? "none" : effortArg);
         }
 
-        _process = ProviderChildProcess.Start(Process.Start, psi, "Failed to start claude process");
+        _process = ProviderChildProcess.Start(ProcessStarter, psi, "Failed to start claude process");
 
         _process.StandardInput.AutoFlush = false;
         _stdin = TextWriter.Synchronized(_process.StandardInput);
@@ -1050,6 +1221,60 @@ public sealed class ClaudeExecutor : IAgentExecutor
             _logger.LogInformation("Restarted claude process with --resume {SessionId} (PID {Pid})", resumeId, _process.Id);
         else
             _logger.LogInformation("Started new claude process (PID {Pid})", _process.Id);
+    }
+
+    /// <summary>
+    /// Decides the session of the process about to start and returns the id to pass to --resume, or
+    /// null for a new session. A session is resumed only when it was started with exactly these
+    /// instructions: a resumed session keeps the system prompt it began with and ignores the one
+    /// passed now. The candidate is the session this executor holds, or else the one the session
+    /// file names (the first start in a container, and any start after the held one was dropped).
+    /// </summary>
+    /// <remarks>
+    /// Logs the outcome of a start that consulted the file, without the instructions: a new session
+    /// and why here, a resumed one in <see cref="OnSessionReported"/> once the process has shown it
+    /// loaded the session. A resume that fails is handled by <see cref="AbandonFailedResumeAsync"/>
+    /// and reaches this method again as a new session with that reason.
+    /// </remarks>
+    private string? DecideSession(string instructions)
+    {
+        _instructionsHash = ProviderSessionFile.HashInstructions(instructions);
+        _sessionReported = false;
+        _unconfirmedResumeId = null;
+        _resumeIsFromFile = false;
+
+        string? resumeId = null;
+        string reason;
+        if (_resumeFailure is { } failure)
+        {
+            _resumeFailure = null;
+            reason = $"resume failed: {failure}";
+        }
+        else if (_session is { } held)
+        {
+            if (held.InstructionsHash == _instructionsHash)
+                resumeId = held.Id;
+            reason = "instructions changed";
+        }
+        else
+        {
+            var decision = _sessionFile.Decide(_instructionsHash);
+            resumeId = decision.ResumeId;
+            reason = decision.Reason;
+            _resumeIsFromFile = resumeId is not null;
+        }
+
+        if (resumeId is not null)
+        {
+            _unconfirmedResumeId = resumeId;
+            return resumeId;
+        }
+
+        _session = null;
+        _lastSessionId = null;
+        _newSessionLinePending = true;
+        _logger.LogInformation("Claude session new: {Reason}", reason);
+        return null;
     }
 
     /// <summary>
@@ -1192,7 +1417,7 @@ public sealed class ClaudeExecutor : IAgentExecutor
 
     // --- Argument building ---
 
-    private string BuildArgs(string? resumeSessionId)
+    private string BuildArgs(string? resumeSessionId, string systemPromptFile)
     {
         var sb = new StringBuilder();
 
@@ -1235,7 +1460,6 @@ public sealed class ClaudeExecutor : IAgentExecutor
             sb.Append($"--mcp-config \"{EscapeArg(mcpConfigPath)}\" ");
         }
 
-        var systemPromptFile = _promptBuilder.WriteSystemPromptFile();
         sb.Append($"--append-system-prompt-file \"{EscapeArg(systemPromptFile)}\" ");
 
         // #460: the harness plan's arguments, last. A flag's value is always its own quoted token,

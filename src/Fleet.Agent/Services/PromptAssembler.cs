@@ -25,6 +25,23 @@ public sealed class PromptAssembler
     public const string VoiceTranscriptionMarker =
         "[voice_transcription: whisper; may_contain_errors=true]";
 
+    /// <summary>
+    /// The line the first turn of a NEW provider session starts with, for a provider that keeps
+    /// the conversation (<see cref="IAgentExecutor.KeepsConversation"/>). Such a provider gets no
+    /// recent chat history in its prompts, so this is what tells the model that a request may refer
+    /// to messages it cannot see, and where they are. A resumed session never gets it.
+    ///
+    /// The executor adds it, not this class: whether the session is new is only known once the
+    /// provider process has started, which is after the prompt was built, and a resume that fails
+    /// turns into a new session inside that same start. Fixed wording, no message content.
+    /// </summary>
+    public const string NewSessionLine =
+        "[session: new; earlier messages are not in this session's context; "
+        + "if a request refers to them, read them with the journal tools]";
+
+    /// <summary><paramref name="task"/> with <see cref="NewSessionLine"/> above it.</summary>
+    public static string WithNewSessionLine(string task) => $"{NewSessionLine}\n{task}";
+
     private readonly IAgentExecutor _executor;
 
     public PromptAssembler(IAgentExecutor executor)

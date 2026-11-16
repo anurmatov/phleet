@@ -17,8 +17,10 @@ namespace Fleet.Agent.Services;
 /// <summary>
 /// Manages a persistent <c>codex app-server --listen stdio://</c> process and
 /// speaks the JSON-RPC 2.0 protocol over stdin/stdout.
-/// Warm state is bounded to the lifetime of the current process only: when the
-/// process dies or is restarted, the next task starts a fresh ephemeral thread.
+/// Threads are saved by codex (<c>ephemeral: false</c>) and the current one is named in the
+/// session file (<see cref="ProviderSessionFile"/>): when the process dies, is restarted or the
+/// container is replaced, the next start resumes that thread with <c>thread/resume</c> while the
+/// instructions and the model provider are the same, and starts a new thread otherwise.
 /// </summary>
 public sealed class CodexExecutor : IAgentExecutor
 {
@@ -61,12 +63,26 @@ public sealed class CodexExecutor : IAgentExecutor
     private bool _effortWarningLogged;
 
     private string? _threadId;
+
+    // The session file, and what the last start decided. All under _sendLock.
+    private readonly ProviderSessionFile _sessionFile;
+    // A new thread has started and no turn has carried PromptAssembler.NewSessionLine yet.
+    private bool _newSessionLinePending;
+    private string? _sessionOrigin;
+    // Why the last thread/resume failed when the app-server did not survive it: the reason of the
+    // new thread the next start attempt begins.
+    private string? _resumeFailure;
+    // A thread /reset or /stop turned away from. The next new thread replaces it, and it is then
+    // deleted like any replaced thread.
+    private string? _forgottenThreadId;
+
     private volatile string? _activeTurnId;
     private volatile string? _commandTurnId;
     private ThreadTokenUsageSnapshot? _lastTurnUsage;
 
     // Usage feed: the current turn, the thread's last reported cumulative total for it, and how many
-    // app-server processes have started (a new one is a new thread, so its first row is a reset).
+    // app-server processes have started (a new one's first row is a reset, also when it resumes
+    // the thread: nothing says the totals it reports go on from the ones before).
     private readonly UsageReporter? _usage;
     private UsageTurn? _usageTurn;
     private JsonObject? _usageTotal;
@@ -101,10 +117,16 @@ public sealed class CodexExecutor : IAgentExecutor
     private const int StartupRetryBudget = 3;
     private static readonly TimeSpan InterruptDrainTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan TurnSteerTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ThreadDeleteTimeout = TimeSpan.FromSeconds(5);
 
     public string? LastSessionId => _threadId;
     public DateTimeOffset LastActivity => _lastActivity;
     public bool IsProcessWarm => _process is not null && !_process.HasExited && _messageCount > 0;
+
+    /// <summary>The thread holds the conversation, in this process and across a resume.</summary>
+    public bool KeepsConversation => true;
+
+    public string? SessionOrigin => _sessionOrigin;
 
     /// <summary>
     /// Always returns empty for codex-provider agents. The codex app-server v2 protocol's
@@ -168,6 +190,13 @@ public sealed class CodexExecutor : IAgentExecutor
             _threadModel = bareModel;
         }
         _adapterHost = adapterHost;
+
+        // A thread is resumed only on the model provider it was started on: the id codex is told
+        // (hosted, local), or its own default when it is told none.
+        _sessionFile = new ProviderSessionFile(
+            _config.WorkDir, AgentProviders.Codex,
+            _hostedProvider?.CodexProviderId ?? _localModelProvider ?? ProviderSessionFile.Cloud,
+            logger);
     }
 
     /// <summary>
@@ -246,10 +275,13 @@ public sealed class CodexExecutor : IAgentExecutor
                     await EnsureProcessReadyAsync(ct);
                 }
 
+                // The first turn of a new thread says so; a resumed thread gets nothing extra.
+                var withNewSessionLine = _newSessionLinePending;
                 var startParams = new JsonObject
                 {
                     ["threadId"] = _threadId!,
-                    ["input"] = BuildUserInputs(task, forwardedPaths),
+                    ["input"] = BuildUserInputs(
+                        withNewSessionLine ? PromptAssembler.WithNewSessionLine(task) : task, forwardedPaths),
                 };
                 var codexEffort = FilterEffortForProvider(MapEffortToCodex(_config.Effort));
                 if (codexEffort is not null)
@@ -260,6 +292,8 @@ public sealed class CodexExecutor : IAgentExecutor
                 var response = await SendRequestAsync("turn/start", startParams, ct);
                 var turn = response.RequireObject("turn");
                 turnId = turn.RequireString("id");
+                if (withNewSessionLine)
+                    _newSessionLinePending = false;
                 _activeTurnId = turnId;
                 _turnHasFinalAnswerPhase = false;
                 _lastTurnUsage = null;
@@ -274,7 +308,7 @@ public sealed class CodexExecutor : IAgentExecutor
                 // Catch all RPC errors per G6 mapping table. Session errors trigger a cold
                 // restart so the next task begins with a fresh thread.
                 LogRpcError(ex);
-                if (ex.IsSessionError) RequestRestart();
+                if (ex.IsSessionError) RestartWithNewThread();
                 startupError = ex;
             }
             finally
@@ -450,7 +484,7 @@ public sealed class CodexExecutor : IAgentExecutor
         catch (RpcErrorException ex)
         {
             LogRpcError(ex);
-            if (ex.IsSessionError) RequestRestart();
+            if (ex.IsSessionError) RestartWithNewThread();
             commandError = ex;
         }
         finally
@@ -491,12 +525,29 @@ public sealed class CodexExecutor : IAgentExecutor
 
     public void RequestRestart() => _restartRequested = true;
 
+    /// <summary>
+    /// codex no longer knows the thread: restart, and do not go back to it. Without the removal
+    /// the next start would resume the thread the session file names, which is this one.
+    /// </summary>
+    private void RestartWithNewThread()
+    {
+        _sessionFile.Remove();
+        RequestRestart();
+    }
+
+    /// <summary>
+    /// Stop the app-server and forget the thread (/reset and /stop): the session file is removed,
+    /// so the next start begins a new thread, in this container or the next.
+    /// </summary>
     public async Task StopProcessAsync()
     {
         await _sendLock.WaitAsync();
         try
         {
+            _forgottenThreadId = _threadId ?? _forgottenThreadId;
             await StopInternalAsync();
+            _sessionFile.Remove();
+            _sessionOrigin = null;
         }
         finally
         {
@@ -504,6 +555,10 @@ public sealed class CodexExecutor : IAgentExecutor
         }
     }
 
+    /// <summary>
+    /// Stops the app-server for a credential change. The session file is kept, so the next start
+    /// resumes the thread and the conversation goes on under the new credentials.
+    /// </summary>
     public async Task<bool> TryStopProcessAsync()
     {
         if (!await _sendLock.WaitAsync(TimeSpan.Zero))
@@ -588,14 +643,21 @@ public sealed class CodexExecutor : IAgentExecutor
     // Polls _pendingRequests until a TCS appears, resolves it with the given result, and returns.
     // Use in tests to stand in for a codex app-server answering one JSON-RPC request — turn/steer
     // for the injection tests, initialize and thread/start for the startup ones.
-    internal async Task<bool> WaitAndCompleteNextPendingRequestForTests(JsonObject result, CancellationToken ct = default)
+    internal Task<bool> WaitAndCompleteNextPendingRequestForTests(JsonObject result, CancellationToken ct = default) =>
+        WaitAndAnswerNextPendingRequestAsync(new RpcOutcome(result, null), ct);
+
+    /// <summary>As <see cref="WaitAndCompleteNextPendingRequestForTests"/>, answering with a JSON-RPC error.</summary>
+    internal Task<bool> WaitAndFailNextPendingRequestForTests(JsonObject error, CancellationToken ct = default) =>
+        WaitAndAnswerNextPendingRequestAsync(new RpcOutcome(null, error), ct);
+
+    private async Task<bool> WaitAndAnswerNextPendingRequestAsync(RpcOutcome outcome, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             var pending = Volatile.Read(ref _pendingRequests);
             foreach (var (id, tcs) in pending)
             {
-                if (pending.TryRemove(id, out var found) && found.TrySetResult(new RpcOutcome(result, null)))
+                if (pending.TryRemove(id, out var found) && found.TrySetResult(outcome))
                     return true;
             }
             await Task.Delay(1, ct);
@@ -881,7 +943,7 @@ public sealed class CodexExecutor : IAgentExecutor
         _activeTurnId = null;
         _lastTurnUsage = null;
         _messageCount = 0;
-        // A new app-server is a new thread: its totals start again and its first row is a reset.
+        // A new app-server: its first row is a reset, whether its thread is new or resumed.
         _processGeneration++;
         _usageTurn = null;
         _logger.LogInformation("CodexExecutor: app-server started (pid {Pid})", _process.Id);
@@ -925,53 +987,62 @@ public sealed class CodexExecutor : IAgentExecutor
 
         var systemPromptPath = _promptBuilder.WriteSystemPromptFile();
         var baseInstructions = await File.ReadAllTextAsync(systemPromptPath, ct);
-        var sandboxMode = NormalizeSandboxMode(_config.CodexSandboxMode);
-
-        var startParams = new JsonObject
-        {
-            ["model"] = _threadModel,
-        };
-
-        // codex resolves the local provider's base URL from CODEX_OSS_BASE_URL in the app-server's
-        // environment: set by StartProcessAsync from Agent:CodexOssBaseUrl, else inherited (legacy).
-        if (_localModelProvider is not null)
-            startParams["modelProvider"] = _localModelProvider;
+        var instructionsHash = ProviderSessionFile.HashInstructions(baseInstructions);
 
         // Hosted provider (#335 D3): defined per thread through config overrides, pointed at the
-        // loopback forwarder. No config.toml is written.
+        // loopback forwarder. No config.toml is written. The endpoint and its token are this
+        // process's own, so a resumed thread is given them again, exactly as a new one is.
+        HostedProviderEndpoint? hostedEndpoint = null;
         if (_hostedProvider is not null)
         {
-            var endpoint = await (_adapterHost?.Endpoint ?? throw new InvalidOperationException(
+            hostedEndpoint = await (_adapterHost?.Endpoint ?? throw new InvalidOperationException(
                 $"CodexExecutor: model '{_config.Model}' selects hosted provider '{_hostedProvider.Prefix}', "
                 + "but no loopback adapter is registered (Agent:HostedProvider is false)."))
                 .WaitAsync(ct);
-            startParams["modelProvider"] = _hostedProvider.CodexProviderId;
-            startParams["config"] = BuildHostedProviderConfig(_hostedProvider, endpoint);
         }
 
-        // #382, local provider only. codex derives its auto-compaction threshold from this window,
-        // so Fleet sets no second one; cloud and hosted models keep their model-owned limits.
-        if (_localModelProvider is not null && _config.ContextWindow is int contextWindow)
-            MergeModelContextWindow(startParams, contextWindow);
+        // The start rule: resume the thread the session file names only when it was started with
+        // exactly these instructions on this model provider. A resumed thread keeps the
+        // instructions it began with beside the ones passed now, so changed instructions always
+        // mean a new thread.
+        string? replacedThreadId = _forgottenThreadId;
+        string reason;
+        if (_resumeFailure is { } earlierFailure)
+        {
+            _resumeFailure = null;
+            reason = $"resume failed: {earlierFailure}";
+        }
+        else
+        {
+            var decision = _sessionFile.Decide(instructionsHash);
+            reason = decision.Reason;
+            replacedThreadId = decision.ReplacedId ?? replacedThreadId;
 
-        // #460: the per-mode defaults and harnessExtra, after the keys above so they never win.
-        if (_harness.Plan?.CodexThreadConfig is { } harnessThread)
-            MergeHarnessThreadConfig(startParams, harnessThread);
+            if (decision.ResumeId is { } resumeId)
+            {
+                var failure = await TryResumeThreadAsync(resumeId, baseInstructions, hostedEndpoint, ct);
+                if (failure is null)
+                {
+                    _sessionOrigin = "resumed";
+                    _logger.LogInformation("Codex session resumed: {ThreadId}", _threadId);
+                    return;
+                }
 
-        startParams["cwd"] = _config.WorkDir;
-        startParams["approvalPolicy"] = "never";
-        startParams["sandbox"] = sandboxMode;
-        startParams["serviceName"] = ClientName;
-        startParams["baseInstructions"] = baseInstructions;
-        startParams["ephemeral"] = true;
+                // Never tried again: the file is gone before the new thread is asked for.
+                _sessionFile.Remove();
+                replacedThreadId = resumeId;
+                reason = $"resume failed: {failure}";
+            }
+        }
 
-        var threadResponse = await SendRequestAsync("thread/start", startParams, ct);
+        var threadResponse = await SendRequestAsync(
+            "thread/start", BuildThreadParams(baseInstructions, hostedEndpoint, resumeThreadId: null), ct);
 
         // A codex that ignored the config overrides would silently run the thread on its default
         // provider — with an OpenAI credential this container does not hold. Fail instead.
         if (_hostedProvider is not null)
         {
-            var echoed = threadResponse["modelProvider"] is JsonValue v && v.TryGetValue<string>(out var p) ? p : null;
+            var echoed = EchoedModelProvider(threadResponse);
             if (!string.Equals(echoed, _hostedProvider.CodexProviderId, StringComparison.Ordinal))
                 throw new InvalidOperationException(
                     $"CodexExecutor: thread/start did not echo modelProvider '{_hostedProvider.CodexProviderId}' "
@@ -981,13 +1052,155 @@ public sealed class CodexExecutor : IAgentExecutor
         var thread = threadResponse.RequireObject("thread");
         _threadId = thread.RequireString("id");
         _contextWindowReported = false;
+        _sessionOrigin = "new";
+        _newSessionLinePending = true;
+        _forgottenThreadId = null;
+        _logger.LogInformation("Codex session new: {Reason} (thread {ThreadId})", reason, _threadId);
+
+        // A saved thread is the expectation now: not ephemeral, with a rollout path. One that
+        // codex did not save cannot be resumed, so it is not recorded either.
         var ephemeral = thread["ephemeral"]?.GetValue<bool>() ?? false;
         var path = thread["path"];
-        if (!ephemeral || path is not null && path.GetValueKindSafe() != JsonValueKind.Null)
+        var hasPath = path is not null && path.GetValueKindSafe() != JsonValueKind.Null;
+        if (ephemeral || !hasPath)
         {
             _logger.LogWarning(
                 "CodexExecutor thread/start returned unexpected persistence state (ephemeral={Ephemeral}, path={Path})",
                 ephemeral, path?.ToJsonString());
+        }
+
+        if (!ephemeral)
+            _sessionFile.Save(_threadId, instructionsHash);
+
+        if (replacedThreadId is not null && replacedThreadId != _threadId)
+            await DeleteThreadBestEffortAsync(replacedThreadId, ct);
+    }
+
+    /// <summary>
+    /// The parameters <c>thread/start</c> and <c>thread/resume</c> share: model, model provider,
+    /// the hosted-provider and local-model config overrides, the harness thread config, cwd,
+    /// approval policy, sandbox and base instructions. A resume carries all of them, because a
+    /// thread is resumed in a new app-server that knows none of it, and the hosted provider's
+    /// loopback address and token are new with every agent start.
+    /// </summary>
+    /// <remarks>
+    /// The two differ only in what the protocol defines for one of them: <c>threadId</c> and
+    /// <c>excludeTurns</c> (the answer then leaves out the thread's whole history, which nothing
+    /// here reads) on a resume; <c>serviceName</c> and <c>ephemeral</c> on a start.
+    /// </remarks>
+    internal JsonObject BuildThreadParams(string baseInstructions, HostedProviderEndpoint? hostedEndpoint, string? resumeThreadId)
+    {
+        var threadParams = new JsonObject();
+        if (resumeThreadId is not null)
+            threadParams["threadId"] = resumeThreadId;
+
+        threadParams["model"] = _threadModel;
+
+        // codex resolves the local provider's base URL from CODEX_OSS_BASE_URL in the app-server's
+        // environment: set by StartProcessAsync from Agent:CodexOssBaseUrl, else inherited (legacy).
+        if (_localModelProvider is not null)
+            threadParams["modelProvider"] = _localModelProvider;
+
+        if (_hostedProvider is not null)
+        {
+            threadParams["modelProvider"] = _hostedProvider.CodexProviderId;
+            threadParams["config"] = BuildHostedProviderConfig(_hostedProvider, hostedEndpoint!);
+        }
+
+        // #382, local provider only. codex derives its auto-compaction threshold from this window,
+        // so Fleet sets no second one; cloud and hosted models keep their model-owned limits.
+        if (_localModelProvider is not null && _config.ContextWindow is int contextWindow)
+            MergeModelContextWindow(threadParams, contextWindow);
+
+        // #460: the per-mode defaults and harnessExtra, after the keys above so they never win.
+        if (_harness.Plan?.CodexThreadConfig is { } harnessThread)
+            MergeHarnessThreadConfig(threadParams, harnessThread);
+
+        threadParams["cwd"] = _config.WorkDir;
+        threadParams["approvalPolicy"] = "never";
+        threadParams["sandbox"] = NormalizeSandboxMode(_config.CodexSandboxMode);
+        if (resumeThreadId is null)
+            threadParams["serviceName"] = ClientName;
+        threadParams["baseInstructions"] = baseInstructions;
+        if (resumeThreadId is null)
+            threadParams["ephemeral"] = false;
+        else
+            threadParams["excludeTurns"] = true;
+
+        return threadParams;
+    }
+
+    /// <summary>
+    /// Asks codex to resume <paramref name="threadId"/>. Returns null when the thread is now the
+    /// current one, or why it is not. A refusal by codex and a thread on another model provider
+    /// leave the app-server usable, so the caller starts a new thread in it; when the app-server
+    /// itself fails, the session file is removed here and the failure goes to the start retry,
+    /// whose next attempt then begins a new thread. Either way the resume is asked for once.
+    /// </summary>
+    private async Task<string?> TryResumeThreadAsync(
+        string threadId, string baseInstructions, HostedProviderEndpoint? hostedEndpoint, CancellationToken ct)
+    {
+        JsonObject response;
+        try
+        {
+            response = await SendRequestAsync(
+                "thread/resume", BuildThreadParams(baseInstructions, hostedEndpoint, threadId), ct);
+        }
+        catch (RpcErrorException ex) when (!ex.IsAuthFailure)
+        {
+            return $"thread/resume: {ex.Message}";
+        }
+        catch (Exception ex) when (ex is not RpcErrorException && !ct.IsCancellationRequested)
+        {
+            _sessionFile.Remove();
+            _resumeFailure = $"the app-server failed during thread/resume ({ex.GetType().Name})";
+            throw;
+        }
+
+        // The echo check of thread/start, held on resume: a hosted thread that came back on any
+        // other provider would run with a credential this container does not hold. A local one is
+        // held to it as well whenever codex names the provider.
+        var echoed = EchoedModelProvider(response);
+        if (_hostedProvider is not null
+            && !string.Equals(echoed, _hostedProvider.CodexProviderId, StringComparison.Ordinal))
+        {
+            return $"the thread came back on model provider '{echoed ?? "<none>"}', not '{_hostedProvider.CodexProviderId}'";
+        }
+
+        if (_localModelProvider is not null && echoed is not null
+            && !string.Equals(echoed, _localModelProvider, StringComparison.Ordinal))
+        {
+            return $"the thread came back on model provider '{echoed}', not '{_localModelProvider}'";
+        }
+
+        if ((response["thread"] as JsonObject)?["id"] is not JsonValue id || !id.TryGetValue<string>(out var resumedId))
+            return "thread/resume answered without a thread";
+
+        _threadId = resumedId;
+        _contextWindowReported = false;
+        return null;
+    }
+
+    private static string? EchoedModelProvider(JsonObject threadResponse) =>
+        threadResponse["modelProvider"] is JsonValue v && v.TryGetValue<string>(out var p) ? p : null;
+
+    /// <summary>
+    /// Asks codex to delete a saved thread that a new one has replaced, so saved threads do not
+    /// pile up. Best-effort: bounded, and no outcome of it changes anything else.
+    /// </summary>
+    private async Task DeleteThreadBestEffortAsync(string threadId, CancellationToken ct)
+    {
+        try
+        {
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            bounded.CancelAfter(ThreadDeleteTimeout);
+            await SendRequestAsync("thread/delete", new JsonObject { ["threadId"] = threadId }, bounded.Token);
+            _logger.LogInformation("Codex deleted the replaced thread {ThreadId}", threadId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInformation(
+                "Codex did not delete the replaced thread {ThreadId} ({Error}); it stays saved", threadId, ex.GetType().Name);
         }
     }
 

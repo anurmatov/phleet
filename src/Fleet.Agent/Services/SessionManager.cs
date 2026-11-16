@@ -3,9 +3,15 @@ using System.Collections.Concurrent;
 namespace Fleet.Agent.Services;
 
 /// <summary>
-/// Tracks Claude session IDs per Telegram chat so follow-up messages
-/// can use --resume to continue context.
+/// Remembers, per chat, the session id a session task last reported there.
 /// </summary>
+/// <remarks>
+/// It does not decide what is resumed. One provider process, and so one provider session, serves
+/// every chat of an agent; the executor owns that session's id and the session file
+/// (<see cref="ProviderSessionFile"/>). This map is read in one place, the <c>Session:</c> line of
+/// <c>/status</c>, and only for a provider that reports no session of its own
+/// (<see cref="IAgentExecutor.SessionOrigin"/> null).
+/// </remarks>
 public sealed class SessionManager
 {
     private readonly ConcurrentDictionary<long, string> _sessions = new();

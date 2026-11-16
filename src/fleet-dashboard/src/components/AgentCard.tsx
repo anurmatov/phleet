@@ -9,6 +9,7 @@ import type {
   WorkflowSummary,
 } from '../types'
 import Icon from './Icon'
+import SessionChoice from './SessionChoice'
 import { statusDot, heartbeatAge, formatDuration, formatTime, formatUptime, temporalUiUrl } from '../utils'
 
 interface AgentCardProps {
@@ -40,7 +41,7 @@ interface AgentCardProps {
   onRestartConfirm: () => void
   onRestartCancel: () => void
   onReprovision: () => void
-  onReprovisionConfirm: () => void
+  onReprovisionConfirm: (fresh: boolean) => void
   onReprovisionCancel: () => void
   onStop: () => void
   onStart: () => void
@@ -59,6 +60,26 @@ interface AgentCardProps {
   onCopyContainer: (name: string) => void
   highlightedEntityId: string | null
   onClearHighlight: () => void
+}
+
+/**
+ * The reprovision question. Mounted only while it is asked, so the session choice is back at
+ * "resume" every time the question opens.
+ */
+function ReprovisionConfirm({ agentName, onCancel, onConfirm }: {
+  agentName: string; onCancel: () => void; onConfirm: (fresh: boolean) => void
+}) {
+  const [fresh, setFresh] = useState(false)
+  return (
+    <div className="row-confirm" onClick={e => e.stopPropagation()}>
+      <span className="row-confirm-text">Reprovision <strong>{agentName}</strong>? Container will be recreated.</span>
+      <SessionChoice fresh={fresh} onChange={setFresh} />
+      <div className="row-confirm-actions">
+        <button className="btn btn-s row-confirm-cancel" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-s btn-primary row-confirm-ok" onClick={() => onConfirm(fresh)}>Reprovision</button>
+      </div>
+    </div>
+  )
 }
 
 export function PriorityBadge({ priority }: { priority?: boolean }) {
@@ -234,13 +255,7 @@ export default function AgentCard({
         </div>
       )}
       {rps === 'confirming' && (
-        <div className="row-confirm" onClick={e => e.stopPropagation()}>
-          <span className="row-confirm-text">Reprovision <strong>{agent.agentName}</strong>? Container will be recreated.</span>
-          <div className="row-confirm-actions">
-            <button className="btn btn-s row-confirm-cancel" onClick={onReprovisionCancel}>Cancel</button>
-            <button className="btn btn-s btn-primary row-confirm-ok" onClick={onReprovisionConfirm}>Reprovision</button>
-          </div>
-        </div>
+        <ReprovisionConfirm agentName={agent.agentName} onCancel={onReprovisionCancel} onConfirm={onReprovisionConfirm} />
       )}
       {cs === 'confirming' && (
         <div className="row-confirm" onClick={e => e.stopPropagation()}>

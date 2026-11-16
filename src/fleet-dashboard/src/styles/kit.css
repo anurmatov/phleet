@@ -121,6 +121,10 @@ textarea { resize: vertical; }
   font-size: var(--fs-xs);
   line-height: 1.45;
 }
+/* The one option of a reprovision question: a tick box and its line of help, on their own row. */
+.session-choice { display: flex; flex: 1 1 100%; flex-direction: column; gap: 2px; min-width: 0; }
+.session-choice-label { display: flex; align-items: center; gap: 8px; align-self: flex-start; cursor: pointer; font-size: var(--fs-s); }
+.session-choice .field-hint { margin: 0; }
 .wfd-required { margin-left: 2px; color: var(--danger); }
 .wfd-field-error, .setup-field-error { color: var(--danger); font-size: var(--fs-s); }
 

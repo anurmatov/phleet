@@ -126,3 +126,4 @@ Put /api/push/devices/{deviceId}
 Put /api/repositories/{name}
 Put /api/secret-bindings/{key}
 Put /api/workflow-definitions/{name}
+Get /api/usage

@@ -35,6 +35,7 @@ namespace Fleet.Agent.Services;
 public sealed class GeminiExecutor : IAgentExecutor
 {
     private readonly AgentOptions _config;
+    private readonly UsageReporter? _usage;
     private readonly PromptBuilder _promptBuilder;
     private readonly ILogger<GeminiExecutor> _logger;
 
@@ -63,18 +64,21 @@ public sealed class GeminiExecutor : IAgentExecutor
     internal static readonly TimeSpan KillExitWait = TimeSpan.FromSeconds(10);
 
     public GeminiExecutor(
-        IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger)
-        : this(config, promptBuilder, logger, Process.Start)
+        IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
+        UsageReporter? usage = null)
+        : this(config, promptBuilder, logger, Process.Start, usage: usage)
     {
     }
 
     internal GeminiExecutor(
         IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
         Func<ProcessStartInfo, Process?> processStarter,
-        Func<Process, Task<bool>>? terminate = null)
+        Func<Process, Task<bool>>? terminate = null,
+        UsageReporter? usage = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
+        _usage = usage;
         _logger = logger;
         _processStarter = processStarter;
         _terminate = terminate ?? (process => ProviderChildProcess.KillAndConfirmExitAsync(process, KillExitWait));
@@ -160,6 +164,7 @@ public sealed class GeminiExecutor : IAgentExecutor
         // the full task duration. (_lastActivity is updated on every yielded event, so
         // using it would measure near-zero — last-event-to-exit gap, not task duration.)
         var startTime = DateTimeOffset.UtcNow;
+        var usageTurn = _usage?.BeginTurn();
 
         var accumulator = new StringBuilder();
         var stderrLines = new StringBuilder();
@@ -291,6 +296,9 @@ public sealed class GeminiExecutor : IAgentExecutor
 
             await stderrTask;
             await process.WaitForExitAsync(ct);
+
+            // Both exits are this turn's own terminal; only a turn that never got here has no row.
+            CompleteUsage(usageTurn, model, startTime);
 
             if (process.ExitCode == 0)
             {
@@ -485,6 +493,15 @@ public sealed class GeminiExecutor : IAgentExecutor
     ///
     /// Legacy / defensive fallbacks retained for forward compatibility with CLI schema changes.
     /// </summary>
+    /// <summary>The usage row of a finished CLI run: no tokens or cost, only the duration.</summary>
+    private void CompleteUsage(UsageTurn? turn, string model, DateTimeOffset startTime)
+    {
+        if (turn is null)
+            return;
+        var durationMs = (long)(DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
+        _usage!.Complete(turn, ProviderUsageSnapshot.ForGemini(model, Math.Max(0, durationMs)));
+    }
+
     internal AgentProgress? MapEvent(JsonElement ev, StringBuilder accumulator)
     {
         // Extract the event type (if present).

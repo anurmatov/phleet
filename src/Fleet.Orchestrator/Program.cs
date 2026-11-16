@@ -118,6 +118,17 @@ builder.Services.AddHostedService<EpicDriverWatcherService>();
 // Push notifications to the first-party iOS app (off by default).
 builder.Services.AddPushNotifications(builder.Configuration);
 
+// Usage feed (off by default): the relay forwards agents' usage rows to the receiver, the reader
+// proxies the dashboard's bounded read. Neither client follows a redirect, and neither has the
+// factory's loggers, so no request line is logged.
+builder.Services.AddSingleton<UsageReadiness>();
+builder.Services.AddHttpClient(UsageReadiness.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(10))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false })
+    .RemoveAllLoggers();
+builder.Services.AddSingleton<UsageRelay>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<UsageRelay>());
+builder.Services.AddSingleton<UsageReader>();
+
 // The writers REST routes and MCP tools both call (Application/): one implementation per write.
 builder.Services.AddAgentWrites();
 
@@ -238,6 +249,7 @@ app.MapOutputStyleEndpoints();
 
 // REST: /api/push — device registration for push notifications to the iOS app.
 app.MapPushEndpoints();
+app.MapUsageEndpoints();
 
 // Secret bindings: which .env keys agents hold only as placeholders, and the hosts each may reach.
 app.MapSecretBindingEndpoints();

@@ -104,6 +104,23 @@ Each has its own page. Chat, push notifications, secret placeholders, primary-hu
 - **Primary-human priority**, which puts your messages ahead of routine queued work: [docs/primary-human-priority.md](docs/primary-human-priority.md).
 - **Epic grants**, which let the co-CTO approve gates inside one scope you approved: [docs/epic-grants.md](docs/epic-grants.md).
 - **Human input requests**, exact questions an agent can put to you: [docs/human-input-requests.md](docs/human-input-requests.md).
+- **Usage feed and the Usage page**, token use and provider-reported cost per agent, model and hour: [Usage feed](#usage-feed) below.
+
+### Usage feed
+
+Off by default. When it is on, each agent sends one row for every provider turn that reached its own result, with metadata only and no message text. The orchestrator forwards each row to an external usage receiver, and the dashboard's **Usage** page reads the receiver's bounded summary back. The receiver contract is `POST /api/usage` (`{"rows":[row]}`) and `GET /api/usage?from=&to=&metric=` (at most 168 hours, the top 20 groups, hourly UTC buckets).
+
+| `.env` key | default | orchestrator setting |
+|---|---|---|
+| `USAGE_ENABLED` | `false` | `Usage__Enabled` |
+| `USAGE_RECEIVER_URL` | empty | `Usage__ReceiverUrl`: the receiver's origin only, e.g. `http://usage-receiver:3900` |
+| `USAGE_AUTH_TOKEN` | empty | `Usage__AuthToken`: the receiver's bearer |
+
+- **Turning it on:** set all three, recreate the orchestrator, then reprovision the agents. Agents get only `Usage__Enabled=true`; the receiver address and bearer stay in the orchestrator. Enabled with a URL that is not a plain origin, or with no token, it stays off, logs `usage_misconfigured` once, and the page says it is not configured.
+- **What a row means:** a missing value was not reported and a `0` was reported as zero. Claude and Codex report session totals; each row carries this turn's difference plus the provider's totals (`cum_*`). A row with no comparable earlier turn (first turn, new session, process or model, or a counter that went down) is marked `delta_reset` and kept out of every sum. Gemini reports no tokens or cost. Delivery is best effort: a full queue, a stopped broker or a receiver error drops the row, with no retry.
+- **What the page shows:** recorded turns only, as a provider-reported estimate, not a bill. A partial value is labelled a subtotal with its coverage. The page fetches on load, on a filter change and on Refresh, and never polls.
+- **Rotating the bearer:** set the new token on the receiver and `USAGE_AUTH_TOKEN` together (the Credentials page masks it), then recreate the orchestrator. Until both match, rows are dropped and the page answers `usage_unavailable`. Do not print the token anywhere.
+- **Turning it off:** set `USAGE_ENABLED=false`, recreate the orchestrator and reprovision the agents. The receiver, its schema and the stored rows are untouched.
 
 ## Documentation
 

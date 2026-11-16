@@ -25,6 +25,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { view: 'agents', label: 'Agents', icon: 'agents' },
       { view: 'workflows', label: 'Workflows', icon: 'workflows' },
       { view: 'chat', label: 'Chat', icon: 'chat' },
+      { view: 'usage', label: 'Usage', icon: 'bolt' },
     ],
   },
   {

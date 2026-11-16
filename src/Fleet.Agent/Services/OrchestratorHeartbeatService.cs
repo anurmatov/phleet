@@ -17,6 +17,7 @@ namespace Fleet.Agent.Services;
 /// Routing keys:
 ///   registration.{shortName} — published once on startup
 ///   heartbeat.{shortName}    — published every 30 seconds
+///   usage.{shortName}        — one frozen row per finished provider turn, when usage is on
 ///
 /// Gracefully disables itself when RabbitMQ is not configured or unreachable.
 /// </summary>
@@ -33,9 +34,22 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
     private readonly JournalDrainer? _journal;
     private readonly TurnBindingPublisher? _turnBindings;
     private readonly AgentHarness? _harness;
+    private readonly UsageReporter? _usage;
 
     private IConnection? _connection;
     private IChannel? _channel;
+
+    // Usage rows go out on their own channel of the same connection, so a publish never interleaves
+    // with a heartbeat write on one channel.
+    private IChannel? _usageChannel;
+    private Task? _usageLoop;
+    private readonly CancellationTokenSource _stopping = new();
+
+    /// <summary>How long one usage publish may take before the row is dropped.</summary>
+    internal static readonly TimeSpan UsagePublishDeadline = TimeSpan.FromSeconds(2);
+
+    /// <summary>A row older than this when its turn comes is dropped instead of published.</summary>
+    internal static readonly TimeSpan UsageMaxAge = TimeSpan.FromSeconds(60);
     private Timer? _heartbeatTimer;
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
@@ -46,9 +60,10 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         IFleetConnectionState connectionState,
         ILogger<OrchestratorHeartbeatService> logger,
         JournalDrainer? journal = null, TurnBindingPublisher? turnBindings = null,
-        AgentHarness? harness = null)
+        AgentHarness? harness = null, UsageReporter? usage = null)
     {
         _harness = harness;
+        _usage = usage;
         _journal = journal;
         _turnBindings = turnBindings;
         _agentConfig = agentConfig.Value;
@@ -108,6 +123,12 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
 
             // Immediate heartbeat on state change (task started or completed)
             _taskManager.OnStatusChanged += () => _ = PublishHeartbeatFireAndForgetAsync();
+
+            if (_usage is { Enabled: true })
+            {
+                _usageChannel = await _connection.CreateChannelAsync(cancellationToken: ct);
+                _usageLoop = Task.Run(() => PublishUsageLoopAsync(_usage, _usageChannel, _stopping.Token));
+            }
         }
         catch (Exception ex)
         {
@@ -120,7 +141,53 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
         if (_heartbeatTimer is not null)
             await _heartbeatTimer.DisposeAsync();
 
+        _stopping.Cancel();
+        if (_usageLoop is not null)
+            await _usageLoop.WaitAsync(ct).ContinueWith(_ => { }, TaskScheduler.Default);
+
         await DisposeAsync();
+    }
+
+    /// <summary>
+    /// Publishes queued usage rows one at a time, as frozen, until stopped. Best effort: a row past
+    /// <see cref="UsageMaxAge"/>, or one whose publish fails or takes longer than
+    /// <see cref="UsagePublishDeadline"/>, is dropped and counted by reason, never retried.
+    /// </summary>
+    internal async Task PublishUsageLoopAsync(UsageReporter usage, IChannel channel, CancellationToken stopping)
+    {
+        var routingKey = OrchestratorBroker.AgentKey(OrchestratorBroker.Usage, _agentConfig.ShortName.ToLowerInvariant());
+        var props = new BasicProperties { Expiration = OrchestratorBroker.UsageExpirationMilliseconds };
+        try
+        {
+            await foreach (var row in usage.Rows.ReadAllAsync(stopping))
+            {
+                if (DateTimeOffset.UtcNow - row.FrozenAt > UsageMaxAge)
+                {
+                    usage.RecordDrop("expired");
+                    continue;
+                }
+
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+                deadline.CancelAfter(UsagePublishDeadline);
+                try
+                {
+                    await channel.BasicPublishAsync(
+                        OrchestratorExchange, routingKey, mandatory: false, basicProperties: props,
+                        body: row.Body, cancellationToken: deadline.Token);
+                }
+                catch (OperationCanceledException) when (!stopping.IsCancellationRequested)
+                {
+                    usage.RecordDrop("publish_timeout");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    usage.RecordDrop(ex.GetType().Name);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        {
+        }
     }
 
     private async Task PublishHeartbeatFireAndForgetAsync()
@@ -216,6 +283,8 @@ public sealed class OrchestratorHeartbeatService : IHostedService, IAsyncDisposa
 
     public async ValueTask DisposeAsync()
     {
+        if (_usageChannel is not null)
+            await _usageChannel.CloseAsync();
         if (_channel is not null)
             await _channel.CloseAsync();
         if (_connection is not null)

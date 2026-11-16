@@ -24,6 +24,7 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
     private readonly AgentConfigPublisherService _publisher;
     private readonly IConfiguration _configuration;
     private readonly ILogger<HeartbeatConsumerService> _logger;
+    private readonly UsageRelay? _usageRelay;
 
     private IConnection? _connection;
     private IChannel? _channel;
@@ -36,8 +37,10 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         AgentRegistry registry,
         AgentConfigPublisherService publisher,
         IConfiguration configuration,
-        ILogger<HeartbeatConsumerService> logger)
+        ILogger<HeartbeatConsumerService> logger,
+        UsageRelay? usageRelay = null)
     {
+        _usageRelay = usageRelay;
         _rabbitConfig = rabbitConfig.Value;
         _registry = registry;
         _publisher = publisher;
@@ -117,6 +120,14 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
         if (ea.RoutingKey.StartsWith(OrchestratorBroker.AccessRequest + ".", StringComparison.OrdinalIgnoreCase))
             return HandleAccessRequestAsync(ea);
 
+        // A usage row is never a heartbeat: hand it to the relay as it is, and return at once.
+        // It must not reach the registry, whatever it contains.
+        if (IsUsageKey(ea.RoutingKey))
+        {
+            _usageRelay?.TryEnqueue(ea.RoutingKey, ea.Body);
+            return Task.CompletedTask;
+        }
+
         try
         {
             var json = Encoding.UTF8.GetString(ea.Body.Span);
@@ -138,6 +149,9 @@ public sealed class HeartbeatConsumerService : IHostedService, IAsyncDisposable,
 
         return Task.CompletedTask;
     }
+
+    internal static bool IsUsageKey(string routingKey) =>
+        routingKey.StartsWith(OrchestratorBroker.Usage + ".", StringComparison.Ordinal);
 
     internal static AgentHeartbeat? DeserializeHeartbeat(string json) =>
         JsonSerializer.Deserialize<AgentHeartbeat>(json, HeartbeatJsonOptions);

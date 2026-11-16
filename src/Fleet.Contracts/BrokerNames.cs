@@ -59,6 +59,16 @@ public static class OrchestratorBroker
     /// property: after a minute it describes a state that has passed.
     /// </summary>
     public const string HeartbeatExpirationMilliseconds = "60000";
+
+    /// <summary>
+    /// The routing key prefix of an <see cref="AgentTurnUsage"/> row, followed by
+    /// <c>.{lowercased short name}</c>. It reaches <see cref="HeartbeatQueue"/> through the <c>#</c>
+    /// binding, and the orchestrator hands it to the usage relay before reading any heartbeat.
+    /// </summary>
+    public const string Usage = "usage";
+
+    /// <summary>How long a usage row may wait unconsumed: after a minute it is dropped, never retried.</summary>
+    public const string UsageExpirationMilliseconds = "60000";
 }
 
 /// <summary>

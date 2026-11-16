@@ -53,11 +53,15 @@ public static class AgentHostRegistration
         services.Configure<TtsOptions>(configuration.GetSection(TtsOptions.Section));
         services.Configure<ClientChannelOptions>(configuration.GetSection(ClientChannelOptions.Section));
         services.Configure<ConversationsOptions>(configuration.GetSection(ConversationsOptions.Section));
+        services.Configure<AgentUsageOptions>(configuration.GetSection(AgentUsageOptions.Section));
 
         // Register services
         services.AddSingleton<PromptBuilder>();
         // #460: the harness plan, computed once; the executors apply it and heartbeats report its sha.
         services.AddSingleton<AgentHarness>();
+        // Usage feed (default off): the executors hand it each terminal turn; the heartbeat service
+        // publishes its queue on a channel of its own.
+        services.AddSingleton<UsageReporter>();
         services.AddSingleton<ClaudeExecutor>();
         services.AddSingleton<CodexExecutor>();
         services.AddSingleton<GeminiExecutor>();

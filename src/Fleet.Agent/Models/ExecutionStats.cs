@@ -37,16 +37,58 @@ public sealed class ExecutionStats
         return parts.Count > 0 ? $"({string.Join(" | ", parts)})" : "";
     }
 
-    /// <summary>Returns an HTML &lt;blockquote expandable&gt; block with tool calls, or empty string if none.</summary>
+    /// <summary>The most HTML the tool lines of <see cref="FormatToolBlock"/> may take, before the "..." that marks a cut.</summary>
+    internal const int MaxToolBlockLength = 2000;
+
+    /// <summary>
+    /// Returns an HTML &lt;blockquote expandable&gt; block with tool calls, or empty string if none.
+    /// The lines are capped at <see cref="MaxToolBlockLength"/> characters of HTML. The cap falls
+    /// between two entries, so an entry is shown whole or not at all and an encoded character is
+    /// never split; a "..." line stands for the entries left out. Only a first entry that is
+    /// larger than the cap by itself is cut, and that cut is made in its text before encoding.
+    /// </summary>
     public string FormatToolBlock()
     {
         if (ToolCalls is null or []) return "";
-        var lines = string.Join("\n", ToolCalls.Select(t =>
-            $"{System.Net.WebUtility.HtmlEncode(t.Name)}({System.Net.WebUtility.HtmlEncode(t.Args)})"));
-        const int MaxToolBlockLength = 2000;
-        if (lines.Length > MaxToolBlockLength)
-            lines = lines[..MaxToolBlockLength] + "...";
+
+        var lines = new System.Text.StringBuilder();
+        foreach (var call in ToolCalls)
+        {
+            var entry = $"{System.Net.WebUtility.HtmlEncode(call.Name)}({System.Net.WebUtility.HtmlEncode(call.Args)})";
+            var separator = lines.Length == 0 ? "" : "\n";
+            if (lines.Length + separator.Length + entry.Length > MaxToolBlockLength)
+            {
+                lines.Append(lines.Length == 0
+                    ? EncodeToFit($"{call.Name}({call.Args}", MaxToolBlockLength) + "..."
+                    : "\n...");
+                break;
+            }
+
+            lines.Append(separator).Append(entry);
+        }
+
         return $"\n<blockquote expandable>{lines}</blockquote>";
+    }
+
+    /// <summary>
+    /// The longest prefix of <paramref name="text"/> whose HTML encoding fits in
+    /// <paramref name="maxEncodedLength"/> characters, encoded. The cut is made in the text, never
+    /// in its encoding, and never inside a surrogate pair.
+    /// </summary>
+    private static string EncodeToFit(string text, int maxEncodedLength)
+    {
+        var cut = Math.Min(text.Length, maxEncodedLength);
+        while (cut > 0)
+        {
+            cut = Fleet.Shared.TextTruncation.SafeCutIndex(text, cut);
+            var encoded = System.Net.WebUtility.HtmlEncode(text[..cut]);
+            if (encoded.Length <= maxEncodedLength)
+                return encoded;
+            // One character encodes to at most ten ("&#1114111;" for a surrogate pair's two).
+            cut -= Math.Max(1, (encoded.Length - maxEncodedLength) / 10);
+        }
+
+        return "";
     }
 
     private static string FormatTokens(int tokens)

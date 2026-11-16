@@ -76,12 +76,6 @@ internal sealed class TurnRun(
     /// </summary>
     private const int ToolMessageMaxChars = 4000;
 
-    /// <summary>
-    /// The most a tool call's summary may take in the description handed to
-    /// <see cref="IDispatchHost.RaiseToolUse"/>, which is kept in the persisted chat buffer.
-    /// </summary>
-    private const int ToolUseDescriptionMaxChars = 200;
-
     /// <summary>Tool calls of the executor turn in flight that the chat has not been shown yet, one line each.</summary>
     private readonly List<string> _pendingToolLines = [];
 
@@ -299,7 +293,6 @@ internal sealed class TurnRun(
                 if (!_firstToolLineSent || _pendingToolLines.Count >= ToolLinesPerMessage)
                     await SendToolLinesAsync();
             }
-            _host.RaiseToolUse(chatId, progress.ToolName, TruncateArgs(progress.Summary, ToolUseDescriptionMaxChars));
 
             // Only the tool NAME leaves the runtime. The Telegram line built by ToolLine
             // carries the call's summary and its truncated ARGUMENTS, and reusing it here is

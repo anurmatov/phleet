@@ -4,11 +4,12 @@ using Fleet.Agent.Models;
 namespace Fleet.Agent.Services;
 
 /// <summary>
-/// Buffers the agent's own answers and tool use back into shared conversation context (#277 D-2).
+/// Buffers the agent's own answers back into the chat's message buffer (#277 D-2).
 ///
-/// Two of the three effects <c>AgentTransport</c>'s constructor used to attach, and neither is
-/// Telegram-specific: a cold executor needs this context whatever channel the turn came from. They
-/// moved here so they survive the transport's absence.
+/// One of the effects <c>AgentTransport</c>'s constructor used to attach, and not
+/// Telegram-specific: the buffer is needed whatever channel the turn came from. It moved here so
+/// it survives the transport's absence. Tool calls are not buffered: they are not messages, and
+/// nothing read them.
 ///
 /// <para>
 /// The <c>telegramMessageId</c> question is the reason this component exists separately rather than
@@ -46,7 +47,6 @@ public sealed class CompletionContextBuffer : IDisposable
         _sink = sink;
 
         _taskManager.OnTaskCompleted += OnTaskCompleted;
-        _taskManager.OnToolUse += OnToolUse;
         IsAttached = true;
     }
 
@@ -57,12 +57,8 @@ public sealed class CompletionContextBuffer : IDisposable
     {
         if (!IsAttached) return;
         _taskManager.OnTaskCompleted -= OnTaskCompleted;
-        _taskManager.OnToolUse -= OnToolUse;
         IsAttached = false;
     }
-
-    private void OnToolUse(long chatId, string toolName, string description) =>
-        _groupBehavior.BufferToolUse(chatId, toolName, description);
 
     private void OnTaskCompleted(
         long chatId, string result, string? relaySender, TaskSource source, bool isPartial,

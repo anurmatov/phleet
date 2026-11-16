@@ -149,7 +149,7 @@ public class MessageRouterAllModeImageTests
     [Fact]
     public void PendingBuffer_PhotoWithCaption_ImageStoredCaptionFlowsAsText()
     {
-        // Caption is already in msg.Text / StrippedText (handled by AddAndPersist);
+        // Caption is already in msg.Text / StrippedText (handled by BufferMessage);
         // the image bytes go to the pending buffer.
         var img = new MessageImage(new byte[] { 1 }, "image/jpeg");
         var msg = new IncomingMessage

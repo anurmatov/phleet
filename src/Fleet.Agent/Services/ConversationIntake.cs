@@ -216,9 +216,8 @@ public sealed class ConversationIntake
             if (hints.Length > 0) text = text.Length > 0 ? $"{text}\n{hints}" : hints;
         }
 
-        // Buffer in memory exactly as the DM path does, so a cold executor still gets context.
-        // SaveBuffers skips reserved keys, so this never reaches disk.
-        _groupBehavior.AddAndPersist(runtimeKey, "user", text, replyTo: null);
+        // Buffer in memory exactly as the DM path does: the chat buffer of this conversation.
+        _groupBehavior.BufferMessage(runtimeKey, "user", text, replyTo: null);
 
         // Reuse the existing DM prompt shape rather than inventing one:
         //   telegramMessageId: 0  -> no [telegram_message_id:] tag (ForDm gates on > 0)
@@ -235,7 +234,8 @@ public sealed class ConversationIntake
             chatUsername: null,
             chatFirstName: null,
             isVoiceTranscription: false);
-        // The same prompt for a provider process restarted while this message waits its turn.
+        // The same prompt for a provider process restarted while this message waits its turn
+        // (the same text, for a provider that keeps the conversation).
         var coldStartPrompt = _groupBehavior.BuildDmColdStartTask(
             chatId: runtimeKey,
             taskText: text,

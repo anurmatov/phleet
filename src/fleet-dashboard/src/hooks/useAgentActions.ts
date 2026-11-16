@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { CancelState, ReprovisionAllState, ReprovisionState, RestartState, StopStartState, TaskRecord } from '../types'
 import type { KeyedTimers } from '../reconnect'
 import { apiGet, apiSend, errorMessage } from '../utils'
+import { reprovisionBody } from '../reprovision'
 import { useKeyedStatus } from './useKeyedStatus'
 
 export type DeleteState = 'idle' | 'confirming' | 'deleting' | 'success' | 'error'
@@ -28,7 +29,8 @@ export interface AgentActions {
   reprovisionStates: Record<string, ReprovisionState>
   reprovisionMsg: Record<string, string>
   reprovision: (agentName: string) => void
-  reprovisionConfirm: (agentName: string) => void
+  /** `fresh` asks for a new session; otherwise the agent resumes when it can. */
+  reprovisionConfirm: (agentName: string, fresh: boolean) => void
   reprovisionCancel: (agentName: string) => void
 
   cancelStates: Record<string, CancelState>
@@ -57,8 +59,9 @@ export interface AgentActions {
 
   reprovisionAllState: ReprovisionAllState
   reprovisionAllMsg: string
+  /** Asks; asking again while the question is open gives it its full time back. */
   reprovisionAll: () => void
-  reprovisionAllConfirm: () => void
+  reprovisionAllConfirm: (fresh: boolean) => void
   reprovisionAllCancel: () => void
 }
 
@@ -125,9 +128,9 @@ export function useAgentActions(timers: KeyedTimers, refreshAgents: () => void, 
       .catch((e: unknown) => restarting.settle(agentName, 'error', errorMessage(e), 4000))
   }
 
-  function reprovisionConfirm(agentName: string) {
+  function reprovisionConfirm(agentName: string, fresh: boolean) {
     reprovisioning.set(agentName, 'provisioning', '')
-    apiSend(`${agentUrl(agentName)}/reprovision`, 'POST')
+    apiSend(`${agentUrl(agentName)}/reprovision`, 'POST', reprovisionBody(fresh))
       .then(() => reprovisioning.settle(agentName, 'success', 'Reprovisioning...', 5000))
       .catch((e: unknown) => reprovisioning.settle(agentName, 'error', errorMessage(e), 5000))
   }
@@ -190,9 +193,9 @@ export function useAgentActions(timers: KeyedTimers, refreshAgents: () => void, 
     timers.after('reprovision-all', 5000, () => setReprovisionAllState(s => s === 'confirming' ? 'idle' : s))
   }
 
-  function reprovisionAllConfirm() {
+  function reprovisionAllConfirm(fresh: boolean) {
     setReprovisionAllState('running')
-    apiSend('/api/agents/reprovision-running', 'POST')
+    apiSend('/api/agents/reprovision-running', 'POST', reprovisionBody(fresh))
       .then(() => {
         setReprovisionAllState('success')
         setReprovisionAllMsg('All agents reprovisioning…')

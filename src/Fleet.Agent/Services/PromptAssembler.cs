@@ -8,6 +8,14 @@ namespace Fleet.Agent.Services;
 /// Single source of truth for building task prompts with context.
 /// Replaces scattered context building in GroupBehavior (BuildGroupTask, BuildDmTask,
 /// RunGroupCheckInAsync inline, OnRelayMessage inline).
+///
+/// <para>Recent chat history ("[Recent conversation]", "[Recent group conversation]") is put in
+/// a prompt only for a provider that does not keep the conversation
+/// (<see cref="IAgentExecutor.KeepsConversation"/> false), and for it only when its process is
+/// not warm. A provider that keeps the conversation holds those messages in its session, in this
+/// process and after a resume, so every prompt for it has the form a warm process gets. The
+/// messages a check-in has not shown yet ("New messages since last check-in") are a different
+/// thing, unread tracking, and go to every provider.</para>
 /// </summary>
 public sealed class PromptAssembler
 {
@@ -25,12 +33,32 @@ public sealed class PromptAssembler
     public const string VoiceTranscriptionMarker =
         "[voice_transcription: whisper; may_contain_errors=true]";
 
+    /// <summary>
+    /// The line the first turn of a NEW provider session starts with, for a provider that keeps
+    /// the conversation (<see cref="IAgentExecutor.KeepsConversation"/>). Such a provider gets no
+    /// recent chat history in its prompts, so this is what tells the model that a request may refer
+    /// to messages it cannot see, and where they are. A resumed session never gets it.
+    ///
+    /// The executor adds it, not this class: whether the session is new is only known once the
+    /// provider process has started, which is after the prompt was built, and a resume that fails
+    /// turns into a new session inside that same start. Fixed wording, no message content.
+    /// </summary>
+    public const string NewSessionLine =
+        "[session: new; earlier messages are not in this session's context; "
+        + "if a request refers to them, read them with the journal tools]";
+
+    /// <summary><paramref name="task"/> with <see cref="NewSessionLine"/> above it.</summary>
+    public static string WithNewSessionLine(string task) => $"{NewSessionLine}\n{task}";
+
     private readonly IAgentExecutor _executor;
 
     public PromptAssembler(IAgentExecutor executor)
     {
         _executor = executor;
     }
+
+    /// <summary>The provider already has the conversation: no history block.</summary>
+    private bool HasConversation => _executor.KeepsConversation || _executor.IsProcessWarm;
 
     /// <summary>
     /// Build a prompt for a direct message (DM) task.
@@ -43,18 +71,20 @@ public sealed class PromptAssembler
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
         bool isVoiceTranscription = false) =>
         RenderDm(buffer, taskText, replyToTelegramMessageId, telegramMessageId, isVoiceTranscription,
-            _executor.IsProcessWarm);
+            HasConversation);
 
     /// <summary>
     /// <see cref="ForDm"/> as a provider process that holds no conversation needs it: with the
     /// recent history above the message, whatever the process's state is right now. A message that
     /// may wait in the queue is given both, because the process can be restarted while it waits.
+    /// For a provider that keeps the conversation a restart loses nothing, so this is
+    /// <see cref="ForDm"/>.
     /// </summary>
     public string ForDmColdStart(GroupChatBuffer buffer, string taskText,
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
         bool isVoiceTranscription = false) =>
         RenderDm(buffer, taskText, replyToTelegramMessageId, telegramMessageId, isVoiceTranscription,
-            processWarm: false);
+            processWarm: _executor.KeepsConversation);
 
     private static string RenderDm(GroupChatBuffer buffer, string taskText,
         long? replyToTelegramMessageId, long telegramMessageId, bool isVoiceTranscription, bool processWarm)
@@ -92,14 +122,14 @@ public sealed class PromptAssembler
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
         bool isVoiceTranscription = false) =>
         RenderGroupMessage(buffer, sender, taskText, replyToTelegramMessageId, telegramMessageId,
-            isVoiceTranscription, _executor.IsProcessWarm);
+            isVoiceTranscription, HasConversation);
 
     /// <summary><see cref="ForGroupMessage"/> for a cold provider process. See <see cref="ForDmColdStart"/>.</summary>
     public string ForGroupMessageColdStart(GroupChatBuffer buffer, string sender, string taskText,
         long? replyToTelegramMessageId = null, long telegramMessageId = 0,
         bool isVoiceTranscription = false) =>
         RenderGroupMessage(buffer, sender, taskText, replyToTelegramMessageId, telegramMessageId,
-            isVoiceTranscription, processWarm: false);
+            isVoiceTranscription, processWarm: _executor.KeepsConversation);
 
     private static string RenderGroupMessage(GroupChatBuffer buffer, string sender, string taskText,
         long? replyToTelegramMessageId, long telegramMessageId, bool isVoiceTranscription, bool processWarm)
@@ -150,11 +180,11 @@ public sealed class PromptAssembler
     /// falls back to <c>[channel: relay]</c> for headless/workflow buffers (ChatId == 0).
     /// </summary>
     public string ForCheckIn(GroupChatBuffer buffer, string label, string instruction) =>
-        RenderCheckIn(buffer, label, instruction, _executor.IsProcessWarm);
+        RenderCheckIn(buffer, label, instruction, HasConversation);
 
     /// <summary><see cref="ForCheckIn"/> for a cold provider process. See <see cref="ForDmColdStart"/>.</summary>
     public string ForCheckInColdStart(GroupChatBuffer buffer, string label, string instruction) =>
-        RenderCheckIn(buffer, label, instruction, processWarm: false);
+        RenderCheckIn(buffer, label, instruction, processWarm: _executor.KeepsConversation);
 
     private static string RenderCheckIn(GroupChatBuffer buffer, string label, string instruction, bool processWarm)
     {

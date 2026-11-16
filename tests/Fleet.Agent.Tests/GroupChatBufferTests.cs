@@ -8,83 +8,11 @@ public class GroupChatBufferTests
     public void FormatContext_LegacyReplyTo_DoesNotRenderSender()
     {
         var buffer = new GroupChatBuffer();
-        buffer.LoadEntries([new SerializedEntry("@u", "hi", "untrusted_sender", DateTimeOffset.UtcNow,
-            TelegramMessageId: 7, ReplyToTelegramMessageId: 5)]);
+        buffer.Add("@u", "hi", "untrusted_sender", DateTimeOffset.UtcNow,
+            telegramMessageId: 7, replyToTelegramMessageId: 5);
         const string expected = "[telegram_message_id: 7] [reply_to_message_id: 5] @u: hi";
         Assert.Equal(expected, buffer.FormatContext());
         Assert.Equal(expected, buffer.FormatNewMessages());
-    }
-
-    private static GroupChatBuffer BuildBuffer()
-    {
-        var buffer = new GroupChatBuffer();
-        buffer.Add("alice", "hello world", null, DateTimeOffset.UtcNow, telegramMessageId: 101);
-        buffer.Add("bob", "how are you", null, DateTimeOffset.UtcNow, telegramMessageId: 202);
-        buffer.Add("carol", "doing great", null, DateTimeOffset.UtcNow, telegramMessageId: 303);
-        return buffer;
-    }
-
-    [Fact]
-    public void TryGetByMessageId_ReturnsCorrectSenderAndText_ForEachEntry()
-    {
-        var buffer = BuildBuffer();
-
-        Assert.True(buffer.TryGetByMessageId(101, out var sender, out var text));
-        Assert.Equal("alice", sender);
-        Assert.Equal("hello world", text);
-
-        Assert.True(buffer.TryGetByMessageId(202, out sender, out text));
-        Assert.Equal("bob", sender);
-        Assert.Equal("how are you", text);
-
-        Assert.True(buffer.TryGetByMessageId(303, out sender, out text));
-        Assert.Equal("carol", sender);
-        Assert.Equal("doing great", text);
-    }
-
-    [Fact]
-    public void TryGetByMessageId_ReturnsFalse_ForZeroId()
-    {
-        var buffer = BuildBuffer();
-
-        Assert.False(buffer.TryGetByMessageId(0, out var sender, out var text));
-        Assert.Equal("", sender);
-        Assert.Equal("", text);
-    }
-
-    [Fact]
-    public void TryGetByMessageId_ReturnsFalse_ForNegativeId()
-    {
-        var buffer = BuildBuffer();
-
-        Assert.False(buffer.TryGetByMessageId(-1, out var sender, out var text));
-        Assert.Equal("", sender);
-        Assert.Equal("", text);
-    }
-
-    [Fact]
-    public void TryGetByMessageId_ReturnsFalse_ForUnknownId()
-    {
-        var buffer = BuildBuffer();
-
-        Assert.False(buffer.TryGetByMessageId(999, out var sender, out var text));
-        Assert.Equal("", sender);
-        Assert.Equal("", text);
-    }
-
-    [Fact]
-    public void TryGetByMessageId_ReturnsFalse_ForToolUseEntry()
-    {
-        var buffer = new GroupChatBuffer();
-        // tool_use entries don't carry telegramMessageId — add a regular entry then a tool_use with same id via AddToolUse.
-        // AddToolUse uses default TelegramMessageId=0, so we test via Add with matching id but tool_use type via LoadEntries.
-        buffer.LoadEntries([
-            new SerializedEntry("my-tool", "used something", null, DateTimeOffset.UtcNow, "tool_use", TelegramMessageId: 500),
-        ]);
-
-        Assert.False(buffer.TryGetByMessageId(500, out var sender, out var text));
-        Assert.Equal("", sender);
-        Assert.Equal("", text);
     }
 
     [Fact]
@@ -104,20 +32,32 @@ public class GroupChatBufferTests
         Assert.Equal("carol: no id message", lines[2]);
     }
 
+    /// <summary>
+    /// The buffer holds messages and nothing else. Tool calls were once stored here as entries of
+    /// their own, which nothing read and which pushed real messages out of the ring of 50.
+    /// </summary>
     [Fact]
-    public void FormatContext_ExcludesToolUseEntries_FromOutput()
+    public void TheBuffer_HasNoWayToStoreAToolCall()
+    {
+        var members = typeof(GroupChatBuffer).GetMembers().Select(m => m.Name).ToList();
+
+        Assert.DoesNotContain(members, name => name.Contains("Tool", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            typeof(BufferedMessage).GetProperties().Select(p => p.Name),
+            name => name.Contains("Type", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void TheRing_KeepsTheLastFiftyMessages()
     {
         var buffer = new GroupChatBuffer();
-        buffer.Add("alice", "hello", null, DateTimeOffset.UtcNow, telegramMessageId: 10);
-        buffer.AddToolUse("my-tool", "did something", DateTimeOffset.UtcNow);
-        buffer.Add("bob", "world", null, DateTimeOffset.UtcNow, telegramMessageId: 20);
+        for (var i = 1; i <= 60; i++)
+            buffer.Add("alice", $"m{i}", null, DateTimeOffset.UtcNow);
 
-        var result = buffer.FormatContext();
-        var lines = result.Split('\n');
-
-        Assert.Equal(2, lines.Length);
-        Assert.Equal("[telegram_message_id: 10] alice: hello", lines[0]);
-        Assert.Equal("[telegram_message_id: 20] bob: world", lines[1]);
+        var entries = buffer.GetEntries();
+        Assert.Equal(50, entries.Count);
+        Assert.Equal("m11", entries[0].Text);
+        Assert.Equal("m60", entries[^1].Text);
     }
 
     [Fact]

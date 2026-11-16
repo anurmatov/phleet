@@ -65,7 +65,12 @@ internal sealed class TaskCommands(
 
     internal async Task HandleStatus(long chatId)
     {
-        var session = _sessions.GetSession(chatId) is not null ? "active" : "none";
+        // One provider session serves every chat. A provider that keeps it says how it began:
+        // "resumed" is the session of before the container was replaced, "new" is one started
+        // since. A provider that keeps none is reported per chat, as before.
+        var session = _executor.SessionOrigin is { Length: > 0 } origin
+            ? $"active ({origin})"
+            : _sessions.GetSession(chatId) is not null ? "active" : "none";
         var buildCommit = Environment.GetEnvironmentVariable("FLEET_BUILD_COMMIT") ?? "unknown";
         var msg = $"Agent: {_agentConfig.Name}\nRole: {_agentConfig.Role}\nBuild: {buildCommit}\nProjects: {string.Join(", ", _agentConfig.Projects)}\nSession: {session}";
 

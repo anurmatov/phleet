@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import type { ActiveView, ReprovisionAllState, WsStatus } from '../types'
 import { NAV_GROUPS } from '../navigation'
 import Icon, { type IconName } from './Icon'
+import SessionChoice from './SessionChoice'
 
 declare const __APP_VERSION__: string
 
@@ -17,13 +19,32 @@ interface SidenavProps {
   reprovisionAllState: ReprovisionAllState
   reprovisionAllMsg: string
   onReprovisionAll: () => void
-  onReprovisionAllConfirm: () => void
+  onReprovisionAllConfirm: (fresh: boolean) => void
   onReprovisionAllCancel: () => void
   onNewAgent: () => void
   wsStatus: WsStatus
   lastUpdated: string
   navOpen: boolean
   onNavClose: () => void
+}
+
+/**
+ * The "reprovision every agent?" question. Mounted only while it is asked, so the session choice
+ * is back at "resume" every time. The question withdraws itself after a few seconds; changing the
+ * choice asks again, which gives it its full time back instead of vanishing under the pointer.
+ */
+function ReprovisionAllConfirm({ onStillDeciding, onConfirm, onCancel }: {
+  onStillDeciding: () => void; onConfirm: (fresh: boolean) => void; onCancel: () => void
+}) {
+  const [fresh, setFresh] = useState(false)
+  return (
+    <div className="sidenav-action-confirm">
+      <span className="sidenav-confirm-text">Reprovision every agent?</span>
+      <SessionChoice fresh={fresh} onChange={next => { setFresh(next); onStillDeciding() }} />
+      <button className="btn btn-danger btn-s sidenav-confirm-yes" onClick={() => onConfirm(fresh)}>Yes</button>
+      <button className="btn btn-s sidenav-confirm-no" onClick={onCancel}>No</button>
+    </div>
+  )
 }
 
 /**
@@ -105,11 +126,7 @@ export default function Sidenav({
             </button>
           )}
           {reprovisionAllState === 'confirming' && (
-            <div className="sidenav-action-confirm">
-              <span className="sidenav-confirm-text">Reprovision every agent?</span>
-              <button className="btn btn-danger btn-s sidenav-confirm-yes" onClick={onReprovisionAllConfirm}>Yes</button>
-              <button className="btn btn-s sidenav-confirm-no" onClick={onReprovisionAllCancel}>No</button>
-            </div>
+            <ReprovisionAllConfirm onStillDeciding={onReprovisionAll} onConfirm={onReprovisionAllConfirm} onCancel={onReprovisionAllCancel} />
           )}
           {reprovisionAllState === 'running' && (
             <div className="sidenav-action running">Reprovisioning…</div>

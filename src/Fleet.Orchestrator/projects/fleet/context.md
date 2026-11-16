@@ -184,9 +184,9 @@ REST endpoints:
 - `POST /api/agents/{name}/cancel` — cancel all running tasks on an agent (proxies via container name on Docker network, falls back to host port if no container name)
 - `POST /api/agents/{name}/cancel/{taskId}` — cancel a specific foreground task by bridge taskId. used by `DelegateToAgentActivity` for targeted cancellation
 - `POST /api/agents/{name}/cancel_bg/{taskId}` — cancel a specific background subagent task
-- `POST /api/agents/{name}/reprovision` — deprovision + provision from DB config (optional `?image=` query param for image override)
+- `POST /api/agents/{name}/reprovision` — deprovision + provision from DB config (optional `?image=` query param for image override; optional `session`, as JSON body `{"session":"fresh"}` or `?session=fresh`: `auto` is the default and lets the agent resume its provider session, `fresh` removes the agent's `.fleet/session.json` between the two containers so it starts a new one; any other value is a 400)
 - `POST /api/agents/{name}/restart-with-version` — restart agent with specific instruction version (body: `instructionName`, `versionNumber`, `pin`)
-- `POST /api/agents/reprovision-running` — bulk reprovision all currently running agents (optional `?image=` query param)
+- `POST /api/agents/reprovision-running` — bulk reprovision all currently running agents (optional `?image=` query param; optional `session` as above, applied to every agent it reprovisions)
 - `GET /api/workflows` — active Temporal workflows across all namespaces
 - `GET /api/workflow-types` — merged workflow type registry: hardcoded C# types (with JSON input schemas) + active UWE DB types. used by dashboard `StartWorkflowModal`
 - `POST /api/workflows/start` — start a new Temporal workflow (body: `workflowType`, `namespace`, `taskQueue`, `workflowId?`, `input?`). auto-generates workflowId as `{type}-{timestamp}` if omitted. auth required
@@ -236,10 +236,10 @@ WebSocket: `/ws/logs/{agentName}` — real-time container log streaming (Docker 
 ## orchestrator MCP tools
 
 container lifecycle management (CTO agent only):
-- `create_agent(agent_name, role, model, display_name?, memory_limit_mb?, container_name?, provider?)` — creates a DB record only, no container. use `manage_agent_*` tools to configure, then `provision_agent` to start.
+- `create_agent(agent_name, role, model, display_name?, memory_limit_mb?, container_name?, provider?)` — creates a DB record only, no container. use `manage_agent_*` tools to configure, then `provision_agent` to start. a session file left in that workspace by a deleted agent of the same name is removed, so the new agent never resumes its conversation.
 - `provision_agent(agent_name)` — creates and starts a container from DB config (image, memory, env, binds, networks). fails if container already exists.
 - `deprovision_agent(agent_name)` — stops and removes the container. workspace volume data preserved.
-- `reprovision_agent(agent_name)` — deprovision + provision in sequence. use after config changes (model, tools, memory).
+- `reprovision_agent(agent_name, session?)` — deprovision + provision in sequence. use after config changes (model, tools, memory). the agent resumes its provider session when its provider and instructions are unchanged; `session=fresh` makes it start a new one (it forgets the conversation). `auto` is the default; any other value is refused.
 - `restart_agent_with_version(agent_name, instruction_name, version_number, pin=false)` — reprovision with a specific instruction version. `pin=false` is temporary (next normal reprovision reverts to current DB version). `pin=true` updates `CurrentVersion` in DB making it sticky.
 
 agent management:

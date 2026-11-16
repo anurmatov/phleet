@@ -204,7 +204,7 @@ public sealed class ColdStartPromptTests
         var router = new MessageRouter(agent, telegram, allowlist, manager, groups, relay, commands, NullLogger<MessageRouter>.Instance, sink);
         try
         {
-            groups.AddAndPersist(42, "@synthetic", "the deploy window is thursday", replyTo: null);
+            groups.BufferMessage(42, "@synthetic", "the deploy window is thursday", replyTo: null);
             await manager.StartTask(1, "workflow step", "workflow step", isSessionTask: true, source: TaskSource.Relay);
             await executor.WaitStarted(1);
 

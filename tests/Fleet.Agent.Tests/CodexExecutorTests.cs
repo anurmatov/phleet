@@ -12,8 +12,16 @@ using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent.Tests;
 
-public class CodexExecutorTests
+public partial class CodexExecutorTests
 {
+    /// <summary>A thread as codex answers for one it saved: not ephemeral, with its rollout path.</summary>
+    private static JsonObject SavedThread(string id) => new()
+    {
+        ["id"] = id,
+        ["ephemeral"] = false,
+        ["path"] = $"/home/agent/.codex/sessions/rollout-{id}.jsonl",
+    };
+
     private static CodexExecutor CreateExecutor(
         string attachmentDir = "/workspace/attachments",
         Func<System.Diagnostics.ProcessStartInfo, System.Diagnostics.Process?>? processStarter = null,
@@ -895,7 +903,7 @@ public class CodexExecutorTests
         Assert.Equal("never", (string?)startParams["approvalPolicy"]);
         Assert.Equal("danger-full-access", (string?)startParams["sandbox"]);
         Assert.Equal("phleet", (string?)startParams["serviceName"]);
-        Assert.True((bool?)startParams["ephemeral"]);
+        Assert.False((bool?)startParams["ephemeral"]);
     }
 
     // The regression that matters most: an agent that did not opt in must send the payload it
@@ -923,7 +931,7 @@ public class CodexExecutorTests
         Assert.Equal("never", (string?)startParams["approvalPolicy"]);
         Assert.Equal("danger-full-access", (string?)startParams["sandbox"]);
         Assert.Equal("phleet", (string?)startParams["serviceName"]);
-        Assert.True((bool?)startParams["ephemeral"]);
+        Assert.False((bool?)startParams["ephemeral"]);
     }
 
     // ── #335: hosted providers ──────────────────────────────────────────────
@@ -994,7 +1002,7 @@ public class CodexExecutorTests
         Assert.Equal(workspace.Path, (string?)startParams["cwd"]);
         Assert.Equal("never", (string?)startParams["approvalPolicy"]);
         Assert.Equal("phleet", (string?)startParams["serviceName"]);
-        Assert.True((bool?)startParams["ephemeral"]);
+        Assert.False((bool?)startParams["ephemeral"]);
 
         // D10: the token reaches codex through thread/start only — not its argv, not its
         // environment, not a log line.
@@ -1050,7 +1058,7 @@ public class CodexExecutorTests
             {
                 await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
                 {
-                    ["thread"] = new JsonObject { ["id"] = "thread-1", ["ephemeral"] = true },
+                    ["thread"] = SavedThread("thread-1"),
                     ["modelProvider"] = "openai",
                 }, cts.Token);
             }
@@ -1695,7 +1703,7 @@ public class CodexExecutorTests
             await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
             var threadStart = new JsonObject
             {
-                ["thread"] = new JsonObject { ["id"] = "thread-1", ["ephemeral"] = true },
+                ["thread"] = SavedThread("thread-1"),
             };
             if (echoedProvider is not null)
                 threadStart["modelProvider"] = echoedProvider;
@@ -1722,7 +1730,7 @@ public class CodexExecutorTests
             await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject(), cts.Token);
             await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
             {
-                ["thread"] = new JsonObject { ["id"] = "thread-1", ["ephemeral"] = true },
+                ["thread"] = SavedThread("thread-1"),
             }, cts.Token);
             await executor.WaitAndCompleteNextPendingRequestForTests(new JsonObject
             {
@@ -1793,14 +1801,41 @@ public class CodexExecutorTests
                 CreateNoWindow = true,
             };
             psi.ArgumentList.Add("-c");
-            psi.ArgumentList.Add($"cat > '{_capturePath}'");
+            // Appended, so a second stand-in started by a retry adds to what the first one captured.
+            psi.ArgumentList.Add($"cat >> '{_capturePath}'");
 
             _process = System.Diagnostics.Process.Start(psi)
                 ?? throw new InvalidOperationException($"Failed to start the stand-in app-server '{ShellPath}'.");
             return _process;
         }
 
+        /// <summary>Waits until the stand-in has taken a frame of this method from the executor.</summary>
+        public async Task WaitForMethodAsync(string method, CancellationToken ct)
+        {
+            while (!File.Exists(_capturePath)
+                || !File.ReadAllText(_capturePath).Contains($"\"method\":\"{method}\"", StringComparison.Ordinal))
+            {
+                await Task.Delay(5, ct);
+            }
+        }
+
+        /// <summary>Kills the running stand-in, as an app-server that dies does. What it captured stays.</summary>
+        public void KillCurrent() => _process!.Kill(entireProcessTree: true);
+
         public JsonObject ReadThreadStartParams() => ReadParams("thread/start");
+
+        /// <summary>Every request and notification the executor wrote, in order: method and params.</summary>
+        public IReadOnlyList<(string Method, JsonObject? Params)> ReadFrames()
+        {
+            _process!.StandardInput.BaseStream.Close();
+            _process.WaitForExit(milliseconds: 5000);
+
+            return File.ReadAllLines(_capturePath)
+                .Select(line => JsonNode.Parse(line) as JsonObject)
+                .Where(frame => frame?["method"] is not null)
+                .Select(frame => ((string)frame!["method"]!, frame["params"] as JsonObject))
+                .ToList();
+        }
 
         public JsonObject ReadParams(string method)
         {

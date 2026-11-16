@@ -115,6 +115,37 @@ test('agents: reprovision confirm sends it, and a refusal shows the server\'s re
   await expect(beta.locator('.row-feedback-error')).toContainText('secret_proxy_disabled')
 })
 
+test('agents: reprovision resumes the session unless a new one is ticked, and asks afresh each time', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const alpha = agentRow(page, 'alpha')
+  const choice = alpha.locator('.row-confirm').getByRole('checkbox', { name: 'New session' })
+
+  // The default: the question offers the choice unticked, and the request is the one it always was.
+  await alpha.locator('.agent-row-actions').getByTitle('Reprovision').click()
+  await expect(choice).not.toBeChecked()
+  await expect(alpha.locator('.row-confirm .field-hint'))
+    .toHaveText('A new session forgets the conversation. Changed instructions always start a new session.')
+  await alpha.locator('.row-confirm-ok').click()
+  await expect(alpha.locator('.row-feedback-success')).toHaveText('Reprovisioning...')
+  expect(fleet.writes('POST', '/api/agents/alpha/reprovision').map(c => [c.query, c.body])).toEqual([['', null]])
+
+  // Ticked and then cancelled sends nothing, and the next question is back at resume.
+  const beta = agentRow(page, 'beta')
+  const betaChoice = beta.locator('.row-confirm').getByRole('checkbox', { name: 'New session' })
+  await beta.locator('.agent-row-actions').getByTitle('Reprovision').click()
+  await betaChoice.check()
+  await beta.locator('.row-confirm-cancel').click()
+  expect(fleet.writes('POST', '/api/agents/beta/reprovision')).toHaveLength(0)
+  await beta.locator('.agent-row-actions').getByTitle('Reprovision').click()
+  await expect(betaChoice).not.toBeChecked()
+
+  // Ticked and confirmed asks for a new session.
+  await betaChoice.check()
+  await beta.locator('.row-confirm-ok').click()
+  await expect(beta.locator('.row-feedback-success')).toHaveText('Reprovisioning...')
+  expect(fleet.writes('POST', '/api/agents/beta/reprovision').map(c => [c.query, c.body])).toEqual([['', { session: 'fresh' }]])
+})
+
 test('agents: cancelling a running task asks first', async ({ page }) => {
   const fleet = await open(page, 'agents')
   const beta = agentRow(page, 'beta')
@@ -269,6 +300,37 @@ test('agents: reprovision all asks in the sidenav, then says so and raises an al
   await expect(page.locator('.sidenav-action.success')).toHaveText('All agents reprovisioning…')
   await expect(page.locator('.toast')).toContainText('Reprovision all triggered — agents restarting')
   expect(fleet.writes('POST', '/api/agents/reprovision-running')).toHaveLength(1)
+})
+
+test('agents: reprovision all resumes sessions by default and sends nothing more', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  await page.getByRole('button', { name: 'Reprovision all' }).click()
+  const confirm = page.locator('.sidenav-action-confirm')
+  await expect(confirm.getByRole('checkbox', { name: 'New session' })).not.toBeChecked()
+  await expect(confirm.locator('.field-hint'))
+    .toHaveText('A new session forgets the conversation. Changed instructions always start a new session.')
+  await confirm.locator('.sidenav-confirm-yes').click()
+  await expect(page.locator('.sidenav-action.success')).toHaveText('All agents reprovisioning…')
+  expect(fleet.writes('POST', '/api/agents/reprovision-running').map(c => [c.query, c.body])).toEqual([['', null]])
+})
+
+test('agents: reprovision all with a new session ticked asks every agent for one', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const confirm = page.locator('.sidenav-action-confirm')
+  const choice = confirm.getByRole('checkbox', { name: 'New session' })
+
+  // Ticked and then refused sends nothing, and the next question is back at resume.
+  await page.getByRole('button', { name: 'Reprovision all' }).click()
+  await choice.check()
+  await confirm.locator('.sidenav-confirm-no').click()
+  expect(fleet.writes('POST', '/api/agents/reprovision-running')).toHaveLength(0)
+  await page.getByRole('button', { name: 'Reprovision all' }).click()
+  await expect(choice).not.toBeChecked()
+
+  await choice.check()
+  await confirm.locator('.sidenav-confirm-yes').click()
+  await expect(page.locator('.sidenav-action.success')).toHaveText('All agents reprovisioning…')
+  expect(fleet.writes('POST', '/api/agents/reprovision-running').map(c => [c.query, c.body])).toEqual([['', { session: 'fresh' }]])
 })
 
 test('agents: the log viewer follows the agent\'s stream and closes', async ({ page }) => {

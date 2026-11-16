@@ -59,10 +59,18 @@ public interface IAgentExecutor : IAsyncDisposable
         yield break;
     }
 
-    /// <summary>Stop the running process gracefully.</summary>
+    /// <summary>
+    /// Stop the running process and forget its session: the next start is a new session. This is
+    /// what <c>/reset</c> and <c>/stop</c> mean, so a provider that keeps a session file
+    /// (<see cref="Fleet.Shared.AgentSessionFile"/>) removes it here.
+    /// </summary>
     Task StopProcessAsync();
 
-    /// <summary>Try to stop the process; returns false if it wasn't running.</summary>
+    /// <summary>
+    /// Try to stop the process so the next task starts a new one, as a credential change needs;
+    /// returns false if it could not be stopped now. The session is kept: a provider that can
+    /// resume one does so on that next start.
+    /// </summary>
     Task<bool> TryStopProcessAsync();
 
     /// <summary>Request a process restart on the next execution.</summary>
@@ -79,6 +87,21 @@ public interface IAgentExecutor : IAsyncDisposable
     /// so callers can skip re-sending redundant context.
     /// </summary>
     bool IsProcessWarm { get; }
+
+    /// <summary>
+    /// True when the provider keeps the conversation between turns, in a session that outlives the
+    /// process (Claude, Codex). Prompts for such a provider never carry recent chat history: the
+    /// session already holds it. False for a provider that starts from nothing on every task
+    /// (Gemini), and for an executor that does not say.
+    /// </summary>
+    bool KeepsConversation => false;
+
+    /// <summary>
+    /// How the session in use began: <c>new</c> when this agent started it since its container
+    /// came up, <c>resumed</c> when it was taken over from the session file. Null when there is no
+    /// session yet, and for a provider that keeps none.
+    /// </summary>
+    string? SessionOrigin => null;
 
     /// <summary>Session/resume token from the last execution.</summary>
     string? LastSessionId { get; }

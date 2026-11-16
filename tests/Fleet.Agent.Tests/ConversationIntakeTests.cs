@@ -51,7 +51,8 @@ public class ConversationIntakeTests : IDisposable
         }
     }
 
-    private Harness Build(string token = Token, long ownerUserId = OwnerUserId, bool allowlisted = true)
+    private Harness Build(string token = Token, long ownerUserId = OwnerUserId, bool allowlisted = true,
+        bool keepsConversation = false)
     {
         Directory.CreateDirectory(_historyDir);
 
@@ -70,6 +71,7 @@ public class ConversationIntakeTests : IDisposable
         var rabbitOpts = Options.Create(new RabbitMqOptions());
 
         var executor = Substitute.For<IAgentExecutor>();
+        executor.KeepsConversation.Returns(keepsConversation);
         executor
             .ExecuteAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<MessageImage>?>(),
                 Arg.Any<IReadOnlyList<MessageDocument>?>(), Arg.Any<CancellationToken>())
@@ -525,9 +527,33 @@ public class ConversationIntakeTests : IDisposable
     // ── AC32 / Constraint 25: client text never reaches disk ──────────────────
 
     /// <summary>
-    /// AC32 and Constraint 25. The SaveBuffers filter is mandatory rather than belt-and-braces:
-    /// BufferBotResponse calls SaveBuffers() on every completion, so without it client text would
-    /// be persisted through the completion path regardless of what the intake does.
+    /// A dashboard or phone chat is not Telegram, but its prompt comes from the same assembler and
+    /// the same rule: the earlier messages of the conversation are put above the new one only for
+    /// a provider that keeps no conversation. One that keeps it has them in its session.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AChatPrompt_CarriesRecentHistory_OnlyForAProviderThatKeepsNoConversation(bool keepsConversation)
+    {
+        var harness = Build(keepsConversation: keepsConversation);
+        var open = harness.Intake.Open(OpenPayload());
+        harness.GroupBehavior.BufferMessage(open.RuntimeKey, "user", "an earlier chat message", replyTo: null);
+        harness.GroupBehavior.BufferBotResponse(open.RuntimeKey, "an earlier answer");
+
+        await harness.Intake.SubmitAsync(open.RuntimeKey, "the new message");
+
+        var prompt = await WaitForPromptAsync(harness);
+        Assert.Contains("the new message", prompt);
+        Assert.Equal(!keepsConversation, prompt.Contains("[Recent conversation]", StringComparison.Ordinal));
+        Assert.Equal(!keepsConversation, prompt.Contains("an earlier chat message", StringComparison.Ordinal));
+        Assert.Equal(!keepsConversation, prompt.Contains("an earlier answer", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// AC32 and Constraint 25: client text never reaches disk. It once took a filter in the save
+    /// path to guarantee that, because every completion rewrote the chat history file. No agent
+    /// writes that file any more, so the claim is now simply that it does not exist.
     /// </summary>
     [Fact]
     public async Task ClientText_IsNeverWrittenToTheOnDiskHistory()
@@ -538,32 +564,24 @@ public class ConversationIntakeTests : IDisposable
 
         await harness.Intake.SubmitAsync(open.RuntimeKey, secretish);
 
-        // Force the persistence path the completion handler uses.
+        // The path the completion handler uses.
         harness.GroupBehavior.BufferBotResponse(open.RuntimeKey, "the reply");
 
-        if (File.Exists(harness.HistoryPath))
-        {
-            var onDisk = await File.ReadAllTextAsync(harness.HistoryPath);
-            Assert.DoesNotContain(secretish, onDisk);
-            Assert.DoesNotContain(open.RuntimeKey.ToString(), onDisk);
-        }
+        Assert.False(File.Exists(harness.HistoryPath));
+        Assert.Contains(harness.GroupBehavior.GetGroupBuffer(open.RuntimeKey).GetEntries(), e => e.Text == secretish);
     }
 
     /// <summary>
-    /// The negative control for the test above: a Telegram conversation in the same process is
-    /// still persisted normally, so the filter is scoped to reserved keys rather than having
-    /// disabled persistence outright.
+    /// A Telegram conversation is not written either: the buffers are in memory for every channel.
     /// </summary>
     [Fact]
-    public void TelegramConversations_AreStillPersisted()
+    public void TelegramConversations_AreKeptInMemoryOnly()
     {
         var harness = Build();
 
-        harness.GroupBehavior.AddAndPersist(555L, "user", "an ordinary telegram message", replyTo: null);
+        harness.GroupBehavior.BufferMessage(555L, "user", "an ordinary telegram message", replyTo: null);
 
-        Assert.True(File.Exists(harness.HistoryPath));
-        var onDisk = File.ReadAllText(harness.HistoryPath);
-        Assert.Contains("an ordinary telegram message", onDisk);
-        Assert.Contains("555", onDisk);
+        Assert.False(File.Exists(harness.HistoryPath));
+        Assert.Contains(harness.GroupBehavior.GetGroupBuffer(555L).GetEntries(), e => e.Text == "an ordinary telegram message");
     }
 }

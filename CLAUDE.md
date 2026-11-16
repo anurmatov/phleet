@@ -69,12 +69,37 @@ are byte-identical to what the script's former inline Node and Python wrote (`Sc
 only as the reference) beside the current one to prove it; change the output only on purpose, with
 that harness updated.
 
+### Reprovision and the session choice
+
+A reprovision keeps the agent's workspace, and with it the agent's session file
+(`Fleet.Shared.AgentSessionFile`, `.fleet/session.json` under the agent's `WorkDir`), so the new
+container may resume the provider session. A request may ask for a new one instead: `session` is
+`auto` (the default) or `fresh` on `POST /api/agents/{name}/reprovision` and
+`POST /api/agents/reprovision-running` (JSON body `{"session":"fresh"}` or `?session=fresh`, beside
+`?image=`) and on the MCP tool `reprovision_agent`. Any other value is a 400 (the tool's `✗` answer)
+and nothing is touched. `fresh` makes `ContainerProvisioningService.ReprovisionAsync` remove the file
+(`SessionFileRemoval`, the host side of `/workspace`, `/root/.claude` and `/root/.codex`) after the old container is removed and
+before the new one is created. A missing file is success. A file that cannot be removed fails the
+reprovision with `session_file_not_removed` and no new container is started: the agent is down until
+the next reprovision, because starting it would resume the session the caller asked to end.
+
+Creating an agent removes the file too (`AgentCreator.DescribeInheritedSessionFaultAsync`, the last
+step before the row is saved, on `POST /api/agents` and `create_agent`): a deleted agent's workspace
+stays on disk, and a new agent with the same container name must not resume its conversation. A file
+that cannot be removed refuses the creation (500, the tool's fault sentence; no row). A container
+name another stored agent uses is that agent's workspace and is left alone.
+
+MUST NOT: store the choice (it belongs to one request); remove the file while a container of the
+agent exists (the agent would write it again); remove it on any other path. Restart with an
+instruction version, deprovision, provision and delete leave the file alone, so `provision_agent`
+after `deprovision_agent` keeps the session.
+
 ## Provider Summary
 
 | Provider | Auth | Process model | System prompt delivery | MCP transport |
 |----------|------|--------------|----------------------|---------------|
-| claude | OAuth via `~/.claude/.credentials.json` | Persistent process, session resumption | `--append-system-prompt-file` (temp file) | HTTP/SSE + stdio |
-| codex | OAuth via `~/.codex/auth.json` | Persistent `codex app-server --listen stdio://`, JSON-RPC 2.0 over stdio; one ephemeral thread per process | `thread/start` `baseInstructions` (PromptBuilder file contents) | HTTP only, via `~/.codex/config.toml` generated at container start by `prepare config` (stdio skipped) |
+| claude | OAuth via `~/.claude/.credentials.json` | Persistent process; the session is resumed (`--resume`) by a later process or container while the instructions are unchanged | `--append-system-prompt-file` (temp file) | HTTP/SSE + stdio |
+| codex | OAuth via `~/.codex/auth.json` | Persistent `codex app-server --listen stdio://`, JSON-RPC 2.0 over stdio; one saved thread, resumed (`thread/resume`) by a later process or container while the instructions are unchanged | `thread/start` / `thread/resume` `baseInstructions` (PromptBuilder file contents) | HTTP only, via `~/.codex/config.toml` generated at container start by `prepare config` (stdio skipped) |
 | gemini | OAuth via `~/.gemini/oauth_creds.json` (writable bind mount) | Fresh `gemini` CLI per task | `GEMINI_SYSTEM_MD` env var → temp file | HTTP/SSE only (stdio skipped by `prepare config`) |
 
 For gemini setup: run `gemini auth` once on the host, then `./setup.sh` (choose option 3 or 5).
@@ -208,6 +233,54 @@ and the file (view: "not reported"). Cloud model picker: families — Claude `op
 passed through, Codex `sol`/`terra`/`luna` mapped in `HarnessDefaults.CodexModelAliases` (the pinned
 Codex does not resolve them) — plus a **custom…** free-text entry (#465); dated ids keep working, never rewritten. The dashboard dialog is sectioned and shows the effective settings
 and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
+
+## Provider sessions
+
+A Claude or Codex agent keeps its provider session across process and container restarts.
+`ProviderSessionFile` (`src/Fleet.Agent/Services/`) owns `<WorkDir>/.fleet/session.json`
+(`Fleet.Shared.AgentSessionFile.RelativePath`, the one spelling the orchestrator also uses): provider,
+session or thread id, `runsOn` (`cloud`, Claude `local`, or the Codex model provider id) and the SHA-256
+of the exact instructions the session began with (Claude: the `--append-system-prompt-file` content;
+Codex: the `baseInstructions` string). It is written by rename when a new session's id is first known.
+
+**The start rule.** A provider process start resumes the session only when provider, `runsOn` and the
+instructions hash all equal what this start uses; anything else (no file, unreadable file, other
+provider, changed instructions, model running elsewhere) is a new session, and the file is replaced once
+the new id is known. The hash is not an optimisation: measured on the pinned CLIs, a resumed Claude
+session ignores a new system prompt and a resumed Codex thread keeps the old instructions beside the new
+ones. A resume that fails (Claude exits or answers with an error before its `init`; Codex `thread/resume`
+errors, the app-server dies during it, or a hosted thread comes back on another model provider) removes
+the file and becomes a new session inside the same start. One line says which happened:
+`Claude session resumed: …`, `Codex session new: instructions changed (thread …)`, `… new: resume failed: …`.
+
+`/reset` and `/stop` (`IAgentExecutor.StopProcessAsync`) remove the file. A credential change
+(`TryStopProcessAsync`) restarts the process and keeps the session. Codex threads are started
+`ephemeral: false`; `thread/resume` carries everything `thread/start` does (`CodexExecutor.BuildThreadParams`:
+model, model provider, hosted and local `config` overrides, harness thread config, cwd, approval policy,
+sandbox, base instructions) because the hosted forwarder's address and token are new with every agent
+start, and a thread a new one replaced is deleted best-effort (`thread/delete`).
+
+Because the session holds the conversation, `IAgentExecutor.KeepsConversation` is true for Claude and
+Codex and `PromptAssembler` gives them no "[Recent conversation]" or "[Recent group conversation]" block,
+whatever the state of the process. The first turn of a **new** session starts with the one fixed line
+`PromptAssembler.NewSessionLine` (added by the executor, which is where a new session is known; that
+turn is normally the startup ping, and the line then stays in the session); a resumed session gets
+nothing. Check-ins keep "New messages since last check-in": that is unread
+tracking. Gemini keeps no session and still gets its history block. `/status` shows
+`Session: active (new)` or `active (resumed)`.
+
+The chat buffers (`GroupChatBuffer`, `GroupChatBuffers`) are in memory only, for every provider: 50
+messages per chat, for unread tracking, check-ins and Gemini's history block. No agent reads or writes
+`.fleet/chat-history.json`; `GroupBehavior` deletes one left by an earlier version at startup and logs
+it. Tool calls are not buffered and `TaskManager` has no tool-use event.
+
+MUST NOT: resume on any condition weaker than the start rule; retry a failed resume or keep its file;
+log or store the instructions (hash only); put a history block in a Claude or Codex prompt; write the
+chat buffers to disk; store a tool call in a chat buffer.
+
+⚠️ A restart no longer gives a broken conversation a fresh start: a Codex thread stuck over its context
+limit, or any session that fails every turn, is resumed as it is. `/reset`, or a reprovision that asks
+for a new session, is the way out.
 
 ## Project contexts
 

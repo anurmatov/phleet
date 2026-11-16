@@ -153,7 +153,7 @@ export default function AgentsView({
             onRestartConfirm={() => onRestartConfirm(agent.agentName)}
             onRestartCancel={() => onRestartCancel(agent.agentName)}
             onReprovision={() => onReprovision(agent.agentName)}
-            onReprovisionConfirm={() => onReprovisionConfirm(agent.agentName)}
+            onReprovisionConfirm={fresh => onReprovisionConfirm(agent.agentName, fresh)}
             onReprovisionCancel={() => onReprovisionCancel(agent.agentName)}
             onStop={() => onStop(agent.agentName)}
             onStart={() => onStart(agent.agentName)}

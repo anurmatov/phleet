@@ -494,13 +494,24 @@ public sealed class ContainerProvisioningService(
     /// <remarks>
     /// The new container is decided and rendered in full before the old one is touched, so a
     /// refusal for anything in the agent's configuration leaves the old container running.
+    /// <para>
+    /// <paramref name="session"/> is <see cref="AgentSessionFile.Auto"/> (or nothing: the agent
+    /// resumes its provider session when its own rules allow) or <see cref="AgentSessionFile.Fresh"/>:
+    /// the agent's session file is removed between the two containers, so the new one starts a new
+    /// session. Any other value is refused before anything is touched. The choice belongs to this
+    /// one call and is stored nowhere.
+    /// </para>
     /// </remarks>
     public async Task<ProvisionResult> ReprovisionAsync(
         string agentName,
         string? imageOverride = null,
         IReadOnlyDictionary<string, int>? instructionVersionOverrides = null,
+        string? session = null,
         CancellationToken ct = default)
     {
+        if (DescribeSessionChoiceFault(session) is { } sessionChoiceFault)
+            return ProvisionResult.Fail(agentName, sessionChoiceFault) with { Failure = ProvisionFailure.InvalidSessionChoice };
+
         using var held = await _agentOperations.AcquireAsync(agentName, ct);
 
         if (_policy.DescribePrimaryHumanFault() is { } priorityFault)
@@ -549,24 +560,47 @@ public sealed class ContainerProvisioningService(
             }
         }
 
+        // A new session was asked for: no container of this agent is running now, so nothing can
+        // write the file again before the new one reads it. If it cannot be removed the new
+        // container is not started, because it would resume the session the caller asked to end.
+        var fresh = AgentSessionFile.IsFresh(session);
+        if (fresh && SessionFileRemoval.Remove(prepared.Agent, prepared.BaseDir, logger) is { } sessionFault)
+            return ProvisionResult.Fail(agentName, sessionFault);
+
         var provision = await CreateAsync(prepared, ct);
         if (!provision.Success)
             return ProvisionResult.Fail(agentName,
                 $"deprovision succeeded but provision failed: {provision.Message}");
 
-        return ProvisionResult.Ok(agentName, $"reprovision complete — {provision.Message}");
+        return ProvisionResult.Ok(agentName, fresh
+            ? $"reprovision complete (new session) — {provision.Message}"
+            : $"reprovision complete — {provision.Message}");
     }
+
+    /// <summary>
+    /// The refusal for a reprovision's <c>session</c> value that is neither of the two words in
+    /// <see cref="AgentSessionFile"/>, or null.
+    /// </summary>
+    private static string? DescribeSessionChoiceFault(string? session) =>
+        AgentSessionFile.IsValidChoice(session)
+            ? null
+            : $"session_choice_invalid: session must be '{AgentSessionFile.Auto}' or '{AgentSessionFile.Fresh}'";
 
     /// <summary>
     /// Reprovisiones all DB-registered agents whose containers are currently running.
     /// Agents whose containers are not running are skipped.
-    /// An optional imageOverride is applied to every agent (e.g. for bulk image upgrades).
+    /// An optional imageOverride is applied to every agent (e.g. for bulk image upgrades), and so is
+    /// the session choice (see <see cref="ReprovisionAsync"/>); an invalid one reprovisions nothing.
     /// Returns per-agent results.
     /// </summary>
     public async Task<IReadOnlyList<ProvisionResult>> ReprovisionRunningAsync(
         string? imageOverride = null,
+        string? session = null,
         CancellationToken ct = default)
     {
+        if (DescribeSessionChoiceFault(session) is { } sessionChoiceFault)
+            return [ProvisionResult.Fail("(all)", sessionChoiceFault) with { Failure = ProvisionFailure.InvalidSessionChoice }];
+
         // 1. Fetch all enabled agent names + container names from DB
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
@@ -600,7 +634,7 @@ public sealed class ContainerProvisioningService(
                 "Reprovisioning running agent '{Agent}' (container='{Container}')",
                 agent.Name, agent.ContainerName);
 
-            var result = await ReprovisionAsync(agent.Name, imageOverride, null, ct);
+            var result = await ReprovisionAsync(agent.Name, imageOverride, null, session, ct);
             results.Add(result);
         }
 

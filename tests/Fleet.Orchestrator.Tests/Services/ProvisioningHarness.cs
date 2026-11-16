@@ -44,6 +44,9 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
     /// <summary>Whether the fake Docker reports the container as existing (needed to deprovision).</summary>
     public bool ContainerExists { set => _dockerApi.ContainerExists = value; }
 
+    /// <summary>The container names the fake Docker lists as running; unset, the list call is not answered.</summary>
+    public IReadOnlyList<string>? RunningContainers { set => _dockerApi.RunningContainers = value; }
+
     /// <summary>
     /// Runs before the fake Docker answers a call, with the call as <c>METHOD /path</c>. A test uses
     /// it to hold a call open, or to change the database at a known point of a provision.
@@ -132,6 +135,7 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
         public List<(string Network, string Body)> NetworkConnects { get; } = [];
         public bool FailNetworkConnect { get; set; }
         public bool ContainerExists { get; set; }
+        public IReadOnlyList<string>? RunningContainers { get; set; }
         public Func<string, Task>? OnRequest { get; set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -160,6 +164,13 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
                 NetworkConnects.Add((network, request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct)));
                 return new HttpResponseMessage(FailNetworkConnect ? HttpStatusCode.NotFound : HttpStatusCode.OK);
             }
+            if (RunningContainers is { } running && request.Method == HttpMethod.Get && path.EndsWith("/containers/json", StringComparison.Ordinal))
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        System.Text.Json.JsonSerializer.Serialize(running.Select(name => new { Names = new[] { $"/{name}" } })),
+                        System.Text.Encoding.UTF8, "application/json"),
+                };
             if (ContainerExists && request.Method == HttpMethod.Get && path.EndsWith("/json", StringComparison.Ordinal))
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {

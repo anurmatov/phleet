@@ -56,6 +56,8 @@ public enum ProvisionFailure
     AgentNotFound,
     /// <summary>A deprovision found no container to remove.</summary>
     ContainerNotFound,
+    /// <summary>A reprovision's <c>session</c> value was neither <c>auto</c> nor <c>fresh</c>; nothing was touched.</summary>
+    InvalidSessionChoice,
 }
 
 /// <summary>

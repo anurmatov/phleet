@@ -501,7 +501,7 @@ internal static class AgentConfigFiles
     }
 
     /// <summary>Why the forwarder would refuse this binding's placeholder at this endpoint, or null.</summary>
-    private static string? DescribeBindingMismatch(string url, string headerName, SecretBinding binding)
+    internal static string? DescribeBindingMismatch(string url, string headerName, SecretBinding binding)
     {
         if (binding.Kind == SecretBindingRules.KindSshKey)
             return "an SSH key is never sent as a header";

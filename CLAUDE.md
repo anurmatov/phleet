@@ -298,11 +298,14 @@ MCP tool listing: `POST /api/agents/{name}/mcp-tools` (`McpToolDiscovery`) asks 
 section ticks tools from it (`ToolsEditor`, `mcpTools.ts`) and still saves the same list of names.
 `McpToolPlan.Build` is the only place that decides what a listing request carries: the address
 provisioning gives the agent (`AgentConfigFiles.AgentMcpUrl`), an unbound Env Ref's `.env` value as
-its mapped header, the agent's journal read token for `fleet-comms-journal`. MUST NOT resolve or send
-a bound secret from the orchestrator (that endpoint answers `needs_agent_secret`), ask an address
-that is not saved, follow a redirect, make the route a GET (an unmarked internal GET needs no
-credential), give the MCP client or its handler a logger, or return a header value or an exception's
-text. A granted name a server does not list is kept and shown, never dropped.
+its mapped header, the agent's journal read token for `fleet-comms-journal`, and a bound `static`
+secret's real value. This is the one sender of a bound secret besides the forwarder, under the
+forwarder's own rule (`AgentConfigFiles.DescribeBindingMismatch`, checked against the address that
+is asked): `https` on 443, a host the binding names, the binding's header. MUST NOT send a bound
+value on any other condition, send a GitHub App key (`needs_agent_secret`) or an SSH key at all, ask
+an address that is not saved, follow a redirect, make the route a GET (an unmarked internal GET
+needs no credential), give the MCP client or its handler a logger, or return a header value or an
+exception's text. A granted name a server does not list is kept and shown, never dropped.
 
 The stock OpenShell integration (manual enrollment, managed sandbox runtime, saved sandbox policies,
 identity signer, epoch broker lanes) was removed. `ManagedRuntimeRemovalPreflight` runs in `DbSeeder`

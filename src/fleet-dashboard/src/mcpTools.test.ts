@@ -16,7 +16,7 @@ const discovery: ToolDiscovery = {
       ],
     },
     { name: 'fleet-memory', status: 'ok', reason: null, truncated: false, tools: [{ name: 'memory_search', description: null }] },
-    { name: 'guarded', status: 'needs_agent_secret', reason: 'Header X-Example-Key carries the bound secret EXAMPLE_KEY.', tools: [], truncated: false },
+    { name: 'guarded', status: 'needs_agent_secret', reason: 'Header X-Example-Key carries EXAMPLE_KEY, a GitHub App secret.', tools: [], truncated: false },
   ],
 }
 

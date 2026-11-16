@@ -1,5 +1,6 @@
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Services.McpTools;
+using Fleet.Shared;
 
 namespace Fleet.Orchestrator.Tests.Services.McpTools;
 
@@ -114,21 +115,85 @@ public sealed class McpToolPlanTests
         Assert.Equal(Secret, Assert.Single(entry.Target!.Headers, h => h.Key == "X-Example-Key").Value);
     }
 
-    [Fact]
-    public void AHeaderMappedToABoundSecret_IsNeverResolved_AndTheServerIsNotAsked()
+    private static SecretBinding Binding(string hosts = "mcp.example.test", string header = "X-Example-Key", string kind = "static") =>
+        new() { EnvKeyName = "EXAMPLE_API_KEY", Hosts = hosts, HeaderName = header, Kind = kind };
+
+    private static Agent AgentWithBoundHeader(string url = "https://mcp.example.test/mcp", string header = "X-Example-Key")
     {
         var agent = NewAgent();
         agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "EXAMPLE_API_KEY" });
-        agent.McpEndpoints.Add(Endpoint("example", "https://mcp.example.test/mcp", headers: Mapping("X-Example-Key", "EXAMPLE_API_KEY")));
-        var bindings = new List<SecretBinding> { new() { EnvKeyName = "EXAMPLE_API_KEY", Hosts = "mcp.example.test" } };
+        agent.McpEndpoints.Add(Endpoint("example", url, headers: Mapping(header, "EXAMPLE_API_KEY")));
+        return agent;
+    }
 
-        // The real value is in the env file, and still is not used.
-        var entry = Only(Build(agent, new() { ["EXAMPLE_API_KEY"] = Secret }, bindings), "example");
+    [Fact]
+    public void AHeaderMappedToABoundSecret_CarriesItsValue_ToTheBindingsOwnHostAndHeader()
+    {
+        var entry = Only(
+            Build(AgentWithBoundHeader(), new() { ["EXAMPLE_API_KEY"] = Secret }, [Binding()]), "example");
+
+        Assert.Null(entry.NotAsked);
+        Assert.Equal("mcp.example.test", entry.Target!.Url.Host);
+        Assert.Equal(Secret, Assert.Single(entry.Target.Headers, h => h.Key == "X-Example-Key").Value);
+    }
+
+    [Theory]
+    // Another host than the binding names.
+    [InlineData("https://other.example.test/mcp", "X-Example-Key", "mcp.example.test", "X-Example-Key")]
+    // A host that only ends like the binding's.
+    [InlineData("https://evil-mcp.example.test/mcp", "X-Example-Key", "mcp.example.test", "X-Example-Key")]
+    // Not https.
+    [InlineData("http://mcp.example.test/mcp", "X-Example-Key", "mcp.example.test", "X-Example-Key")]
+    // Another port.
+    [InlineData("https://mcp.example.test:8443/mcp", "X-Example-Key", "mcp.example.test", "X-Example-Key")]
+    // Another header than the binding injects.
+    [InlineData("https://mcp.example.test/mcp", "X-Other", "mcp.example.test", "X-Example-Key")]
+    public void ABoundSecret_IsNotSent_WhereItsBindingWouldNotSendIt(string url, string mappedHeader, string hosts, string bindingHeader)
+    {
+        var entry = Only(
+            Build(AgentWithBoundHeader(url, mappedHeader), new() { ["EXAMPLE_API_KEY"] = Secret }, [Binding(hosts, bindingHeader)]),
+            "example");
+
+        Assert.Null(entry.Target);
+        Assert.Equal(McpServerTools.Misconfigured, entry.NotAsked!.Status);
+        Assert.Contains("EXAMPLE_API_KEY", entry.NotAsked.Reason);
+        Assert.DoesNotContain(Secret, entry.NotAsked.Reason);
+    }
+
+    [Fact]
+    public void AGitHubAppSecret_IsNeverSent_ItsKeyIsNotAHeaderValue()
+    {
+        var binding = Binding(hosts: "api.github.com", header: "Authorization", kind: SecretBindingRules.KindGitHubApp);
+        binding.AppIdEnvKey = "EXAMPLE_APP_ID";
+        var agent = AgentWithBoundHeader("https://api.github.com/mcp", "Authorization");
+
+        var entry = Only(Build(agent, new() { ["EXAMPLE_API_KEY"] = Secret }, [binding]), "example");
 
         Assert.Null(entry.Target);
         Assert.Equal(McpServerTools.NeedsAgentSecret, entry.NotAsked!.Status);
-        Assert.Contains("EXAMPLE_API_KEY", entry.NotAsked.Reason);
         Assert.DoesNotContain(Secret, entry.NotAsked.Reason);
+    }
+
+    [Fact]
+    public void AnSshKey_IsNeverSent()
+    {
+        var binding = Binding(hosts: "deploy@mcp.example.test", kind: SecretBindingRules.KindSshKey);
+        binding.SshKnownHosts = "mcp.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleExampleEx";
+
+        var entry = Only(Build(AgentWithBoundHeader(), new() { ["EXAMPLE_API_KEY"] = Secret }, [binding]), "example");
+
+        Assert.Null(entry.Target);
+        Assert.NotEqual(McpServerTools.Ok, entry.NotAsked!.Status);
+        Assert.DoesNotContain(Secret, entry.NotAsked.Reason);
+    }
+
+    [Fact]
+    public void ABoundSecretWithNoUsableValue_IsNotAsked()
+    {
+        var entry = Only(Build(AgentWithBoundHeader(), new() { ["EXAMPLE_API_KEY"] = "<secret>" }, [Binding()]), "example");
+
+        Assert.Null(entry.Target);
+        Assert.Equal(McpServerTools.Misconfigured, entry.NotAsked!.Status);
     }
 
     [Theory]

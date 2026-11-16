@@ -1,5 +1,6 @@
 using Fleet.Orchestrator.Application;
 using Fleet.Orchestrator.Data;
+using Fleet.Shared;
 
 namespace Fleet.Orchestrator.Services.McpTools;
 
@@ -20,7 +21,7 @@ public sealed record McpServerTools(
     public const string TimedOut = "timeout";
     /// <summary>The server answered 401 or 403.</summary>
     public const string Refused = "refused";
-    /// <summary>A header carries a bound secret, which only the agent's own requests can use.</summary>
+    /// <summary>A header carries a secret only the forwarder can turn into a value: a GitHub App's.</summary>
     public const string NeedsAgentSecret = "needs_agent_secret";
     /// <summary>The saved endpoint cannot be asked as it stands: its address, its mappings or a value.</summary>
     public const string Misconfigured = "misconfigured";
@@ -43,9 +44,17 @@ public sealed record McpPlanEntry(string Name, McpListTarget? Target, McpServerT
 /// <remarks>
 /// The address is the one provisioning writes for the agent (<see cref="AgentConfigFiles.AgentMcpUrl"/>),
 /// so the list is of the server the agent reaches. A header mapped to an unbound Env Ref carries its
-/// <c>.env</c> value, the value provisioning writes into the agent's own MCP configuration. A header
-/// mapped to a bound secret is never resolved: the orchestrator does not send a bound key anywhere,
-/// and that endpoint is reported as <see cref="McpServerTools.NeedsAgentSecret"/> instead.
+/// <c>.env</c> value, the value provisioning writes into the agent's own MCP configuration.
+/// <para>
+/// A header mapped to a bound secret carries the secret's real value, and only under the binding's
+/// own rule, the one the forwarder applies to the agent's requests and provisioning applies to the
+/// mapping (<see cref="AgentConfigFiles.DescribeBindingMismatch"/>): an <c>https</c> address on port
+/// 443, a host the binding names, the binding's own header. Anything else is not asked. The
+/// orchestrator already holds the value (it writes it into the forwarder's state), so no new party
+/// learns it; what is new is that this listing sends it, to that host and nowhere else. MUST NOT
+/// send a bound value on any other condition, and MUST NOT send a GitHub App key or an SSH key at
+/// all: neither is a header value.
+/// </para>
 /// </remarks>
 public static class McpToolPlan
 {
@@ -124,9 +133,20 @@ public static class McpToolPlan
                 return NotAsked(McpServerTools.Misconfigured,
                     $"Header {mapping.HeaderName} maps {mapping.EnvRefName}, which is not an Env Ref of this agent.");
 
-            if (bindings.Any(b => string.Equals(b.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)))
-                return NotAsked(McpServerTools.NeedsAgentSecret,
-                    $"Header {mapping.HeaderName} carries the bound secret {mapping.EnvRefName}, which only the agent's own requests can use.");
+            if (bindings.FirstOrDefault(b => string.Equals(b.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)) is { } binding)
+            {
+                // Checked against the address that will be asked, not only the one that is stored.
+                if (SecretBindingRules.DescribeFault(
+                        binding.EnvKeyName, binding.Kind, binding.HostList, binding.HeaderName, binding.KnownHostList) is not null)
+                    return NotAsked(McpServerTools.Misconfigured,
+                        $"Header {mapping.HeaderName} maps the bound secret {mapping.EnvRefName}, whose binding is not valid.");
+                if (AgentConfigFiles.DescribeBindingMismatch(address, mapping.HeaderName, binding) is { } mismatch)
+                    return NotAsked(McpServerTools.Misconfigured,
+                        $"Header {mapping.HeaderName} maps the bound secret {mapping.EnvRefName}, but {mismatch}.");
+                if (binding.Kind != SecretBindingRules.KindStatic)
+                    return NotAsked(McpServerTools.NeedsAgentSecret,
+                        $"Header {mapping.HeaderName} carries {mapping.EnvRefName}, a GitHub App secret: only the forwarder can turn it into a token.");
+            }
 
             // The same test provisioning applies before it writes the value into the agent's files.
             if (!envValues.TryGetValue(mapping.EnvRefName, out var value) || value.Length == 0 || value == "<secret>"

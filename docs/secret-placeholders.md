@@ -253,13 +253,21 @@ because it makes the orchestrator send requests, so it needs a credential on eve
 |---|---|---|
 | No headers | Nothing but the request | Its tools |
 | A header mapped to an unbound Env Ref | That `.env` value, the one provisioning writes into the agent's MCP configuration | Its tools |
-| A header mapped to a bound secret | Nothing: the endpoint is not asked | `needs_agent_secret`; its tools are granted by name |
+| A header mapped to a bound secret | The secret's real value, and only to an `https` address on port 443 of a host the binding names, in the binding's own header | Its tools |
+| The same, where the binding would not send it (another host, port, scheme or header) | Nothing: the endpoint is not asked | `misconfigured`, with the reason |
+| A header mapped to a GitHub App secret | Nothing: its key is not a header value | `needs_agent_secret`; its tools are granted by name |
 | `fleet-comms-journal` | A read token for that agent, as provisioning mints | Its tools |
 
 Only saved endpoints are asked: an address typed into the dialog is asked after it is saved, never
 before. A redirect is not followed, each server has 10 seconds, and the answer holds tool names,
-descriptions and fixed sentences. The orchestrator never sends a bound secret anywhere, so an
-endpoint that needs one stays a list of names until an agent-side listing exists.
+descriptions and fixed sentences.
+
+This is the one place besides the forwarder that sends a bound secret. The orchestrator already
+holds the value, since it writes it into the forwarder's state, so no new party learns it. The
+rule it sends under is the forwarder's and provisioning's own (host, port, scheme, header), read
+from the same binding. It is sent when someone signed in opens the section or presses Refresh, and
+not otherwise. An agent's own requests are unchanged: they carry the placeholder, and only the
+forwarder swaps it.
 
 ## Revocation and rotation
 

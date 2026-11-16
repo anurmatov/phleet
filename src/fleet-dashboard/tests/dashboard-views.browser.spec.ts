@@ -1199,7 +1199,7 @@ for (const colorScheme of ['light', 'dark'] as const) {
 
 const ALWAYS_ON = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep']
 
-/** alpha with two servers: one that lists its tools, and one whose header carries a bound secret. */
+/** alpha with two servers: one that lists its tools, and one that cannot be asked for them. */
 function withServers(fleet: FakeFleet) {
   fleet.configs.alpha = {
     ...configOf('alpha'),
@@ -1220,7 +1220,7 @@ function withServers(fleet: FakeFleet) {
         { name: 'zeta_lookup', description: 'Looks one thing up by its id.\nReturns null when there is none.' },
       ] },
       { name: 'fleet-memory', status: 'ok', reason: null, truncated: false, tools: [{ name: 'memory_search', description: 'Searches shared memory.' }] },
-      { name: 'guarded', status: 'needs_agent_secret', reason: 'Header X-Example-Key carries the bound secret EXAMPLE_KEY, which only the agent\u2019s own requests can use.', tools: [], truncated: false },
+      { name: 'guarded', status: 'needs_agent_secret', reason: 'Header X-Example-Key carries EXAMPLE_KEY, a GitHub App secret: only the forwarder can turn it into a token.', tools: [], truncated: false },
     ],
   }
 }
@@ -1288,7 +1288,7 @@ test('tools: a server that cannot be listed says why, keeps what is granted, and
 
   const guarded = panel.getByRole('region', { name: 'MCP server guarded' })
   await expect(guarded.getByRole('status')).toContainText('Its tools cannot be listed from here.')
-  await expect(guarded.getByRole('status')).toContainText('bound secret EXAMPLE_KEY')
+  await expect(guarded.getByRole('status')).toContainText('EXAMPLE_KEY, a GitHub App secret')
   // What the agent is granted there is still shown. It is not called missing: nobody asked the server.
   const granted = guarded.getByRole('row', { name: /orders_get/ })
   await expect(granted.getByRole('checkbox')).toBeChecked()

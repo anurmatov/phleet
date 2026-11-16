@@ -23,7 +23,7 @@ public sealed class AgentMcpToolsEndpointsTests : IAsyncLifetime
 {
     private const string Post = "/api/agents/agent1/mcp-tools";
     private const string Secret = "value-from-env-file";
-    private const string BoundSecret = "bound-value-never-sent";
+    private const string BoundSecret = "bound-value-from-env-file";
 
     private SqliteConnection _connection = null!;
     private WebApplication _app = null!;
@@ -182,24 +182,40 @@ public sealed class AgentMcpToolsEndpointsTests : IAsyncLifetime
         Assert.DoesNotContain(Secret, raw);
     }
 
-    [Fact]
-    public async Task ABoundSecret_IsNotSent_AndThatServerIsSaidToNeedTheAgent()
+    private Task SeedBoundAsync(string url, string hosts) => SeedAsync((agent, db) =>
     {
-        await SeedAsync((agent, db) =>
+        db.SecretBindings.Add(new SecretBinding { EnvKeyName = "BOUND_API_KEY", Hosts = hosts, HeaderName = "X-Example-Key" });
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "BOUND_API_KEY" });
+        agent.McpEndpoints.Add(new AgentMcpEndpoint
         {
-            db.SecretBindings.Add(new SecretBinding { EnvKeyName = "BOUND_API_KEY", Hosts = "mcp.example.test" });
-            agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "BOUND_API_KEY" });
-            agent.McpEndpoints.Add(new AgentMcpEndpoint
-            {
-                McpName = "example", Url = "https://mcp.example.test/mcp", TransportType = "http",
-                HeaderEnvRefsJson = Mapping("X-Example-Key", "BOUND_API_KEY"),
-            });
+            McpName = "example", Url = url, TransportType = "http",
+            HeaderEnvRefsJson = Mapping("X-Example-Key", "BOUND_API_KEY"),
         });
+    });
+
+    [Fact]
+    public async Task ABoundSecret_IsSentToItsBindingsHost_AndItsValueIsNotInTheAnswer()
+    {
+        await SeedBoundAsync("https://mcp.example.test/mcp", hosts: "mcp.example.test");
+
+        var (body, raw) = await ListAsync();
+
+        Assert.Equal("ok", Server(body, "example").GetProperty("status").GetString());
+        var asked = Assert.Single(_lister.Asked, t => t.Name == "example");
+        Assert.Equal("mcp.example.test", asked.Url.Host);
+        Assert.Equal(BoundSecret, asked.Headers["X-Example-Key"]);
+        Assert.DoesNotContain(BoundSecret, raw);
+    }
+
+    [Fact]
+    public async Task ABoundSecret_IsNotSentToAHostItsBindingDoesNotName()
+    {
+        await SeedBoundAsync("https://other.example.test/mcp", hosts: "mcp.example.test");
 
         var (body, raw) = await ListAsync();
 
         var example = Server(body, "example");
-        Assert.Equal("needs_agent_secret", example.GetProperty("status").GetString());
+        Assert.Equal("misconfigured", example.GetProperty("status").GetString());
         Assert.Empty(example.GetProperty("tools").EnumerateArray());
         Assert.Contains("BOUND_API_KEY", example.GetProperty("reason").GetString());
         Assert.DoesNotContain(_lister.Asked, t => t.Name == "example");

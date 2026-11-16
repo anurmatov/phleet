@@ -208,8 +208,11 @@ export const mcpToolsAnswer = {
   agent: 'agent1',
   alwaysOn: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
   servers: [
-    { name: 'example', status: 'needs_agent_secret', tools: [], truncated: false,
-      reason: 'Header X-Example-Key carries the bound secret EXAMPLE_API_KEY, which only the agent\u2019s own requests can use.' },
+    { name: 'example', status: 'ok', reason: null, truncated: false, tools: [
+      { name: 'orders_get_current', description: 'Lists the orders that are open now.' },
+      { name: 'orders_get_history', description: 'Lists closed orders between two dates.' },
+      { name: 'quotes_get', description: 'Returns the latest quote for one or more symbols.' },
+    ] },
     { name: 'fleet-memory', status: 'ok', reason: null, truncated: false, tools: [
       { name: 'memory_get', description: 'Reads one memory by its id.' },
       { name: 'memory_list', description: 'Lists the memories of a project, newest first.' },

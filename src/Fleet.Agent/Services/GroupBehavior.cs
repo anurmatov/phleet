@@ -28,7 +28,7 @@ public sealed class GroupBehavior
     // Per-group debounce timers (fixes global-timer bug)
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _debounceTimers = new();
 
-    private readonly GroupChatHistoryStore _history;
+    private readonly GroupChatBuffers _buffers = new();
     private readonly PendingGroupImages _pendingImages;
     private readonly ProviderTokenUpdater _tokens;
     private readonly ProactiveCheckInLoop _proactive;
@@ -70,13 +70,16 @@ public sealed class GroupBehavior
         _logger = logger;
         _sink = sink ?? NullMessageSink.Instance;
 
-        _history = new GroupChatHistoryStore(Path.Combine(_agentConfig.WorkDir, ".fleet", "chat-history.json"), _logger);
         _pendingImages = new PendingGroupImages(_logger);
         _tokens = new ProviderTokenUpdater(_agentConfig, _executor, _logger);
-        _proactive = new ProactiveCheckInLoop(_agentConfig, _allowlist, _executor, _history, StartGroupCheckIn, _logger);
+        _proactive = new ProactiveCheckInLoop(_agentConfig, _allowlist, _executor, _buffers, StartGroupCheckIn, _logger);
+
+        // This object is built once, when the host starts. No agent keeps the chat buffers in a
+        // file any more; one left by an earlier version goes now.
+        GroupChatBuffers.DeleteLegacyFile(_agentConfig.WorkDir, _logger);
     }
 
-    public GroupChatBuffer GetGroupBuffer(long chatId) => _history.GetGroupBuffer(chatId);
+    public GroupChatBuffer GetGroupBuffer(long chatId) => _buffers.GetGroupBuffer(chatId);
 
     public void SetBotUsername(string username) => _botUsername = username;
 
@@ -95,24 +98,16 @@ public sealed class GroupBehavior
         var truncated = text.Length > 200 ? text[..200] + "..." : text;
         buffer.Add($"@{_botUsername}", truncated, replyTo: null, DateTimeOffset.UtcNow,
             telegramMessageId: telegramMessageId);
-        _history.Save();
     }
 
-    public void BufferToolUse(long chatId, string toolName, string description)
-    {
-        var buffer = GetGroupBuffer(chatId);
-        buffer.AddToolUse(toolName, description, DateTimeOffset.UtcNow);
-        _history.Save();
-    }
-
-    public void AddAndPersist(long chatId, string sender, string text, string? replyTo,
+    /// <summary>Adds a message someone else wrote to its chat's buffer.</summary>
+    public void BufferMessage(long chatId, string sender, string text, string? replyTo,
         long telegramMessageId = 0, long? replyToTelegramMessageId = null)
     {
         var buffer = GetGroupBuffer(chatId);
         buffer.Add(sender, text, replyTo, DateTimeOffset.UtcNow,
             telegramMessageId: telegramMessageId,
             replyToTelegramMessageId: replyToTelegramMessageId);
-        _history.Save();
     }
 
     // --- Debounce (per-group) ---
@@ -270,7 +265,7 @@ public sealed class GroupBehavior
         }
 
         if (type is RelayMessageType.Response or RelayMessageType.PartialResponse)
-            AddAndPersist(chatId, sender, text, replyTo: null);
+            BufferMessage(chatId, sender, text, replyTo: null);
 
         if (type == RelayMessageType.PartialResponse)
         {
@@ -385,7 +380,7 @@ public sealed class GroupBehavior
         _logger.LogInformation("{Label} triggered for group {ChatId}", label, chatId);
 
         // Delegate entirely to TaskManager — it handles typing, execution,
-        // session tracking, tool buffering, IDLE suppression, and completion events.
+        // session tracking, IDLE suppression, and completion events.
         _taskManager.StartTaskDetached(chatId, prompt, $"[{label}]", isSessionTask: true,
             source: TaskSource.CheckIn,
             images: pendingImages.Count > 0 ? pendingImages : null,
@@ -499,6 +494,9 @@ public sealed class GroupBehavior
 
     // ─── Internal testing seams ─────────────────────────────────────────────────
     // Exposed via InternalsVisibleTo for Fleet.Agent.Tests. Production code never calls these.
+
+    /// <summary>Runs one sweep of the proactive loop, as a timer tick does.</summary>
+    internal Task RunProactiveSweepForTestAsync() => _proactive.RunProactiveCheckIns(_shutdownToken);
 
     /// <summary>Invokes <see cref="StartDebouncedGroupCheckInAsync"/> directly, bypassing the debounce timer.</summary>
     internal Task TriggerDebouncedGroupBatchForTestAsync(long chatId, string label = "test", string instruction = "check-in")

@@ -349,7 +349,7 @@ public static class AgentHostRegistration
         // --- Completion effects (#277 D-2) ----------------------------------------------------
         // Both subscribe to TaskManager in their own constructors and must outlive the Telegram
         // transport's absence: relay/bridge publication is what workflow delegations depend on, and
-        // context buffering is what a cold executor needs, on every channel.
+        // context buffering feeds unread tracking and check-ins, on every channel.
         //
         // The AddSingleton + factory-AddHostedService pair on the publisher is load-bearing, not
         // style. A bare AddHostedService<RelayCompletionPublisher>() registers the type ONLY as

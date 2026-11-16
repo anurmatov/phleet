@@ -63,6 +63,15 @@ internal sealed class ScriptedExecutor : IAgentExecutor
     /// <summary>Completes when the first turn's enumerator has begun. Lets a test steer a live turn.</summary>
     public Task FirstTurnStarted => _firstTurnStarted.Task;
 
+    /// <summary>
+    /// Completes when a turn's whole script has been taken: the consumer asked for the event after
+    /// the last one, so it has finished handling every scripted event.
+    /// </summary>
+    public Task ScriptConsumed => _scriptConsumed.Task;
+
+    private readonly TaskCompletionSource _scriptConsumed =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     /// <summary>Every task string handed to <see cref="ExecuteAsync"/>, in order.</summary>
     public List<string> Tasks { get; } = [];
 
@@ -98,6 +107,8 @@ internal sealed class ScriptedExecutor : IAgentExecutor
             ct.ThrowIfCancellationRequested();
             yield return progress;
         }
+
+        _scriptConsumed.TrySetResult();
 
         if (ThrowAfterScript is not null)
             throw ThrowAfterScript;

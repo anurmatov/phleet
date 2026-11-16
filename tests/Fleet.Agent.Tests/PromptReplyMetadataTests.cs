@@ -32,7 +32,7 @@ public sealed class PromptReplyMetadataTests
         executor.IsProcessWarm.Returns(warm);
         var assembler = new PromptAssembler(executor);
         var buffer = new GroupChatBuffer { ChatId = group ? -100 : 100, ChatTitle = group ? "group A" : null, ChatLabel = "user=@u" };
-        buffer.LoadEntries([new SerializedEntry("@u", "history", "untrusted_sender", DateTimeOffset.UtcNow)]);
+        buffer.Add("@u", "history", "untrusted_sender", DateTimeOffset.UtcNow);
         var prompt = group
             ? assembler.ForGroupMessage(buffer, "@u", "hi", replyToTelegramMessageId: reply ? 5 : null,
                 telegramMessageId: 7, isVoiceTranscription: voice)

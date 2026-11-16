@@ -12,14 +12,14 @@ internal sealed class ProactiveCheckInLoop(
     AgentOptions agentConfig,
     AllowlistHolder allowlist,
     IAgentExecutor executor,
-    GroupChatHistoryStore history,
+    GroupChatBuffers buffers,
     Action<long, string, string, CancellationToken> startGroupCheckIn,
     ILogger logger)
 {
     private readonly AgentOptions _agentConfig = agentConfig;
     private readonly AllowlistHolder _allowlist = allowlist;
     private readonly IAgentExecutor _executor = executor;
-    private readonly GroupChatHistoryStore _history = history;
+    private readonly GroupChatBuffers _buffers = buffers;
     private readonly Action<long, string, string, CancellationToken> _startGroupCheckIn = startGroupCheckIn;
     private readonly ILogger _logger = logger;
 
@@ -53,12 +53,13 @@ internal sealed class ProactiveCheckInLoop(
         _logger.LogInformation("Proactive loop stopped");
     }
 
-    private Task RunProactiveCheckIns(CancellationToken ct)
+    /// <summary>One sweep over the allowed groups: what every timer tick does.</summary>
+    internal Task RunProactiveCheckIns(CancellationToken ct)
     {
         // Iterate ALL allowed groups with new messages (fixes first-group-only bug)
         foreach (var groupId in _allowlist.GetAllowedGroupIds())
         {
-            if (!_history.TryGetExisting(groupId, out var buffer) || !buffer.HasMessagesSinceLastCheck())
+            if (!_buffers.TryGetExisting(groupId, out var buffer) || !buffer.HasMessagesSinceLastCheck())
                 continue;
 
             buffer.MarkChecked();

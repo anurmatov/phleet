@@ -28,8 +28,6 @@ internal interface IDispatchHost
     void RaiseTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial,
         string? correlationId, string? taskId, CompletionKind kind);
 
-    void RaiseToolUse(long chatId, string toolName, string description);
-
     void RaiseStatusChanged();
 
     /// <summary>True while the warmup ping or a <c>/run</c> command holds the executor.</summary>

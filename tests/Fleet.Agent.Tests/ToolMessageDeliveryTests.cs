@@ -49,7 +49,6 @@ public class ToolMessageDeliveryTests
 
         var html = run.Sink.Sent.Where(s => s.Kind == "html").ToList();
         Assert.Equal(linesPerMessage, html.Select(s => Lines(s.Text).Count));
-        Assert.Equal(calls, run.ToolUses.Count);
     }
 
     [Fact]
@@ -87,7 +86,7 @@ public class ToolMessageDeliveryTests
     {
         var executor = new ScriptedExecutor(Tools(1, 4)) { BlockUntilCancelled = true };
         var run = await StartAsync(executor);
-        await WaitForAsync(() => run.ToolUses.Count == 4);
+        await executor.ScriptConsumed.WaitAsync(TimeSpan.FromSeconds(10));
 
         await run.Manager.CancelAllAsync();
         await run.Completed;
@@ -189,13 +188,12 @@ public class ToolMessageDeliveryTests
     // ── what stays as it was ─────────────────────────────────────────────────
 
     [Fact]
-    public async Task SuppressToolMessages_SendsNoToolLine_AndStillRaisesEveryCall()
+    public async Task SuppressToolMessages_SendsNoToolLine()
     {
         var steps = Tools(1, 7).Append(ScriptedExecutor.Final(Answer)).ToList();
         var run = await RunAsync(new ScriptedExecutor(steps), o => o.SuppressToolMessages = true);
 
         Assert.Equal(["text"], run.Sink.Sent.Select(s => s.Kind));
-        Assert.Equal(7, run.ToolUses.Count);
     }
 
     [Theory]
@@ -207,7 +205,6 @@ public class ToolMessageDeliveryTests
         var run = await RunAsync(new ScriptedExecutor(steps), source: source);
 
         Assert.DoesNotContain(run.Sink.Sent, s => s.Kind == "html");
-        Assert.Equal(7, run.ToolUses.Count);
     }
 
     // ── truncation: one knob ─────────────────────────────────────────────────
@@ -361,7 +358,6 @@ public class ToolMessageDeliveryTests
 
         var line = Assert.Single(Lines(Assert.Single(run.Sink.Sent, s => s.Kind == "html").Text));
         Assert.Equal("Running: " + command, line);
-        Assert.Equal(("shell", "Running: " + command), Assert.Single(run.ToolUses));
     }
 
     [Fact]
@@ -374,19 +370,6 @@ public class ToolMessageDeliveryTests
 
         var line = Assert.Single(Lines(Assert.Single(run.Sink.Sent, s => s.Kind == "html").Text));
         Assert.Equal("Running: " + command, line);
-    }
-
-    /// <summary>The description kept in the chat buffer stays short however long the command is.</summary>
-    [Fact]
-    public async Task TheBufferedDescription_OfALongCommand_IsBounded()
-    {
-        var call = CodexToolCall(new JsonObject { ["type"] = "commandExecution", ["command"] = "echo " + new string('x', 5000) });
-        var run = await RunAsync(new ScriptedExecutor([call, ScriptedExecutor.Final(Answer)]));
-
-        var (tool, description) = Assert.Single(run.ToolUses);
-        Assert.Equal("shell", tool);
-        Assert.Equal(203, description.Length);
-        Assert.EndsWith("...", description, StringComparison.Ordinal);
     }
 
     // ── rig ──────────────────────────────────────────────────────────────────
@@ -493,7 +476,6 @@ public class ToolMessageDeliveryTests
         public required TaskManager Manager { get; init; }
         public required RecordingSink Sink { get; init; }
         public required Task Completed { get; init; }
-        public List<(string Tool, string Description)> ToolUses { get; } = [];
         public bool CompletedWithError { get; set; }
     }
 
@@ -518,7 +500,6 @@ public class ToolMessageDeliveryTests
 
         var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var run = new Run { Manager = manager, Sink = sink, Completed = completed.Task.WaitAsync(TimeSpan.FromSeconds(10)) };
-        manager.OnToolUse += (_, tool, description) => { lock (run.ToolUses) run.ToolUses.Add((tool, description)); };
         manager.OnTaskCompleted += (_, _, _, _, isError, _, _, _) =>
         {
             run.CompletedWithError = isError;

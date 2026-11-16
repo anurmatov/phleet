@@ -67,7 +67,7 @@ public sealed class MessageRouter
             }
 
             // Buffer ALL allowed group messages for context
-            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, msg.Text, null,
+            _groupBehavior.BufferMessage(msg.ChatId, msg.Sender, msg.Text, null,
                 telegramMessageId: msg.TelegramMessageId,
                 replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
 
@@ -176,7 +176,7 @@ public sealed class MessageRouter
         // Buffer DM messages for context recovery
         if (!msg.IsGroupChat)
         {
-            _groupBehavior.AddAndPersist(msg.ChatId, msg.Sender, trimmed, null,
+            _groupBehavior.BufferMessage(msg.ChatId, msg.Sender, trimmed, null,
                 telegramMessageId: msg.TelegramMessageId,
                 replyToTelegramMessageId: msg.ReplyToTelegramMessageId);
         }

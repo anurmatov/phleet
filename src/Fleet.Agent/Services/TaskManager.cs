@@ -1251,12 +1251,6 @@ public sealed class TaskManager
     public event Action<long, string, string?, TaskSource, bool, string?, string?, CompletionKind>? OnTaskCompleted;
 
     /// <summary>
-    /// Raised for each significant tool-use event during task execution.
-    /// Parameters: chatId, toolName, description.
-    /// </summary>
-    public event Action<long, string, string>? OnToolUse;
-
-    /// <summary>
     /// Raised immediately when agent state changes (task started or completed).
     /// Allows the orchestrator heartbeat to publish without waiting for the next timer tick.
     /// </summary>
@@ -1283,9 +1277,6 @@ public sealed class TaskManager
         public void RaiseTaskCompleted(long chatId, string result, string? relaySender, TaskSource source, bool isPartial,
             string? correlationId, string? taskId, CompletionKind kind) =>
             owner.OnTaskCompleted?.Invoke(chatId, result, relaySender, source, isPartial, correlationId, taskId, kind);
-
-        public void RaiseToolUse(long chatId, string toolName, string description) =>
-            owner.OnToolUse?.Invoke(chatId, toolName, description);
 
         public void RaiseStatusChanged() => owner.OnStatusChanged?.Invoke();
 

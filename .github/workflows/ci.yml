@@ -931,6 +931,16 @@ jobs:
           PROXY_IMAGE=fleet:secrets-ci AGENT_IMAGE=fleet:agent-ci bash tests/secret-proxy/run.sh
           PROXY_IMAGE=fleet:secrets-ci bash tests/secret-proxy/run.sh
 
+      # The existing fixture needs a real daemon and the production renderer, not a local skip.
+      - name: Setup .NET for native MCP fixture
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Native MCP identity headers (pinned Claude and Codex)
+        timeout-minutes: 20
+        run: PROXY_IMAGE=fleet:secrets-ci AGENT_IMAGE=fleet:agent-ci bash tests/secret-proxy/mcp-headers.sh
+
       - name: Clean up
         if: always()
         run: docker image rm -f fleet:agent-ci fleet:secrets-ci fleet-secrets-e2e:client || true

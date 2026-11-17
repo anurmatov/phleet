@@ -8,7 +8,7 @@ Before upgrading past the loopback-ports change, read **[docs/upgrading/internal
 
 ## Memory search re-index
 
-The first start of fleet-memory after the memory-search change embeds every memory again, once, in sections: several embedding calls per memory, one after the other. The service answers during it. What to expect, and how to go back to an earlier image, is in **[docs/memory-search.md](../memory-search.md#what-a-start-costs)**.
+The first start of fleet-memory after the memory-search change embeds every memory again, once: one embedding call per section (a memory over 1,200 characters is several sections), one after the other. The service answers during it, and later starts embed only what changed. How to estimate the cost for your store, what search does meanwhile, and how to go back to an earlier image are in **[docs/memory-search.md](../memory-search.md#what-a-start-costs)**.
 
 ## Pi provider removed
 

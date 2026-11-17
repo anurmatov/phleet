@@ -96,9 +96,20 @@ Full index complete: 1904 indexed (3 embedded in 7 sections, 1901 unchanged and 
 ```
 
 **The first start after upgrading to this version embeds every memory again, once**, because the
-keywords and the sections changed. That is one embedding call per section, not per memory: several
-times the number of memories. Memories are embedded one after the other, so with a remote embedder
-this can take a long time. During it:
+keywords and the sections changed: one embedding call per section, one after the other. How long
+that takes is the number of sections times what your embedder takes for one input, and both are
+yours to measure:
+
+- Sections: a memory whose content is up to 1,200 characters is one. A longer one is roughly one
+  per 900 to 1,000 characters (sections are cut at headings and paragraphs, so they are not filled
+  to the budget), and never more than 200. A store of many long memories has several times as
+  many sections as memories.
+- Time per call: the version before this one embedded every memory at every start, so the time
+  between its `Starting full index` and `Full index complete` log lines (`docker logs -t
+  fleet-memory`), divided by the number it indexed, is what one call cost there. A section is no
+  longer than the memories that was measured on, so a call now costs that or less.
+
+The `Full index complete` line of the first start says how many sections there were. During it:
 
 - the service answers; searches by id, title and tag are complete from the first seconds;
 - a memory not reached yet is still found by keyword and meaning through its old index entry, with

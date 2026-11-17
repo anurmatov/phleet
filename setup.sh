@@ -98,6 +98,9 @@ unset FLEET_INTERNAL_BIND_ADDRESS
 # in .env; an exported FLEET_QDRANT_VERSION left over from an earlier step would start a different
 # one, and Qdrant storage does not survive a skipped minor.
 unset FLEET_QDRANT_VERSION
+# And the optional credentials Fleet's services present to Qdrant and Temporal, with the address
+# fleet-memory reaches Qdrant at: an exported one must never stand in for what .env says.
+unset FLEET_QDRANT_URL FLEET_QDRANT_API_KEY FLEET_TEMPORAL_BEARER_TOKEN
 unset FLEET_COMMS_JOURNAL_ENABLED FLEET_COMMS_JOURNAL_BIND FLEET_COMMS_JOURNAL_KEY \
       FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS FLEET_COMMS_JOURNAL_RETENTION \
       FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS

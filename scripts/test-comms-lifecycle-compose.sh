@@ -64,6 +64,7 @@ FLEET_BASE_DIR=$DIR/repo/fleet
 FLEET_COMMS_ENABLED=$([[ "$mode" == disabled ]] && echo false || echo true)
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-seaweedfs:8333
 FLEET_COMMS_MEDIA_STORE=seaweedfs
+FLEET_AGENT_IDENTITY_KEY=synthetic-identity-key-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ENV
   cp "$DIR/repo/fleet/.env" "$DIR/before"
   # Old generated definitions must not determine the new pin/services.

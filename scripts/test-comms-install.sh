@@ -81,7 +81,8 @@ rc=0; bash "$DIR/upgrade.sh" > "$DIR/output" 2>&1 || rc=$?
 ! grep -q '^compose ' "$CALLS"
 echo 'PASS invalid store fails before compose'
 # Comms disabled, even with an endpoint: remove every optional service but keep keys/volumes.
-# The epic watcher/grant keys are present, so upgrade has nothing to add and must not touch .env.
+# The epic watcher/grant keys and the agent identity key are present, so upgrade has nothing to add
+# and must not touch .env.
 cat > "$ENV" <<'ENV'
 FLEET_COMMS_ENABLED=false
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-minio:9000
@@ -96,6 +97,8 @@ FLEET_AUTONOMY_ENABLED=false
 FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false
 FLEET_DURABLE_DELEGATION_ENABLED=false
 FLEET_PUSH_ENABLED=false
+FLEET_AGENT_IDENTITY_KEY=synthetic-identity-key-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+FLEET_AGENT_IDENTITY_ENFORCE=false
 FLEET_SECRETS_ENABLED=false
 ENV
 cp "$ENV" "$DIR/before"
@@ -114,8 +117,17 @@ echo 'PASS disabled Comms removes containers but preserves keys and volumes'
 # glues a key onto a last line that has no newline.
 printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
-[[ "$(cat "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false\nFLEET_DURABLE_DELEGATION_ENABLED=false\nFLEET_PUSH_ENABLED=false\nFLEET_SECRETS_ENABLED=false')" ]]
+# The agent identity key is generated, so its value is compared by shape: it is there, and long enough.
+[[ "$(sed -E 's/^(FLEET_AGENT_IDENTITY_KEY)=.{43,}$/\1=<generated>/' "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false\nFLEET_DURABLE_DELEGATION_ENABLED=false\nFLEET_PUSH_ENABLED=false\nFLEET_AGENT_IDENTITY_KEY=<generated>\nFLEET_AGENT_IDENTITY_ENFORCE=false\nFLEET_SECRETS_ENABLED=false')" ]]
 echo 'PASS upgrade adds missing epic watcher/grant keys with defaults and keeps present values'
+# The key is generated once: a second upgrade keeps it, and it is never printed.
+identity_key=$(grep '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")
+! grep -qF "${identity_key#*=}" "$DIR/output"
+bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
+[[ "$(grep '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")" == "$identity_key" ]]
+[[ "$(grep -c '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")" == 1 ]]
+! grep -qF "${identity_key#*=}" "$DIR/output"
+echo 'PASS upgrade generates the agent identity key once and never prints it'
 sed -i.bak 's/^FLEET_AUTONOMY_ENABLED=false$/FLEET_AUTONOMY_ENABLED=true/' "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
 [[ "$(grep -c '^FLEET_AUTONOMY_ENABLED=' "$ENV")" == 1 ]]

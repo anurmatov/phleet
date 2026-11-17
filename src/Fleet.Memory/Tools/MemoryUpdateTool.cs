@@ -4,6 +4,7 @@ using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tools;
 
@@ -31,9 +32,9 @@ public sealed class MemoryUpdateTool(
             if (!aclCache.IsAvailable)
                 return "memory_update: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
-            var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            var agentName = AgentCallerHttp.AgentNameOf(httpContextAccessor);
             if (string.IsNullOrWhiteSpace(agentName))
-                return "memory_update: agent identity required — missing '?agent=' query parameter.";
+                return "memory_update: agent identity required — this call was not made as an agent.";
 
             MemoryDocument? probe;
             try { probe = await memoryService.GetAsync(id); }

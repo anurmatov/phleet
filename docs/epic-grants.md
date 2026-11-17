@@ -12,9 +12,14 @@ never delegated.
 
 ## Threat model
 
-Trusted, as before, and not hardened by this feature: the `?agent=` attribution on MCP endpoints,
-the shared orchestrator admin bearer (the dashboard and agent containers hold it), and host access.
-Whoever holds them is trusted. Epic grants are not a defence against a malicious operator or agent.
+Trusted, as before, and not hardened by this feature: who an MCP caller is, the shared orchestrator
+admin bearer (the dashboard and agent containers hold it), and host access. Whoever holds them is
+trusted. Epic grants are not a defence against a malicious operator or agent.
+
+Who an MCP caller is is hardened separately (`docs/agent-identity.md`). With
+`FLEET_AGENT_IDENTITY_ENFORCE=true` the bridge takes "this is the CTO" from the caller's identity
+token, which only the CTO agent holds. Until then it is the name in the caller's URL, which any
+caller on the network can type.
 
 What the feature does guarantee:
 

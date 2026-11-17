@@ -6,6 +6,7 @@ using ModelContextProtocol.Server;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Telegram.Tools;
 
@@ -39,9 +40,8 @@ public sealed class SetReactionTool(BotClientFactory factory, IHttpContextAccess
         [Description("Standard emoji to react with (e.g. \"👍\"). Must be a non-premium Telegram reaction emoji.")] string emoji,
         CancellationToken cancellationToken = default)
     {
-        // Agent identity is resolved server-side from the ?agent= query parameter
-        // baked into the MCP URL at provision time — never supplied by the caller.
-        var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        // Who reacts is who called: the agent of the identity token, never a tool argument.
+        var agent_name = AgentCallerHttp.AgentNameOf(httpContextAccessor) ?? "";
 
         if (!long.TryParse(chat_id?.Trim(), out var chatIdLong))
             return JsonSerializer.Serialize(new { ok = false, error = $"Invalid chat_id '{chat_id}' — must be a numeric value" });

@@ -3,6 +3,7 @@ using Fleet.Memory.Data;
 using Fleet.Memory.Endpoints;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
+using Fleet.Shared.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -58,14 +59,16 @@ builder.Services.AddSingleton<AclCacheService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AclCacheService>());
 builder.Services.AddHostedService<PeerConfigHostedService>();
 
-// IHttpContextAccessor for agent attribution in MemoryGetTool and ACL enforcement
-builder.Services.AddHttpContextAccessor();
+// Who is calling: an agent by its identity token, held to the tools it is granted (read from the
+// orchestrator). Tools ask AgentCallerHttp for the agent, never the URL. See docs/agent-identity.md.
+builder.Services.AddAgentIdentityFromOrchestrator(builder.Configuration);
 
 // MCP Server
 builder.Services
     .AddMcpServer()
     .WithHttpTransport()
-    .WithToolsFromAssembly();
+    .WithToolsFromAssembly()
+    .AddAgentToolAuthorization(MemoryIdentity.ServerName);
 
 var app = builder.Build();
 
@@ -75,6 +78,11 @@ app.Services.GetRequiredService<MemorySizeGuidance>().LogStartup(
     embeddingConfig.Provider.Equals("ollama", StringComparison.OrdinalIgnoreCase)
         ? embeddingConfig.Ollama.Model
         : Path.GetFileNameWithoutExtension(embeddingConfig.Onnx.ModelPath));
+
+// The MCP endpoint is at the root, so everything but the health check and the service routes is it.
+app.UseAgentIdentity(context => MemoryIdentity.IsMcp(context.Request.Path));
+// /internal/* reads, changes and deletes any memory with no project check: a service's, never an agent's.
+app.UseServiceIdentity(context => MemoryIdentity.IsInternal(context.Request.Path));
 
 app.MapMcp();
 

@@ -5,6 +5,7 @@ using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tools;
 
@@ -41,13 +42,13 @@ public sealed class MemorySearchTool(
         if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
             return $"memory_search: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var agentName = AgentCallerHttp.AgentNameOf(httpContextAccessor);
 
         if (aclCache.IsAclEnabled && !aclCache.IsAvailable)
             return "memory_search: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
         if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
-            return "memory_search: agent identity required — missing '?agent=' query parameter.";
+            return "memory_search: agent identity required — this call was not made as an agent.";
 
         // When ACL is active, request a 3x candidate pool to compensate for post-filter evictions.
         // Known precision trade-off: allowed memories may score lower than disallowed neighbors.

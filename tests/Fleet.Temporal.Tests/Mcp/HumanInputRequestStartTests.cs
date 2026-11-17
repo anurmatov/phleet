@@ -9,6 +9,8 @@ using Microsoft.Extensions.Options;
 using NSubstitute;
 using Temporalio.Client;
 using Temporalio.Api.Enums.V1;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Temporal.Tests.Mcp;
 
@@ -64,7 +66,7 @@ public class HumanInputRequestStartTests
         var http = Substitute.For<IHttpClientFactory>(); http.CreateClient("orchestrator").Returns(new HttpClient());
         var registry = new WorkflowTypeRegistry(http, Options.Create(new TemporalBridgeOptions()), NullLogger<WorkflowTypeRegistry>.Instance);
         var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
-        if (requester != null) accessor.HttpContext.Request.QueryString = new QueryString("?agent=" + requester);
+        if (requester != null) AgentCallerHttp.Set(accessor.HttpContext, new AgentCaller(requester, AgentCallerKind.Agent));
         WorkflowOptions? options = null;
         IReadOnlyCollection<object?>? args = null;
         client.StartWorkflowAsync(Arg.Any<string>(), Arg.Do<IReadOnlyCollection<object?>>(a => args = a), Arg.Do<WorkflowOptions>(o => options = o))

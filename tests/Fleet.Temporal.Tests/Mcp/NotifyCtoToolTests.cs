@@ -4,6 +4,8 @@ using Fleet.Temporal.Mcp;
 using Microsoft.AspNetCore.Http;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Temporal.Tests.Mcp;
 
@@ -21,7 +23,7 @@ public sealed class NotifyCtoToolTests
 
         var httpContext = new DefaultHttpContext();
         if (agentQueryParam is not null)
-            httpContext.Request.QueryString = new QueryString($"?agent={agentQueryParam}");
+            AgentCallerHttp.Set(httpContext, new AgentCaller(agentQueryParam, AgentCallerKind.Agent));
 
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns(httpContext);

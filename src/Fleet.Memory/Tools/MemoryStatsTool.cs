@@ -3,6 +3,7 @@ using System.Text;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tools;
 
@@ -26,9 +27,9 @@ public sealed class MemoryStatsTool(
         if (!aclCache.IsAvailable)
             return "memory_stats: ACL cache unavailable";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var agentName = AgentCallerHttp.AgentNameOf(httpContextAccessor);
         if (string.IsNullOrWhiteSpace(agentName))
-            return "memory_stats: agent identity required — missing '?agent=' query parameter.";
+            return "memory_stats: agent identity required — this call was not made as an agent.";
 
         Dictionary<string, int> stats;
         try

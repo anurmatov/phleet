@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Telegram.Bot;
 using Telegram.Bot.Types;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Telegram.Tools;
 
@@ -15,11 +16,12 @@ public sealed class GetChatInfoTool(BotClientFactory factory, IHttpContextAccess
     [Description("Get basic info (title, type) for a Telegram chat ID. Useful for verifying chat IDs before use. Returns {\"ok\":true,\"chat_id\":N,\"title\":\"...\",\"type\":\"...\"} or {\"ok\":false,\"error\":\"...\"}")]
     public async Task<string> GetInfoAsync(
         [Description("Telegram chat ID to look up")] long chat_id,
-        [Description("Agent name to query with (falls back to notifier bot if unknown)")] string agent_name = "",
+        [Description("Ignored when the call is made as an agent: that agent's own bot is used. Otherwise the agent whose bot to query with (falls back to the notifier bot if unknown).")] string agent_name = "",
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(agent_name))
-            agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        // Whose bot is used is who called. The argument once won over that, which let a model pick
+        // any agent's bot; it stands now only for a caller that is not an agent.
+        agent_name = AgentCallerHttp.AgentNameOr(httpContextAccessor, agent_name);
 
         var client = factory.GetClient(agent_name);
         if (client is null)

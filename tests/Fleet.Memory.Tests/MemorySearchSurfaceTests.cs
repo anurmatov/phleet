@@ -4,6 +4,8 @@ using Fleet.Memory.Data;
 using Fleet.Memory.Endpoints;
 using Fleet.Memory.Services;
 using Fleet.Memory.Tools;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -232,8 +234,9 @@ public sealed class MemorySearchSurfaceTests : IDisposable
             Microsoft.Extensions.Logging.Abstractions.NullLogger<AclCacheService>.Instance);
         cache.InjectAclForTesting(acl ?? []);
 
+        // The caller as the identity middleware records it: the URL is not who calls.
         var http = new DefaultHttpContext();
-        http.Request.QueryString = new QueryString("?agent=" + agent);
+        AgentCallerHttp.Set(http, new AgentCaller(agent, AgentCallerKind.Agent));
         var denied = new AclDeniedCounterService();
         var log = new CapturingLogger<MemorySearchTool>();
         return (new MemorySearchTool(_f.Service, cache, new HttpContextAccessor { HttpContext = http }, denied, log), denied, log);

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Telegram.Tools;
 
@@ -30,7 +31,7 @@ public sealed class SendToCeoTool(
         if (chatId == 0)
             return JsonSerializer.Serialize(new { ok = false, error = "CEO chat ID not configured" });
 
-        var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        var agent_name = AgentCallerHttp.AgentNameOf(httpContextAccessor) ?? "";
         var formattingModeRaw = httpContextAccessor.HttpContext?.Request.Query["formatting_mode"].FirstOrDefault() ?? "1";
         byte.TryParse(formattingModeRaw, out var formattingModeByte);
         var formattingMode = (Fleet.Shared.FormattingMode)Math.Clamp((int)formattingModeByte, 0, 2);

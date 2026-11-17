@@ -4,6 +4,7 @@ using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tools;
 
@@ -23,13 +24,13 @@ public sealed class MemoryDeleteTool(
         if (string.IsNullOrWhiteSpace(id))
             return "memory_delete: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var agentName = AgentCallerHttp.AgentNameOf(httpContextAccessor);
 
         if (aclCache.IsAclEnabled && !aclCache.IsAvailable)
             return "memory_delete: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
         if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
-            return "memory_delete: agent identity required — missing '?agent=' query parameter.";
+            return "memory_delete: agent identity required — this call was not made as an agent.";
 
         if (aclCache.IsAclEnabled)
         {

@@ -10,6 +10,8 @@ using Temporalio.Client;
 using Temporalio.Testing;
 using Temporalio.Worker;
 using Temporalio.Workflows;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Temporal.Tests.Mcp;
 
@@ -68,7 +70,7 @@ public class GetWorkflowResultRunIdTests
         var registry=new WorkflowTypeRegistry(http,Options.Create(new TemporalBridgeOptions()),NullLogger<WorkflowTypeRegistry>.Instance);
         var cto=Substitute.For<CtoAgentConfigService>();cto.GetCtoAgent().Returns("cto-agent");
         var accessor=Substitute.For<IHttpContextAccessor>();accessor.HttpContext.Returns(new DefaultHttpContext());
-        accessor.HttpContext!.Request.QueryString=new QueryString("?agent="+caller);
+        AgentCallerHttp.Set(accessor.HttpContext!, new AgentCaller(caller, AgentCallerKind.Agent));
         return new TemporalWorkflowTools(factory,registry,cto,Substitute.For<IWorkflowGateStateReader>(),
             Substitute.For<IEpicGrantDecisionForwarder>(),accessor,NullLogger<TemporalWorkflowTools>.Instance);
     }

@@ -232,7 +232,7 @@ with its own ingest token. The records carry `origin: agent_tool`; the observer 
 test fails if anything else calls a send method on a bot client. When a tool call ends with at least
 one message accepted, `fleet-telegram` publishes one receipt:
 
-- to the direct exchange `fleet.journal.tool-sends`, routing key the lower-cased `?agent=` name,
+- to the direct exchange `fleet.journal.tool-sends`, routing key the calling agent's name, lower-cased,
   persistent, JSON `v: 1`: `agent`, `tool`, `requestedAt` (UTC, before the first Bot API call),
   `botId`, `chat{id,type,title}` and `messages[{messageId, date, replyToMessageId?, text,
   textFormat}]` in send order;
@@ -287,7 +287,10 @@ A receipt is trusted because of where it can come from:
 
 1. `fleet-telegram` builds receipts only in `TelegramSender`, from a `Message` the Bot API returned
    to the agent's own bot client.
-2. The routing key is the trusted `?agent=` endpoint attribution, lower-cased.
+2. The routing key is the calling agent's name, lower-cased, as `fleet-telegram` resolved the
+   caller (`docs/agent-identity.md`): from its identity token when it sent one, and from the name in
+   its URL only while `FLEET_AGENT_IDENTITY_ENFORCE` is off. Until enforcement is on, that name can
+   be typed by any caller on the network, so this step is only as strong as that setting.
 3. The agent consumes only its own queue `fleet.journal.tool-sends.<name>`.
 4. The agent drops a receipt whose `agent` is not its own name (`receipt_invalid`, reason `agent`)
    and one whose `botId` is not its own bot (`tool_send_foreign_bot`). The notifier fallback bot

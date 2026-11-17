@@ -252,6 +252,10 @@ services:
       - Embedding__Ollama__Model=${FLEET_MEMORY_OLLAMA_MODEL:-nomic-embed-text}
       # Embedding-input size guidance in UTF-8 bytes; empty or 0 = off (#346). Advisory only.
       - Embedding__InputGuidanceBytes=${FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES:-}
+      # Agent identity: verifies each agent's token and reads its grants from the orchestrator.
+      # See docs/agent-identity.md.
+      - AgentIdentity__Key=${FLEET_AGENT_IDENTITY_KEY:-}
+      - AgentIdentity__Enforce=${FLEET_AGENT_IDENTITY_ENFORCE:-false}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:
@@ -283,6 +287,10 @@ services:
       # Conversation journal: report send_message / send_to_ceo sends back to the calling agent
       # (exchange fleet.journal.tool-sends). Off unless FLEET_COMMS_JOURNAL_ENABLED=true.
       - Journal__ToolSendReceipts=${FLEET_COMMS_JOURNAL_ENABLED:-false}
+      # Agent identity: verifies each agent's token and reads its grants from the orchestrator.
+      # See docs/agent-identity.md.
+      - AgentIdentity__Key=${FLEET_AGENT_IDENTITY_KEY:-}
+      - AgentIdentity__Enforce=${FLEET_AGENT_IDENTITY_ENFORCE:-false}
     mem_limit: 128m
     restart: unless-stopped
     depends_on:
@@ -364,6 +372,10 @@ services:
       # Delegations that survive a restart of this service (off by default). Upgrade every agent
       # image before turning it on. See docs/durable-delegation.md.
       - DurableDelegation__Enabled=${FLEET_DURABLE_DELEGATION_ENABLED:-false}
+      # Agent identity: verifies each agent's token and reads its grants from the orchestrator.
+      # See docs/agent-identity.md.
+      - AgentIdentity__Key=${FLEET_AGENT_IDENTITY_KEY:-}
+      - AgentIdentity__Enforce=${FLEET_AGENT_IDENTITY_ENFORCE:-false}
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq

@@ -1,4 +1,5 @@
 using Fleet.Telegram.Services;
+using Fleet.Shared.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,12 +12,20 @@ builder.Services.AddHttpContextAccessor();
 // Journal:ToolSendReceipts is true (#394).
 builder.Services.AddToolSendReceipts(builder.Configuration);
 
+// Who is calling: an agent by its identity token, held to the tools it is granted (read from the
+// orchestrator). Whose bot sends is decided by that, never by the URL. See docs/agent-identity.md.
+builder.Services.AddAgentIdentityFromOrchestrator(builder.Configuration);
+
 builder.Services
     .AddMcpServer()
     .WithHttpTransport()
-    .WithToolsFromAssembly();
+    .WithToolsFromAssembly()
+    .AddAgentToolAuthorization("fleet-telegram");
 
 var app = builder.Build();
+
+// The MCP endpoint is at the root: everything but the health check.
+app.UseAgentIdentity(context => !context.Request.Path.Equals("/health", StringComparison.OrdinalIgnoreCase));
 
 app.MapMcp();
 

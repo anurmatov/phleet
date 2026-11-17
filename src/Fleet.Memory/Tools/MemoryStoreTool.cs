@@ -3,6 +3,7 @@ using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tools;
 
@@ -18,7 +19,7 @@ public sealed class MemoryStoreTool(
         [Description("Memory type: task_result, learning, user_preference, codebase_knowledge, decision, error_resolution, conversation_summary, reference")] string type,
         [Description("Short descriptive title for this memory")] string title,
         [Description("The memory content — detailed information to remember")] string content,
-        [Description("Agent name storing this memory")] string agent = "",
+        [Description("Agent name storing this memory. Ignored when the call is made as an agent: the author is then the caller.")] string agent = "",
         [Description("Project this memory relates to")] string project = "",
         [Description("Comma-separated tags for categorization")] string tags = "",
         [Description("Source context (e.g., session ID, task ID)")] string source = "")
@@ -42,9 +43,9 @@ public sealed class MemoryStoreTool(
             if (!aclCache.IsAvailable)
                 return "memory_store: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
-            var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            var agentName = AgentCallerHttp.AgentNameOf(httpContextAccessor);
             if (string.IsNullOrWhiteSpace(agentName))
-                return "memory_store: agent identity required — missing '?agent=' query parameter.";
+                return "memory_store: agent identity required — this call was not made as an agent.";
 
             var (allowed, denyReason) = aclCache.CanRead(agentName!, project);
             if (!allowed)
@@ -57,7 +58,9 @@ public sealed class MemoryStoreTool(
             Type = type,
             Title = title,
             Content = content,
-            Agent = agent,
+            // Who stored it is who called, not what the model typed. The argument stands only for a
+            // caller that is not an agent (a service, or a deployment from before identity tokens).
+            Agent = AgentCallerHttp.AgentNameOr(httpContextAccessor, agent),
             Project = project,
             Tags = string.IsNullOrWhiteSpace(tags) ? [] : tags.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList(),
             Source = source

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Telegram.Tools;
 
@@ -27,7 +28,7 @@ public sealed class SendMessageTool(
         [Description("Optional message ID to reply to. When supplied, the message is sent as a threaded reply. If the target message is not found, the message is sent standalone with a reply_fallback flag in the response.")] int? reply_to_message_id = null,
         CancellationToken cancellationToken = default)
     {
-        var agent_name = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault() ?? "";
+        var agent_name = AgentCallerHttp.AgentNameOf(httpContextAccessor) ?? "";
         var formattingModeRaw = httpContextAccessor.HttpContext?.Request.Query["formatting_mode"].FirstOrDefault() ?? "1";
         byte.TryParse(formattingModeRaw, out var formattingModeByte);
         var formattingMode = (Fleet.Shared.FormattingMode)Math.Clamp((int)formattingModeByte, 0, 2);

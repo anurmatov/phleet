@@ -176,7 +176,6 @@ public sealed partial class PrReadinessHoldTests
     [InlineData("rejection without a ref")]
     [InlineData("feedback for another gate")]
     [InlineData("feedback with an empty ref")]
-    [InlineData("stale delegated approval")]
     [InlineData("not an object")]
     public async Task InAHold_WhatIsNotFeedbackIsDropped_TheMergeGoesAhead_AndALaterGateOpensUndecided(string stray)
     {
@@ -203,10 +202,9 @@ public sealed partial class PrReadinessHoldTests
                 "rejection without a ref" => new { Decision = "rejected", Comment = "no" },
                 "feedback for another gate" => new { Decision = "changes_requested", Ref = gateRef + "9", Comment = "elsewhere" },
                 "feedback with an empty ref" => new { Decision = "changes_requested", Ref = "", Comment = "elsewhere" },
-                "stale delegated approval" => Delegated("merge-approval:1", first),
                 _ => "changes_requested",
             };
-            await handle.SignalAsync("merge-approval", [payload is JsonElement element ? element : Json(payload)]);
+            await handle.SignalAsync("merge-approval", [Json(payload)]);
 
             // The hold checks again, clear this time; the merge is refused for a moved head, and
             // the run comes back to its gate after a new review.
@@ -226,7 +224,89 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(0, Timers(run, 300));
         Assert.Equal(1, CancelledTimers(run.History, 300));
         Assert.Equal(3, run.Calls.Count(c => c.Step == "merge_preflight"));   // held, clear, and clear after the second approval
-        Assert.Equal(0, run.Discards);   // the late read is not the gate's guard: it logs no discard
+        Assert.Equal(0, run.Discards);   // the late read is not the gate's guard,
+        Assert.Equal(0, run.Refusals);   // and none of these is a delegated payload
+        Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
+    }
+
+    /// <summary>
+    /// A delegated approval is not for a late read to take: its guard refuses it and the engine
+    /// discards it. Sent during a hold's pause, naming the visit and the ref the gate itself
+    /// accepted a moment ago, it does not end the pause (the pause keeps its original end, as a
+    /// second timer for the remainder), nothing is revised, the merge goes ahead on the human
+    /// approval when the preflight clears, and the next gate opens as visit 2: it was not left
+    /// in the buffer for that gate.
+    /// </summary>
+    [Fact]
+    public async Task InAHold_ADelegatedApprovalIsRefusedByTheEngine_DoesNotEndThePause_AndDecidesNothingLater()
+    {
+        var script = new Script
+        {
+            Preflight = n => n == 1 ? "held" : "clear",
+            Merge = n => n == 1 ? "head_changed" : "merged",
+            Verify = n => n == 1 ? "open" : "merged",
+        };
+        var first = script.Head;
+
+        var run = await RunAsync(script, async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1");
+            await h.SignalHumanApprovalAsync(handle);
+            await WaitForHistoryAsync(handle, history => OpenTimers(history, 300) == 1);
+            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", first)]);
+
+            // The discard re-waits for what is left of the five minutes: the first timer is
+            // cancelled and one for the remainder is open. The hold has not checked again.
+            await WaitForHistoryAsync(handle, history => CancelledTimers(history, 300) == 1 && TimerSeconds(history).Count(IsHoldPause) == 2);
+            Assert.Equal(1, h.Calls.Count(c => c.Step == "merge_preflight"));
+            Assert.DoesNotContain(h.Calls, c => c.Step is "phase4_merge" or "phase4_merge_pinned");
+
+            await h.AdvanceAsync(TimeSpan.FromSeconds(301));
+            await DriveToAsync(handle, h, history => h.LastUpsert(history, "GateVisit") == "merge-approval:2", pastStall: false);
+            Assert.Single(h.Calls, c => c.Step == "phase4_merge");
+            await h.SignalHumanApprovalAsync(handle);
+        });
+
+        Assert.Equal(1, run.Refusals);
+        Assert.Equal(0, run.Discards);
+        Assert.DoesNotContain("revision", run.Upserts("Phase"));
+        Assert.All(run.ConsensusInputs, i => Assert.NotNull(i.ReviewRef));
+        Assert.Equal(["merge-approval:1", "merge-approval:2"], run.Upserts("GateVisit").Where(v => v.Length > 0));
+        Assert.DoesNotContain(run.Calls, c => c.Step == "phase4_merge_pinned");   // never treated as an approval
+        Assert.Equal(2, run.Calls.Count(c => c.Step == "phase4_merge"));
+        // The whole pause passed: its remainder timer is the one that fired.
+        Assert.Equal(1, FiredSeconds(run.History).Count(IsHoldPause));
+        Assert.Equal(0, Timers(run, 300));   // the full-length timer was the cancelled one
+        Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
+    }
+
+    /// <summary>
+    /// On the delegated path the last look meets a second delegated approval of the same visit
+    /// (sent twice, say). The engine refuses it there, the look ends as a timeout, and the pinned
+    /// merge goes ahead on the approval the gate accepted: one merge, nothing revised.
+    /// </summary>
+    [Fact]
+    public async Task DelegatedApproval_ASecondDelegatedApprovalAtTheLastLook_IsRefused_AndTheMergeGoesAhead()
+    {
+        using var preflight = new ManualResetEventSlim(false);
+        var script = new Script();
+        script.Hold["merge_approval_preflight"] = preflight;
+
+        var run = await RunAsync(script, async (handle, h) =>
+        {
+            await h.WaitForGateVisitAsync(handle, "merge-approval:1");
+            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", script.Head)]);
+            await WaitForCallAsync(h, "merge_approval_preflight");
+            await handle.SignalAsync("merge-approval", [Delegated("merge-approval:1", script.Head)]);
+            preflight.Set();
+        });
+
+        Assert.Equal(1, run.Refusals);
+        Assert.Equal(0, run.Discards);
+        Assert.Single(run.Calls, c => c.Step == "phase4_merge_pinned");
+        Assert.DoesNotContain("revision", run.Upserts("Phase"));
+        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merging"], Phases(run));
+        Assert.Equal(["merge-approval:1"], run.Upserts("GateVisit").Where(v => v.Length > 0));
         Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
     }
 
@@ -480,6 +560,9 @@ public sealed partial class PrReadinessHoldTests
         var reads = WorkflowDefinitionValidator.Walk(SeedHarness.Parse(Workflow)).OfType<WaitForSignalStep>()
             .Where(w => w.OutputVar == "merge_late_signal").ToDictionary(w => w.Name!, w => w.TimeoutMinutes);
         Assert.Equal(4, reads.Count);
+        // Each refuses every delegated payload: a late read is never where an approval is consumed.
+        Assert.All(all.Where(s => Type(s) == "wait_for_signal" && s.TryGetProperty("outputVar", out var into) && into.GetString() == "merge_late_signal"),
+            read => Assert.Equal("""{"marker":"GrantId","refuse":true}""", Canonical(read.GetProperty("delegatedGuard").GetRawText())));
         Assert.Equal(0, reads["merge_hold_feedback_take"]);
         Assert.Equal(5, reads["merge_hold_feedback_wait"]);
         Assert.Equal(0, reads["stalled_feedback_take"]);
@@ -583,6 +666,12 @@ public sealed partial class PrReadinessHoldTests
             && e.TimerStartedEventAttributes.StartToFireTimeout.Seconds == seconds
             && !done.Contains(e.TimerStartedEventAttributes.TimerId));
     }
+
+    /// <summary>
+    /// A hold pause, or what is left of one after a discard inside it: the remainder is the five
+    /// minutes less the moment the discard took, so it is recorded a little under 300 seconds.
+    /// </summary>
+    private static bool IsHoldPause(long seconds) => seconds is >= 290 and <= 300;
 
     private static int CancelledTimers(WorkflowHistory history, long seconds)
     {

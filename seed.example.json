@@ -3940,7 +3940,11 @@
                                     "signalName": "merge-approval",
                                     "timeoutMinutes": 0,
                                     "autoCompleteOnTimeout": true,
-                                    "outputVar": "merge_late_signal"
+                                    "outputVar": "merge_late_signal",
+                                    "delegatedGuard": {
+                                      "marker": "GrantId",
+                                      "refuse": true
+                                    }
                                   },
                                   {
                                     "name": "stalled_feedback",
@@ -8931,7 +8935,11 @@
                                     "signalName": "merge-approval",
                                     "timeoutMinutes": 0,
                                     "autoCompleteOnTimeout": true,
-                                    "outputVar": "merge_late_signal"
+                                    "outputVar": "merge_late_signal",
+                                    "delegatedGuard": {
+                                      "marker": "GrantId",
+                                      "refuse": true
+                                    }
                                   }
                                 ]
                               }
@@ -8987,7 +8995,11 @@
                                   "signalName": "merge-approval",
                                   "timeoutMinutes": 5,
                                   "autoCompleteOnTimeout": true,
-                                  "outputVar": "merge_late_signal"
+                                  "outputVar": "merge_late_signal",
+                                  "delegatedGuard": {
+                                    "marker": "GrantId",
+                                    "refuse": true
+                                  }
                                 }
                               ]
                             }
@@ -9507,7 +9519,11 @@
                         "signalName": "merge-approval",
                         "timeoutMinutes": 0,
                         "autoCompleteOnTimeout": true,
-                        "outputVar": "merge_late_signal"
+                        "outputVar": "merge_late_signal",
+                        "delegatedGuard": {
+                          "marker": "GrantId",
+                          "refuse": true
+                        }
                       },
                       {
                         "name": "merge_entry_feedback",

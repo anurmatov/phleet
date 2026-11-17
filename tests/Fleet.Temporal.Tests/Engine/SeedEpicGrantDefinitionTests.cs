@@ -82,16 +82,20 @@ public sealed class SeedEpicGrantDefinitionTests
         });
 
         // Every other wait on the gate's signal is a read of late feedback (the PR definition's
-        // merge hold, stall and merge entry). It mints no visit, parks under no phase, notifies
-        // nobody and writes a variable of its own, so nothing it takes can reach the steps that
-        // read the gate's decision: a delegated approval taken there is dropped, never used.
+        // merge hold, stall and merge entry). Its guard refuses every delegated payload, so the
+        // engine discards a delegated approval there and only the gate above can consume one.
+        // It mints no visit, parks under no phase, notifies nobody and writes a variable of its
+        // own, so nothing it does take can reach the steps that read the gate's decision.
         var gateVars = waits.Select(w => w.OutputVar).ToHashSet();
         var others = all.Except(waits).ToList();
         Assert.Equal(workflow == "UwePrImplementationWorkflow" ? 4 : 0, others.Count);
         Assert.All(others, w =>
         {
             Assert.Null(w.VisitVar);
-            Assert.Null(w.DelegatedGuard);
+            Assert.NotNull(w.DelegatedGuard);
+            Assert.True(w.DelegatedGuard!.Refuse);
+            Assert.Equal("GrantId", w.DelegatedGuard.Marker);
+            Assert.Null(w.DelegatedGuard.Require);
             Assert.Null(w.NotifyStep);
             Assert.Null(w.BindTo);
             Assert.True(w.AutoCompleteOnTimeout);
@@ -615,6 +619,9 @@ internal sealed record SeedRun(
 {
     public string? WaiterDecision { get; init; }
 
+    /// <summary>Delegated payloads discarded by a wait that accepts none (a refusing guard); not in <see cref="Discards"/>.</summary>
+    public int Refusals { get; init; }
+
     /// <summary>The run's closed status, read from the server after it ended.</summary>
     public WorkflowExecutionStatus Status { get; init; }
 
@@ -765,6 +772,7 @@ internal sealed class SeedHarness
             history, harness.Calls, harness._consensus, logs.Count)
         {
             WaiterDecision = waiterDecision,
+            Refusals = logs.Refusals,
             Status = status,
             Failure = failure,
         };
@@ -908,11 +916,13 @@ internal sealed class SeedHarness
         return Path.Combine(dir!.FullName, "seed.example.json");
     }
 
-    /// <summary>Counts the engine's discard warnings.</summary>
+    /// <summary>Counts the engine's discard warnings: a guarded gate's, and a refusing wait's.</summary>
     private sealed class DiscardCounter : ILoggerProvider
     {
         private int _count;
+        private int _refusals;
         public int Count => Volatile.Read(ref _count);
+        public int Refusals => Volatile.Read(ref _refusals);
         public ILogger CreateLogger(string categoryName) => new Logger(this);
         public void Dispose() { }
 
@@ -924,8 +934,11 @@ internal sealed class SeedHarness
             public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
                 Func<TState, Exception?, string> formatter)
             {
-                if (formatter(state, exception).StartsWith("delegated signal discarded: stale visit or artifact", StringComparison.Ordinal))
+                var message = formatter(state, exception);
+                if (message.StartsWith("delegated signal discarded: stale visit or artifact", StringComparison.Ordinal))
                     Interlocked.Increment(ref owner._count);
+                else if (message.StartsWith("delegated signal discarded: this wait accepts no delegated decision", StringComparison.Ordinal))
+                    Interlocked.Increment(ref owner._refusals);
             }
         }
     }

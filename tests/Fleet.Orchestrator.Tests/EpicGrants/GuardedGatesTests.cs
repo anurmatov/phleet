@@ -187,7 +187,11 @@ public sealed class GuardedGatesTests
         Assert.Empty(EpicJson.GuardedGates(Definition(Wait("merge-approval", "merge_visit"), wait)));
     }
 
-    /// <summary>The shipped seed passes the strict rule, gate by gate.</summary>
+    /// <summary>
+    /// The shipped seed passes the strict rule, gate by gate. The PR definition reads
+    /// <c>merge-approval</c> in four more places than its gate (late feedback in the merge hold,
+    /// the stall of a held merge and at the merge entry); each of those refuses.
+    /// </summary>
     [Theory]
     [InlineData("UwePrImplementationWorkflow", "merge-approval")]
     [InlineData("UweDesignWorkflow", "design-approval")]
@@ -204,6 +208,65 @@ public sealed class GuardedGatesTests
             .Single(d => d!["name"]!.GetValue<string>() == workflow)!["definition"]!.ToJsonString();
 
         Assert.Equal([gate], EpicJson.GuardedGates(definition));
+    }
+
+    /// <summary>
+    /// What makes the shipped PR definition's merge gate delegable, wait by wait: one guarded gate
+    /// and four refusing reads. Taking the refusing guard off any one of the four switches the
+    /// gate's delegation off.
+    /// </summary>
+    [Fact]
+    public void The_shipped_pr_definition_has_one_guarded_merge_gate_and_four_refusing_reads()
+    {
+        var definition = ShippedDefinition("UwePrImplementationWorkflow");
+        var waits = Descendants(definition)
+            .Where(o => o["type"]?.GetValue<string>() == "wait_for_signal" && o["signalName"]?.GetValue<string>() == "merge-approval")
+            .ToList();
+
+        Assert.Equal(5, waits.Count);
+        var refusing = waits.Where(w => w["delegatedGuard"]?["refuse"] is not null).ToList();
+        Assert.Equal(
+            ["merge_entry_feedback_take", "merge_hold_feedback_take", "merge_hold_feedback_wait", "stalled_feedback_take"],
+            refusing.Select(w => w["name"]!.GetValue<string>()).Order());
+        Assert.All(refusing, w => Assert.Equal("""{"marker":"GrantId","refuse":true}""", w["delegatedGuard"]!.ToJsonString()));
+        Assert.Equal("merge_approval_signal", Assert.Single(waits.Except(refusing))["name"]!.GetValue<string>());
+
+        foreach (var read in refusing)
+        {
+            var guard = read["delegatedGuard"]!.DeepClone();
+            read.Remove("delegatedGuard");
+            Assert.Empty(EpicJson.GuardedGates(definition.ToJsonString()));
+            read["delegatedGuard"] = guard;
+        }
+        Assert.Equal(["merge-approval"], EpicJson.GuardedGates(definition.ToJsonString()));
+    }
+
+    private static JsonNode ShippedDefinition(string workflow)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "seed.example.json")))
+            dir = dir.Parent;
+        Assert.NotNull(dir);
+
+        var seed = JsonNode.Parse(File.ReadAllText(Path.Combine(dir!.FullName, "seed.example.json")))!;
+        return seed["workflowDefinitions"]!.AsArray()
+            .Single(d => d!["name"]!.GetValue<string>() == workflow)!["definition"]!;
+    }
+
+    private static IEnumerable<JsonObject> Descendants(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                yield return obj;
+                foreach (var property in obj)
+                    foreach (var child in Descendants(property.Value)) yield return child;
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                    foreach (var child in Descendants(item)) yield return child;
+                break;
+        }
     }
 
     private static JsonObject Refusing(string signal) => new()

@@ -699,6 +699,12 @@ public sealed class AgentConfigWriter(
     private static async Task<WriteFault?> DescribeEnvRefAttachFaultAsync(
         OrchestratorDbContext db, string envKeyName, WriteAuthority authority, CancellationToken ct)
     {
+        // The key that signs every agent's identity: an agent holding it could be any agent. Nobody
+        // may attach it, the operator included; provisioning would not deliver it either.
+        if (ContainerSpecBuilder.IsNeverDelivered(envKeyName))
+            return WriteFaults.Invalid("env_ref_reserved",
+                $"Env ref '{envKeyName}' signs agent identities and is never given to an agent. Nothing was changed.");
+
         if (authority == WriteAuthority.Operator) return null;
 
         var binding = (await db.SecretBindings.AsNoTracking().ToListAsync(ct))

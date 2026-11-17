@@ -43,6 +43,16 @@ internal static class ContainerSpecBuilder
         };
     }
 
+    /// <summary>The <c>.env</c> key that signs agent identities (<c>FLEET_AGENT_IDENTITY_KEY</c>).</summary>
+    public const string AgentIdentityKeyName = "FLEET_AGENT_IDENTITY_KEY";
+
+    /// <summary>
+    /// Whether a <c>.env</c> key is one no agent may hold, as an Env Ref or any other way. The
+    /// identity key is the only one: an agent with it could mint any agent's token.
+    /// </summary>
+    internal static bool IsNeverDelivered(string envKeyName) =>
+        string.Equals(envKeyName.Trim(), AgentIdentityKeyName, StringComparison.OrdinalIgnoreCase);
+
     /// <param name="bindings">Every secret binding. A bound key is never written here, whatever <paramref name="secrets"/> holds.</param>
     /// <param name="secrets">The agent's placeholder plan, or <see cref="SecretPlan.None"/>.</param>
     internal static List<string> BuildEnv(
@@ -56,6 +66,9 @@ internal static class ContainerSpecBuilder
         {
             // A bound secret never enters the container. Its placeholder is added below, from the plan.
             if (SecretGrantPlanner.IsBound(bindings, envRef.EnvKeyName))
+                continue;
+            // Nor does the key that signs agent identities, whatever a stored row says.
+            if (IsNeverDelivered(envRef.EnvKeyName))
                 continue;
 
             var value = envValues.TryGetValue(envRef.EnvKeyName, out var v) ? v : "<secret>";

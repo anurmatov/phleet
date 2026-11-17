@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Who is calling a fleet MCP server, for the servers themselves: the request middleware that
+    verifies an agent's identity token, and the MCP filters that hold a caller to the tools it was
+    granted. Split from Fleet.Shared because it needs ASP.NET Core and the MCP server library, which
+    Fleet.Shared must not bring to everything that references it. Referenced by the four services
+    that serve MCP to agents: the orchestrator, fleet-memory, fleet-telegram and the Temporal bridge.
+  -->
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Shared\Fleet.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+  </ItemGroup>
+
+</Project>

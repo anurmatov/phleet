@@ -6,6 +6,7 @@ using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Services;
 using Fleet.Orchestrator.Services.Push;
+using Fleet.Shared.Mcp;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -137,10 +138,17 @@ builder.Services.AddSingleton<UsageReader>();
 builder.Services.AddAgentWrites();
 
 // MCP server (HTTP transport — same port as REST, path /mcp)
+// Who is calling the MCP endpoint, and what that agent is granted: an agent's identity token, and
+// its stored tools checked here instead of only by the CLI inside its own container.
+builder.Services.AddAgentIdentity(builder.Configuration);
+builder.Services.AddSingleton<DbAgentGrantSource>();
+builder.Services.AddSingleton<Fleet.Shared.Mcp.IAgentGrantSource>(sp => sp.GetRequiredService<DbAgentGrantSource>());
+
 builder.Services
     .AddMcpServer()
     .WithHttpTransport()
-    .WithToolsFromAssembly();
+    .WithToolsFromAssembly()
+    .AddAgentToolAuthorization(OrchestratorMcp.ServerName);
 
 var app = builder.Build();
 
@@ -226,6 +234,9 @@ app.UseRateLimiter();
 // token. With no Orchestrator:AuthToken nothing is gated, as before sign-in existed.
 app.UseFleetAccess();
 
+// Who is calling the MCP endpoint: an agent by its identity token, or the operator.
+app.UseMcpAgentIdentity();
+
 // MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
 app.MapMcp("/mcp");
 
@@ -243,6 +254,8 @@ app.MapAgentListEndpoints();
 app.MapAgentConfigEndpoints();
 // REST: GET /api/agents/{name}/effective-harness — the computed harness plan and drift (#460).
 app.MapAgentHarnessEndpoints();
+// GET /internal/agent-mcp-grants — what each agent may call on the fleet's own MCP servers.
+app.MapAgentIdentityEndpoints();
 // REST: POST /api/agents/{name}/mcp-tools — the tools each saved MCP endpoint offers, asked now.
 app.MapAgentMcpToolsEndpoints();
 app.MapJournalCrossChatAuthorization();

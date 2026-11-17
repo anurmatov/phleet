@@ -64,6 +64,7 @@ Get /api/workflows/failures
 Get /api/workflows/{ns}/event-value/{**id}
 Get /api/workflows/{ns}/history/{**id}
 Get /health
+Get /internal/agent-mcp-grants
 Get /internal/agent-project-access
 Mcp /mcp
 Post /api/agents

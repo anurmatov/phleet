@@ -68,6 +68,7 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED \
       FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS \
       FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED FLEET_DURABLE_DELEGATION_ENABLED \
+      FLEET_AGENT_IDENTITY_KEY FLEET_AGENT_IDENTITY_ENFORCE \
       FLEET_PUSH_ENABLED FLEET_PUSH_APNS_KEY_BASE64 FLEET_PUSH_APNS_KEY_ID FLEET_PUSH_APNS_TEAM_ID FLEET_PUSH_APNS_TOPIC \
       FLEET_SECRETS_ENABLED FLEET_SECRETS_SUBNET FLEET_SECRETS_ADDRESS \
       USAGE_ENABLED USAGE_RECEIVER_URL USAGE_AUTH_TOKEN
@@ -721,6 +722,17 @@ for _epic_default in FLEET_PUSH_ENABLED=false FLEET_EPIC_WATCHER_ENABLED=false F
     write_env_var "$ENV_FILE" "${_epic_default%%=*}" "${_epic_default#*=}"
   fi
 done
+
+# Agent identity: the key that signs each agent's token for the fleet's own MCP servers. Every
+# host gets one, whatever else is on, and it is never replaced: every token minted with it would
+# stop verifying until each agent is reprovisioned. Enforcement stays off until the operator turns
+# it on, after every agent has been reprovisioned once. See docs/agent-identity.md.
+if [[ -z "$(read_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_KEY")" ]]; then
+  write_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_KEY" "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
+fi
+if ! grep -q "^FLEET_AGENT_IDENTITY_ENFORCE=" "$ENV_FILE" 2>/dev/null; then
+  write_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_ENFORCE" "false"
+fi
 
 echo
 echo "  Fill in required configuration (press Enter to keep existing values):"

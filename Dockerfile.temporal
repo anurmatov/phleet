@@ -6,6 +6,7 @@ COPY src/Fleet.Temporal/Fleet.Temporal.csproj src/Fleet.Temporal/
 COPY src/Fleet.Contracts/Fleet.Contracts.csproj src/Fleet.Contracts/
 COPY src/Fleet.Shared/Fleet.Shared.csproj src/Fleet.Shared/
 COPY src/Fleet.Shared.Messaging/Fleet.Shared.Messaging.csproj src/Fleet.Shared.Messaging/
+COPY src/Fleet.Shared.Mcp/Fleet.Shared.Mcp.csproj src/Fleet.Shared.Mcp/
 RUN dotnet restore src/Fleet.Temporal/Fleet.Temporal.csproj
 COPY src/ src/
 RUN dotnet publish src/Fleet.Temporal/Fleet.Temporal.csproj -c Release -o /app

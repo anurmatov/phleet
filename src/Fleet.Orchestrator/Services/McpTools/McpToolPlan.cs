@@ -63,11 +63,12 @@ public static class McpToolPlan
         IReadOnlyDictionary<string, string> envValues,
         IReadOnlyCollection<SecretBinding> bindings,
         string fleetMemoryMcpUrl,
-        Func<string?> journalReadToken)
+        Func<string?> journalReadToken,
+        string? serviceToken = null)
     {
         var entries = new List<McpPlanEntry>();
         foreach (var endpoint in agent.McpEndpoints.OrderBy(e => e.McpName, StringComparer.Ordinal))
-            entries.Add(Plan(agent, endpoint, envValues, bindings, journalReadToken));
+            entries.Add(WithServiceIdentity(Plan(agent, endpoint, envValues, bindings, journalReadToken), serviceToken));
 
         // Every agent is given fleet-memory, whether or not it has a row for it.
         if (!agent.McpEndpoints.Any(e => e.McpName == "fleet-memory"))
@@ -76,10 +77,28 @@ public static class McpToolPlan
             {
                 McpName = "fleet-memory", Url = fleetMemoryMcpUrl, TransportType = McpHeaderMappings.HttpTransport,
             };
-            entries.Add(Plan(agent, implicitMemory, envValues, bindings, journalReadToken));
+            entries.Add(WithServiceIdentity(Plan(agent, implicitMemory, envValues, bindings, journalReadToken), serviceToken));
         }
 
         return [.. entries.OrderBy(e => e.Name, StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// The fleet's own servers are asked as the orchestrator, by its service token, not as the
+    /// agent: the list is for an operator choosing what to grant, so it must hold every tool, and a
+    /// server that requires tokens would refuse a caller without one. No other endpoint is sent it.
+    /// </summary>
+    private static McpPlanEntry WithServiceIdentity(McpPlanEntry entry, string? serviceToken)
+    {
+        if (serviceToken is null || entry.Target is not { } target
+            || !AgentConfigFiles.IdentityServerNames.Contains(entry.Name, StringComparer.Ordinal))
+            return entry;
+
+        var headers = new Dictionary<string, string>(target.Headers, StringComparer.Ordinal)
+        {
+            ["Authorization"] = $"{AgentIdentityTokens.Scheme} {serviceToken}",
+        };
+        return entry with { Target = target with { Headers = headers } };
     }
 
     private static McpPlanEntry Plan(

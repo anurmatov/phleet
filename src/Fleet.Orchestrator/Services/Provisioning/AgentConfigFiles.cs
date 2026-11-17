@@ -382,6 +382,79 @@ internal static class AgentConfigFiles
                 ? WithAgentParam(e.Url, agent.Name)
                 : e.Url;
 
+    /// <summary>
+    /// The fleet's own MCP servers, by the name every agent knows them under. These are the
+    /// endpoints an agent proves its identity to, and the names its grants for them carry.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> IdentityServerNames =
+        ["fleet-memory", "fleet-orchestrator", "fleet-telegram", "fleet-temporal"];
+
+    /// <summary>
+    /// The agent's identity token, or null when it gets none: no key is configured, its provider
+    /// does not send MCP headers (a header on such an agent's endpoint makes the agent skip the
+    /// server), or its name cannot be a token's subject. Such an agent is an unverified caller.
+    /// </summary>
+    internal static string? IdentityTokenFor(Agent agent, IReadOnlyList<byte[]> keys) =>
+        keys.Count > 0 && SupportsMcpHeaders(agent.Provider) && AgentIdentityTokens.IsValidSubject(agent.Name)
+            ? AgentIdentityTokens.Mint(keys[0], AgentIdentityTokens.PurposeAgent, agent.Name)
+            : null;
+
+    /// <summary>
+    /// <paramref name="mappedHeaders"/> with the agent's identity added to each of the fleet's own
+    /// servers it reaches, fleet-memory always among them. The identity is the
+    /// <c>Authorization</c> header and wins over a mapping of that name: who an agent is cannot be
+    /// configured per endpoint. Without a token the mappings come back as they were.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WithIdentityHeaders(
+        Agent agent, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders, string? identityToken)
+    {
+        if (identityToken is null) return mappedHeaders;
+
+        var merged = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        foreach (var (name, headers) in mappedHeaders ?? new Dictionary<string, IReadOnlyDictionary<string, string>>())
+            merged[name] = headers;
+
+        var reached = agent.McpEndpoints.Select(e => e.McpName).Append("fleet-memory")
+            .Where(name => IdentityServerNames.Contains(name, StringComparer.Ordinal))
+            .Distinct(StringComparer.Ordinal);
+        foreach (var name in reached)
+        {
+            var headers = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (merged.TryGetValue(name, out var mapped))
+                foreach (var (header, value) in mapped)
+                    if (!string.Equals(header, "Authorization", StringComparison.OrdinalIgnoreCase))
+                        headers[header] = value;
+            headers["Authorization"] = $"{AgentIdentityTokens.Scheme} {identityToken}";
+            merged[name] = headers;
+        }
+        return merged;
+    }
+
+    /// <summary>
+    /// What an agent may call on the fleet's own MCP servers: its enabled tools, and the two every
+    /// agent is given whether or not they are listed (<c>memory_get</c>, and <c>notify_cto</c> for
+    /// every agent but the CTO). The same list the generated allow-lists carry, so a server that
+    /// checks grants agrees with the agent's own CLI.
+    /// </summary>
+    internal static List<string> EffectiveMcpGrants(Agent agent, string? ctoAgentName)
+    {
+        var grants = agent.Tools.Where(t => t.IsEnabled).Select(t => t.ToolName)
+            .Where(name => IdentityServerNames.Any(server =>
+                name.StartsWith($"{AgentToolGrants.Prefix}{server}__", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, AgentToolGrants.Prefix + server, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (!grants.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
+            grants.Add("mcp__fleet-memory__memory_get");
+        if (!string.IsNullOrWhiteSpace(ctoAgentName)
+            && !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase)
+            && !grants.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
+            grants.Add("mcp__fleet-temporal__notify_cto");
+
+        grants.Sort(StringComparer.OrdinalIgnoreCase);
+        return grants;
+    }
+
     /// <param name="mappedHeaders">
     /// #593: each mapped endpoint's resolved headers (<see cref="ResolveMcpHeaders"/>), by endpoint name.
     /// An endpoint without an entry is written as it always was.
@@ -429,7 +502,10 @@ internal static class AgentConfigFiles
         if (!mcpServers.ContainsKey("fleet-memory"))
         {
             var url = WithAgentParam(fleetMemoryMcpUrl, agent.Name);
-            mcpServers["fleet-memory"] = new { type = "http", url };
+            // The agent's identity header goes to the memory server it is given, row or no row.
+            mcpServers["fleet-memory"] = mappedHeaders is not null && mappedHeaders.TryGetValue("fleet-memory", out var headers)
+                ? new { type = "http", url, headers }
+                : new { type = "http", url };
         }
 
         if (filesEnabled && (HasFilesGrant(agent) || JournalGrants.HasSendGrant(agent)) && agent.JournalEnabled && HasTelegramBot(agent)

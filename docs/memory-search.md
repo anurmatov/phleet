@@ -29,10 +29,12 @@ Things worth knowing:
 - **There is no cut-off by default.** The meaning side always returns its nearest memories, however
   far they are; that is why they are labelled and carry a score. `Search__MinMeaningScore` drops
   the ones below a similarity (see [Settings](#settings)).
-- **`id`, `title` and `tag` hits need neither Qdrant nor the embedder.** They come from a catalogue
+- **`id`, `title` and `tag` hits need neither Qdrant nor the embedder during search.** They come from a catalogue
   held in memory, built from the files before the service starts to listen. With the embedder down, keyword hits still work;
   with Qdrant down, the first three still work. A search that found nothing while a part of it
   could not run fails instead of saying "nothing found".
+  This is a running-service search fallback, not a guarantee of startup during a Qdrant outage:
+  collection initialization and other hosted services must still complete without a fatal error.
 - **Keywords are words in any script**: runs of Unicode letters, digits and underscore, lower-cased.
   Han and Hiragana, which are written without spaces, are matched one character at a time. Scripts
   that need a dictionary to find word ends (Thai, Lao, Khmer) are matched only as whole runs between
@@ -78,7 +80,7 @@ a value that cannot be used is the default with one warning in the log.
 
 | Key (env form) | Default | Range | Meaning |
 |---|---|---|---|
-| `Search__SectionChars` | 1200 | 200 to 8000 | The longest section, in characters. The default fits the smallest supported model (512 tokens) in any script. |
+| `Search__SectionChars` | 1200 | 200 to 8000 | The longest section, in characters, not tokens. Check the model's token limit for the language being indexed; the tokenizer can truncate a section even at the default. |
 | `Search__MaxSections` | 200 | 1 to 2000 | The most sections of one memory that are indexed. |
 | `Search__MinMeaningScore` | 0 (off) | 0 to 1 | A hit found by meaning alone is dropped below this similarity. The right value depends on the embedding model: look at the scores your model gives to results you would and would not want. |
 
@@ -106,8 +108,9 @@ yours to measure:
   many sections as memories.
 - Time per call: the version before this one embedded every memory at every start, so the time
   between its `Starting full index` and `Full index complete` log lines (`docker logs -t
-  fleet-memory`), divided by the number it indexed, is what one call cost there. A section is no
-  longer than the memories that was measured on, so a call now costs that or less.
+  fleet-memory`), divided by the number it indexed, gives a rough historical average. It is not an
+  upper bound: model warmup, tokenization, remote latency and other requests can change the cost.
+  Measure representative section calls with the intended provider before budgeting a first rebuild.
 
 The `Full index complete` line of the first start says how many sections there were. During it:
 
@@ -122,9 +125,36 @@ The `Full index complete` line of the first start says how many sections there w
 
 An interrupted first start is continued, not repeated: what was embedded is skipped next time.
 
-To go back to an earlier fleet-memory image, drop the index (stop the stack, remove the `qdrant`
-container and the `fleet_qdrant_data` volume, start again). An earlier image does not know about
-sections and would list and return a long memory several times.
+## Rollback without losing other collections
+
+An earlier fleet-memory image does not understand section points and can list and return a long
+memory several times. Do not point it at the sectioned collection. **Do not stop the whole stack,
+remove the shared Qdrant container, or delete its volume:** other services can own collections there.
+
+Before an operator-authorized rollback:
+
+1. Record the current and rollback image digests, effective `Qdrant:Url`, `Qdrant:Collection`, memory
+   file mount, embedding provider/model/dimensions and service configuration. Back up the Markdown
+   files, which are the source of truth. Record the unrelated collections and their point counts.
+2. Stop **only fleet-memory**, including any other receiver that writes this memory collection.
+   A read-only file mount does not stop an instance from writing or recreating its Qdrant collection.
+   Leave Qdrant and unrelated services running; keep their configuration unchanged.
+3. Choose a new, dedicated collection name for the old image, such as `memories_rollback_20260301`.
+   Verify that exact name is absent in Qdrant before starting anything. In fleet-memory's service
+   configuration only, set `Qdrant__Collection` to that name and select the retained old image.
+   Keep its file mount and the recorded embedding settings. Preserve the current sectioned collection
+   unchanged: do not delete any collection, container or volume for this rollback.
+4. Start only fleet-memory. The old image rebuilds its single-point index from the Markdown files;
+   a healthy endpoint alone does not prove this rebuild finished. Verify the completed index log,
+   distinct memory IDs, representative searches and caller ACL refusals before resuming use.
+   Check that unrelated collections and their point counts are preserved.
+
+This needs space for both memory indexes and time to embed every memory again. Do not run old and
+new receivers against the same collection. To return to the new image, stop the old receiver and
+restore the recorded new-image configuration and sectioned collection name; startup reconciles any
+files changed during rollback. Retain both collections until the operator separately approves cleanup
+of an explicitly named, exclusively owned memory collection. If there is insufficient space or
+ownership is uncertain, stop and agree a scoped backup/restore plan instead of deleting shared data.
 
 ## `GET /internal/memory/search`
 

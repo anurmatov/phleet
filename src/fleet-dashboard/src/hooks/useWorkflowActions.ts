@@ -3,6 +3,7 @@ import type { SignalButton, SignalDef, SignalModalState, WfActionState, Workflow
 import type { KeyedTimers } from '../reconnect'
 import { apiFetch, apiGet, apiSend, errorMessage } from '../utils'
 import { buildSignalRequest, signalErrorMessage } from '../signalRequest'
+import { pruneDecisions, sentDecision, withDecision, withoutDecision, type SentDecisions } from '../sentDecisions'
 import { useKeyedStatus } from './useKeyedStatus'
 
 // What can be done to a running workflow, wherever its row is drawn: the Agents page and the
@@ -47,14 +48,19 @@ export interface WorkflowActions {
   runAction: (wf: WorkflowSummary, action: WorkflowAction) => void
   signalStates: Record<string, SignalState>
   signalMsg: Record<string, string>
-  /** `workflowId::phase` of signals already sent, so the buttons stay away until the phase moves. */
-  sentSignals: Set<string>
-  /** Drops the sent marks of workflows that left that phase or the list. */
+  /** The label of the decision this page sent for the run's current phase (sentDecisions.ts), or null. */
+  decisionSent: (wf: WorkflowSummary) => string | null
+  /** The run's phase accepts a signal and none was sent for it yet: it waits for the person. */
+  awaitsDecision: (wf: WorkflowSummary) => boolean
+  /** Offers the run's buttons again after a decision was sent. */
+  sendAgain: (wf: WorkflowSummary) => void
+  /** Drops the sent decisions of workflows that left that phase or the list. */
   pruneSentSignals: (current: WorkflowSummary[]) => void
   signalConfirm: string | null
   /** Opens the dialog for a signal that needs one, otherwise click-again-to-confirm. */
   signalClick: (wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) => void
-  sendSignal: (wf: WorkflowSummary, signalName: string, payload: string, comment?: string) => void
+  /** `label` is the button's, shown in place of the buttons once the signal is sent. */
+  sendSignal: (wf: WorkflowSummary, signalName: string, payload: string, comment?: string, label?: string) => void
   signalModal: SignalModalState | null
   setSignalModal: React.Dispatch<React.SetStateAction<SignalModalState | null>>
   menuOpen: Record<string, boolean>
@@ -74,7 +80,7 @@ export interface WorkflowActions {
 export function useWorkflowActions(timers: KeyedTimers, signalRegistry: Record<string, SignalDef[]>): WorkflowActions {
   const actions = useKeyedStatus<WfActionState>(timers, 'wf', 'idle')
   const signals = useKeyedStatus<SignalState>(timers, 'signal', 'idle')
-  const [sentSignals, setSentSignals] = useState<Set<string>>(new Set())
+  const [sent, setSent] = useState<SentDecisions>({})
   const [signalConfirm, setSignalConfirm] = useState<string | null>(null)
   const [signalModal, setSignalModal] = useState<SignalModalState | null>(null)
   const [menuOpen, setMenuOpen] = useState<Record<string, boolean>>({})
@@ -89,6 +95,10 @@ export function useWorkflowActions(timers: KeyedTimers, signalRegistry: Record<s
     if (!wf.phase) return []
     return defs.filter(sig => !sig.validPhases || sig.validPhases.includes(wf.phase!))
   }
+
+  function decisionSent(wf: WorkflowSummary): string | null { return sentDecision(sent, wf) }
+  function awaitsDecision(wf: WorkflowSummary): boolean { return getSignalDefs(wf).length > 0 && decisionSent(wf) === null }
+  function sendAgain(wf: WorkflowSummary) { setSent(prev => withoutDecision(prev, wf)) }
 
   function wfActionState(wf: WorkflowSummary): WfActionState { return actions.states[wfKey(wf)] ?? 'idle' }
 
@@ -111,7 +121,7 @@ export function useWorkflowActions(timers: KeyedTimers, signalRegistry: Record<s
     actions.settle(wfKey(wf), `confirming-${action}`, '', 5000)
   }
 
-  function sendSignal(wf: WorkflowSummary, signalName: string, payload: string, comment?: string) {
+  function sendSignal(wf: WorkflowSummary, signalName: string, payload: string, comment?: string, label?: string) {
     const key = signalKey(wf)
     // An answer to a human-input request is not retried blind: its result stays on the row.
     const answer = signalName === 'request-input'
@@ -126,7 +136,7 @@ export function useWorkflowActions(timers: KeyedTimers, signalRegistry: Record<s
       .then(async r => {
         if (r.ok) {
           report('success', 'Signal sent')
-          setSentSignals(prev => new Set(prev).add(`${wf.workflowId}::${wf.phase}`))
+          setSent(prev => withDecision(prev, wf, label ?? signalName))
           return
         }
         const body = await r.json().catch(() => ({}))
@@ -143,7 +153,7 @@ export function useWorkflowActions(timers: KeyedTimers, signalRegistry: Record<s
     const ck = signalConfirmKey(wf, sig.name, btn.label)
     if (signalConfirm === ck) {
       setSignalConfirm(null)
-      sendSignal(wf, sig.name, btn.payload)
+      sendSignal(wf, sig.name, btn.payload, undefined, btn.label)
     } else {
       setSignalConfirm(ck)
       timers.after('signal-confirm', 5000, () => setSignalConfirm(prev => prev === ck ? null : prev))
@@ -151,17 +161,7 @@ export function useWorkflowActions(timers: KeyedTimers, signalRegistry: Record<s
   }
 
   const pruneSentSignals = useCallback((current: WorkflowSummary[]) => {
-    setSentSignals(prev => {
-      const next = new Set(prev)
-      for (const entry of prev) {
-        const sepIdx = entry.lastIndexOf('::')
-        const wfId = entry.slice(0, sepIdx)
-        const oldPhase = entry.slice(sepIdx + 2)
-        const updated = current.find(w => w.workflowId === wfId)
-        if (!updated || updated.phase !== oldPhase || updated.status !== 'Running') next.delete(entry)
-      }
-      return next.size !== prev.size ? next : prev
-    })
+    setSent(prev => pruneDecisions(prev, current))
   }, [])
 
   function toggleMenu(key: string) {
@@ -201,7 +201,7 @@ export function useWorkflowActions(timers: KeyedTimers, signalRegistry: Record<s
     wfKey, signalKey, signalConfirmKey, wfStatusClass, getSignalDefs,
     wfActionState, wfActionMsg: actions.messages, confirmAction, runAction,
     signalStates: signals.states, signalMsg: signals.messages,
-    sentSignals, pruneSentSignals, signalConfirm, signalClick, sendSignal,
+    decisionSent, awaitsDecision, sendAgain, pruneSentSignals, signalConfirm, signalClick, sendSignal,
     signalModal, setSignalModal,
     menuOpen, toggleMenu,
     selectedWf, history, historyLoading, historyError, expandedEvents,

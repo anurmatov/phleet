@@ -98,7 +98,10 @@ POST /v1.41/containers/fleet-agent-codex-hosted/start
   "mcpServers": {
     "fleet-memory": {
       "type": "http",
-      "url": "http://fleet-memory:3100?agent=agent-codex-hosted"
+      "url": "http://fleet-memory:3100",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-codex-hosted.I3m_HSSwV0IU4cMUavNTvGFPNZGJoh-l_hQUMBaNN9k"
+      }
     }
   }
 }
@@ -135,7 +138,8 @@ POST /v1.41/containers/fleet-agent-codex-hosted/start
     "HostedProvider": true,
     "HostedProviderKeyEnv": "ZAI_CODING_PLAN_API_KEY",
     "AnthropicBaseUrl": null,
-    "InstructionOrder": []
+    "InstructionOrder": [],
+    "McpHeaderSupport": true
   },
   "Telegram": {
     "AllowedUserIds": [],

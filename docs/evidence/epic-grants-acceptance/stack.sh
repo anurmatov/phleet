@@ -35,8 +35,19 @@ start() {
   echo '{"heads": {}, "merged": {}, "bodies": {}, "ceo_concern_valid": {}, "head_version": {}}' > state.json
   : > env.file
 
+  # Synthetic shared server key and a single offline-minted agent token, never inherited.
+  # Client helpers receive only identity-tokens.json, not a service token or the signing key.
+  umask 077
+  python3 - <<'PYIDENTITY' || exit 1
+import base64, hashlib, hmac, json
+key = bytes(range(32))
+mac = base64.urlsafe_b64encode(hmac.new(key, b"fa1|agent|cto-agent", hashlib.sha256).digest()).decode().rstrip("=")
+with open("identity-tokens.json", "w") as f:
+    json.dump({"cto-agent": "fa1.agent.cto-agent." + mac}, f)
+PYIDENTITY
   cat > orch.env <<EOF
 ASPNETCORE_ENVIRONMENT=Production
+AgentIdentity__Key=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
 Kestrel__Endpoints__Http__Url=http://127.0.0.1:3600
 ConnectionStrings__OrchestratorDb='Server=127.0.0.1;Port=3306;Database=orch_accept436;User=accept;Password=accept-only;AllowPublicKeyRetrieval=true'
 Temporal__Address=127.0.0.1:7233
@@ -60,6 +71,8 @@ EpicGrants__DeniedRepos=example-org/accept-denied
 EpicGrants__GitHubApiBaseUrl=http://127.0.0.1:3901
 EOF
   cat > bridge.env <<EOF
+AgentIdentity__Key=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
+AgentIdentity__OrchestratorUrl=http://127.0.0.1:3600
 TemporalBridge__TemporalAddress=127.0.0.1:7233
 TemporalBridge__Namespaces__0=fleet
 TemporalBridge__OrchestratorUrl=http://127.0.0.1:3600
@@ -78,7 +91,19 @@ EOF
   sleep 6
   setsid nohup "${CLEAN[@]}" bash -c "set -a; . '$ACCEPT_DIR/orch.env'; set +a; cd '$REPO_ROOT/src/Fleet.Orchestrator/bin/Release/net10.0' && exec dotnet Fleet.Orchestrator.dll" \
     > "$ACCEPT_DIR/orchestrator.log" 2>&1 < /dev/null &
-  for _ in $(seq 1 60); do curl -sf http://127.0.0.1:3600/api/epic-grants >/dev/null 2>&1 && break; sleep 1; done
+  for _ in $(seq 1 60); do curl -sf -H "Authorization: Bearer accept436-admin-token" http://127.0.0.1:3600/api/epic-grants >/dev/null 2>&1 && break; sleep 1; done
+  # Authorization data belongs only to this disposable database. No container is provisioned.
+  mysql -uaccept -paccept-only -h127.0.0.1 orch_accept436 <<'SQL' || exit 1
+INSERT INTO agents
+  (Name, DisplayName, Role, Model, ContainerName, MemoryLimitMb, IsEnabled,
+   FormattingMode, GroupDebounceSeconds, MountDockerSock, PrefixMessages,
+   ProactiveIntervalMinutes, ShowStats, SuppressToolMessages, TelegramSendOnly)
+VALUES ('cto-agent', 'Synthetic coordinator', 'co-cto', 'synthetic', 'synthetic-cto',
+        512, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+INSERT INTO agent_tools (AgentId, ToolName, IsEnabled)
+SELECT Id, 'mcp__fleet-temporal__temporal_signal_workflow', 1
+FROM agents WHERE Name = 'cto-agent';
+SQL
   setsid nohup "${CLEAN[@]}" bash -c "set -a; . '$ACCEPT_DIR/bridge.env'; set +a; cd '$REPO_ROOT/src/Fleet.Temporal/bin/Release/net10.0' && exec dotnet Fleet.Temporal.dll" \
     > "$ACCEPT_DIR/bridge.log" 2>&1 < /dev/null &
   sleep 10

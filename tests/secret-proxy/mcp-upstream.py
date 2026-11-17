@@ -3,14 +3,15 @@
 
 Answers streamable-HTTP MCP at POST /mcp for one host (mcp.example.test): initialize, the
 initialized notification, tools/list and ping. A request is answered only when both mapped headers
-carry the two expected synthetic secrets; anything else is a 401. Every request is logged as one JSON
-line of booleans and the JSON-RPC method, never a header value, so the harness can count what
+carry the expected synthetic secrets, agent identity and separate config token; anything else is
+a 401. Every request is logged as one JSON line of booleans, never a header value, so the harness can count what
 arrived and prove no placeholder reached it. Nothing here is a real service.
 """
 import json, ssl, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 KEY_SECRET, SECRET_SECRET, LOG = sys.argv[1], sys.argv[2], sys.argv[3]
+EXPECTED = json.load(open(sys.argv[6]))
 SESSION = "synthetic-session-1"
 
 
@@ -24,10 +25,10 @@ class Handler(BaseHTTPRequestHandler):
         key = self.headers.get("X-Example-Key") or ""
         secret = self.headers.get("X-Example-Secret") or ""
         entry = {
-            "host": (self.headers.get("Host") or "").lower(),
-            "http_method": self.command,
-            "path": self.path,
-            "rpc_method": rpc_method,
+            "host_ok": (self.headers.get("Host") or "").lower() == "mcp.example.test",
+            "initialize": rpc_method == "initialize",
+            "identity_ok": self.headers.get("Authorization") == EXPECTED["authorization"],
+            "config_ok": self.headers.get("X-Fleet-Config-Token") == EXPECTED["configToken"],
             "key_ok": key == KEY_SECRET,
             "secret_ok": secret == SECRET_SECRET,
             "placeholder_seen": any("fleet_placeholder_" in (v or "") for v in self.headers.values()),
@@ -65,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
         entry = self.record(message.get("method"))
         if self.path.split("?")[0] != "/mcp":
             return self.send(404, {"error": "not found"})
-        if not (entry["key_ok"] and entry["secret_ok"]):
+        if not (entry["key_ok"] and entry["secret_ok"] and entry["identity_ok"] and entry["config_ok"]):
             return self.send(401, {"error": "synthetic credentials missing"})
 
         method, rid = message.get("method"), message.get("id")

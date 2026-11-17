@@ -1,6 +1,10 @@
 # Gemini Provider Setup
 
-Fleet supports Google Gemini as an AI provider via the `gemini` CLI in headless mode.
+Gemini credentials and saved records remain supported, but **agent provisioning is unavailable**
+while its pinned native CLI has `McpHeaderSupport=false`. Mandatory signed MCP identity refuses
+provision/reprovision with `mcp_headers_unsupported` before files or a healthy container change.
+Migrate or stop running unsupported callers before strict deployment; keep stopped callers stopped.
+See [agent identity migration](../agent-identity.md#existing-install-migration).
 
 ## Prerequisites
 
@@ -25,7 +29,7 @@ Fleet supports Google Gemini as an AI provider via the `gemini` CLI in headless 
 
 ## Setup with fleet
 
-Run `./setup.sh` and choose option **3** (gemini) or **5** (claude + gemini).
+Run `./setup.sh` and choose option **3** or **5** for Gemini **credential preparation only**, not a provisionable mandatory-MCP agent.
 setup.sh copies `~/.gemini/oauth_creds.json` to `./fleet/.gemini-credentials.json`.
 
 ## How it works
@@ -103,9 +107,8 @@ Telegram replies carry only message ids, never quoted text. Conversation-bound
 reply lookup requires an explicitly granted journal tool and a read-token header.
 The pinned CLI `0.40.1` remains `McpHeaderSupport=false` until an actual CLI
 transcript proves `tools/list`, bound and unbound `get_message`, and Authorization
-on every request. Provisioning refuses a journal endpoint with
-`journal_headers_unsupported`; without the endpoint, the reply prompt reports
-`provider_headers_unsupported`. Entrypoint translation tests alone are not proof. The current
+on every request. Mandatory identity now refuses the whole provision with `mcp_headers_unsupported`;
+the earlier journal-specific checks remain separate. Entrypoint translation tests alone are not proof. The current
 [failing probe](../evidence/journal-provider-probes.md) was credential-blocked;
 it is not evidence of header support or a transport limitation.
 

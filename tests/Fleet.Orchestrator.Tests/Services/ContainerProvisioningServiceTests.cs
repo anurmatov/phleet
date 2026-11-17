@@ -12,23 +12,23 @@ public class ContainerProvisioningServiceTests
     // carries ?agent= (or any other query param) never produces a double-query URL.
 
     [Fact]
-    public void WithAgentParam_NoQuery_AppendsAgent()
+    public void WithAgentParam_NoQuery_LeavesUrl()
     {
         var result = ContainerProvisioningService.WithAgentParam(
             "http://fleet-memory:3100", "myagent");
 
-        Assert.Equal("http://fleet-memory:3100?agent=myagent", result);
+        Assert.Equal("http://fleet-memory:3100", result);
     }
 
     [Fact]
-    public void WithAgentParam_ExistingAgentQuery_ReplacesWithNewAgent()
+    public void WithAgentParam_ExistingAgentQuery_RemovesCaller()
     {
         // This is the actual bug: re-provisioning an agent whose DB URL already
         // had ?agent=old produced http://...?agent=old?agent=new (malformed).
         var result = ContainerProvisioningService.WithAgentParam(
             "http://fleet-memory:3100?agent=old", "new");
 
-        Assert.Equal("http://fleet-memory:3100?agent=new", result);
+        Assert.Equal("http://fleet-memory:3100", result);
     }
 
     [Fact]
@@ -37,7 +37,7 @@ public class ContainerProvisioningServiceTests
         var result = ContainerProvisioningService.WithAgentParam(
             "http://fleet-memory:3100/?agent=old", "foo");
 
-        Assert.Equal("http://fleet-memory:3100?agent=foo", result);
+        Assert.Equal("http://fleet-memory:3100", result);
     }
 
     [Fact]
@@ -46,18 +46,17 @@ public class ContainerProvisioningServiceTests
         var result = ContainerProvisioningService.WithAgentParam(
             "http://fleet-temporal-bridge:3001/mcp", "adev");
 
-        Assert.Equal("http://fleet-temporal-bridge:3001/mcp?agent=adev", result);
+        Assert.Equal("http://fleet-temporal-bridge:3001/mcp", result);
     }
 
     [Fact]
-    public void WithAgentParam_UnrelatedQueryParams_AllDropped()
+    public void WithAgentParam_UnrelatedQueryParams_Preserved()
     {
-        // WithAgentParam strips ALL query params, not just ?agent=.
-        // Fleet-internal MCP URLs never carry other params — this is intentional.
+        // Only the obsolete caller parameter is removed.
         var result = ContainerProvisioningService.WithAgentParam(
             "http://fleet-telegram:3800/mcp?foo=bar&baz=qux", "myagent");
 
-        Assert.Equal("http://fleet-telegram:3800/mcp?agent=myagent", result);
+        Assert.Equal("http://fleet-telegram:3800/mcp?foo=bar&baz=qux", result);
     }
 
     [Fact]
@@ -134,7 +133,7 @@ public class ContainerProvisioningServiceTests
         var agent = MinimalAgent("atester", "claude");
         var (_, url) = GetAutoInjectedFleetMemory(agent, "http://fleet-memory:3100");
         Assert.DoesNotContain("/mcp", url);
-        Assert.Contains("?agent=atester", url);
+        Assert.DoesNotContain("agent=", url);
     }
 
     [Fact]
@@ -156,7 +155,7 @@ public class ContainerProvisioningServiceTests
               "mcpServers": {
                 "fleet-memory": {
                   "type": "http",
-                  "url": "http://fleet-memory:3100?agent=agolden"
+                  "url": "http://fleet-memory:3100"
                 }
               }
             }

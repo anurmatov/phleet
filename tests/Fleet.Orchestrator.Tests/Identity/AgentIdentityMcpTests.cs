@@ -35,8 +35,9 @@ public sealed class AgentIdentityMcpTests
             return $"{caller.Kind}:{caller.Name}";
         }
 
+        public static int RestrictedCalls;
         [McpServerTool(Name = "restricted"), Description("A tool few are granted.")]
-        public static string Restricted() => "done";
+        public static string Restricted() { Interlocked.Increment(ref RestrictedCalls); return "done"; }
     }
 
     private sealed class Grants : IAgentGrantSource
@@ -48,6 +49,16 @@ public sealed class AgentIdentityMcpTests
             ValueTask.FromResult(Available
                 ? new AgentGrantAnswer(true, ByAgent.GetValueOrDefault(agent, []))
                 : AgentGrantAnswer.Unknown);
+    }
+
+    private sealed class ChangingIdentity(HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        public string? Token { get; set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            request.Headers.Authorization = Token is null ? null : new("Bearer", Token);
+            return base.SendAsync(request, ct);
+        }
     }
 
     private sealed class Host(WebApplication app, Grants grants) : IAsyncDisposable
@@ -67,10 +78,15 @@ public sealed class AgentIdentityMcpTests
                 },
                 new HttpClient(app.GetTestServer().CreateHandler()), loggerFactory: null, ownsHttpClient: true));
 
+        public ChangingIdentity NewIdentityHandler() => new(app.GetTestServer().CreateHandler());
+        public Task<McpClient> ConnectAsync(ChangingIdentity handler) => McpClient.CreateAsync(new HttpClientTransport(
+            new HttpClientTransportOptions { Endpoint = new Uri("http://localhost/mcp"), TransportMode = HttpTransportMode.StreamableHttp },
+            new HttpClient(handler), loggerFactory: null, ownsHttpClient: true));
+
         public ValueTask DisposeAsync() => app.DisposeAsync();
     }
 
-    private static async Task<Host> StartAsync(bool withKey, bool enforce, Func<HttpContext, bool>? isOperator = null)
+    private static async Task<Host> StartAsync(bool withKey, bool enforce, Func<HttpContext, bool>? isOperator = null, bool registerGrants = true, bool rootMcp = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -82,11 +98,13 @@ public sealed class AgentIdentityMcpTests
         });
         var grants = new Grants();
         builder.Services.AddAgentIdentity(builder.Configuration);
-        builder.Services.AddSingleton<IAgentGrantSource>(grants);
+        if (registerGrants) builder.Services.AddSingleton<IAgentGrantSource>(grants);
         builder.Services.AddMcpServer().WithHttpTransport().WithTools<ExampleTools>().AddAgentToolAuthorization(Server);
 
         var app = builder.Build();
-        app.UseAgentIdentity(context => context.Request.Path.StartsWithSegments("/mcp"), isOperator);
+        app.UseAgentIdentity(context => rootMcp
+            ? !context.Request.Path.Equals("/health", StringComparison.OrdinalIgnoreCase)
+            : context.Request.Path.StartsWithSegments("/mcp"), isOperator);
         app.MapMcp("/mcp");
         app.MapGet("/health", () => "ok");
         await app.StartAsync();
@@ -133,23 +151,16 @@ public sealed class AgentIdentityMcpTests
     }
 
     [Fact]
-    public async Task WithoutAToken_ACallerIsServedByItsClaim_WhileTokensAreNotRequired()
+    public async Task WithoutAToken_ACallerCannotClaimAName()
     {
         await using var host = await StartAsync(withKey: true, enforce: false);
-        await using var client = await host.ConnectAsync(claimedAgent: "agent-1");
-
-        Assert.Equal("Unverified:agent-1", await CallAsync(client, "whoami"));
+        Assert.Equal(HttpStatusCode.Unauthorized, await PostStatusAsync(host, null, "?agent=agent-1"));
     }
 
     [Fact]
-    public async Task WithoutAKey_TheServerBehavesAsItDidBeforeTokens()
+    public async Task WithoutAKey_TheServerDoesNotStart()
     {
-        await using var host = await StartAsync(withKey: false, enforce: false);
-        // A token is not refused for the server lacking the key: it simply proves nothing here.
-        await using var client = await host.ConnectAsync(AgentToken("agent-9"), claimedAgent: "agent-1");
-
-        Assert.Equal("Unverified:agent-1", await CallAsync(client, "whoami"));
-        Assert.Equal("done", await CallAsync(client, "restricted"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => StartAsync(withKey: false, enforce: false));
     }
 
     [Fact]
@@ -164,12 +175,11 @@ public sealed class AgentIdentityMcpTests
     }
 
     [Fact]
-    public async Task AWrongToken_IsRefusedEvenWhileTokensAreNotRequired()
+    public async Task AWrongToken_AndMissingToken_AreRefused()
     {
         await using var host = await StartAsync(withKey: true, enforce: false);
-
-        Assert.Equal(HttpStatusCode.Unauthorized, await PostStatusAsync(host, AgentToken("agent-1", AgentIdentityTokensTests.OtherKey), "?agent=agent-1"));
-        Assert.NotEqual(HttpStatusCode.Unauthorized, await PostStatusAsync(host, token: null, query: "?agent=agent-1"));
+        Assert.Equal(HttpStatusCode.Unauthorized, await PostStatusAsync(host, AgentToken("agent-1", AgentIdentityTokensTests.OtherKey)));
+        Assert.Equal(HttpStatusCode.Unauthorized, await PostStatusAsync(host, null));
     }
 
     [Fact]
@@ -282,19 +292,14 @@ public sealed class AgentIdentityMcpTests
     }
 
     [Fact]
-    public async Task AnUnverifiedCaller_IsNotHeldToGrants_BecauseItsNameProvesNothing()
+    public async Task AnUnsignedCaller_IsNeverServed()
     {
         await using var host = await StartAsync(withKey: true, enforce: false);
-        host.Grants.ByAgent["agent-1"] = [];
-        await using var client = await host.ConnectAsync(claimedAgent: "agent-1");
-
-        // Served as before tokens. Enforcement is what closes this, not a check on a typed name.
-        Assert.Equal(2, (await client.ListToolsAsync()).Count);
-        Assert.Equal("done", await CallAsync(client, "restricted"));
+        Assert.Equal(HttpStatusCode.Unauthorized, await PostStatusAsync(host, null, "?agent=agent-1"));
     }
 
     [Fact]
-    public async Task WhenGrantsCannotBeRead_AnAgentIsRefusedUnderEnforcement_AndServedOtherwise()
+    public async Task WhenGrantsCannotBeRead_AnAgentIsAlwaysRefused()
     {
         await using (var enforcing = await StartAsync(withKey: true, enforce: true))
         {
@@ -309,8 +314,69 @@ public sealed class AgentIdentityMcpTests
         observing.Grants.Available = false;
         await using var served = await observing.ConnectAsync(AgentToken("agent-1"));
 
-        Assert.Equal("Agent:agent-1", await CallAsync(served, "whoami"));
-        Assert.Equal(2, (await served.ListToolsAsync()).Count);
+        Assert.StartsWith("ERROR " + AgentToolAuthorization.GrantsUnavailableCode, await CallAsync(served, "whoami"));
+        Assert.Empty(await served.ListToolsAsync());
+    }
+
+    [Fact]
+    public async Task MandatoryIdentity_RetiredFalseCannotServeUnsignedCaller()
+    {
+        await using var host = await StartAsync(withKey: true, enforce: false);
+        Assert.Equal(HttpStatusCode.Unauthorized, await PostStatusAsync(host, null, "?agent=agent-1"));
+    }
+
+    [Fact]
+    public async Task MandatoryIdentity_UnknownGrantsAlwaysFailClosed()
+    {
+        await using var host = await StartAsync(withKey: true, enforce: false);
+        host.Grants.Available = false;
+        await using var client = await host.ConnectAsync(AgentToken("agent-1"));
+        Assert.Empty(await client.ListToolsAsync());
+        Assert.StartsWith("ERROR " + AgentToolAuthorization.GrantsUnavailableCode, await CallAsync(client, "whoami"));
+    }
+
+    [Fact]
+    public void MandatoryIdentity_MissingKeyAlwaysRefusesStartup()
+    {
+        Assert.Throws<InvalidOperationException>(() => AgentIdentitySettings.From(new ConfigurationBuilder().Build()));
+    }
+
+    [Fact]
+    public async Task MissingGrantSource_ListsNothingAndRefusesTheRealTool()
+    {
+        await using var host = await StartAsync(true, false, registerGrants: false);
+        await using var client = await host.ConnectAsync(AgentToken("agent-1"));
+        var calls = ExampleTools.RestrictedCalls;
+        Assert.Empty(await client.ListToolsAsync());
+        Assert.StartsWith("ERROR " + AgentToolAuthorization.GrantsUnavailableCode, await CallAsync(client, "restricted"));
+        Assert.Equal(calls, ExampleTools.RestrictedCalls);
+    }
+
+    [Fact]
+    public async Task ExistingSession_RechecksIdentityAndGrantsOnEveryCall()
+    {
+        await using var host = await StartAsync(true, false);
+        host.Grants.ByAgent["agent-1"] = [AgentToolGrants.GrantName(Server, "whoami"), AgentToolGrants.GrantName(Server, "restricted")];
+        var handler = host.NewIdentityHandler();
+        handler.Token = AgentToken("agent-1");
+        await using var client = await host.ConnectAsync(handler);
+        Assert.Equal("Agent:agent-1", await CallAsync(client, "whoami"));
+        handler.Token = AgentToken("agent-2");
+        var calls = ExampleTools.RestrictedCalls;
+        Assert.StartsWith("ERROR " + AgentToolAuthorization.NotGrantedCode, await CallAsync(client, "restricted"));
+        Assert.Equal(calls, ExampleTools.RestrictedCalls);
+        handler.Token = null;
+        await Assert.ThrowsAnyAsync<Exception>(() => CallAsync(client, "whoami"));
+    }
+
+    [Fact]
+    public async Task TelegramRootSelector_OnlyExcludesTheExactHealthRoute()
+    {
+        await using var host = await StartAsync(true, false, rootMcp: true);
+        using var http = host.Http();
+        Assert.Equal(HttpStatusCode.OK, (await http.GetAsync("/health")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync("/healthz")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync("/message?agent=agent1")).StatusCode);
     }
 
     // ── settings ─────────────────────────────────────────────────────────────
@@ -331,15 +397,14 @@ public sealed class AgentIdentityMcpTests
     [InlineData("yes")]
     [InlineData("1")]
     [InlineData("enabled")]
-    public void ASwitchThatIsNeitherTrueNorFalse_StopsTheService(string value)
+    public void RetiredSwitch_IsIgnored(string value)
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["AgentIdentity:Key"] = AgentIdentityTokensTests.Encode(Key),
             ["AgentIdentity:Enforce"] = value,
         }).Build();
-
-        Assert.Throws<InvalidOperationException>(() => AgentIdentitySettings.From(configuration));
+        Assert.NotNull(AgentIdentitySettings.From(configuration));
     }
 
     [Fact]
@@ -355,12 +420,8 @@ public sealed class AgentIdentityMcpTests
     }
 
     [Fact]
-    public void TheSettings_DefaultToNoKeyAndNoEnforcement()
+    public void TheSettings_RequireAKey()
     {
-        var settings = AgentIdentitySettings.From(new ConfigurationBuilder().Build());
-
-        Assert.False(settings.HasKey);
-        Assert.False(settings.Enforce);
-        Assert.Null(settings.ServiceToken("fleet-orchestrator"));
+        Assert.Throws<InvalidOperationException>(() => AgentIdentitySettings.From(new ConfigurationBuilder().Build()));
     }
 }

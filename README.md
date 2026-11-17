@@ -6,7 +6,7 @@
 
 **A self-hosted team of AI agents that you run by talking to one of them.**
 
-Phleet runs Claude, Codex or Gemini agents as Docker containers on your own machine. You message one agent, the co-CTO, in Telegram. It creates the other agents, hands them work, and runs workflows that design, implement and review changes, stopping for your approval at the gates you choose.
+Phleet runs Claude or Codex agents as Docker containers on your own machine. You message one agent, the co-CTO, in Telegram. It creates the other agents, hands them work, and runs workflows that design, implement and review changes, stopping for your approval at the gates you choose.
 
 - **Yours.** Your provider credentials, your GitHub App, your host. Runtime state, workflow history and memory stay on your machine; outbound traffic goes only to the providers you configure.
 - **Reviewed.** Work passes a consensus review by several agents, usually on different models, before it reaches you.
@@ -48,7 +48,7 @@ After setup one agent is running: the co-CTO. It is the only agent with the full
 You need:
 
 - **Docker 24+ with Compose**, about 8 GB RAM and 20 GB free disk.
-- **A provider CLI signed in on the host**: `claude`, `codex` or `gemini`. Setup copies its credentials for the agents.
+- **A provider CLI signed in on the host**: `claude` or `codex`. Setup copies its credentials for the agents. Gemini credential preparation remains available, but mandatory native MCP headers currently prevent Gemini provisioning.
 - **Two Telegram bots** from [@BotFather](https://t.me/BotFather): one for the co-CTO, one shared by every other agent.
 - **A GitHub App** with access to your repos: its App ID and private key file.
 
@@ -63,6 +63,8 @@ cd phleet
 1. Open the dashboard at **http://localhost:3700** and sign in with `ORCHESTRATOR_AUTH_TOKEN` from `./fleet/.env`.
 2. Click the **CTO template card** and follow the prompts.
 3. The co-CTO sends you a welcome DM. If it does not arrive, send `/start` to your CTO bot first.
+
+Existing installations must first follow the [mandatory identity migration](docs/agent-identity.md#existing-install-migration); upgrade requires the preserved shared signing key and verified signed callers.
 
 Later, `cd fleet && docker compose up -d` (or `down`) starts and stops the stack, and `./upgrade.sh` rebuilds and restarts it after a `git pull`. Check the [upgrade notes](docs/upgrading/README.md) before upgrading an existing installation.
 

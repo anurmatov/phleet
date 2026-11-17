@@ -6,6 +6,7 @@ using Fleet.Orchestrator.Configuration;
 using Fleet.Orchestrator.Data;
 using Fleet.Orchestrator.Endpoints;
 using Fleet.Orchestrator.Services;
+using Fleet.Orchestrator.Services.Push;
 using Fleet.Orchestrator.Tests.Services;
 using Fleet.Orchestrator.Tests.Support;
 using Fleet.Orchestrator.Tools;
@@ -62,10 +63,13 @@ public sealed class NewAgentSessionTests : IAsyncLifetime
         services.AddSingleton(new AgentRegistry(null!, NullLogger<AgentRegistry>.Instance));
         services.AddSingleton(new TemporalClientRegistry(
             Options.Create(new TemporalOptions()), NullLogger<TemporalClientRegistry>.Instance));
+        services.AddSingleton(new AgentConfigPublisherService(Options.Create(new RabbitMqOptions()),
+            NullLogger<AgentConfigPublisherService>.Instance) { Send = (_, _, _) => Task.CompletedTask });
         services.AddAgentWrites();
 
         _app = builder.Build();
         _app.MapAgentCreateEndpoints();
+        _app.MapAgentConfigEndpoints();
         await _app.StartAsync();
         _client = _app.GetTestClient();
 
@@ -122,6 +126,23 @@ public sealed class NewAgentSessionTests : IAsyncLifetime
             return Task.CompletedTask;
         };
         return seen;
+    }
+
+    [Theory]
+    [InlineData(false, HttpStatusCode.Created)]
+    [InlineData(true, HttpStatusCode.MultiStatus)]
+    public async Task MandatoryIdentity_GeminiRecordsCanBeSavedButNotProvisioned(bool provision, HttpStatusCode expected)
+    {
+        var response = await PostAsync(new { name = "agent1", role = "developer", model = "gemini-2.5-pro", provider = "gemini", provision });
+        Assert.Equal(expected, response.StatusCode);
+        Assert.True(await IsStoredAsync("agent1"));
+        if (provision) Assert.Contains("mcp_headers_unsupported", await response.Content.ReadAsStringAsync());
+        var update = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { model = "gemini-2.5-flash" });
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+        Assert.Empty(_harness.CreateBodies);
+        Assert.False(Directory.Exists(_harness.GeneratedDir("fleet-agent1")));
+        var preview = await _harness.Service.PreviewAsync("agent1");
+        Assert.Contains(preview.Diffs, d => d.StartsWith("mcp_headers_unsupported"));
     }
 
     // ── REST ─────────────────────────────────────────────────────────────────────────────────────

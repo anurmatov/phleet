@@ -236,6 +236,8 @@ app.UseFleetAccess();
 
 // Who is calling the MCP endpoint: an agent by its identity token, or the operator.
 app.UseMcpAgentIdentity();
+// Authorization bootstrap is service-only and never depends on the maps it protects.
+app.UseServiceIdentity(AgentIdentityEndpoints.IsAuthorizationBootstrap);
 
 // MCP endpoint — explicitly mapped to /mcp so the auth middleware exemption matches
 app.MapMcp("/mcp");

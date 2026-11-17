@@ -102,7 +102,7 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
     {
         var acl = new AclCacheService(Options.Create(new AclOptions { EnableProjectScopedAcl = enabled, AclAllowNoProject = allowNoProject }),
             Options.Create(new OrchestratorOptions { BaseUrl = "https://acl.example.test" }), NullLogger<AclCacheService>.Instance,
-            new HttpClient(_responses));
+            new HttpClient(_responses), new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]]));
         if (populate is not null) acl.InjectAclForTesting(populate);
         return acl;
     }

@@ -24,21 +24,6 @@ public interface IAgentGrantSource
 /// enforced only by the provider's CLI inside the agent's own container, which the agent's shell
 /// can simply go around.
 /// </summary>
-/// <remarks>
-/// <list type="bullet">
-/// <item>A verified agent may call a tool only when its grants include it, and is listed only those tools.</item>
-/// <item>A service or the operator is not an agent and is not held to grants.</item>
-/// <item>
-/// A caller without a token is only ever here while tokens are not required. It is served as
-/// before: applying grants to a name anyone can type would protect nothing and would break the
-/// callers that are not agents.
-/// </item>
-/// <item>
-/// When the grants cannot be read, a verified agent is refused under enforcement and served
-/// otherwise. A server that cannot tell is not a server that allows.
-/// </item>
-/// </list>
-/// </remarks>
 public static class AgentToolAuthorization
 {
     public const string NotGrantedCode = "tool_not_granted";
@@ -60,14 +45,14 @@ public static class AgentToolAuthorization
             var result = await next(context, ct);
             var services = context.Services;
             var caller = AgentCallerHttp.Of(services?.GetService<IHttpContextAccessor>());
-            if (caller.Kind != AgentCallerKind.Agent || services?.GetService<IAgentGrantSource>() is not { } source)
-                return result;
-
-            var answer = await source.GrantsOfAsync(caller.Name, ct);
+            if (caller.Kind == AgentCallerKind.Service) return result;
+            var source = services?.GetService<IAgentGrantSource>();
+            var answer = caller.Kind == AgentCallerKind.Agent && source is not null
+                ? await source.GrantsOfAsync(caller.Name, ct) : AgentGrantAnswer.Unknown;
             if (!answer.Known)
             {
-                // The same rule as a call: under enforcement an agent whose grants cannot be read is shown nothing.
-                if (services.GetService<AgentIdentitySettings>()?.Enforce == true) result.Tools = [];
+                // Missing or unreadable authorization never lists tools.
+                result.Tools = [];
                 return result;
             }
             // An agent is shown what it may call. The rest exists, and is not its to see.
@@ -82,16 +67,15 @@ public static class AgentToolAuthorization
     internal static async ValueTask<string?> DecideAsync(IServiceProvider? services, string serverName, string tool, CancellationToken ct)
     {
         var caller = AgentCallerHttp.Of(services?.GetService<IHttpContextAccessor>());
-        if (caller.Kind != AgentCallerKind.Agent) return null;
+        if (caller.Kind == AgentCallerKind.Service) return null;
+        if (caller.Kind != AgentCallerKind.Agent) return AgentIdentityApp.RequiredCode;
 
-        var settings = services?.GetService<AgentIdentitySettings>();
         var source = services?.GetService<IAgentGrantSource>();
         var answer = source is null ? AgentGrantAnswer.Unknown : await source.GrantsOfAsync(caller.Name, ct);
         var logger = services?.GetService<ILoggerFactory>()?.CreateLogger("Fleet.AgentIdentity");
 
         if (!answer.Known)
         {
-            if (settings?.Enforce != true) return null;
             logger?.LogWarning("{Code}: agent={Agent} server={Server} tool={Tool}", GrantsUnavailableCode, caller.Name, serverName, tool);
             return $"{GrantsUnavailableCode}: this server cannot read which tools '{caller.Name}' is granted right now. Try again shortly.";
         }

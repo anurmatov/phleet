@@ -6,6 +6,17 @@ namespace Fleet.Orchestrator.Tests.Services;
 
 public sealed class JournalFilesProvisioningTests
 {
+    private static async Task<bool> ProvisionSupportedAsync(ProvisioningHarness harness, string provider)
+    {
+        var result = await harness.Service.ProvisionAsync("agent1");
+        if (provider != "gemini") { Assert.True(result.Success, result.Message); return true; }
+        Assert.False(result.Success);
+        Assert.Contains("mcp_headers_unsupported", result.Message);
+        Assert.Empty(harness.CreateBodies);
+        Assert.False(Directory.Exists(harness.GeneratedDir("fleet-agent1")));
+        return false;
+    }
+
     private const string Grant = "mcp__fleet-journal-files__fetch_attachment";
     private static readonly Dictionary<string, string?> Config = new() { ["Journal:TokenKey"] = Convert.ToBase64String(Enumerable.Repeat((byte)42, 32).ToArray()) };
     private static Agent Agent(string provider, bool capture = true, bool enabledGrant = true) => new()
@@ -25,13 +36,13 @@ public sealed class JournalFilesProvisioningTests
     {
         await using var harness = ProvisioningHarness.Create(Config);
         await harness.SeedAsync(db => { var agent = Agent(provider); if (uppercaseGrant) agent.Tools[0].ToolName = Grant.ToUpperInvariant(); db.Agents.Add(agent); });
-        var result = await harness.Service.ProvisionAsync("agent1"); Assert.True(result.Success, result.Message);
+        if (!await ProvisionSupportedAsync(harness, provider)) return;
         var dir = harness.GeneratedDir("fleet-agent1");
         using var config = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
         Assert.True(config.RootElement.GetProperty("Journal").GetProperty("FilesEnabled").GetBoolean());
         Assert.Contains(config.RootElement.GetProperty("Agent").GetProperty("AllowedTools").EnumerateArray(), t => t.GetString() == Grant);
         Assert.StartsWith("cj1.read.agent1.", config.RootElement.GetProperty("Journal").GetProperty("ReadToken").GetString());
-        if (provider != "claude") Assert.False(config.RootElement.GetProperty("Agent").TryGetProperty("McpHeaderSupport", out _));
+        Assert.True(config.RootElement.GetProperty("Agent").GetProperty("McpHeaderSupport").GetBoolean());
         using var mcp = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, ".mcp.json")));
         var server = mcp.RootElement.GetProperty("mcpServers").GetProperty("fleet-journal-files");
         Assert.Equal("http://127.0.0.1:8091/journal-files/v1/mcp", server.GetProperty("url").GetString());
@@ -45,7 +56,7 @@ public sealed class JournalFilesProvisioningTests
     {
         await using var harness = ProvisioningHarness.Create(Config);
         await harness.SeedAsync(db => db.Agents.Add(Agent(provider, enabledGrant: false)));
-        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        if (!await ProvisionSupportedAsync(harness, provider)) return;
         var dir = harness.GeneratedDir("fleet-agent1");
         Assert.DoesNotContain("FilesEnabled", await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
         Assert.DoesNotContain("ReadToken", await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
@@ -62,13 +73,13 @@ public sealed class JournalFilesProvisioningTests
     {
         await using var harness = ProvisioningHarness.Create(Config);
         await harness.SeedAsync(db => { var agent = Agent(provider); agent.Tools.Clear(); if (!bot) agent.EnvRefs.Clear(); db.Agents.Add(agent); });
-        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        if (!await ProvisionSupportedAsync(harness, provider)) return;
         var dir = harness.GeneratedDir("fleet-agent1");
         var names = new[] { "appsettings.json", ".mcp.json", "settings.json" };
         var before = names.ToDictionary(name => name, name => File.ReadAllBytes(Path.Combine(dir, name)));
         await harness.MutateAsync(async db => { var agent = await db.Agents.SingleAsync(a => a.Name == "agent1");
             agent!.Tools.Add(new() { ToolName = Grant, IsEnabled = false }); await db.SaveChangesAsync(); });
-        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        if (!await ProvisionSupportedAsync(harness, provider)) return;
         foreach (var name in names) Assert.Equal(before[name], await File.ReadAllBytesAsync(Path.Combine(dir, name)));
     }
     [Fact]
@@ -101,7 +112,7 @@ public sealed class JournalFilesProvisioningTests
             agent.JournalCrossChatEnabled = cross;
             db.Agents.Add(agent);
         });
-        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
+        if (!await ProvisionSupportedAsync(harness, provider)) return;
         var dir = harness.GeneratedDir("fleet-agent1");
         using var config = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dir, "appsettings.json")));
         var journal = config.RootElement.GetProperty("Journal");

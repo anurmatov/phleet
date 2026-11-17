@@ -7,6 +7,7 @@ trap 'rm -rf "$DIR"' EXIT
 mkdir -p "$DIR/scripts/lib" "$DIR/fleet" "$DIR/bin"
 cp "$ROOT/setup.sh" "$ROOT/upgrade.sh" "$DIR/"
 cp "$ROOT"/scripts/lib/*.sh "$DIR/scripts/lib/"
+cp "$ROOT/scripts/mint-identity-token.sh" "$DIR/scripts/"
 cp "$ROOT/docker-compose.example.yml" "$DIR/"
 export CALLS="$DIR/calls"
 cat > "$DIR/bin/docker" <<'MOCK'
@@ -26,6 +27,7 @@ export PATH="$DIR/bin:$PATH"
 ENV="$DIR/fleet/.env"
 # No Docker call from --comms; a recorded true is never rewritten or re-asked.
 cat > "$ENV" <<'ENV'
+FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 FLEET_COMMS_ENABLED=true
 FLEET_COMMS_BIND=127.0.0.1:3500
 FLEET_COMMS_TRUST_PROXY=false
@@ -43,6 +45,7 @@ cmp "$ENV" "$DIR/before"
 echo 'PASS --comms dry-run preserves file'
 # A legacy endpoint with no store must resolve the previewed backfill, not the real file.
 cat > "$ENV" <<'ENV'
+FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 FLEET_COMMS_ENABLED=true
 FLEET_COMMS_BIND=127.0.0.1:3500
 FLEET_COMMS_TRUST_PROXY=false
@@ -57,8 +60,38 @@ grep -q 'Media store: minio' "$DIR/output"
 echo 'PASS legacy dry-run resolves previewed backfill without writes or Docker'
 if bash "$DIR/setup.sh" --comms --skip-services > "$DIR/output" 2>&1; then exit 1; fi
 echo 'PASS --comms rejects other flags'
+# Run the production setup key block without prompts or lifecycle calls.
+sed -n '/^# Agent identity: the key/,/^echo$/p' "$ROOT/setup.sh" | sed '$d' > "$DIR/key-block.sh"
+: > "$ENV"
+DRY_RUN=false SCRIPT_DIR="$DIR" ENV_FILE="$ENV" ROOT="$ROOT" bash -c '
+  source <(sed -n "/^read_env_var() {/,/^# Check if a value/p" "$ROOT/setup.sh" | sed "$ d")
+  source "$SCRIPT_DIR/key-block.sh"
+' > "$DIR/output"
+identity_key=$(grep '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")
+cp "$ENV" "$DIR/before"
+DRY_RUN=false SCRIPT_DIR="$DIR" ENV_FILE="$ENV" ROOT="$ROOT" bash -c '
+  source <(sed -n "/^read_env_var() {/,/^# Check if a value/p" "$ROOT/setup.sh" | sed "$ d")
+  source "$SCRIPT_DIR/key-block.sh"
+' >> "$DIR/output"
+cmp "$ENV" "$DIR/before"
+[[ "$(grep -c '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")" == 1 ]]
+! grep -qF "${identity_key#*=}" "$DIR/output"
+echo 'PASS setup generates a durable key once, preserves it and never prints it'
+# No key or an invalid key refuses before even Docker info or any file change.
+for value in '' invalid AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,invalid; do
+  printf 'FLEET_COMMS_ENABLED=false\nFLEET_AGENT_IDENTITY_KEY=%s\nFLEET_AGENT_IDENTITY_ENFORCE=false\n' "$value" > "$ENV"
+  cp "$ENV" "$DIR/before"
+  : > "$CALLS"
+  rc=0; bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]]
+  cmp "$ENV" "$DIR/before"
+  [[ ! -s "$CALLS" ]]
+  grep -q 'agent_identity_misconfigured' "$DIR/output"
+done
+echo 'PASS missing/invalid identity key stops upgrade before edits or Docker'
 # Missing withdrawn images fail before down, rm or up.
 cat > "$ENV" <<'ENV'
+FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 FLEET_COMMS_ENABLED=true
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-minio:9000
 ENV
@@ -71,6 +104,7 @@ grep -q 'legacy MinIO media images are not on this host' "$DIR/output"
 grep -qx 'FLEET_COMMS_MEDIA_STORE=minio' "$ENV"
 echo 'PASS missing legacy images fail before lifecycle changes'
 cat > "$ENV" <<'ENV'
+FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 FLEET_COMMS_ENABLED=true
 FLEET_COMMS_MEDIA_ENDPOINT=http://store
 FLEET_COMMS_MEDIA_STORE=invalid
@@ -84,6 +118,7 @@ echo 'PASS invalid store fails before compose'
 # The epic watcher/grant keys and the agent identity key are present, so upgrade has nothing to add
 # and must not touch .env.
 cat > "$ENV" <<'ENV'
+FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 FLEET_COMMS_ENABLED=false
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-minio:9000
 FLEET_COMMS_MEDIA_STORE=minio
@@ -97,11 +132,10 @@ FLEET_AUTONOMY_ENABLED=false
 FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false
 FLEET_DURABLE_DELEGATION_ENABLED=false
 FLEET_PUSH_ENABLED=false
-FLEET_AGENT_IDENTITY_KEY=synthetic-identity-key-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 FLEET_AGENT_IDENTITY_ENFORCE=false
 FLEET_SECRETS_ENABLED=false
 ENV
-cp "$ENV" "$DIR/before"
+sed '/^FLEET_AGENT_IDENTITY_ENFORCE=/d' "$ENV" > "$DIR/before"
 : > "$CALLS"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
 cmp "$ENV" "$DIR/before"
@@ -115,10 +149,11 @@ done
 echo 'PASS disabled Comms removes containers but preserves keys and volumes'
 # Epic watcher/grant upgrades append missing defaults, keep a present value, and never
 # glues a key onto a last line that has no newline.
-printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
+printf 'FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nFLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7' > "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
-# The agent identity key is generated, so its value is compared by shape: it is there, and long enough.
-[[ "$(sed -E 's/^(FLEET_AGENT_IDENTITY_KEY)=.{43,}$/\1=<generated>/' "$ENV")" == "$(printf 'FLEET_COMMS_ENABLED=false\nFLEET_EPIC_GRANTS_MAX_DAYS=7\nFLEET_EPIC_WATCHER_ENABLED=false\nFLEET_EPIC_WATCHER_INTERVAL_SECONDS=300\nFLEET_EPIC_GRANTS_ENABLED=false\nFLEET_EPIC_GRANTS_DENIED_REPOS=\nFLEET_AUTONOMY_ENABLED=false\nFLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED=false\nFLEET_DURABLE_DELEGATION_ENABLED=false\nFLEET_PUSH_ENABLED=false\nFLEET_AGENT_IDENTITY_KEY=<generated>\nFLEET_AGENT_IDENTITY_ENFORCE=false\nFLEET_SECRETS_ENABLED=false')" ]]
+grep -qx 'FLEET_EPIC_GRANTS_MAX_DAYS=7' "$ENV"
+grep -qx 'FLEET_EPIC_WATCHER_ENABLED=false' "$ENV"
+! grep -q '^FLEET_AGENT_IDENTITY_ENFORCE=' "$ENV"
 echo 'PASS upgrade adds missing epic watcher/grant keys with defaults and keeps present values'
 # The key is generated once: a second upgrade keeps it, and it is never printed.
 identity_key=$(grep '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")
@@ -127,7 +162,7 @@ bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
 [[ "$(grep '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")" == "$identity_key" ]]
 [[ "$(grep -c '^FLEET_AGENT_IDENTITY_KEY=' "$ENV")" == 1 ]]
 ! grep -qF "${identity_key#*=}" "$DIR/output"
-echo 'PASS upgrade generates the agent identity key once and never prints it'
+echo 'PASS upgrade preserves the required identity key and never prints it'
 sed -i.bak 's/^FLEET_AUTONOMY_ENABLED=false$/FLEET_AUTONOMY_ENABLED=true/' "$ENV"
 bash "$DIR/upgrade.sh" --skip-restart > "$DIR/output" 2>&1
 [[ "$(grep -c '^FLEET_AUTONOMY_ENABLED=' "$ENV")" == 1 ]]
@@ -193,6 +228,7 @@ echo 'PASS upgrade selects the secrets profile only when FLEET_SECRETS_ENABLED=t
 
 # Pull failure must also precede every lifecycle operation.
 cat > "$ENV" <<'ENV'
+FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 FLEET_COMMS_ENABLED=true
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-seaweedfs:8333
 FLEET_COMMS_MEDIA_STORE=seaweedfs
@@ -209,6 +245,7 @@ FRESH="$DIR/fresh"
 mkdir -p "$FRESH/scripts/lib" "$DIR/home/.gemini" "$DIR/previews"
 cp "$ROOT/setup.sh" "$ROOT/.env.example" "$ROOT/docker-compose.example.yml" "$FRESH/"
 cp "$ROOT"/scripts/lib/*.sh "$FRESH/scripts/lib/"
+cp "$ROOT/scripts/mint-identity-token.sh" "$FRESH/scripts/"
 printf '%s\n' '{"refresh_token":"synthetic-fixture-token"}' > "$DIR/home/.gemini/oauth_creds.json"
 cp "$FRESH/.env.example" "$DIR/example-before"
 : > "$CALLS"

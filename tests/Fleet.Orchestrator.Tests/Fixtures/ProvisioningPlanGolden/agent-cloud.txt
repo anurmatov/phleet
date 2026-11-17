@@ -128,15 +128,24 @@ project-net: {"Container":"0123456789abcdef0123"}
     },
     "fleet-memory": {
       "type": "http",
-      "url": "http://fleet-memory:3100?agent=agent-cloud"
+      "url": "http://fleet-memory:3100",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-cloud.9byVwp-RLY0YIsw6IkoiZQsjm73SzZyD3TnjGng8PW0"
+      }
     },
     "fleet-telegram": {
       "type": "http",
-      "url": "http://fleet-telegram:3200?agent=agent-cloud\u0026formatting_mode=2"
+      "url": "http://fleet-telegram:3200/?formatting_mode=2",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-cloud.9byVwp-RLY0YIsw6IkoiZQsjm73SzZyD3TnjGng8PW0"
+      }
     },
     "fleet-temporal": {
       "type": "http",
-      "url": "http://fleet-temporal-bridge:3001?agent=agent-cloud"
+      "url": "http://fleet-temporal-bridge:3001",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-cloud.9byVwp-RLY0YIsw6IkoiZQsjm73SzZyD3TnjGng8PW0"
+      }
     },
     "fleet-journal-files": {
       "type": "http",

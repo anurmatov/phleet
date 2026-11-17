@@ -317,27 +317,28 @@ internal static class AgentConfigFiles
         return node.ToJsonString(IndentedJson);
     }
 
-    /// <summary>
-    /// Appends ?agent={agentName} to a fleet-internal MCP URL, stripping any pre-existing
-    /// query string first. Prevents double-appending if the URL was stored in the DB
-    /// with an old ?agent= already attached (e.g. after a manual DB edit or re-provision).
-    /// Note: ALL existing query params are dropped, not just ?agent=. Fleet-internal MCP
-    /// URLs never carry other query params, so this is intentional and safe.
-    /// </summary>
+    /// <summary>Removes only obsolete built-in caller attribution, preserving other query options.</summary>
     internal static string WithAgentParam(string url, string agentName)
     {
-        var trimmed = url.TrimEnd('/');
-        var questionIdx = trimmed.IndexOf('?');
-        var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
-        return $"{basePath}?agent={agentName}";
+        var fragment = url.IndexOf('#');
+        var suffix = fragment >= 0 ? url[fragment..] : "";
+        var target = fragment >= 0 ? url[..fragment] : url;
+        var at = target.IndexOf('?');
+        if (at < 0) return target.TrimEnd('/') + suffix;
+        var kept = target[(at + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(pair => !Uri.UnescapeDataString(pair.Split('=')[0]).Equals("agent", StringComparison.OrdinalIgnoreCase));
+        var query = string.Join("&", kept);
+        return target[..at].TrimEnd('/') + (query.Length == 0 ? "" : "?" + query) + suffix;
     }
 
     internal static string WithAgentTelegramParams(string url, string agentName, byte formattingMode)
     {
-        var trimmed = url.TrimEnd('/');
-        var questionIdx = trimmed.IndexOf('?');
-        var basePath = (questionIdx >= 0 ? trimmed[..questionIdx] : trimmed).TrimEnd('/');
-        return $"{basePath}?agent={agentName}&formatting_mode={formattingMode}";
+        var clean = WithAgentParam(url, agentName);
+        var uri = new UriBuilder(clean);
+        var parts = uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(p => !Uri.UnescapeDataString(p.Split('=')[0]).Equals("formatting_mode", StringComparison.OrdinalIgnoreCase));
+        uri.Query = string.Join("&", parts.Append($"formatting_mode={formattingMode}"));
+        return uri.Uri.AbsoluteUri;
     }
 
     /// <summary>
@@ -353,34 +354,23 @@ internal static class AgentConfigFiles
         if (string.IsNullOrWhiteSpace(rawUrl) || !Uri.TryCreate(rawUrl, UriKind.Absolute, out _))
             return DefaultUrl;
 
-        // Strip query string; work on path only.
-        var withoutQuery = rawUrl.Split('?')[0].TrimEnd('/');
-
-        // Strip a pure trailing /mcp (case-insensitive). A segment like /mcp/v1 is left intact.
-        if (withoutQuery.EndsWith("/mcp", StringComparison.OrdinalIgnoreCase))
-            withoutQuery = withoutQuery[..^4];
-
-        return withoutQuery.TrimEnd('/');
+        var builder = new UriBuilder(rawUrl);
+        var path = builder.Path.TrimEnd('/');
+        if (path.EndsWith("/mcp", StringComparison.OrdinalIgnoreCase)) path = path[..^4];
+        builder.Path = path;
+        return builder.Uri.AbsoluteUri.TrimEnd('/');
     }
 
     /// <summary>
     /// The address an agent is given for one of its endpoints. Also what the tool listing asks, so
     /// the page shows the tools of the server the agent will reach.
     /// </summary>
-    /// <remarks>
-    /// Appends ?agent={name} to fleet-telegram, fleet-memory, and fleet-temporal URLs
-    /// so each server can identify the calling agent without relying on the LLM to pass it.
-    /// WithAgentParam strips any existing query string before appending to prevent
-    /// double-appending when the URL was stored in the DB with ?agent= already.
-    /// fleet-telegram also gets ?formatting_mode={n} so send tools can honour the agent's
-    /// FormattingMode without an extra orchestrator round-trip on every send.
-    /// </remarks>
     internal static string AgentMcpUrl(Agent agent, AgentMcpEndpoint e) =>
-        e.McpName == "fleet-telegram"
+        e.McpName.Equals("fleet-telegram", StringComparison.OrdinalIgnoreCase)
             ? WithAgentTelegramParams(e.Url, agent.Name, (byte)agent.FormattingMode)
-            : (e.McpName == "fleet-memory" || e.McpName == "fleet-temporal")
-                ? WithAgentParam(e.Url, agent.Name)
-                : e.Url;
+            : IsIdentityServer(e.McpName) ? WithAgentParam(e.Url, agent.Name) : e.Url;
+
+    internal static bool IsIdentityServer(string name) => IdentityServerNames.Contains(name, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// The fleet's own MCP servers, by the name every agent knows them under. These are the
@@ -389,15 +379,9 @@ internal static class AgentConfigFiles
     internal static readonly IReadOnlyList<string> IdentityServerNames =
         ["fleet-memory", "fleet-orchestrator", "fleet-telegram", "fleet-temporal"];
 
-    /// <summary>
-    /// The agent's identity token, or null when it gets none: no key is configured, its provider
-    /// does not send MCP headers (a header on such an agent's endpoint makes the agent skip the
-    /// server), or its name cannot be a token's subject. Such an agent is an unverified caller.
-    /// </summary>
-    internal static string? IdentityTokenFor(Agent agent, IReadOnlyList<byte[]> keys) =>
-        keys.Count > 0 && SupportsMcpHeaders(agent.Provider) && AgentIdentityTokens.IsValidSubject(agent.Name)
-            ? AgentIdentityTokens.Mint(keys[0], AgentIdentityTokens.PurposeAgent, agent.Name)
-            : null;
+    /// <summary>Mandatory agent identity after capability, subject and destination preflight.</summary>
+    internal static string IdentityTokenFor(Agent agent, IReadOnlyList<byte[]> keys) =>
+        AgentIdentityTokens.Mint(keys[0], AgentIdentityTokens.PurposeAgent, agent.Name);
 
     /// <summary>Where the fleet's own servers answer when the deployment does not say: the compose service names.</summary>
     internal static readonly IReadOnlyList<string> DefaultIdentityOrigins =
@@ -438,24 +422,23 @@ internal static class AgentConfigFiles
     /// servers it reaches at a trusted address (<paramref name="origins"/>), fleet-memory always
     /// among them. The identity is the <c>Authorization</c> header and wins over a mapping of that
     /// name: who an agent is cannot be configured per endpoint. Other mapped headers stay, such as
-    /// the config token <c>set_config_values</c> reads. Without a token the mappings come back as
-    /// they were.
+    /// the config token <c>set_config_values</c> reads. Identity is mandatory.
     /// </summary>
-    internal static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WithIdentityHeaders(
-        Agent agent, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders, string? identityToken,
+    internal static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> WithIdentityHeaders(
+        Agent agent, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders, string identityToken,
         IReadOnlyCollection<string> origins, string fleetMemoryMcpUrl)
     {
-        if (identityToken is null) return mappedHeaders;
+        ArgumentException.ThrowIfNullOrEmpty(identityToken);
 
-        var merged = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        var merged = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var (name, headers) in mappedHeaders ?? new Dictionary<string, IReadOnlyDictionary<string, string>>())
             merged[name] = headers;
 
         // A row's own address decides; fleet-memory without a row is at the configured address.
         var reached = agent.McpEndpoints
-            .Where(e => IdentityServerNames.Contains(e.McpName, StringComparer.Ordinal) && IsIdentityDestination(e.Url, origins))
+            .Where(e => IsIdentityServer(e.McpName) && IsIdentityDestination(e.Url, origins))
             .Select(e => e.McpName)
-            .Concat(agent.McpEndpoints.Any(e => e.McpName == "fleet-memory") || !IsIdentityDestination(fleetMemoryMcpUrl, origins)
+            .Concat(agent.McpEndpoints.Any(e => e.McpName.Equals("fleet-memory", StringComparison.OrdinalIgnoreCase)) || !IsIdentityDestination(fleetMemoryMcpUrl, origins)
                 ? [] : ["fleet-memory"])
             .Distinct(StringComparer.Ordinal);
         foreach (var name in reached)
@@ -540,7 +523,7 @@ internal static class AgentConfigFiles
 
         // Every agent gets fleet-memory access for memory_get, even if not in DB.
         // This is the provisioning-time enforcement point for mandatory read access.
-        if (!mcpServers.ContainsKey("fleet-memory"))
+        if (!mcpServers.Keys.Any(k => k.Equals("fleet-memory", StringComparison.OrdinalIgnoreCase)))
         {
             var url = WithAgentParam(fleetMemoryMcpUrl, agent.Name);
             // The agent's identity header goes to the memory server it is given, row or no row.
@@ -660,7 +643,7 @@ internal static class AgentConfigFiles
     }
 
     internal static bool SupportsMcpHeaders(string? provider) =>
-        provider is not null && McpHeaderSupport.TryGetValue(provider, out var supported) && supported;
+        McpHeaderSupport.TryGetValue(AgentProviders.Normalize(provider), out var supported) && supported;
 
     internal static string WithoutQuery(string url)
     {

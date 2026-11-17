@@ -151,7 +151,7 @@ public sealed class AgentIdentityTokensTests
 
     private static (AgentIdentityOutcome Outcome, AgentCaller Caller) Resolve(
         string? header, string? claimed, bool enforce, params byte[][] keys) =>
-        AgentIdentityRules.Resolve(header, claimed, keys, enforce);
+        AgentIdentityRules.Resolve(header, keys);
 
     [Fact]
     public void AValidAgentToken_IsThatAgent_WhateverTheUrlClaims()
@@ -193,48 +193,28 @@ public sealed class AgentIdentityTokensTests
     }
 
     [Fact]
-    public void WithoutAToken_ACallerIsBelievedOnlyWhileTokensAreNotRequired()
+    public void WithoutAToken_ACallerIsAlwaysRefused()
     {
-        var (served, caller) = Resolve(null, " agent-1 ", enforce: false, Key);
-        Assert.Equal(AgentIdentityOutcome.Accepted, served);
-        Assert.Equal(new AgentCaller("agent-1", AgentCallerKind.Unverified), caller);
-        Assert.False(caller.IsVerified);
-        Assert.Equal("agent-1", caller.AgentName);
-
-        var (refused, nobody) = Resolve(null, "agent-1", enforce: true, Key);
-        Assert.Equal(AgentIdentityOutcome.TokenRequired, refused);
-        Assert.Equal(AgentCaller.None, nobody);
+        Assert.Equal(AgentIdentityOutcome.TokenRequired, Resolve(null, "agent-1", false, Key).Outcome);
+        Assert.Equal(AgentIdentityOutcome.TokenRequired, Resolve(null, "agent-1", true, Key).Outcome);
     }
 
     [Fact]
     public void ABearerThatIsNotThisFleetsToken_IsNoToken()
     {
-        // The orchestrator's own operator check reads such a bearer; this rule does not.
-        var (observed, caller) = Resolve("Bearer operator-secret", "agent-1", enforce: false, Key);
-        Assert.Equal(AgentIdentityOutcome.Accepted, observed);
-        Assert.Equal(AgentCallerKind.Unverified, caller.Kind);
-
-        Assert.Equal(AgentIdentityOutcome.TokenRequired, Resolve("Bearer operator-secret", "agent-1", enforce: true, Key).Outcome);
+        Assert.Equal(AgentIdentityOutcome.TokenRequired, Resolve("Bearer operator-secret", "agent-1", false, Key).Outcome);
     }
 
     [Fact]
-    public void WithNoKey_CallersAreBelievedAsBefore_EvenOnesThatSendAToken()
+    public void WithNoKey_NothingCanBeVerified()
     {
-        var (outcome, caller) = Resolve($"Bearer {Agent("agent-9")}", "agent-1", enforce: false);
-
-        Assert.Equal(AgentIdentityOutcome.Accepted, outcome);
-        // Nothing can be verified, so the token says nothing: the claim stands, unverified.
-        Assert.Equal(new AgentCaller("agent-1", AgentCallerKind.Unverified), caller);
+        Assert.Equal(AgentIdentityOutcome.InvalidToken, Resolve($"Bearer {Agent("agent-9")}", "agent-1", false).Outcome);
     }
 
     [Fact]
     public void NobodyIsNobody()
     {
-        var (outcome, caller) = Resolve(null, "  ", enforce: false, Key);
-
-        Assert.Equal(AgentIdentityOutcome.Accepted, outcome);
-        Assert.Equal(AgentCaller.None, caller);
-        Assert.Equal("", caller.AgentName);
+        Assert.Equal(AgentIdentityOutcome.TokenRequired, Resolve(null, "", false, Key).Outcome);
     }
 
     // ── grants ───────────────────────────────────────────────────────────────

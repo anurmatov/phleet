@@ -231,7 +231,7 @@ public sealed class MemorySearchSurfaceTests : IDisposable
         var cache = new AclCacheService(
             Options.Create(new AclOptions { EnableProjectScopedAcl = acl is not null }),
             Options.Create(new OrchestratorOptions { BaseUrl = "http://unused" }),
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<AclCacheService>.Instance);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AclCacheService>.Instance, new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]]));
         cache.InjectAclForTesting(acl ?? []);
 
         // The caller as the identity middleware records it: the URL is not who calls.

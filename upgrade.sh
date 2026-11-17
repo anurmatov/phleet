@@ -86,6 +86,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+# Validate before edits, pulls, builds or lifecycle changes. Never mint a replacement key here.
+if ! FLEET_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/scripts/mint-identity-token.sh" --check-key >/dev/null 2>&1; then
+  fail "agent_identity_misconfigured: first migrate callers on signed-capable 2a338668 or a later pre-hardening release, preserve its shared key, then retry. Nothing was changed."
+  exit 1
+fi
+
 if ! docker info &>/dev/null; then
   fail "Docker daemon is not running."; exit 1
 fi
@@ -121,17 +127,8 @@ add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
 add_missing_env_var FLEET_DURABLE_DELEGATION_ENABLED false
 add_missing_env_var FLEET_PUSH_ENABLED false
-# Agent identity: every host gets the key, generated once and never replaced (every token minted
-# with it would stop verifying). Enforcement is added off and never changed: the operator turns it
-# on after every agent has been reprovisioned. See docs/agent-identity.md.
-if [[ -z "$(read_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_KEY")" ]]; then
-  # Written here, not through add_missing_env_var: that prints the value it adds, and this is a key.
-  sed -i.bak -E '/^FLEET_AGENT_IDENTITY_KEY=[[:space:]]*$/d' "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-  [[ -s "$ENV_FILE" && -n "$(tail -c 1 "$ENV_FILE")" ]] && printf '\n' >> "$ENV_FILE"
-  printf 'FLEET_AGENT_IDENTITY_KEY=%s\n' "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')" >> "$ENV_FILE"
-  ok "Generated FLEET_AGENT_IDENTITY_KEY: agents prove who they are to the fleet's MCP servers with it"
-fi
-add_missing_env_var FLEET_AGENT_IDENTITY_ENFORCE false
+# Retired compatibility switch cannot restore unsigned access.
+sed -i.bak '/^FLEET_AGENT_IDENTITY_ENFORCE=/d' "$ENV_FILE" && rm -f "$ENV_FILE.bak"
 # Secret placeholders: added off when missing, never changed when present.
 add_missing_env_var FLEET_SECRETS_ENABLED false
 

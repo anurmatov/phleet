@@ -14,6 +14,58 @@ namespace Fleet.Memory.Tests;
 /// </summary>
 public class MemoryAclTests
 {
+    private sealed class BootstrapHandler : HttpMessageHandler
+    {
+        public string Body { get; set; } = "{\"acl\":{\"agent1\":[\"alpha\"]}}";
+        public System.Net.HttpStatusCode Status { get; set; } = System.Net.HttpStatusCode.OK;
+        public string? Authorization { get; private set; }
+        public Uri? Url { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Authorization = request.Headers.Authorization?.ToString();
+            Url = request.RequestUri;
+            return Task.FromResult(new HttpResponseMessage(Status) { Content = new StringContent(Body, System.Text.Encoding.UTF8, "application/json") });
+        }
+    }
+
+    [Fact]
+    public async Task Bootstrap_SendsOwnServiceIdentity_AndDoesNotReplaceSnapshotOnFailure()
+    {
+        var handler = new BootstrapHandler();
+        await using var cache = new AclCacheService(Options.Create(new AclOptions { EnableProjectScopedAcl = true }),
+            Options.Create(new OrchestratorOptions { BaseUrl = "https://orchestrator.example.test" }),
+            NullLogger<AclCacheService>.Instance, new HttpClient(handler), new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]]));
+        await cache.StartAsync(CancellationToken.None);
+        for (var i = 0; i < 100 && !cache.IsAvailable; i++) await Task.Delay(10);
+        Assert.True(cache.IsAvailable);
+        Assert.True(Fleet.Shared.AgentIdentityTokens.TryVerify(Fleet.Shared.AgentIdentityTokens.BearerOf(handler.Authorization),
+            [new byte[32]], out var purpose, out var subject));
+        Assert.Equal(("service", "fleet-memory"), (purpose, subject));
+        Assert.Equal("https://orchestrator.example.test/internal/agent-project-access", handler.Url!.AbsoluteUri);
+        Assert.True(cache.CanRead("agent1", "alpha").allowed);
+        handler.Status = System.Net.HttpStatusCode.Unauthorized;
+        handler.Body = "{\"acl\":{\"agent1\":[\"beta\"]}}";
+        using var bound = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.RefreshAsync(bound.Token));
+        Assert.True(cache.CanRead("agent1", "alpha").allowed);
+        Assert.False(cache.CanRead("agent1", "beta").allowed);
+    }
+
+    [Theory]
+    [InlineData("relative")]
+    [InlineData("file:///secret")]
+    [InlineData("https://user:password@example.test")]
+    [InlineData("https://example.test?token=secret")]
+    [InlineData("https://example.test#secret")]
+    public void Bootstrap_InvalidDestinationRefusesWithoutEcho(string url)
+    {
+        var fault = Assert.Throws<InvalidOperationException>(() => new AclCacheService(Options.Create(new AclOptions()),
+            Options.Create(new OrchestratorOptions { BaseUrl = url }), NullLogger<AclCacheService>.Instance,
+            new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]])));
+        Assert.StartsWith("agent_identity_misconfigured", fault.Message);
+        Assert.DoesNotContain(url, fault.Message);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -34,7 +86,7 @@ public class MemoryAclTests
             AclAllowNoProject = allowNoProject,
         });
         var orchOpts = Options.Create(new OrchestratorOptions { BaseUrl = "http://unused" });
-        var svc = new AclCacheService(aclOpts, orchOpts, NullLogger<AclCacheService>.Instance);
+        var svc = new AclCacheService(aclOpts, orchOpts, NullLogger<AclCacheService>.Instance, new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]]));
         svc.InjectAclForTesting(acl);
         return svc;
     }
@@ -44,7 +96,7 @@ public class MemoryAclTests
     {
         var aclOpts = Options.Create(new AclOptions { EnableProjectScopedAcl = false });
         var orchOpts = Options.Create(new OrchestratorOptions { BaseUrl = "http://unused" });
-        var svc = new AclCacheService(aclOpts, orchOpts, NullLogger<AclCacheService>.Instance);
+        var svc = new AclCacheService(aclOpts, orchOpts, NullLogger<AclCacheService>.Instance, new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]]));
         svc.InjectAclForTesting([]);
         return svc;
     }

@@ -68,7 +68,7 @@ unset FLEET_BASE_DIR FLEET_CTO_AGENT FLEET_GROUP_CHAT_ID FLEET_PRIMARY_HUMAN_USE
       FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED \
       FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS \
       FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED FLEET_DURABLE_DELEGATION_ENABLED \
-      FLEET_AGENT_IDENTITY_KEY FLEET_AGENT_IDENTITY_ENFORCE \
+      FLEET_AGENT_IDENTITY_KEY \
       FLEET_PUSH_ENABLED FLEET_PUSH_APNS_KEY_BASE64 FLEET_PUSH_APNS_KEY_ID FLEET_PUSH_APNS_TEAM_ID FLEET_PUSH_APNS_TOPIC \
       FLEET_SECRETS_ENABLED FLEET_SECRETS_SUBNET FLEET_SECRETS_ADDRESS \
       USAGE_ENABLED USAGE_RECEIVER_URL USAGE_AUTH_TOKEN
@@ -505,9 +505,10 @@ section "[2/7] AI Provider Auth..."
 echo "  Which AI provider(s) do you want to use?"
 echo "    1) claude"
 echo "    2) codex"
-echo "    3) gemini"
+echo "    3) gemini (credential preparation only; mandatory native MCP headers unsupported)"
+echo "       See docs/providers/gemini.md before selecting Gemini."
 echo "    4) claude + codex"
-echo "    5) claude + gemini"
+echo "    5) claude + gemini (Gemini credentials only)"
 echo "  Local models (Claude local, Codex local) are set per agent in the dashboard — see docs/providers/local-models.md."
 read -rp "  Choice [1]: " provider_choice
 provider_choice="${provider_choice:-1}"
@@ -725,13 +726,14 @@ done
 
 # Agent identity: the key that signs each agent's token for the fleet's own MCP servers. Every
 # host gets one, whatever else is on, and it is never replaced: every token minted with it would
-# stop verifying until each agent is reprovisioned. Enforcement stays off until the operator turns
-# it on, after every agent has been reprovisioned once. See docs/agent-identity.md.
+# stop verifying until each agent is reprovisioned. Identity is mandatory; existing installs must
+# migrate callers first. See docs/agent-identity.md.
 if [[ -z "$(read_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_KEY")" ]]; then
   write_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_KEY" "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')"
 fi
-if ! grep -q "^FLEET_AGENT_IDENTITY_ENFORCE=" "$ENV_FILE" 2>/dev/null; then
-  write_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_ENFORCE" "false"
+if ! $DRY_RUN && ! FLEET_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/scripts/mint-identity-token.sh" --check-key >/dev/null 2>&1; then
+  echo "agent_identity_misconfigured: preserve or supply a valid durable shared key before setup" >&2
+  exit 1
 fi
 
 echo

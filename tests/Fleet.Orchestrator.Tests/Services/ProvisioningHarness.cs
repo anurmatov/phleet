@@ -79,6 +79,7 @@ internal sealed class ProvisioningHarness : IAsyncDisposable
 
         var settings = new Dictionary<string, string?>
         {
+            ["AgentIdentity:Key"] = Convert.ToBase64String(new byte[32]).TrimEnd('='),
             ["Provisioning:BaseDir"] = BaseDir,
             ["Provisioning:EnvFilePath"] = envFile,
             ["FleetMemory:McpUrl"] = "http://fleet-memory:3100",

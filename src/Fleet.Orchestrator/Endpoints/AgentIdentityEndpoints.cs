@@ -8,12 +8,20 @@ namespace Fleet.Orchestrator.Endpoints;
 /// to its grants; the orchestrator's own MCP endpoint reads the same data directly.
 /// </summary>
 /// <remarks>
-/// Docker-network-only and without a credential, like <c>/internal/agent-project-access</c>: names
+/// Service-authenticated, like <c>/internal/agent-project-access</c>: names
 /// of agents and of tools, nothing an agent could not list for itself. It is what a server
 /// *believes*, so a server MUST read it from the orchestrator's address and nowhere else.
 /// </remarks>
 public static class AgentIdentityEndpoints
 {
+    /// <summary>Only the two authorization-map routes, including routing's trailing-slash aliases.</summary>
+    public static bool IsAuthorizationBootstrap(HttpContext context)
+    {
+        var path = context.Request.Path.Value?.TrimEnd('/');
+        return string.Equals(path, "/internal/agent-mcp-grants", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(path, "/internal/agent-project-access", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static IEndpointRouteBuilder MapAgentIdentityEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/internal/agent-mcp-grants", async (DbAgentGrantSource grants, CancellationToken ct) =>

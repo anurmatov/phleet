@@ -23,7 +23,7 @@ public class MemoryToolValidationTests
     {
         var opts = Options.Create(new AclOptions { EnableProjectScopedAcl = false });
         var oOpts = Options.Create(new OrchestratorOptions());
-        var svc = new AclCacheService(opts, oOpts, NullLogger<AclCacheService>.Instance);
+        var svc = new AclCacheService(opts, oOpts, NullLogger<AclCacheService>.Instance, new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]]));
         svc.InjectAclForTesting([]);
         return svc;
     }

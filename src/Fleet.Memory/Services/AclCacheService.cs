@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
 using Fleet.Memory.Configuration;
+using Fleet.Shared.Mcp;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Memory.Services;
@@ -30,9 +31,10 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
     ];
 
     private readonly IOptions<AclOptions> _aclOptions;
-    private readonly IOptions<OrchestratorOptions> _orchestratorOptions;
     private readonly ILogger<AclCacheService> _logger;
     private readonly HttpClient _http;
+    private readonly Uri _url;
+    private readonly string _serviceToken;
 
     // Keyed by lowercase agent name, value is list of lowercase project names (or ["*"] for wildcard).
     private volatile Dictionary<string, List<string>> _cache = [];
@@ -45,17 +47,19 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
     public AclCacheService(
         IOptions<AclOptions> aclOptions,
         IOptions<OrchestratorOptions> orchestratorOptions,
-        ILogger<AclCacheService> logger)
+        ILogger<AclCacheService> logger, AgentIdentitySettings identity)
     {
         _aclOptions = aclOptions;
-        _orchestratorOptions = orchestratorOptions;
         _logger = logger;
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        _url = AgentIdentitySettings.BootstrapUrl(orchestratorOptions.Value.BaseUrl, "/internal/agent-project-access");
+        _serviceToken = identity.ServiceToken("fleet-memory");
+        _http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false })
+            { Timeout = TimeSpan.FromSeconds(5) };
     }
 
     /// <summary>Test seam: the same service with a caller-supplied <see cref="HttpClient"/>.</summary>
     internal AclCacheService(IOptions<AclOptions> aclOptions, IOptions<OrchestratorOptions> orchestratorOptions,
-        ILogger<AclCacheService> logger, HttpClient http) : this(aclOptions, orchestratorOptions, logger)
+        ILogger<AclCacheService> logger, HttpClient http, AgentIdentitySettings identity) : this(aclOptions, orchestratorOptions, logger, identity)
     {
         _http.Dispose();
         _http = http;
@@ -177,7 +181,7 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
         _ = Task.Run(async () =>
         {
             try { await RefreshAsync(CancellationToken.None); }
-            catch (Exception ex) { _logger.LogWarning(ex, "ACL refresh triggered by config.changed failed"); }
+            catch (Exception) { _logger.LogWarning("ACL refresh triggered by config.changed failed"); }
         });
     }
 
@@ -192,11 +196,11 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
                 await FetchOnceAsync(ct);
                 return; // success
             }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
+            catch (Exception) when (!ct.IsCancellationRequested)
             {
                 if (i < FetchRetryDelays.Length)
                 {
-                    _logger.LogWarning(ex, "ACL fetch attempt {Attempt}/{Max} failed, retrying",
+                    _logger.LogWarning("ACL fetch attempt {Attempt}/{Max} failed, retrying",
                         i + 1, FetchRetryDelays.Length + 1);
                     await Task.Delay(FetchRetryDelays[i], ct);
                 }
@@ -204,7 +208,7 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
                 {
                     if (isInitial)
                     {
-                        _logger.LogError(ex,
+                        _logger.LogError(
                             "ACL cache could not be populated after {Attempts} attempts — entering fail-closed mode. " +
                             "All read tools will return 503 until the orchestrator is reachable.",
                             FetchRetryDelays.Length + 1);
@@ -220,16 +224,16 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
                                     TrySetAvailable();
                                     return;
                                 }
-                                catch (Exception retryEx)
+                                catch (Exception)
                                 {
-                                    _logger.LogWarning(retryEx, "ACL background retry failed");
+                                    _logger.LogWarning("ACL background retry failed");
                                 }
                             }
                         }, ct);
                     }
                     else
                     {
-                        _logger.LogWarning(ex, "ACL refresh failed after {Attempts} attempts — retaining stale cache (age: {Age:F0}s)",
+                        _logger.LogWarning("ACL refresh failed after {Attempts} attempts — retaining stale cache (age: {Age:F0}s)",
                             FetchRetryDelays.Length + 1,
                             (DateTimeOffset.UtcNow - _cacheLoadedAt).TotalSeconds);
                     }
@@ -244,8 +248,11 @@ public sealed class AclCacheService : IHostedService, IAsyncDisposable
 
     private async Task FetchOnceAsync(CancellationToken ct)
     {
-        var url = $"{_orchestratorOptions.Value.BaseUrl.TrimEnd('/')}/internal/agent-project-access";
-        var resp = await _http.GetFromJsonAsync<AclResponse>(url, ct)
+        using var request = new HttpRequestMessage(HttpMethod.Get, _url);
+        request.Headers.Authorization = new("Bearer", _serviceToken);
+        using var response = await _http.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+        var resp = await response.Content.ReadFromJsonAsync<AclResponse>(cancellationToken: ct)
             ?? throw new InvalidOperationException("Empty response from /internal/agent-project-access");
 
         var newCache = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);

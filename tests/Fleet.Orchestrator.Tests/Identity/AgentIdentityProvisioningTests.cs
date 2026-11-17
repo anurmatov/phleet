@@ -12,7 +12,7 @@ namespace Fleet.Orchestrator.Tests.Identity;
 /// <summary>
 /// What provisioning writes for an agent to prove who it is, through the real
 /// <see cref="ContainerProvisioningService"/>: its token as a header on the fleet's own MCP
-/// servers and nowhere else, and nothing at all for a deployment without the key.
+/// servers and nowhere else; missing keys and unsupported callers refuse provisioning.
 /// </summary>
 public sealed class AgentIdentityProvisioningTests
 {
@@ -47,7 +47,7 @@ public sealed class AgentIdentityProvisioningTests
 
     private static async Task<ProvisioningHarness> StartAsync(Agent agent, bool withKey = true)
     {
-        var harness = ProvisioningHarness.Create(withKey ? WithKey : null);
+        var harness = ProvisioningHarness.Create(withKey ? WithKey : new Dictionary<string,string?> { ["AgentIdentity:Key"] = "" });
         await harness.SeedAsync(db => db.Agents.Add(agent));
         return harness;
     }
@@ -104,29 +104,22 @@ public sealed class AgentIdentityProvisioningTests
     }
 
     [Fact]
-    public async Task AGeminiAgent_GetsNoHeader_BecauseItWouldSkipEveryServerThatHasOne()
+    public async Task AGeminiAgent_IsRefusedBeforeFilesAreWritten()
     {
         await using var harness = await StartAsync(NewAgent("gemini"));
-
-        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
-
-        var servers = Servers(harness);
-        foreach (var server in new[] { "fleet-memory", "fleet-telegram", "fleet-temporal", "fleet-orchestrator" })
-            Assert.Null(AuthorizationOf(servers, server));
+        var result = await harness.Service.ProvisionAsync("agent1");
+        Assert.False(result.Success);
+        Assert.Contains("mcp_headers_unsupported", result.Message);
+        Assert.False(Directory.Exists(harness.GeneratedDir("fleet-agent1")));
     }
 
     [Fact]
-    public async Task WithoutTheKey_AnAgentsFilesAreWhatTheyAlwaysWere()
+    public async Task WithoutTheKey_ProvisioningIsRefused()
     {
         await using var harness = await StartAsync(NewAgent(), withKey: false);
-
-        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
-
-        var text = File.ReadAllText(Path.Combine(harness.GeneratedDir("fleet-agent1"), ".mcp.json"));
-        Assert.DoesNotContain("headers", text);
-        Assert.DoesNotContain("fa1.", text);
-        var appsettings = File.ReadAllText(Path.Combine(harness.GeneratedDir("fleet-agent1"), "appsettings.json"));
-        Assert.DoesNotContain("McpHeaderSupport", appsettings);
+        var result = await harness.Service.ProvisionAsync("agent1");
+        Assert.False(result.Success);
+        Assert.Contains("agent_identity_misconfigured", result.Message);
     }
 
     [Fact]
@@ -136,8 +129,8 @@ public sealed class AgentIdentityProvisioningTests
 
         Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
 
-        Assert.EndsWith("?agent=agent1", Servers(harness).GetProperty("fleet-memory").GetProperty("url").GetString());
-        Assert.Contains("?agent=agent1", Servers(harness).GetProperty("fleet-telegram").GetProperty("url").GetString());
+        Assert.DoesNotContain("agent=", Servers(harness).GetProperty("fleet-memory").GetProperty("url").GetString());
+        Assert.DoesNotContain("agent=", Servers(harness).GetProperty("fleet-telegram").GetProperty("url").GetString());
     }
 
     [Fact]
@@ -210,14 +203,13 @@ public sealed class AgentIdentityProvisioningTests
         Assert.DoesNotContain("authorization", merged["fleet-telegram"].Keys);
         // A third-party endpoint keeps exactly what the operator mapped.
         Assert.Equal(new Dictionary<string, string> { ["X-Example-Key"] = "value" }, merged["example"]);
-        Assert.Same(mapped, AgentConfigFiles.WithIdentityHeaders(NewAgent(), mapped, identityToken: null, Origins, MemoryUrl));
+        Assert.Throws<ArgumentNullException>(() => AgentConfigFiles.WithIdentityHeaders(NewAgent(), mapped, identityToken: null!, Origins, MemoryUrl));
     }
 
     [Fact]
-    public void AnAgentWhoseNameCannotBeSigned_GetsNoToken_RatherThanFailingToProvision()
+    public void InvalidSubject_CannotBeSigned()
     {
-        Assert.Null(AgentConfigFiles.IdentityTokenFor(NewAgent(name: "agent.with.dots"), [Key]));
-        Assert.Null(AgentConfigFiles.IdentityTokenFor(NewAgent(), []));
+        Assert.Throws<ArgumentException>(() => AgentConfigFiles.IdentityTokenFor(NewAgent(name: "agent.with.dots"), [Key]));
         Assert.NotNull(AgentConfigFiles.IdentityTokenFor(NewAgent(), [Key]));
     }
 
@@ -259,6 +251,91 @@ public sealed class AgentIdentityProvisioningTests
         Assert.All(without, entry => Assert.Empty(entry.Target!.Headers));
     }
 
+    [Theory]
+    [InlineData("gemini", "agent1", "mcp_headers_unsupported")]
+    [InlineData("claude", "agent.with.dots", "agent_identity_subject_invalid")]
+    public async Task MandatoryIdentity_UnsignableCallerKeepsOldContainer(string provider, string name, string fault)
+    {
+        var agent = NewAgent(provider, name);
+        await using var harness = await StartAsync(agent);
+        harness.ContainerExists = true;
+        var result = await harness.Service.ReprovisionAsync(name);
+        Assert.False(result.Success);
+        Assert.Contains(fault, result.Message);
+        Assert.DoesNotContain(harness.DockerRequests, r => r.StartsWith("DELETE ") || r.EndsWith("/stop"));
+        Assert.False(Directory.Exists(harness.GeneratedDir(agent.ContainerName)));
+    }
+
+    [Theory]
+    [InlineData("fleet-orchestrator")]
+    [InlineData("FLEET-ORCHESTRATOR")]
+    [InlineData("FLEET-MEMORY")]
+    [InlineData("Fleet-Telegram")]
+    [InlineData("Fleet-Temporal")]
+    public async Task MandatoryIdentity_UntrustedBuiltinKeepsOldContainer(string server)
+    {
+        var agent = NewAgent();
+        agent.McpEndpoints.RemoveAll(e => e.McpName.Equals(server, StringComparison.OrdinalIgnoreCase));
+        agent.McpEndpoints.Add(new() { McpName = server, Url = Collector, TransportType = "http" });
+        await using var harness = await StartAsync(agent);
+        harness.ContainerExists = true;
+        var existingDir = harness.GeneratedDir(agent.ContainerName);
+        Directory.CreateDirectory(existingDir);
+        File.WriteAllText(Path.Combine(existingDir, "sentinel"), "preserve");
+        var preview = await harness.Service.PreviewAsync(agent.Name);
+        Assert.Contains(preview.Diffs, d => d.StartsWith("agent_identity_origin_untrusted"));
+        var result = await harness.Service.ReprovisionAsync(agent.Name);
+        Assert.False(result.Success);
+        Assert.Contains("agent_identity_origin_untrusted", result.Message);
+        Assert.DoesNotContain(harness.DockerRequests, r => r.StartsWith("DELETE ") || r.EndsWith("/stop"));
+        Assert.Equal("preserve", File.ReadAllText(Path.Combine(existingDir, "sentinel")));
+        Assert.Single(Directory.GetFiles(existingDir));
+    }
+
+    [Theory]
+    [InlineData("file:///secret")]
+    [InlineData("https://user:password@example.test")]
+    [InlineData("not-a-url")]
+    public async Task MandatoryIdentity_InvalidImplicitMemoryKeepsOldFilesAndContainer(string url)
+    {
+        var agent = NewAgent();
+        await using var h = ProvisioningHarness.Create(new Dictionary<string, string?>
+            { ["FleetMemory:McpUrl"] = url });
+        await h.SeedAsync(db => db.Agents.Add(agent));
+        h.ContainerExists = true;
+        var dir = h.GeneratedDir(agent.ContainerName);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "sentinel"), "preserve");
+        var result = await h.Service.ReprovisionAsync(agent.Name);
+        Assert.False(result.Success);
+        Assert.StartsWith("agent_identity_origin_untrusted", result.Message);
+        Assert.DoesNotContain(url, result.Message);
+        Assert.Equal("preserve", File.ReadAllText(Path.Combine(dir, "sentinel")));
+        Assert.Single(Directory.GetFiles(dir));
+        Assert.DoesNotContain(h.DockerRequests, r => r.StartsWith("DELETE ") || r.EndsWith("/stop"));
+    }
+
+    [Theory]
+    [InlineData("fleet-memory")]
+    [InlineData("FLEET-MEMORY")]
+    [InlineData("fleet-temporal")]
+    [InlineData("FLEET-ORCHESTRATOR")]
+    [InlineData("fleet-telegram")]
+    public void MandatoryIdentity_BuiltinUrlsKeepUnrelatedOptions(string name)
+    {
+        var agent = NewAgent();
+        var url = AgentConfigFiles.AgentMcpUrl(agent, new() { McpName = name, TransportType = "http",
+            Url = "https://mcp.example.test/mcp?tag=a%20b&AGENT=stale&flag=1#section" });
+        Assert.Contains("tag=a%20b", url);
+        Assert.Contains("flag=1", url);
+        Assert.EndsWith("#section", url);
+        Assert.DoesNotContain("AGENT=", url);
+        if (name == "fleet-telegram") Assert.Contains("formatting_mode=0", url);
+        // Third-party `agent` is an application argument, not a caller credential.
+        Assert.Equal("https://example.test/?agent=author", AgentConfigFiles.AgentMcpUrl(agent,
+            new() { McpName = "example", Url = "https://example.test/?agent=author", TransportType = "http" }));
+    }
+
     // ── where a token may go ─────────────────────────────────────────────────
 
     /// <summary>
@@ -271,13 +348,10 @@ public sealed class AgentIdentityProvisioningTests
         var agent = NewAgent();
         agent.McpEndpoints.Single(e => e.McpName == "fleet-orchestrator").Url = Collector;
         await using var harness = await StartAsync(agent);
-
-        Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
-
-        var servers = Servers(harness);
-        Assert.Null(AuthorizationOf(servers, "fleet-orchestrator"));
-        foreach (var server in new[] { "fleet-memory", "fleet-telegram", "fleet-temporal" })
-            Assert.NotNull(AuthorizationOf(servers, server));
+        var result = await harness.Service.ProvisionAsync("agent1");
+        Assert.False(result.Success);
+        Assert.Contains("agent_identity_origin_untrusted", result.Message);
+        Assert.False(Directory.Exists(harness.GeneratedDir("fleet-agent1")));
     }
 
     /// <summary>

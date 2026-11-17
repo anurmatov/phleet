@@ -135,6 +135,7 @@ public sealed class MemorySearchEndpointTests
             builder.Configuration.Sources.Clear();
             builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
+                ["AgentIdentity:Key"] = new string('A', 43),
                 ["Orchestrator:AuthToken"] = Token,
                 ["FleetMemory:Url"] = "http://fleet-memory.invalid:3100/",
             });

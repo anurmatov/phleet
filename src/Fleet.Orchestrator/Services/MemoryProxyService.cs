@@ -6,7 +6,7 @@ namespace Fleet.Orchestrator.Services;
 /// <summary>
 /// Thin HTTP client that calls fleet-memory's /internal/* REST endpoints.
 /// The orchestrator proxies these to the dashboard via /api/memory/* endpoints.
-/// No auth required — fleet-memory's internal API relies on Docker-network trust.
+/// Every request carries the server's service identity.
 /// </summary>
 public sealed class MemoryProxyService(IHttpClientFactory httpClientFactory, IConfiguration config)
 {
@@ -17,15 +17,14 @@ public sealed class MemoryProxyService(IHttpClientFactory httpClientFactory, ICo
 
     /// <summary>
     /// The client for fleet-memory's <c>/internal</c> routes. They read, change and delete any memory
-    /// with no project check, so fleet-memory serves them to a service only once identity is
-    /// enforced: every request carries this orchestrator's service token when there is a key.
+    /// with no project check, so every request carries this orchestrator's required service identity.
     /// </summary>
     private HttpClient CreateClient()
     {
         var client = httpClientFactory.CreateClient("fleet-memory");
-        if (Fleet.Shared.Mcp.AgentIdentitySettings.From(config).ServiceToken(OrchestratorMcp.ServerName) is { } token)
-            client.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue(Fleet.Shared.AgentIdentityTokens.Scheme, token);
+        var token = Fleet.Shared.Mcp.AgentIdentitySettings.From(config).ServiceToken(OrchestratorMcp.ServerName);
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(Fleet.Shared.AgentIdentityTokens.Scheme, token);
         return client;
     }
 

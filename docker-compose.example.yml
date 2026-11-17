@@ -265,7 +265,6 @@ services:
       # Agent identity: verifies each agent's token and reads its grants from the orchestrator.
       # See docs/agent-identity.md.
       - AgentIdentity__Key=${FLEET_AGENT_IDENTITY_KEY:-}
-      - AgentIdentity__Enforce=${FLEET_AGENT_IDENTITY_ENFORCE:-false}
     mem_limit: 512m
     restart: unless-stopped
     depends_on:
@@ -301,7 +300,6 @@ services:
       # Agent identity: verifies each agent's token and reads its grants from the orchestrator.
       # See docs/agent-identity.md.
       - AgentIdentity__Key=${FLEET_AGENT_IDENTITY_KEY:-}
-      - AgentIdentity__Enforce=${FLEET_AGENT_IDENTITY_ENFORCE:-false}
     mem_limit: 128m
     restart: unless-stopped
     depends_on:
@@ -386,7 +384,6 @@ services:
       # Agent identity: verifies each agent's token and reads its grants from the orchestrator.
       # See docs/agent-identity.md.
       - AgentIdentity__Key=${FLEET_AGENT_IDENTITY_KEY:-}
-      - AgentIdentity__Enforce=${FLEET_AGENT_IDENTITY_ENFORCE:-false}
       - ORCHESTRATOR_URL=http://fleet-orchestrator:3600
       - ORCHESTRATOR_CONFIG_TOKEN=${ORCHESTRATOR_CONFIG_TOKEN}
       - RABBITMQ_URL=amqp://rabbitmq
@@ -477,7 +474,6 @@ services:
       # Agent identity: signs each agent's token, and verifies it on this service's own MCP endpoint.
       # See docs/agent-identity.md.
       - AgentIdentity__Key=${FLEET_AGENT_IDENTITY_KEY:-}
-      - AgentIdentity__Enforce=${FLEET_AGENT_IDENTITY_ENFORCE:-false}
       - Journal__ExcludedChatIds=${FLEET_GROUP_CHAT_ID:-},${FLEET_COMMS_JOURNAL_EXCLUDED_CHAT_IDS:-}
       # Epic grants (#436): off unless FLEET_EPIC_GRANTS_ENABLED=true. See docs/epic-grants.md.
       - EpicGrants__Enabled=${FLEET_EPIC_GRANTS_ENABLED:-false}

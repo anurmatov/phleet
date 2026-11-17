@@ -53,6 +53,7 @@ decides 'an unknown target on a fresh host'    'fresh'              ''      fres
 mkdir -p "$DIR/scripts/lib" "$DIR/fleet" "$DIR/bin"
 cp "$ROOT/setup.sh" "$ROOT/upgrade.sh" "$ROOT/docker-compose.example.yml" "$DIR/"
 cp "$ROOT"/scripts/lib/*.sh "$DIR/scripts/lib/"
+cp "$ROOT/scripts/mint-identity-token.sh" "$DIR/scripts/"
 COMPOSE_EXAMPLE="$DIR/docker-compose.example.yml"
 PIN=$(sed -n 's/^ *image: qdrant\/qdrant:\${FLEET_QDRANT_VERSION:-\(v[0-9]*\.[0-9]*\.[0-9]*\)}$/\1/p' "$COMPOSE_EXAMPLE")
 [[ -n "$PIN" ]] || { echo 'FAIL the compose file pins no full Qdrant release' >&2; exit 1; }
@@ -65,7 +66,7 @@ sed -E -e 's|^(      context: )\.$|\1..|' -e 's|\./deploy/comms-seaweedfs:|../de
 
 write_env() { # <qdrant lines>
   cp "$ROOT/.env.example" "$ENV"
-  printf 'FLEET_BASE_DIR=%s\nFLEET_COMMS_ENABLED=false\n%s' "$DIR/fleet" "$1" >> "$ENV"
+  printf 'FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nFLEET_BASE_DIR=%s\nFLEET_COMMS_ENABLED=false\n%s' "$DIR/fleet" "$1" >> "$ENV"
 }
 # What Compose itself resolves for this .env, asked directly and without the function under test.
 # The shell's own FLEET_QDRANT_VERSION is removed, as both scripts remove it.

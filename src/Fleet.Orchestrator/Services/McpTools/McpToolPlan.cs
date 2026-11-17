@@ -72,7 +72,7 @@ public static class McpToolPlan
             entries.Add(WithServiceIdentity(Plan(agent, endpoint, envValues, bindings, journalReadToken), serviceToken, identityOrigins));
 
         // Every agent is given fleet-memory, whether or not it has a row for it.
-        if (!agent.McpEndpoints.Any(e => e.McpName == "fleet-memory"))
+        if (!agent.McpEndpoints.Any(e => e.McpName.Equals("fleet-memory", StringComparison.OrdinalIgnoreCase)))
         {
             var implicitMemory = new AgentMcpEndpoint
             {
@@ -95,14 +95,14 @@ public static class McpToolPlan
     private static McpPlanEntry WithServiceIdentity(McpPlanEntry entry, string? serviceToken, IReadOnlyCollection<string>? identityOrigins)
     {
         if (serviceToken is null || identityOrigins is null || entry.Target is not { } target
-            || !AgentConfigFiles.IdentityServerNames.Contains(entry.Name, StringComparer.Ordinal)
+            || !AgentConfigFiles.IsIdentityServer(entry.Name)
             || !AgentConfigFiles.IsIdentityDestination(target.Url.AbsoluteUri, identityOrigins))
             return entry;
 
-        var headers = new Dictionary<string, string>(target.Headers, StringComparer.Ordinal)
-        {
-            ["Authorization"] = $"{AgentIdentityTokens.Scheme} {serviceToken}",
-        };
+        var headers = target.Headers
+            .Where(h => !h.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(h => h.Key, h => h.Value, StringComparer.OrdinalIgnoreCase);
+        headers["Authorization"] = $"{AgentIdentityTokens.Scheme} {serviceToken}";
         return entry with { Target = target with { Headers = headers } };
     }
 

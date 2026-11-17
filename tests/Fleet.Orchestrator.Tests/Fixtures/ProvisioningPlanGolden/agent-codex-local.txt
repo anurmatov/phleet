@@ -100,7 +100,10 @@ POST /v1.41/containers/fleet-agent-codex-local/start
   "mcpServers": {
     "fleet-memory": {
       "type": "http",
-      "url": "http://fleet-memory:3100?agent=agent-codex-local"
+      "url": "http://fleet-memory:3100",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-codex-local.Vj8a4gZJNcql9Ov-0TNIGpk4H8C8N7nKDrCv9sApd-c"
+      }
     }
   }
 }
@@ -140,6 +143,7 @@ POST /v1.41/containers/fleet-agent-codex-local/start
     "HostedProviderKeyEnv": null,
     "AnthropicBaseUrl": null,
     "InstructionOrder": [],
+    "McpHeaderSupport": true,
     "CodexOssBaseUrl": "http://inference-host:11434/v1",
     "ContextWindow": 65536,
     "HarnessExtra": "history.persistence = \u0022save-all\u0022"

@@ -69,6 +69,7 @@ public sealed class ContainerProvisioningService(
         var diffs   = actual is null
             ? ["container not found — not running"]
             : ContainerSpecDiff.ComputeDiff(desired, actual);
+        if (ProvisioningFaults.DescribeIdentityFault(agent, config) is { } identityFault) diffs = [.. diffs, identityFault];
         if (secretFault is not null) diffs = [.. diffs, secretFault];
         // #593: the fault only; resolved header values never leave provisioning.
         else if (AgentConfigFiles.ResolveMcpHeaders(agent, envValues, bindings, secretPlan!).Fault is { } headerFault)
@@ -169,6 +170,8 @@ public sealed class ContainerProvisioningService(
         // #386: PV1, before Docker is called or any file is generated.
         if (ProvisioningFaults.DescribeProviderPreflightFault(agent) is { } providerFault)
             return Refuse(providerFault);
+        if (ProvisioningFaults.DescribeIdentityFault(agent, config) is { } identityFault)
+            return Refuse(identityFault);
         if (_policy.DescribeJournalProvisioningFault(agent) is { } journalFault)
             return Refuse(journalFault);
 

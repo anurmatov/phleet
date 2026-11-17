@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # #593 A7: the pinned Claude and Codex clients in the real agent image send MCP `initialize` with two
-# environment-backed headers, rendered by production code, through the unchanged fleet-secrets
+# environment-backed headers plus mandatory identity Authorization and a separate config header,
+# rendered by production code, through the unchanged fleet-secrets
 # forwarder to an isolated HTTPS mock that sees both synthetic secrets and never a placeholder.
 # Synthetic fixtures only; no internet route, production mount or inherited credential.
 # Exit 0: pass, 1: assertion, 2: infrastructure (never a pass).
@@ -29,6 +30,7 @@ MCP_HOST=mcp.example.test
 KEY_SECRET="synthetic-mcp-key-4a1f7c"
 SECRET_SECRET="synthetic-mcp-secret-9e03b2"
 CLAUDE_PIN=2.1.280
+CODEX_PIN=0.164.0
 WORK="$(mktemp -d)"
 chmod 755 "$WORK"
 mkdir -p "$WORK/state" "$WORK/ca" "$WORK/fixture" "$WORK/log" "$WORK/client"
@@ -46,7 +48,7 @@ trap cleanup EXIT
 FLEET_MCP_HEADERS_FIXTURE_DIR="$WORK/client" timeout 900 dotnet test "$REPO_ROOT/tests/Fleet.Orchestrator.Tests" \
     --filter "FullyQualifiedName~McpHeaderEnvTests.Native_fixture_export" > "$WORK/fixture-export.log" 2>&1 \
     || { tail -20 "$WORK/fixture-export.log" >&2; fail_infra "could not export the production-rendered fixture"; }
-for f in claude.mcp.json codex.mcp.json codex.appsettings.json placeholders.env; do
+for f in claude.mcp.json codex.mcp.json codex.appsettings.json placeholders.env native-identity.json; do
     [ -s "$WORK/client/$f" ] || fail_infra "fixture file $f was not written"
 done
 # shellcheck disable=SC1091
@@ -102,8 +104,8 @@ timeout 30 docker network create --internal --subnet "$EGRESS.0/24" "$ID-egress"
 timeout 30 docker network create --internal --subnet "$SECRETS.0/24" "$ID-secrets" > /dev/null || fail_infra "could not create the secrets network (set SECRETS_SUBNET)"
 
 timeout 60 docker run -d --name "$ID-upstream" --network "$ID-egress" --ip "$UPSTREAM_IP" --entrypoint python3 \
-    -v "$HERE/mcp-upstream.py:/mcp-upstream.py:ro" -v "$WORK/fixture:/fixture:ro" -v "$WORK/log:/log" \
-    "$TOOL_IMAGE" /mcp-upstream.py "$KEY_SECRET" "$SECRET_SECRET" /log/requests.jsonl /fixture/upstream.crt /fixture/upstream.key > /dev/null \
+    -v "$HERE/mcp-upstream.py:/mcp-upstream.py:ro" -v "$WORK/fixture:/fixture:ro" -v "$WORK/log:/log" -v "$WORK/client:/client:ro" \
+    "$TOOL_IMAGE" /mcp-upstream.py "$KEY_SECRET" "$SECRET_SECRET" /log/requests.jsonl /fixture/upstream.crt /fixture/upstream.key /client/native-identity.json > /dev/null \
     || fail_infra "could not start the mock MCP server"
 
 timeout 60 docker create --name "$ID-proxy" --network "$ID-egress" --add-host "$MCP_HOST:$UPSTREAM_IP" \
@@ -155,45 +157,64 @@ agent "claude --version" | grep -q "^$CLAUDE_PIN " || fail_infra "the agent imag
 
 LOG="$WORK/log/requests.jsonl"
 received() { tool "touch log/requests.jsonl; jq -s '$1' log/requests.jsonl"; }
-authenticated_inits() { received '[.[] | select(.rpc_method == "initialize" and .key_ok and .secret_ok)] | length'; }
+authenticated_inits() { received '[.[] | select(.initialize and .key_ok and .secret_ok and .identity_ok and .config_ok)] | length'; }
 total_requests() { received 'length'; }
 # claude mcp list: the server's line and its health check, as the CLI reports it.
 claude_list() { agent 'cd /tmp/home && claude mcp list 2>&1' 240 || true; }
 server_line() { grep -E "^$1:" <<< "$2" || true; }
 
 # ── Claude: the production server entry, registered as the CLI's own user configuration ─────────
-agent "cd /tmp/home && claude mcp add-json --scope user example \"\$(jq -c '.mcpServers.example' /client/claude.mcp.json)\" > /dev/null" \
+agent "cd /tmp/home && claude mcp add-json --scope user fleet-orchestrator \"\$(jq -c '.mcpServers[\"fleet-orchestrator\"]' /client/claude.mcp.json)\" > /dev/null" \
     || fail_assert "claude mcp add-json refused the production-rendered server"
 before="$(authenticated_inits)"
 listing="$(claude_list)"
-server_line example "$listing" | grep -q "Connected" || { server_line example "$listing" >&2; fail_assert "claude does not report the example server as connected"; }
+server_line fleet-orchestrator "$listing" | grep -q "Connected" || { server_line fleet-orchestrator "$listing" >&2; fail_assert "claude does not report the example server as connected"; }
 after="$(authenticated_inits)"
 [ "$after" -gt "$before" ] || fail_assert "the mock saw no authenticated initialize from claude"
 pass "claude $CLAUDE_PIN: initialize reached the mock with both secrets substituted, server connected"
 
 # ── Controls: each refused by the forwarder, with no request reaching the mock ───────────────────
-agent 'cd /tmp/home && claude mcp remove --scope user example > /dev/null' || fail_infra "could not remove the example server"
+agent 'cd /tmp/home && claude mcp remove --scope user fleet-orchestrator > /dev/null' || fail_infra "could not remove the example server"
 write_state key-only
 count="$(total_requests)"
-agent "cd /tmp/home && claude mcp add-json --scope user example \"\$(jq -c '.mcpServers.example' /client/claude.mcp.json)\" > /dev/null"
-server_line example "$(claude_list)" | grep -q "Connected" && fail_assert "a revoked grant still connected"
+agent "cd /tmp/home && claude mcp add-json --scope user fleet-orchestrator \"\$(jq -c '.mcpServers[\"fleet-orchestrator\"]' /client/claude.mcp.json)\" > /dev/null"
+server_line fleet-orchestrator "$(claude_list)" | grep -q "Connected" && fail_assert "a revoked grant still connected"
 [ "$(total_requests)" -eq "$count" ] || fail_assert "a request with a revoked grant reached the mock"
 pass "control: a missing grant is refused before the mock"
 
-agent 'cd /tmp/home && claude mcp remove --scope user example > /dev/null'
+agent 'cd /tmp/home && claude mcp remove --scope user fleet-orchestrator > /dev/null'
 write_state both
-agent "cd /tmp/home && claude mcp add-json --scope user swapped \"\$(jq -c '.mcpServers.example | .headers = {\"X-Example-Key\": .headers[\"X-Example-Secret\"], \"X-Example-Secret\": .headers[\"X-Example-Key\"]}' /client/claude.mcp.json)\" > /dev/null"
+agent "cd /tmp/home && claude mcp add-json --scope user swapped \"\$(jq -c '.mcpServers[\"fleet-orchestrator\"] | .headers = {\"X-Example-Key\": .headers[\"X-Example-Secret\"], \"X-Example-Secret\": .headers[\"X-Example-Key\"]}' /client/claude.mcp.json)\" > /dev/null"
 count="$(total_requests)"
 server_line swapped "$(claude_list)" | grep -q "Connected" && fail_assert "swapped placeholders still connected"
 [ "$(total_requests)" -eq "$count" ] || fail_assert "a placeholder in another binding's header reached the mock"
 pass "control: placeholders in swapped headers are refused before the mock"
 
 agent 'cd /tmp/home && claude mcp remove --scope user swapped > /dev/null'
-agent "cd /tmp/home && claude mcp add-json --scope user example \"\$(jq -c '.mcpServers.example' /client/claude.mcp.json)\" > /dev/null"
+agent "cd /tmp/home && claude mcp add-json --scope user fleet-orchestrator \"\$(jq -c '.mcpServers[\"fleet-orchestrator\"]' /client/claude.mcp.json)\" > /dev/null"
 before="$(authenticated_inits)"
-server_line example "$(claude_list)" | grep -q "Connected" || fail_assert "the original configuration no longer connects"
+server_line fleet-orchestrator "$(claude_list)" | grep -q "Connected" || fail_assert "the original configuration no longer connects"
 [ "$(authenticated_inits)" -gt "$before" ] || fail_assert "the restored configuration sent no authenticated initialize"
 pass "control: the original configuration still succeeds"
+
+# Missing and changed identity cannot initialize even with the correct config token.
+for mode in missing changed; do
+    agent 'cd /tmp/home && claude mcp remove --scope user fleet-orchestrator > /dev/null'
+    if [[ "$mode" == missing ]]; then
+        filter='del(.headers.Authorization)'
+    else
+        filter='.headers.Authorization = "Bearer fa1.agent.agent1.invalid"'
+    fi
+    agent "cd /tmp/home && claude mcp add-json --scope user fleet-orchestrator \"\$(jq -c '.mcpServers[\"fleet-orchestrator\"] | $filter' /client/claude.mcp.json)\" > /dev/null"
+    before="$(authenticated_inits)"
+    invalid_before="$(received '[.[] | select(.initialize and .config_ok and (.identity_ok | not))] | length')"
+    server_line fleet-orchestrator "$(claude_list)" | grep -q Connected && fail_assert "invalid identity connected"
+    [[ "$(authenticated_inits)" == "$before" ]] || fail_assert "invalid identity initialized"
+    [[ "$(received '[.[] | select(.initialize and .config_ok and (.identity_ok | not))] | length')" -gt "$invalid_before" ]] || fail_assert "identity negative never reached the upstream"
+    pass "Claude $mode identity refused with separate config token retained"
+done
+
+agent "codex --version" | grep -q "^codex-cli $CODEX_PIN$" || fail_infra "the agent image does not carry the pinned Codex CLI"
 
 # ── Codex: the production prepare step writes config.toml, the pinned app-server connects ────────
 agent '
@@ -234,29 +255,42 @@ if answer(1, deadline) is None:
 send({"jsonrpc": "2.0", "method": "initialized"})
 status = None
 while time.time() < deadline and status is None:
-    send({"jsonrpc": "2.0", "id": 2, "method": "mcpServerStatus/list", "params": {"serverName": "example"}})
+    send({"jsonrpc": "2.0", "id": 2, "method": "mcpServerStatus/list", "params": {"serverName": "fleet-orchestrator"}})
     reply = answer(2, deadline)
-    servers = [s for s in ((reply or {}).get("result") or {}).get("data", []) if s.get("name") == "example"]
+    servers = [s for s in ((reply or {}).get("result") or {}).get("data", []) if s.get("name") == "fleet-orchestrator"]
     if servers and (servers[0].get("serverInfo") or {}).get("name") == "synthetic-mcp":
         status = servers[0]
     else:
         time.sleep(2)
 proc.kill()
 if status is None:
-    print("example: not initialized"); sys.exit(1)
+    print("fleet-orchestrator: not initialized"); sys.exit(1)
 tools = status.get("tools") or {}
 names = list(tools) if isinstance(tools, dict) else [t.get("name") for t in tools]
-print("example: initialized, tools=" + ",".join(sorted(n for n in names if n)))
+print("fleet-orchestrator: initialized, tools=" + ",".join(sorted(n for n in names if n)))
 PY
 before="$(authenticated_inits)"
 codex_out="$(timeout 180 docker exec -u 0 -i "$ID-agent" python3 - < "$WORK/client-codex.py" 2>&1 || true)"
-grep -q "^example: initialized" <<< "$codex_out" || { echo "$codex_out" >&2; fail_assert "codex did not initialize the example server"; }
+grep -q "^fleet-orchestrator: initialized" <<< "$codex_out" || { echo "$codex_out" >&2; fail_assert "codex did not initialize the example server"; }
 [ "$(authenticated_inits)" -gt "$before" ] || fail_assert "the mock saw no authenticated initialize from codex"
 pass "codex: initialize reached the mock with both secrets substituted"
 
+# Re-render Codex config through prepare for both negative identity cases.
+for mode in missing changed; do
+    if [[ "$mode" == missing ]]; then filter='del(.headers.Authorization)'; else filter='.headers.Authorization = "Bearer fa1.agent.agent1.invalid"'; fi
+    agent "jq '.mcpServers[\"fleet-orchestrator\"] |= ($filter)' /client/codex.mcp.json > /tmp/codex-root/workspace/.mcp.json && cd /app && dotnet Fleet.Agent.dll prepare config --root /tmp/codex-root > /dev/null 2>/dev/null" || fail_assert "negative Codex prepare failed"
+    before="$(authenticated_inits)"
+    invalid_before="$(received '[.[] | select(.initialize and .config_ok and (.identity_ok | not))] | length')"
+    codex_out="$(timeout 180 docker exec -u 0 -i "$ID-agent" python3 - < "$WORK/client-codex.py" 2>&1 || true)"
+    grep -q '^fleet-orchestrator: initialized' <<< "$codex_out" && fail_assert "invalid Codex identity connected"
+    [[ "$(authenticated_inits)" == "$before" ]] || fail_assert "invalid Codex identity initialized"
+    [[ "$(received '[.[] | select(.initialize and .config_ok and (.identity_ok | not))] | length')" -gt "$invalid_before" ]] || fail_assert "Codex identity negative never reached the upstream"
+    pass "Codex $mode identity refused"
+done
+
 # ── What the mock saw, and what nothing kept ─────────────────────────────────────────────────────
 [ "$(received '[.[] | select(.placeholder_seen)] | length')" -eq 0 ] || fail_assert "a placeholder reached the mock"
-[ "$(received '[.[] | .host] | unique | . - ["mcp.example.test"] | length')" -eq 0 ] || fail_assert "a request reached another host"
+[ "$(received '[.[] | select(.host_ok | not)] | length')" -eq 0 ] || fail_assert "a request reached another host"
 pass "mock: no placeholder ever arrived, only the bound host was reached"
 
 agent "! grep -rqF -e '$KEY_SECRET' -e '$SECRET_SECRET' /tmp/home /tmp/codex-root /client && ! env | grep -qF -e '$KEY_SECRET' -e '$SECRET_SECRET'" \

@@ -1,10 +1,16 @@
-import json, urllib.request
+import json, os, urllib.request
+from pathlib import Path
 BASE = "http://127.0.0.1:3001/"
 class Mcp:
     def __init__(self, agent):
-        self.url = BASE + f"?agent={agent}"; self.sid = None; self.n = 0
+        self.url = BASE; self.sid = None; self.n = 0
+        # Only the already-minted synthetic agent credential is available to this client.
+        token_file = Path(os.environ.get("ACCEPT_DIR", "/tmp/epic-grants-accept")) / "identity-tokens.json"
+        self.token = json.loads(token_file.read_text())[agent]
+        if not self.token.startswith(f"fa1.agent.{agent}."):
+            raise ValueError("synthetic agent identity unavailable")
     def _post(self, payload):
-        h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        h = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
         if self.sid: h["Mcp-Session-Id"] = self.sid
         req = urllib.request.Request(self.url, json.dumps(payload).encode(), h, method="POST")
         with urllib.request.urlopen(req, timeout=180) as r:

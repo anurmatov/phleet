@@ -68,9 +68,18 @@ public class HumanInputRequestTests
                 "case-variant" => new { value = "approved", Ref = handle.ResultRunId, VisitId = Signal + ":1" },
                 _ => new { Value = decision, Comment = Literal, Ref = handle.ResultRunId, VisitId = Signal + ":1" }
             };
-            await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(payload)]);
-            // First valid decision only; conflicting buffered data must not cause a second callback.
-            await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new { Value = "rejected", Ref = handle.ResultRunId, VisitId = Signal + ":1" })]);
+            activities.HoldNotification = true;
+            try
+            {
+                await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(payload)]);
+                // SignalAsync confirms persistence, not consumption. After the stale delivery,
+                // co-batched values may still enter the engine's last-write-wins buffer.
+                // Hold the existing callback barrier to prove this answer was selected before
+                // injecting the conflict, while keeping the workflow open to receive it.
+                await activities.Notifying.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new { Value = "rejected", Ref = handle.ResultRunId, VisitId = Signal + ":1" })]);
+            }
+            finally { activities.ReleaseNotification.TrySetResult(); }
         });
         var expected = decision is "malformed" or "case-variant" or "array" or "forged-timeout" ? "invalid" : "answered";
         var result = JsonSerializer.Deserialize<JsonElement>(run.Result);
@@ -107,6 +116,31 @@ public class HumanInputRequestTests
         Assert.All(timers, e => Assert.InRange(
             (e.EventTime.ToDateTime() + e.TimerStartedEventAttributes.StartToFireTimeout.ToTimeSpan() - end).TotalSeconds, -1, 1));
         await new WorkflowReplayer(new WorkflowReplayerOptions { Namespace = "fleet", TaskQueue = "fleet" }.AddWorkflow<UniversalWorkflow>()).ReplayWorkflowAsync(run.History);
+    }
+
+    [Theory]
+    [InlineData("approved", "rejected")]
+    [InlineData("rejected", "approved")]
+    public async Task Decision_CoBatchedConflicts_UsesInheritedLastBufferedValue(string first, string last)
+    {
+        var run = await RunWithWorkerStopped(async (_, handle) =>
+        {
+            // No worker can consume these separately. The stale delivery completes the waiter,
+            // so both valid deliveries enter the engine's existing last-write-wins buffer.
+            await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new { Value = "approved", Ref = "old", VisitId = "old" })]);
+            foreach (var value in new[] { first, last })
+                await handle.SignalAsync(Signal, [JsonSerializer.SerializeToElement(new
+                    { Value = value, Comment = Literal, Ref = handle.ResultRunId, VisitId = Signal + ":1" })]);
+        });
+        var signals = run.History.Events.Where(e => e.EventType == EventType.WorkflowExecutionSignaled).ToArray();
+        Assert.Equal(3, signals.Length);
+        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.WorkflowTaskCompleted
+            && e.EventId > signals[0].EventId && e.EventId < signals[^1].EventId);
+        var result = JsonSerializer.Deserialize<JsonElement>(run.Result!);
+        Assert.Equal("answered", result.GetProperty("Response").GetProperty("Status").GetString());
+        Assert.Equal(last, result.GetProperty("Response").GetProperty("Answer").GetProperty("Value").GetString());
+        Assert.Single(run.Activities.Calls);
+        await Replay(run.History);
     }
 
     [Fact]

@@ -259,6 +259,41 @@ test('a change too large to be worth it keeps its lines and has no word marks', 
   assert.equal(result.rows.every(r => r.parts === undefined), true)
 })
 
+test('many changed lines share one budget for their words, and finish at once', () => {
+  // Each change alone is under its own limit, so a limit per change let these take seconds.
+  const lines = (word: string) => Array.from({ length: 400 }, (_, i) => word.repeat(1200) + '\nKEEP' + i).join('\n')
+  const steps = (word: string) => JSON.stringify({
+    type: 'sequence',
+    steps: Array.from({ length: 1500 }, (_, i) => ({ type: 'delegate', target: 'agent1', outputVar: 'result' + i, instruction: word.repeat(500) })),
+  })
+  const cases = [
+    { older: lines('a '), newer: lines('b '), format: 'text', changes: 400 },
+    { older: steps('x '), newer: steps('y '), format: 'json', changes: 1500 },
+  ] as const
+  for (const { older, newer, format, changes } of cases) {
+    assert.ok(older.length < MAX_COMPARE_CHARS, `${older.length} characters`)
+    compareTexts(older, newer, format)
+    const start = performance.now()
+    const result = ok(compareTexts(older, newer, format))
+    const took = performance.now() - start
+    assert.equal(result.blocks.length, changes)
+    assert.ok(took < 1000, `${format}: took ${took.toFixed(0)} ms`)
+  }
+})
+
+test('once the words budget is spent, the changes after it keep their lines without word marks', () => {
+  // Every other word kept: each change is marked by words when it is reached, and each costs a lot.
+  const line = (word: string) => Array.from({ length: 300 }, () => `keep ${word}`).join(' ')
+  const text = (word: string) => Array.from({ length: 400 }, (_, i) => `${line(word)}\nunchanged ${i}`).join('\n')
+  const result = ok(compareTexts(text('old'), text('new'), 'text'))
+  assert.equal(result.blocks.length, 400)
+  const marked = result.blocks.map(block => result.rows.slice(block.start, block.end).some(r => r.parts !== undefined))
+  assert.equal(marked[0], true)
+  assert.equal(marked[marked.length - 1], false)
+  // The ones marked come first, and none is marked after the first one left plain.
+  assert.equal(marked.indexOf(false), marked.lastIndexOf(true) + 1)
+})
+
 // ── JSON ────────────────────────────────────────────────────────────────────────────────────────
 
 test('JSON is laid out with two spaces, exactly as written', () => {

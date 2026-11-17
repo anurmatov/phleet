@@ -17,6 +17,12 @@ export const MAX_COMPARE_CHARS = 2_000_000
 export const LINE_WORK_LIMIT = 60_000_000
 /** The same, for the words inside one change. Past it the change keeps its lines without word marks. */
 export const WORD_WORK_LIMIT = 2_000_000
+/**
+ * The same, for the words of all the changes of one comparison together: without it, many changes
+ * each under their own limit could still hold the page for seconds. Once it is spent, the changes
+ * left keep their lines without word marks.
+ */
+export const WORDS_WORK_LIMIT = 20_000_000
 /** A change with more word tokens than this is not compared by words. */
 export const WORD_TOKEN_LIMIT = 6_000
 
@@ -38,8 +44,12 @@ export interface SequenceMarks {
  * rows of integers, never a table. Null when it would take more than `workLimit` steps.
  */
 export function diffSequences(older: Int32Array, newer: Int32Array, workLimit: number = LINE_WORK_LIMIT): SequenceMarks | null {
+  return diffWithin(older, newer, { left: workLimit })
+}
+
+/** {@link diffSequences} spending from `budget`, which is left showing what remains. */
+function diffWithin(older: Int32Array, newer: Int32Array, budget: { left: number }): SequenceMarks | null {
   const marks: SequenceMarks = { removed: new Uint8Array(older.length), added: new Uint8Array(newer.length) }
-  const budget = { left: workLimit }
   try {
     solve(older, 0, older.length, newer, 0, newer.length, marks, budget)
   } catch (e) {
@@ -265,6 +275,7 @@ export function compareTexts(older: string | null, newer: string, format: Compar
   const rows: DiffRow[] = []
   const blocks: ChangeBlock[] = []
   let added = 0, removed = 0
+  const wordBudget = { left: WORDS_WORK_LIMIT }
   let i = 0, j = 0
   while (i < oldLines.length || j < newLines.length) {
     if (i < oldLines.length && j < newLines.length && !marks.removed[i] && !marks.added[j]) {
@@ -277,7 +288,7 @@ export function compareTexts(older: string | null, newer: string, format: Compar
     const firstAdded = rows.length
     while (j < newLines.length && marks.added[j]) { rows.push(row('add', newLines[j], null, j + 1)); j++; added++ }
     blocks.push({ start, end: rows.length })
-    if (firstAdded > start && rows.length > firstAdded) markWords(rows, start, firstAdded, rows.length)
+    if (firstAdded > start && rows.length > firstAdded) markWords(rows, start, firstAdded, rows.length, wordBudget)
   }
 
   return {
@@ -380,16 +391,21 @@ function tokensOf(rows: DiffRow[], start: number, end: number): BlockTokens {
  * Marks the changed words of one change: its removed rows (`start` up to `middle`) against its
  * added rows (`middle` up to `end`), each side taken as one text, so nothing depends on which
  * line stands opposite which. Leaves the rows unmarked when the change is too large to be worth
- * it, or when the two sides share too few words for the marks to mean anything.
+ * it, when `budget`, shared by every change of the comparison, is spent, or when the two sides
+ * share too few words for the marks to mean anything.
  */
-function markWords(rows: DiffRow[], start: number, middle: number, end: number): void {
+function markWords(rows: DiffRow[], start: number, middle: number, end: number, budget: { left: number }): void {
+  if (budget.left <= 0) return
   const before = tokensOf(rows, start, middle)
   const after = tokensOf(rows, middle, end)
   if (before.texts.length + after.texts.length > WORD_TOKEN_LIMIT) return
   const intern = interner()
   const beforeIds = Int32Array.from(before.texts, text => intern(text))
   const afterIds = Int32Array.from(after.texts, text => intern(text))
-  const marks = diffSequences(beforeIds, afterIds, WORD_WORK_LIMIT)
+  const allowed = Math.min(WORD_WORK_LIMIT, budget.left)
+  const change = { left: allowed }
+  const marks = diffWithin(beforeIds, afterIds, change)
+  budget.left -= allowed - change.left
   if (!marks) return
   settleWords(beforeIds, marks.removed)
   settleWords(afterIds, marks.added)

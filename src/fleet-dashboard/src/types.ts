@@ -510,6 +510,13 @@ export interface WorkflowDefinitionVersion {
 
 export interface WorkflowDefinitionDetail extends WorkflowDefinitionSummary {
   definition: string
+  /** When and by whom the definition was first created: what its first version is dated by. */
+  createdAt?: string
+  createdBy?: string | null
+  /**
+   * The replaced versions, newest first. A row holds the step tree its version had, stamped with
+   * the time, author and reason of the write that replaced it (see `definitionVersions`).
+   */
   versions: WorkflowDefinitionVersion[]
 }
 

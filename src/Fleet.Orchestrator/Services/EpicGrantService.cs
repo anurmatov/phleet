@@ -689,25 +689,34 @@ internal static class EpicJson
 
     /// <summary>
     /// Delegable gates that a stored definition FULLY guards (#436). A gate counts only when the
-    /// tree has at least one <c>wait_for_signal</c> on it and EVERY wait on it is guarded the way
-    /// the orchestrator's signal is checked at consumption:
+    /// tree has at least one <c>wait_for_signal</c> on it that is guarded the way the
+    /// orchestrator's signal is checked at consumption:
     /// <list type="bullet">
     /// <item>a literal, non-blank <c>visitVar</c>;</item>
     /// <item><c>delegatedGuard.marker</c> exactly <c>GrantId</c>;</item>
     /// <item><c>delegatedGuard.require.VisitId</c> exactly <c>{{vars.&lt;that visitVar&gt;}}</c>, so the
     /// guard checks the visit this wait mints;</item>
     /// <item><c>delegatedGuard.require.ArtifactRef</c> exactly <c>{{vars.review_ref}}</c>, the variable
-    /// the definition publishes as <c>ReviewRef</c>.</item>
+    /// the definition publishes as <c>ReviewRef</c>;</item>
     /// </list>
-    /// One unguarded or differently guarded wait on a gate makes that whole gate not delegable: it
-    /// could consume a delegated approval the orchestrator checked against a different visit. A
-    /// wait whose <c>signalName</c> is a template could resolve to any gate at run time, so its
-    /// presence makes the definition guard nothing. Walks the JSON tree generically; an
-    /// unparsable definition guards nothing.
+    /// and EVERY other wait on it is either guarded in that same way or REFUSES every delegated
+    /// payload (<see cref="IsRefusing"/>): <c>delegatedGuard.marker</c> exactly <c>GrantId</c>,
+    /// <c>delegatedGuard.refuse</c> exactly JSON <c>true</c>, no <c>visitVar</c> and no
+    /// <c>require</c>. The engine discards every payload carrying <c>GrantId</c> at such a wait,
+    /// and it publishes no visit, so it can neither consume a delegated approval nor be decided.
+    /// A definition may read a gate's signal there (late feedback after the gate) without making
+    /// the gate undelegable; refusing waits alone, with no guarded one, guard nothing.
+    ///
+    /// Any other wait on a gate makes that whole gate not delegable: it could consume a delegated
+    /// approval the orchestrator checked against a different visit. A wait whose
+    /// <c>signalName</c> is a template could resolve to any gate at run time, so its presence
+    /// makes the definition guard nothing. Walks the JSON tree generically; an unparsable
+    /// definition guards nothing.
     /// </summary>
     public static IReadOnlyList<string> GuardedGates(string definitionJson)
     {
-        var verdicts = new Dictionary<string, bool>(StringComparer.Ordinal);
+        // Per gate: every wait so far is acceptable, and at least one of them is fully guarded.
+        var verdicts = new Dictionary<string, (bool Acceptable, bool Guarded)>(StringComparer.Ordinal);
         var templatedWait = false;
         try
         {
@@ -719,7 +728,7 @@ internal static class EpicJson
             return [];
         }
         if (templatedWait) return [];
-        return [.. verdicts.Where(v => v.Value).Select(v => v.Key).Order(StringComparer.Ordinal)];
+        return [.. verdicts.Where(v => v.Value is { Acceptable: true, Guarded: true }).Select(v => v.Key).Order(StringComparer.Ordinal)];
 
         void Walk(JsonElement element)
         {
@@ -734,7 +743,11 @@ internal static class EpicJson
                         if (signalName.Contains("{{", StringComparison.Ordinal))
                             templatedWait = true;
                         else if (EpicGrantGates.Canonical(signalName) is { } gate)
-                            verdicts[gate] = (!verdicts.TryGetValue(gate, out var sofar) || sofar) && IsFullyGuarded(element);
+                        {
+                            var sofar = verdicts.TryGetValue(gate, out var seen) ? seen : (Acceptable: true, Guarded: false);
+                            var guarded = IsFullyGuarded(element);
+                            verdicts[gate] = (sofar.Acceptable && (guarded || IsRefusing(element)), sofar.Guarded || guarded);
+                        }
                     }
                     foreach (var property in element.EnumerateObject())
                         Walk(property.Value);
@@ -761,6 +774,22 @@ internal static class EpicJson
             && require.TryGetProperty("ArtifactRef", out var artifact)
             && artifact.ValueKind == JsonValueKind.String
             && artifact.GetString() == "{{vars.review_ref}}";
+    }
+
+    /// <summary>
+    /// A wait that refuses every delegated payload: marker exactly <c>GrantId</c>, <c>refuse</c>
+    /// exactly JSON <c>true</c>, and neither a <c>visitVar</c> nor a <c>require</c> member at all
+    /// (present with any value, even null or empty, is not this shape). The engine's validator
+    /// accepts <c>refuse</c> only in this combination, and the engine then discards every payload
+    /// carrying the marker; this reads the same shape strictly, from the stored JSON.
+    /// </summary>
+    private static bool IsRefusing(JsonElement wait)
+    {
+        if (Property(wait, "visitVar") is not null) return false;
+        if (Property(wait, "delegatedGuard") is not { ValueKind: JsonValueKind.Object } guard) return false;
+        if (!string.Equals(String(guard, "marker"), GuardMarker, StringComparison.Ordinal)) return false;
+        if (Property(guard, "require") is not null) return false;
+        return Property(guard, "refuse") is { ValueKind: JsonValueKind.True };
     }
 }
 

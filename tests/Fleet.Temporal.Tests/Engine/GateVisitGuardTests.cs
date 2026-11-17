@@ -540,6 +540,264 @@ public sealed class GateVisitGuardTests
         Assert.Equal(["GateVisit=merge-approval:1", "GateVisit="], Upserts(run.History, "GateVisit"));
     }
 
+    // ── a refusing guard: the wait accepts no delegated payload ─────────────────────────────
+
+    /// <summary>
+    /// A read without waiting (<c>timeoutMinutes: 0</c>) that refuses. A delegated payload found in
+    /// the buffer is removed and discarded, and the read then ends as the timeout it would have
+    /// been with nothing buffered: no timer, no visit, no upsert. The payload is gone: a later
+    /// unguarded read of the same signal does not see it.
+    /// </summary>
+    [Fact]
+    public async Task ARefusingReadWithoutWaiting_DiscardsABufferedDelegatedPayload_AndReturnsTheTimeout()
+    {
+        var definition = Definition(
+            new DelegateStep { Name = "tick", Target = "agent1", Instruction = "work" },
+            Refusing(timeoutMinutes: 0),
+            Wait(Gate) with { TimeoutMinutes = 0 },
+            new DelegateStep { Name = "after", Target = "agent1", Instruction = "work" },
+            Result("{{vars.late.Decision}}|{{vars.merge-approval.Decision}}|{{vars.late_visit | default: 'no visit'}}"));
+
+        var run = await RunAsync(definition, async (_, handle, activities) =>
+        {
+            await activities.Started("tick").WaitAsync(TimeSpan.FromSeconds(20));
+            await handle.SignalAsync(Gate, [Delegated("merge-approval:1", ReviewRef, ValidEvidence)]);
+            activities.Release("tick");
+        }, held: ["tick"]);
+
+        Assert.Equal("timeout|timeout|no visit", run.Result);
+        AssertRefusals(run, count: 1);
+        Assert.Empty(TimersStarted(run.History));
+        Assert.Empty(Upserts(run.History, "GateVisit", "Phase"));
+        // Both reads ended inside the workflow task that followed the held step's answer.
+        Assert.Equal(
+            [EventType.WorkflowTaskScheduled, EventType.WorkflowTaskStarted, EventType.WorkflowTaskCompleted],
+            EventsBetweenDelegations(run.History, "tick", "after"));
+    }
+
+    /// <summary>What is not delegated is read by a refusing wait as by any other, from the buffer or live.</summary>
+    [Theory]
+    [InlineData("""{"Decision":"changes_requested","Comment":"please fix the edge case"}""", 0)]
+    [InlineData("""{"Decision":"approved"}""", 0)]
+    [InlineData("\"approved\"", 0)]
+    [InlineData("""{"Decision":"changes_requested","Comment":"please fix the edge case"}""", 5)]
+    public async Task ARefusingWait_ReadsAPayloadWithoutTheMarker(string payloadJson, int timeoutMinutes)
+    {
+        var definition = Definition(
+            new DelegateStep { Name = "tick", Target = "agent1", Instruction = "work" },
+            Refusing(timeoutMinutes),
+            Result("{{vars.late}}"));
+
+        var run = await RunAsync(definition, async (_, handle, activities) =>
+        {
+            await activities.Started("tick").WaitAsync(TimeSpan.FromSeconds(20));
+            if (timeoutMinutes == 0)
+            {
+                await handle.SignalAsync(Gate, [Json(payloadJson)]);
+                activities.Release("tick");
+            }
+            else
+            {
+                activities.Release("tick");
+                await WaitForHistoryAsync(handle, h => TimersStarted(h).Count >= 1);
+                await handle.SignalAsync(Gate, [Json(payloadJson)]);
+            }
+        }, held: ["tick"]);
+
+        Assert.Equal(Json(payloadJson).ToString(), run.Result);
+        AssertRefusals(run, count: 0);
+        Assert.Equal(timeoutMinutes == 0 ? 0 : 1, TimersStarted(run.History).Count);
+    }
+
+    /// <summary>
+    /// A delegated payload already buffered when a five-minute refusing wait is entered is
+    /// discarded at entry, and the wait then pauses its whole five minutes: one 300-second timer,
+    /// which fires. The payload does not end the pause.
+    /// </summary>
+    [Fact]
+    public async Task ARefusingPause_ABufferedDelegatedPayload_IsDiscardedAtEntry_AndThePauseRunsItsFullLength()
+    {
+        var definition = Definition(
+            new DelegateStep { Name = "tick", Target = "agent1", Instruction = "work" },
+            Refusing(timeoutMinutes: 5),
+            Result("{{vars.late.Decision}}"));
+
+        var run = await RunAsync(definition, async (_, handle, activities) =>
+        {
+            await activities.Started("tick").WaitAsync(TimeSpan.FromSeconds(20));
+            await handle.SignalAsync(Gate, [Delegated("merge-approval:1", ReviewRef, ValidEvidence)]);
+            activities.Release("tick");
+        }, held: ["tick"]);
+
+        Assert.Equal("timeout", run.Result);
+        AssertRefusals(run, count: 1);
+        Assert.Equal([TimeSpan.FromMinutes(5)], TimersStarted(run.History).Select(t => t.Duration));
+        Assert.Single(run.History.Events, e => e.EventType == EventType.TimerFired);
+        Assert.DoesNotContain(run.History.Events, e => e.EventType == EventType.TimerCanceled);
+    }
+
+    /// <summary>
+    /// A delegated payload that arrives DURING the pause is discarded and the pause keeps its
+    /// original end: the wait re-waits for the remainder (a second, shorter timer), and the two
+    /// together are the five minutes. The pause is not cut short and not restarted.
+    /// </summary>
+    [Fact]
+    public async Task ARefusingPause_ALiveDelegatedPayload_IsDiscarded_AndThePauseKeepsItsOriginalEnd()
+    {
+        var definition = Definition(Refusing(timeoutMinutes: 5), Result("{{vars.late.Decision}}"));
+
+        var run = await RunAsync(definition, async (env, handle, _) =>
+        {
+            await WaitForHistoryAsync(handle, h => TimersStarted(h).Count >= 1);
+            await env.DelayAsync(TimeSpan.FromMinutes(2));
+            await handle.SignalAsync(Gate, [Delegated("merge-approval:1", ReviewRef, ValidEvidence)]);
+            await WaitForHistoryAsync(handle, h => TimersStarted(h).Count >= 2);
+        });
+
+        Assert.Equal("timeout", run.Result);
+        AssertRefusals(run, count: 1);
+        var timers = TimersStarted(run.History);
+        Assert.Equal(2, timers.Count);
+        Assert.Equal(TimeSpan.FromMinutes(5), timers[0].Duration);
+        AssertNear(TimeSpan.FromMinutes(3), timers[1].Duration);
+        // From the first timer's start to the end of the run: the five minutes, no more.
+        var ended = run.History.Events.Last().EventTime.ToDateTime();
+        AssertNear(TimeSpan.FromMinutes(5), ended - timers[0].At);
+    }
+
+    /// <summary>
+    /// A delegated payload and, behind it, feedback: the first completes the waiter and is
+    /// discarded, the drain takes the second from the buffer and the wait returns it. An
+    /// indefinite refusing wait does the same without a timer.
+    /// </summary>
+    [Theory]
+    [InlineData(5)]
+    [InlineData(null)]
+    public async Task ARefusingWait_DiscardsTheDelegatedPayload_AndTheDrainReturnsWhatWasBehindIt(int? timeoutMinutes)
+    {
+        var definition = Definition(
+            Refusing(timeoutMinutes) with { NotifyStep = Notify() },
+            Result("{{vars.late.Decision}}|{{vars.late.Comment}}"));
+
+        var run = await RunAsync(definition, async (_, handle, activities) =>
+        {
+            await activities.Started("notify").WaitAsync(TimeSpan.FromSeconds(20));
+            await handle.SignalAsync(Gate, [Delegated("merge-approval:1", ReviewRef, ValidEvidence)]);
+            await handle.SignalAsync(Gate, [Json("""{"Decision":"changes_requested","Comment":"behind it"}""")]);
+            activities.Release("notify");
+        }, held: ["notify"]);
+
+        Assert.Equal("changes_requested|behind it", run.Result);
+        AssertRefusals(run, count: 1);
+        Assert.Empty(TimersStarted(run.History));
+        Assert.Empty(Upserts(run.History, "GateVisit"));
+    }
+
+    /// <summary>
+    /// A refusing wait is not a gate visit. It mints nothing, so the gate after it is still visit
+    /// 1, and the delegated approval it discarded is not there for that gate to take: the gate
+    /// parks, publishes its visit and is decided by the approval sent to it.
+    /// </summary>
+    [Fact]
+    public async Task ARefusingWait_MintsNoVisit_AndLeavesNothingForTheGateAfterIt()
+    {
+        var definition = Definition(
+            PublishReviewRef(ReviewRef),
+            new DelegateStep { Name = "tick", Target = "agent1", Instruction = "work" },
+            Refusing(timeoutMinutes: 0),
+            GuardedGate(timeoutMinutes: 60),
+            Result(DecisionResult + "|{{vars.merge_visit}}|{{vars.late.Decision}}"));
+
+        var run = await RunAsync(definition, async (_, handle, activities) =>
+        {
+            await activities.Started("tick").WaitAsync(TimeSpan.FromSeconds(20));
+            // Exactly what the gate would accept, sent before the gate is open.
+            await handle.SignalAsync(Gate, [Delegated("merge-approval:1", ReviewRef, StaleEvidence)]);
+            activities.Release("tick");
+
+            await WaitForHistoryAsync(handle, h => Upserts(h, "GateVisit").Count >= 1);
+            await handle.SignalAsync(Gate, [Delegated("merge-approval:1", ReviewRef, ValidEvidence)]);
+        }, held: ["tick"]);
+
+        Assert.Equal($"approved|{ValidEvidence}|merge-approval:1|timeout", run.Result);
+        AssertRefusals(run, count: 1);
+        Assert.Empty(Discards(run.Logs));
+        Assert.Equal(["GateVisit=merge-approval:1", "GateVisit="], Upserts(run.History, "GateVisit"));
+    }
+
+    [Fact]
+    public void ARefusingGuard_IsValid_AndDeserializesFromCamelCase()
+    {
+        var root = Parse("""
+            {"type":"sequence","steps":[
+              {"type":"wait_for_signal","name":"late_read","signalName":"merge-approval","timeoutMinutes":0,
+               "autoCompleteOnTimeout":true,"outputVar":"late","delegatedGuard":{"marker":"GrantId","refuse":true}},
+              {"type":"wait_for_signal","name":"merge_gate","signalName":"merge-approval","visitVar":"merge_visit",
+               "delegatedGuard":{"marker":"GrantId","require":{"VisitId":"{{vars.merge_visit}}","ArtifactRef":"{{vars.review_ref}}"}}}
+            ]}
+            """);
+
+        WorkflowDefinitionValidator.Validate(root, "ExampleWorkflow");
+
+        var read = Assert.IsType<WaitForSignalStep>(((SequenceStep)root).Steps[0]);
+        Assert.True(read.DelegatedGuard!.Refuse);
+        Assert.Equal("GrantId", read.DelegatedGuard.Marker);
+        Assert.Null(read.DelegatedGuard.Require);
+        Assert.Null(read.VisitVar);
+        Assert.False(Assert.IsType<WaitForSignalStep>(((SequenceStep)root).Steps[1]).DelegatedGuard!.Refuse);
+    }
+
+    /// <summary>
+    /// A refusing guard needs its marker and nothing of a gate visit; and <c>refuse: false</c> is
+    /// the member omitted, so every rule for a guard with a visit applies to it unchanged.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"refuse":true}""", null, "marker")]
+    [InlineData("""{"marker":" ","refuse":true}""", null, "marker")]
+    [InlineData("""{"marker":"GrantId","refuse":true,"require":{"VisitId":"{{vars.v}}"}}""", null, "require")]
+    [InlineData("""{"marker":"GrantId","refuse":true,"require":{"ArtifactRef":"{{vars.review_ref}}"}}""", null, "require")]
+    [InlineData("""{"marker":"GrantId","refuse":true}""", "v", "visitVar")]
+    [InlineData("""{"marker":"GrantId","refuse":true,"require":{"VisitId":"{{vars.v}}"}}""", "v", "require")]
+    [InlineData("""{"marker":"GrantId","refuse":false}""", null, "visitVar")]
+    [InlineData("""{"marker":"GrantId","refuse":false}""", "v", "VisitId")]
+    public void AnInvalidRefusingGuard_IsRejected_NamingTheStep(string guard, string? visitVar, string mentions)
+    {
+        var visit = visitVar is null ? "" : $"\"visitVar\":\"{visitVar}\",";
+        var root = Parse(
+            """{"type":"sequence","steps":[{"type":"wait_for_signal","name":"named_read","signalName":"merge-approval","""
+            + visit + "\"delegatedGuard\":" + guard + "}]}");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => WorkflowDefinitionValidator.Validate(root, "ExampleWorkflow"));
+
+        Assert.Contains("named_read", ex.Message);
+        Assert.Contains("ExampleWorkflow", ex.Message);
+        Assert.Contains(mentions, ex.Message);
+    }
+
+    /// <summary>An empty <c>require</c> object beside <c>refuse</c> is no requirement, and is allowed.</summary>
+    [Fact]
+    public void ARefusingGuardWithAnEmptyRequire_IsValid()
+    {
+        var root = Parse("""
+            {"type":"sequence","steps":[{"type":"wait_for_signal","name":"late_read","signalName":"merge-approval",
+              "delegatedGuard":{"marker":"GrantId","refuse":true,"require":{}}}]}
+            """);
+
+        WorkflowDefinitionValidator.Validate(root, "ExampleWorkflow");
+    }
+
+    /// <summary><c>refuse</c> is a JSON boolean. Anything else does not load.</summary>
+    [Theory]
+    [InlineData("\"true\"")]
+    [InlineData("1")]
+    [InlineData("null")]
+    public void ARefuseThatIsNotABoolean_DoesNotParse(string value)
+    {
+        Assert.Throws<JsonException>(() => Parse(
+            """{"type":"sequence","steps":[{"type":"wait_for_signal","name":"late_read","signalName":"merge-approval","delegatedGuard":{"marker":"GrantId","refuse":"""
+            + value + "}}]}"));
+    }
+
     // ── AC-E5: validation ───────────────────────────────────────────────────────────────────
 
     [Theory]
@@ -616,6 +874,18 @@ public sealed class GateVisitGuardTests
         MaxReminders = maxReminders,
         NotifyStep = notify,
         AutoCompleteOnTimeout = true,
+    };
+
+    /// <summary>A read of the gate's signal that is not a gate visit: its guard refuses every delegated payload.</summary>
+    private static WaitForSignalStep Refusing(int? timeoutMinutes) => new()
+    {
+        Name = "late_read",
+        SignalName = Gate,
+        OutputVar = "late",
+        TimeoutMinutes = timeoutMinutes,
+        MaxReminders = 0,
+        AutoCompleteOnTimeout = true,
+        DelegatedGuard = new DelegatedGuard { Marker = "GrantId", Refuse = true },
     };
 
     private static WaitForSignalStep Wait(string signal, string? visitVar = null) => new()
@@ -781,6 +1051,40 @@ public sealed class GateVisitGuardTests
             Assert.Equal(visit, d.Fields["Visit"]);
         });
         Assert.DoesNotContain(run.Logs, l => l.Message.Contains("https://example.com", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Exactly <paramref name="count"/> refusal warnings, each naming the signal and nothing of
+    /// the payload, and none of them counted as a stale-visit discard.
+    /// </summary>
+    private static void AssertRefusals(Run run, int count)
+    {
+        var refusals = run.Logs
+            .Where(l => l.Message.StartsWith("delegated signal discarded: this wait accepts no delegated decision", StringComparison.Ordinal))
+            .ToList();
+        Assert.Equal(count, refusals.Count);
+        Assert.All(refusals, r =>
+        {
+            Assert.Equal(LogLevel.Warning, r.Level);
+            Assert.Equal(Gate, r.Fields["Signal"]);
+        });
+        if (count > 0) Assert.Empty(Discards(run.Logs).Where(d => d.Fields["Visit"] is null));
+        Assert.DoesNotContain(run.Logs, l => l.Message.Contains("https://example.com", StringComparison.Ordinal));
+    }
+
+    /// <summary>The event types after the named delegation's answer and before the next one is scheduled.</summary>
+    private static List<EventType> EventsBetweenDelegations(WorkflowHistory history, string answered, string scheduled)
+    {
+        long Scheduled(string step) => history.Events.Single(e =>
+            e.ActivityTaskScheduledEventAttributes?.ActivityType?.Name == "DelegateToAgent"
+            && DataConverter.Default.PayloadConverter
+                .ToValue<string>(e.ActivityTaskScheduledEventAttributes.Input.Payloads_[2])
+                .EndsWith("/" + step, StringComparison.Ordinal)).EventId;
+
+        var from = history.Events.Single(e => e.EventType == EventType.ActivityTaskCompleted
+            && e.ActivityTaskCompletedEventAttributes.ScheduledEventId == Scheduled(answered)).EventId;
+        var to = Scheduled(scheduled);
+        return history.Events.Where(e => e.EventId > from && e.EventId < to).Select(e => e.EventType).ToList();
     }
 
     private static void AssertNear(TimeSpan expected, TimeSpan actual) =>

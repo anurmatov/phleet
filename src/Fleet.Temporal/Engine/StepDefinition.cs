@@ -264,13 +264,15 @@ public sealed record WaitForSignalStep : StepDefinition
     public string? VisitVar { get; init; }
 
     /// <summary>
-    /// Consumption guard for delegated approvals (#436). Requires <see cref="VisitVar"/>.
+    /// Consumption guard for delegated approvals (#436). Requires <see cref="VisitVar"/>, unless
+    /// it is a refusing guard (<see cref="Engine.DelegatedGuard.Refuse"/>), which forbids it.
     ///
     /// Applied to every payload the wait consumes — buffered, live, or drained after a discard. A
     /// payload without the <see cref="Engine.DelegatedGuard.Marker"/> property is accepted exactly as
     /// before (the human path). One with it is accepted only when it matches every
     /// <see cref="Engine.DelegatedGuard.Require"/> entry; otherwise it is discarded, logged, and the
-    /// wait keeps waiting with its timers unchanged.
+    /// wait keeps waiting with its timers unchanged. A refusing guard discards every payload that
+    /// carries the marker.
     ///
     /// Omitted → the wait runs exactly the code it ran before the field existed.
     /// </summary>
@@ -300,6 +302,19 @@ public sealed record DelegatedGuard
     /// Example: <c>{"VisitId": "{{vars.merge_visit}}", "ArtifactRef": "{{vars.review_ref}}"}</c>.
     /// </summary>
     public Dictionary<string, string>? Require { get; init; }
+
+    /// <summary>
+    /// A refusing guard: the wait accepts no delegated payload at all. Every payload carrying
+    /// <see cref="Marker"/> is discarded wherever the wait meets it (the buffer at entry, the live
+    /// wait, the drain after a discard) and logged; a payload without the marker is consumed as
+    /// on any wait. It is for a wait that reads a gate's signal without being a visit of that
+    /// gate, so that only the gate's own guarded wait can consume a delegated approval.
+    ///
+    /// Such a wait has a <see cref="Marker"/>, no <see cref="Require"/> entries and no
+    /// <c>visitVar</c>: it mints no visit and publishes nothing. The validator refuses any other
+    /// combination. False (the member omitted) → the guard is the one described above, unchanged.
+    /// </summary>
+    public bool Refuse { get; init; }
 }
 
 /// <summary>

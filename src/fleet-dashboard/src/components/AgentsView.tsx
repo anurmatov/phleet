@@ -5,7 +5,8 @@ import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import { temporalUiUrl, heartbeatAge } from '../utils'
 import AgentCard from './AgentCard'
 import Icon from './Icon'
-import { PhaseChip, WorkflowRefs, shortWorkflowId } from './WorkflowBits'
+import { PhaseChip, RunElbow, RunOwner, WorkflowRefs, nestedRow, shortWorkflowId } from './WorkflowBits'
+import { arrangeRuns, type PlacedRun } from '../workflowTree'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import CommsJournalPanel from './CommsJournalPanel'
 
@@ -76,9 +77,17 @@ export default function AgentsView({
   const activeWorkflows = workflows.filter(w =>
     w.status !== 'Completed' && w.status !== 'Failed' && w.status !== 'Canceled' && w.status !== 'Terminated' && w.status !== 'TimedOut'
   )
-  // What waits for a person goes first: it is the reason most visits to this page happen.
+  // What waits for a person goes first: it is the reason most visits to this page happen. A run
+  // nests under the run it belongs with, so the whole tree it sits in goes first.
   const waiting = activeWorkflows.filter(w => getSignalDefs(w).length > 0)
   const orderedWorkflows = [...waiting, ...activeWorkflows.filter(w => getSignalDefs(w).length === 0)]
+  const trees: PlacedRun<WorkflowSummary>[][] = []
+  for (const placed of arrangeRuns(orderedWorkflows)) {
+    if (placed.depth === 0 || trees.length === 0) trees.push([placed])
+    else trees[trees.length - 1].push(placed)
+  }
+  const waits = (tree: PlacedRun<WorkflowSummary>[]) => tree.some(p => getSignalDefs(p.run).length > 0)
+  const placedWorkflows = [...trees.filter(waits), ...trees.filter(t => !waits(t))].flat()
 
   const working = sorted.filter(a => a.effectiveStatus !== 'dead' && a.currentTask).length
   const offline = sorted.filter(a => a.effectiveStatus === 'dead').length
@@ -186,7 +195,7 @@ export default function AgentsView({
         <div className="wf-empty">No running workflows.</div>
       ) : (
         <div className="wf-table">
-          {orderedWorkflows.map(wf => {
+          {placedWorkflows.map(({ run: wf, depth, link, elsewhere }) => {
             const url = temporalUiUrl(wf)
             const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)
@@ -195,11 +204,14 @@ export default function AgentsView({
             const wfClass = wfStatusClass(wf, sigDefs)
             const k = wfKey(wf)
             const menuOpen = wfMenuOpen[k] ?? false
+            const nest = nestedRow(depth)
 
             return (
-              <div key={`${wf.namespace}/${wf.workflowId}`} className={`wf-row ${wfClass}`}>
+              <div key={`${wf.namespace}/${wf.workflowId}`} className={`wf-row ${wfClass}${nest.className}`} data-depth={nest['data-depth']} style={nest.style}>
+                <RunElbow placed={{ depth, link }} />
                 <div className="wf-type wf-type-clickable" onClick={() => onWfClick(wf)} title="Click to view execution history">{wf.workflowType}</div>
                 <div className="wf-meta">
+                  <RunOwner elsewhere={elsewhere} />
                   <PhaseChip phase={wf.phase} />
                   <span className="pill wf-ns-badge">{wf.namespace}</span>
                   {wf.taskQueue && wf.taskQueue !== wf.namespace && <span className="pill wf-queue">{wf.taskQueue}</span>}

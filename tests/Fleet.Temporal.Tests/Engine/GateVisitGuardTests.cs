@@ -173,6 +173,58 @@ public sealed class GateVisitGuardTests
             GateWaitHistoryScenario.Commands(history));
     }
 
+    // ── a guard with a visit, recorded before the refusing guard ────────────────────────────
+
+    /// <summary>
+    /// The fixture really was recorded before <c>delegatedGuard.refuse</c> existed: the definition
+    /// it loaded carries guards with a marker and requirements and no such member, and the run
+    /// went through a discard at entry, a live discard and a drain.
+    /// </summary>
+    [Fact]
+    public void TheGuardedGateFixture_IsAPreChangeHistory()
+    {
+        var history = GuardedGateFixture();
+
+        var definitionJson = history.Events
+            .Where(e => e.ActivityTaskCompletedEventAttributes is not null)
+            .Select(e => e.ActivityTaskCompletedEventAttributes.Result.Payloads_[0].Data.ToStringUtf8())
+            .First(json => json.Contains("\"wait_for_signal\"", StringComparison.Ordinal));
+        Assert.Contains("\"DelegatedGuard\":{\"Marker\":\"GrantId\",\"Require\":{", definitionJson);
+        Assert.DoesNotContain("Refuse", definitionJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            ["GateVisit=gate-a:1", "GateVisit=", "GateVisit=gate-b:2", "GateVisit=", "GateVisit=gate-d:4", "GateVisit="],
+            Upserts(history, "GateVisit"));
+        Assert.Equal(6, history.Events.Count(e => e.EventType == EventType.WorkflowExecutionSignaled));
+    }
+
+    /// <summary>
+    /// Replay safety for a guard WITH a visit. A run recorded before the refusing guard — a stale
+    /// delegated payload discarded from the buffer and another discarded live, the drain accepting
+    /// what was behind it, a current one accepted from the buffer, a reminder and a timeout —
+    /// replays against the current engine with no non-determinism error.
+    /// </summary>
+    [Fact]
+    public async Task APreChangeGuardedHistory_ReplaysCleanlyAgainstTheCurrentEngine()
+    {
+        var replayer = new WorkflowReplayer(new WorkflowReplayerOptions().AddWorkflow<UniversalWorkflow>());
+        await replayer.ReplayWorkflowAsync(GuardedGateFixture());
+    }
+
+    /// <summary>
+    /// Replay does not compare command attributes, so the same scenario runs live on the current
+    /// engine and its commands are compared with the recorded ones, entry by entry: activity
+    /// inputs, timer lengths, every upsert and the result.
+    /// </summary>
+    [Fact]
+    public async Task AGuardWithAVisit_EmitsTheSameCommandSequenceAsBefore()
+    {
+        var history = await GuardedGateHistoryScenario.RunAsync(GuardedGateHistoryScenario.Definition());
+
+        Assert.Equal(
+            GateWaitHistoryScenario.Commands(GuardedGateFixture()),
+            GateWaitHistoryScenario.Commands(history));
+    }
+
     // ── AC-E2: no marker → today's behaviour ────────────────────────────────────────────────
 
     /// <summary>
@@ -605,6 +657,11 @@ public sealed class GateVisitGuardTests
         payload["Evidence"] = evidence;
         return JsonSerializer.SerializeToElement(payload);
     }
+
+    private static WorkflowHistory GuardedGateFixture() =>
+        WorkflowHistory.FromJson(
+            GuardedGateHistoryScenario.WorkflowId,
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, GuardedGateHistoryScenario.FixturePath)));
 
     private static WorkflowHistory GateWaitFixture() =>
         WorkflowHistory.FromJson(

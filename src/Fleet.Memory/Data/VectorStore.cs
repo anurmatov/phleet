@@ -17,15 +17,9 @@ public sealed class VectorStore(IOptions<QdrantOptions> qdrantOptions, IOptions<
     private const int UpsertBatch = 50;
     private const uint ScrollPage = 500;
 
-    private readonly QdrantClient _client = CreateClient(qdrantOptions.Value.Url);
+    private readonly QdrantClient _client = QdrantConnection.From(qdrantOptions.Value).CreateClient();
     private readonly string _collection = qdrantOptions.Value.Collection;
     private readonly int _dimensions = embeddingOptions.Value.Dimensions;
-
-    private static QdrantClient CreateClient(string url)
-    {
-        var uri = new Uri(url);
-        return new QdrantClient(uri.Host, uri.Port, https: uri.Scheme == "https");
-    }
 
     public async Task EnsureCollectionAsync(CancellationToken ct = default)
     {

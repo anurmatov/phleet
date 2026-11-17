@@ -48,6 +48,14 @@ public sealed class QdrantOptions
     public const string Section = "Qdrant";
 
     public required string Url { get; set; }
+
+    /// <summary>
+    /// Optional API key for a Qdrant that requires one (<c>Qdrant:ApiKey</c>). Empty (the default):
+    /// no key is sent, as before. A key needs an <c>https</c> <see cref="Url"/>; see
+    /// <c>QdrantConnection</c>, the one place the client is constructed.
+    /// </summary>
+    public string ApiKey { get; set; } = "";
+
     public string Collection { get; set; } = "fleet_memories";
     /// <summary>
     /// Cosine similarity threshold (0-1) for flagging potential duplicates on store.

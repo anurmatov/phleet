@@ -201,7 +201,15 @@ public sealed record WaitForSignalStep : StepDefinition
 {
     public required string SignalName { get; init; }
 
-    /// <summary>Total wait timeout in minutes. Null = wait indefinitely.</summary>
+    /// <summary>
+    /// Total wait timeout in minutes. Null = wait indefinitely.
+    ///
+    /// Zero with <see cref="AutoCompleteOnTimeout"/> is a read without waiting: a signal already
+    /// buffered is returned, otherwise <c>{Decision:"timeout"}</c> is, in the same workflow task
+    /// and with no timer or other command. A positive value starts one timer of that length when
+    /// no reminder interval is set. <c>SignalReadWithoutWaitingTests</c> pins both; the PR
+    /// definition's reads of late merge feedback rely on them.
+    /// </summary>
     public int? TimeoutMinutes { get; init; }
 
     /// <summary>How often to send reminder notifications (minutes). Null = no reminders.</summary>

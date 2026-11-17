@@ -1497,6 +1497,40 @@ test('workflows: a driver, the run it started and that run\u2019s review are sho
   await expect(rows.nth(1)).toHaveAttribute('data-depth', '1')
 })
 
+test('agents: the page\u2019s own list of running workflows is the same tree', async ({ page }, testInfo) => {
+  // The Agents page lists running workflows too, in code of its own. It was left flat once.
+  const fleet = await open(page, 'agents', f => {
+    const base = f.workflows[1]
+    f.workflows = [
+      { ...base, workflowId: 'review-9', runId: 'run-review-9', workflowType: 'ConsensusReviewWorkflow', phase: null,
+        parentWorkflowId: 'wf-build-2', parentRunId: 'run-wf-build-2' },
+      { ...base, workflowId: 'driver-7', runId: 'run-driver-7', workflowType: 'DriverWorkflow', phase: 'driving-epic' },
+      { ...base, waiterWorkflowId: 'driver-7' },
+      // Waiting for a decision: this page keeps it in the same list, first, with its buttons.
+      f.workflows[0],
+      { ...base, workflowId: 'helper-4', runId: 'run-helper-4', workflowType: 'HelperWorkflow', parentWorkflowId: 'wf-review-1', parentRunId: 'run-wf-review-1' },
+      { ...base, workflowId: 'orphan-5', runId: 'run-orphan-5', workflowType: 'OrphanWorkflow', waiterWorkflowId: 'driver-gone' },
+    ] as typeof f.workflows
+  })
+  const rows = page.locator('.wf-table').first().locator('.wf-row')
+  await expect(rows.locator('.wf-type')).toHaveText([
+    'ReviewWorkflow', 'HelperWorkflow', 'DriverWorkflow', 'BuildWorkflow', 'ConsensusReviewWorkflow', 'OrphanWorkflow',
+  ])
+  const depths = await rows.evaluateAll(els => els.map(el => el.getAttribute('data-depth')))
+  expect(depths).toEqual(['0', '1', '0', '1', '2', '0'])
+  await expect(rows.nth(1).getByRole('img', { name: 'child of the run above' })).toBeVisible()
+  await expect(rows.nth(3).getByRole('img', { name: 'started by the run above' })).toBeVisible()
+  // The run that waits for a decision keeps its buttons.
+  await expect(rows.nth(0).getByRole('button', { name: 'Approve' })).toBeVisible()
+  // An owner that is over is named by its id.
+  await expect(rows.nth(5).locator('.wf-owner')).toHaveText('started by driver-gone')
+  await page.screenshot({ path: testInfo.outputPath('agents-workflow-tree.png'), fullPage: true })
+
+  fleet.pushWorkflows((fleet.workflows as Array<{ workflowId: string }>).filter(w => w.workflowId !== 'driver-7'))
+  await expect(rows.locator('.wf-type')).toHaveText(['ReviewWorkflow', 'HelperWorkflow', 'BuildWorkflow', 'ConsensusReviewWorkflow', 'OrphanWorkflow'])
+  await expect(rows.nth(2).locator('.wf-owner')).toHaveText('started by driver-7')
+})
+
 test.describe('workflow tree on a 360px phone', () => {
   test.use({ viewport: { width: 360, height: 800 } })
 

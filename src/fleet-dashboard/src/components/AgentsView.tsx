@@ -5,7 +5,8 @@ import type { WorkflowActions } from '../hooks/useWorkflowActions'
 import { temporalUiUrl, heartbeatAge } from '../utils'
 import AgentCard from './AgentCard'
 import Icon from './Icon'
-import { PhaseChip, WorkflowRefs, shortWorkflowId } from './WorkflowBits'
+import { PhaseChip, RunElbow, RunOwner, WorkflowRefs, nestedRow, shortWorkflowId } from './WorkflowBits'
+import { arrangeRuns } from '../workflowTree'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import CommsJournalPanel from './CommsJournalPanel'
 
@@ -186,7 +187,7 @@ export default function AgentsView({
         <div className="wf-empty">No running workflows.</div>
       ) : (
         <div className="wf-table">
-          {orderedWorkflows.map(wf => {
+          {arrangeRuns(orderedWorkflows).map(({ run: wf, depth, link, elsewhere }) => {
             const url = temporalUiUrl(wf)
             const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)
@@ -195,11 +196,14 @@ export default function AgentsView({
             const wfClass = wfStatusClass(wf, sigDefs)
             const k = wfKey(wf)
             const menuOpen = wfMenuOpen[k] ?? false
+            const nest = nestedRow(depth)
 
             return (
-              <div key={`${wf.namespace}/${wf.workflowId}`} className={`wf-row ${wfClass}`}>
+              <div key={`${wf.namespace}/${wf.workflowId}`} className={`wf-row ${wfClass}${nest.className}`} data-depth={nest['data-depth']} style={nest.style}>
+                <RunElbow placed={{ depth, link }} />
                 <div className="wf-type wf-type-clickable" onClick={() => onWfClick(wf)} title="Click to view execution history">{wf.workflowType}</div>
                 <div className="wf-meta">
+                  <RunOwner elsewhere={elsewhere} />
                   <PhaseChip phase={wf.phase} />
                   <span className="pill wf-ns-badge">{wf.namespace}</span>
                   {wf.taskQueue && wf.taskQueue !== wf.namespace && <span className="pill wf-queue">{wf.taskQueue}</span>}

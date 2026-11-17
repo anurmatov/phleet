@@ -615,6 +615,14 @@ jobs:
       - name: Against the release before the pin
         run: QDRANT_VERSION=v1.19.1 bash tests/memory-qdrant/run.sh
 
+      # The other configuration fleet-memory supports: a Qdrant that answers only over TLS and only
+      # to its API key (docs/datastore-client-auth.md). The script makes the certificates for the
+      # run, checks that the server refuses a request without the key and one in plaintext, and
+      # runs the real store against it in a container that trusts the run's authority the normal
+      # way. Nothing in the client relaxes certificate validation.
+      - name: Against a Qdrant that requires TLS and an API key
+        run: bash tests/memory-qdrant/secured.sh
+
   whisper-tests:
     name: Whisper service tests
     runs-on: ubuntu-latest

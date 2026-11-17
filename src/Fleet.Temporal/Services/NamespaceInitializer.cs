@@ -26,10 +26,7 @@ public sealed class NamespaceInitializer(
         ITemporalClient client;
         try
         {
-            client = await TemporalClient.ConnectAsync(new TemporalClientConnectOptions(opts.TemporalAddress)
-            {
-                Namespace = "default"
-            });
+            client = await TemporalConnect.ConnectAsync(opts, "default");
         }
         catch (Exception ex)
         {

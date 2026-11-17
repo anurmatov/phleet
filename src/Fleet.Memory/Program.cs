@@ -7,6 +7,17 @@ using Fleet.Shared.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// A Qdrant API key (Qdrant:ApiKey, off by default) is sent only over TLS. A key with a URL that is
+// not https ends the process here, before the index or anything else connects: the key is neither
+// sent in the clear nor dropped to connect without it. The explicit exit, as in
+// Fleet.Orchestrator/Program.cs: this must not depend on how a throw propagates.
+if (QdrantConnection.DescribeFault(
+        builder.Configuration[$"{QdrantOptions.Section}:Url"], builder.Configuration[$"{QdrantOptions.Section}:ApiKey"]) is { } qdrantFault)
+{
+    Console.Error.WriteLine($"Fleet.Memory startup aborted, exiting 1: {qdrantFault}");
+    Environment.Exit(1);
+}
+
 // Configuration
 builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection(StorageOptions.Section));
 builder.Services.Configure<QdrantOptions>(builder.Configuration.GetSection(QdrantOptions.Section));
@@ -78,6 +89,11 @@ app.Services.GetRequiredService<MemorySizeGuidance>().LogStartup(
     embeddingConfig.Provider.Equals("ollama", StringComparison.OrdinalIgnoreCase)
         ? embeddingConfig.Ollama.Model
         : Path.GetFileNameWithoutExtension(embeddingConfig.Onnx.ModelPath));
+
+// Said only when a key is in use (nothing new is logged or read otherwise), and never the key.
+var qdrantOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<QdrantOptions>>().Value;
+if (!string.IsNullOrWhiteSpace(qdrantOptions.ApiKey))
+    app.Logger.LogInformation("Qdrant connection: {Connection}", QdrantConnection.From(qdrantOptions));
 
 // The MCP endpoint is at the root, so everything but the health check and the service routes is it.
 app.UseAgentIdentity(context => MemoryIdentity.IsMcp(context.Request.Path));

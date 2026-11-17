@@ -252,8 +252,12 @@ services:
       - ${FLEET_BASE_DIR}/memories:/data/memories
     environment:
       - Storage__Path=/data/memories
-      - Qdrant__Url=http://qdrant:6334
+      - Qdrant__Url=${FLEET_QDRANT_URL:-http://qdrant:6334}
       - Qdrant__Collection=fleet_memories
+      # Optional: the API key of a Qdrant that requires one. Empty sends none. With a key,
+      # FLEET_QDRANT_URL must be https, or fleet-memory refuses to start. This file does not make
+      # the qdrant service above require a key or serve TLS. See docs/datastore-client-auth.md.
+      - Qdrant__ApiKey=${FLEET_QDRANT_API_KEY:-}
       # Use ONNX embedding by default (no external dependency).
       # To use Ollama: set Embedding__Provider=ollama and configure Embedding__Ollama__* below.
       - Embedding__Provider=${FLEET_MEMORY_EMBEDDING_PROVIDER:-onnx}
@@ -375,6 +379,10 @@ services:
       - RabbitMq__Host=rabbitmq
       - TemporalBridge__TemporalAddress=temporal-server:7233
       - TemporalBridge__Namespaces__0=fleet
+      # Optional: a bearer token for a Temporal that checks one, sent on every call. Empty sends
+      # none. The connection stays plaintext. This file does not make temporal-server check
+      # tokens. See docs/datastore-client-auth.md.
+      - TemporalBridge__BearerToken=${FLEET_TEMPORAL_BEARER_TOKEN:-}
       - TemporalBridge__AgentTimeoutSeconds=1800
       - TemporalBridge__OrchestratorAuthToken=${ORCHESTRATOR_AUTH_TOKEN}
       - TemporalBridge__OrchestratorUrl=http://fleet-orchestrator:3600
@@ -465,6 +473,8 @@ services:
       - RabbitMq__Host=rabbitmq
       - Temporal__Address=temporal-server:7233
       - Temporal__Namespaces__0=fleet
+      # Optional: a bearer token for a Temporal that checks one (docs/datastore-client-auth.md).
+      - Temporal__BearerToken=${FLEET_TEMPORAL_BEARER_TOKEN:-}
       - Provisioning__SeedFilePath=/app/seed.json
       - Provisioning__BaseDir=${FLEET_BASE_DIR}
       - Provisioning__EnvFilePath=${FLEET_BASE_DIR}/.env

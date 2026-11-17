@@ -20,4 +20,12 @@
     <ProjectReference Include="..\..\src\Fleet.Memory\Fleet.Memory.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- A local HTTP/2 endpoint that records what reaches it, for what the Qdrant client this service
+         builds puts on the wire, and a way to start the service itself as a process, for what it
+         does at startup. Shared source. -->
+    <Compile Include="..\fixtures\local-endpoint\GrpcStub.cs" Link="GrpcStub.cs" />
+    <Compile Include="..\fixtures\local-endpoint\ServiceProcess.cs" Link="ServiceProcess.cs" />
+  </ItemGroup>
+
 </Project>

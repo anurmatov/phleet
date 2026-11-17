@@ -23,6 +23,9 @@ unset FLEET_INTERNAL_BIND_ADDRESS
 # in .env; an exported FLEET_QDRANT_VERSION left over from an earlier step would start a different
 # one, and Qdrant storage does not survive a skipped minor.
 unset FLEET_QDRANT_VERSION
+# And the optional credentials Fleet's services present to Qdrant and Temporal, with the address
+# fleet-memory reaches Qdrant at: an exported one must never stand in for what .env says.
+unset FLEET_QDRANT_URL FLEET_QDRANT_API_KEY FLEET_TEMPORAL_BEARER_TOKEN
 # Epic grants (#436): .env is the record of the decision, never a stale shell export.
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS

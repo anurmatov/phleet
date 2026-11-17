@@ -1,4 +1,5 @@
 using Fleet.Temporal.Configuration;
+using Fleet.Temporal.Services;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
 using Temporalio.Client;
@@ -32,11 +33,7 @@ public sealed class TemporalClientFactory(IOptions<TemporalBridgeOptions> option
             if (_cache.TryGetValue(@namespace, out var cached))
                 return cached;
 
-            var client = await TemporalClient.ConnectAsync(new TemporalClientConnectOptions(_opts.TemporalAddress)
-            {
-                Namespace = @namespace,
-                DataConverter = CaseInsensitiveDataConverter
-            });
+            var client = await TemporalConnect.ConnectAsync(_opts, @namespace, CaseInsensitiveDataConverter);
 
             _cache[@namespace] = client;
             return client;

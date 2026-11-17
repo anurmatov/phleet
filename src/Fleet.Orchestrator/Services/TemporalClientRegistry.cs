@@ -33,9 +33,9 @@ public sealed class TemporalClientRegistry(
     /// </summary>
     internal static readonly TimeSpan RetryCooldown = TimeSpan.FromSeconds(30);
 
-    /// <summary>Connects to one namespace. Replaced in tests.</summary>
-    internal Func<string, string, Task<ITemporalClient>> Connect { get; init; } = async (address, ns) =>
-        await TemporalClient.ConnectAsync(new TemporalClientConnectOptions(address) { Namespace = ns });
+    /// <summary>Connects to one namespace, through <see cref="TemporalConnect"/>. Replaced in tests.</summary>
+    internal Func<string, string, Task<ITemporalClient>> Connect { get; init; } = (address, ns) =>
+        TemporalConnect.ConnectAsync(opts.Value, address, ns);
 
     internal TimeProvider Time { get; init; } = TimeProvider.System;
 

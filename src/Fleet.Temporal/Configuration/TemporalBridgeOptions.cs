@@ -1,11 +1,24 @@
+using Fleet.Shared;
+
 namespace Fleet.Temporal.Configuration;
 
 public sealed class TemporalBridgeOptions
 {
     public const string Section = "TemporalBridge";
 
+    /// <summary><see cref="BearerToken"/> as configuration and refusal messages name it.</summary>
+    public const string BearerTokenSetting = Section + ":" + TemporalBearerToken.SettingName;
+
     /// <summary>Temporal server address (host:port).</summary>
     public string TemporalAddress { get; set; } = "temporal-server:7233";
+
+    /// <summary>
+    /// Optional bearer token for a Temporal that checks one (<c>TemporalBridge:BearerToken</c>).
+    /// Empty (the default): no credential is sent, as before. The token alone, without "Bearer ".
+    /// Used only by <c>TemporalConnect</c>, the one place this service constructs a client or
+    /// registers a worker; read once, so a replaced token takes a restart.
+    /// </summary>
+    public string BearerToken { get; set; } = "";
 
     /// <summary>Temporal namespaces to create on startup and register workers for.</summary>
     public List<string> Namespaces { get; set; } = [];

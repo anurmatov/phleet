@@ -111,6 +111,59 @@ public class ConfigServiceGetValuesTests : IDisposable
         Assert.Equal("bot-token-123", inner["myagent"]);
     }
 
+    /// <summary>
+    /// A template is not denylisted, but what it resolves to can be: an Env Ref the denylist covers
+    /// is never read through one, so a credential withheld by name is not served by pattern.
+    /// </summary>
+    [Theory]
+    [InlineData("FLEET_{SHORTNAME}_API_KEY", "FLEET_QDRANT_API_KEY")]
+    [InlineData("FLEET_{SHORTNAME}_BEARER_TOKEN", "FLEET_TEMPORAL_BEARER_TOKEN")]
+    public async Task GetValuesAsync_ADenylistedEnvRef_IsNotServedThroughATemplate_WhileOthersAre(string template, string envKey)
+    {
+        await using var db = CreateDb($"test_denylisted_{envKey}");
+        var agent = new Agent
+        {
+            Name = "myagent", ShortName = "myagent", DisplayName = "My Agent",
+            Role = "dev", Model = "claude", ContainerName = "fleet-myagent",
+        };
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = envKey });
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "TELEGRAM_MYAGENT_BOT_TOKEN" });
+        db.Agents.Add(agent);
+        await db.SaveChangesAsync();
+
+        await File.WriteAllTextAsync(_envFile, $"{envKey}=synthetic-secret\nTELEGRAM_MYAGENT_BOT_TOKEN=bot-token-123\n");
+
+        var result = await BuildService(BuildScopeFactory(db)).GetValuesAsync([template, "TELEGRAM_{SHORTNAME}_BOT_TOKEN"]);
+
+        Assert.Empty(result.AgentDerived[template]);
+        Assert.Equal("bot-token-123", result.AgentDerived["TELEGRAM_{SHORTNAME}_BOT_TOKEN"]["myagent"]);
+    }
+
+    /// <summary>
+    /// A denylisted Env Ref is left out before one is chosen: it cannot win the alphabetical pick
+    /// over an Env Ref that may be served, and so hide it.
+    /// </summary>
+    [Fact]
+    public async Task GetValuesAsync_ADenylistedEnvRef_DoesNotTakeAnAllowedOnesPlace()
+    {
+        await using var db = CreateDb("test_denylisted_pick");
+        var agent = new Agent
+        {
+            Name = "myagent", ShortName = "myagent", DisplayName = "My Agent",
+            Role = "dev", Model = "claude", ContainerName = "fleet-myagent",
+        };
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "FLEET_QDRANT_API_KEY" });
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "FLEET_XYZ_API_KEY" });
+        db.Agents.Add(agent);
+        await db.SaveChangesAsync();
+
+        await File.WriteAllTextAsync(_envFile, "FLEET_QDRANT_API_KEY=synthetic-secret\nFLEET_XYZ_API_KEY=allowed-value\n");
+
+        var result = await BuildService(BuildScopeFactory(db)).GetValuesAsync(["FLEET_{SHORTNAME}_API_KEY"]);
+
+        Assert.Equal("allowed-value", result.AgentDerived["FLEET_{SHORTNAME}_API_KEY"]["myagent"]);
+    }
+
     [Fact]
     public async Task GetValuesAsync_AgentWithoutEnvRef_AbsentFromInnerDict()
     {

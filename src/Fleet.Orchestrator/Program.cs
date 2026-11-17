@@ -12,6 +12,16 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// The optional bearer token for Temporal (Temporal:BearerToken, empty by default). A token that
+// cannot be sent as it is ends the process here, before the seeder or any hosted service connects:
+// no connection is made without the header that was asked for. The explicit exit, as below: this
+// must not depend on how a throw propagates.
+if (TemporalConnect.DescribeStartupFault(builder.Configuration) is { } temporalTokenFault)
+{
+    Console.Error.WriteLine($"Fleet.Orchestrator startup aborted, exiting 1: {temporalTokenFault}");
+    Environment.Exit(1);
+}
+
 // Configuration
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.Section));
 builder.Services.Configure<TemporalOptions>(builder.Configuration.GetSection(TemporalOptions.Section));
@@ -155,6 +165,9 @@ var app = builder.Build();
 var epicGrantOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<EpicGrantOptions>>().Value;
 if (epicGrantOptions.DisableMisconfiguredAutonomy())
     app.Logger.LogWarning("epic_autonomy_misconfigured");
+
+// When the Temporal token says when it expires, say it once: it takes every Temporal call down when it does.
+TemporalConnect.LogTokenExpiry(app.Logger, app.Configuration, TimeProvider.System.GetUtcNow());
 
 // Resolve the size policy now so an invalid value warns at startup, then log the active limits.
 var promptSizePolicy = app.Services.GetRequiredService<PromptSizePolicy>();

@@ -13,6 +13,16 @@ using Fleet.Shared.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// The optional bearer token for Temporal (TemporalBridge:BearerToken, empty by default). A token
+// that cannot be sent as it is ends the process here, before a worker, an initializer or a tool
+// connects: no connection is made without the header that was asked for. The explicit exit, as in
+// Fleet.Orchestrator/Program.cs: this must not depend on how a throw propagates.
+if (TemporalConnect.DescribeStartupFault(builder.Configuration) is { } temporalTokenFault)
+{
+    Console.Error.WriteLine($"Fleet.Temporal startup aborted, exiting 1: {temporalTokenFault}");
+    Environment.Exit(1);
+}
+
 // Configuration
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.Section));
 builder.Services.Configure<TemporalBridgeOptions>(builder.Configuration.GetSection(TemporalBridgeOptions.Section));
@@ -154,9 +164,9 @@ foreach (var @namespace in configuredNamespaces)
 {
     // Register the same generic workflows/activities on every namespace worker.
     // Unused registrations are harmless and keep startup fully config-driven.
-    builder.Services
-        .AddHostedTemporalWorker(temporalOpts.TemporalAddress, @namespace, @namespace)
-        .ConfigureOptions(opt => opt.ClientOptions!.DataConverter = caseInsensitiveDataConverter)
+    // Through TemporalConnect, like every other Temporal client of this service.
+    TemporalConnect
+        .AddWorker(builder.Services, temporalOpts, @namespace, caseInsensitiveDataConverter)
         .AddScopedActivities<DelegateToAgentActivity>()
         .AddScopedActivities<HttpRequestActivity>()
         .AddScopedActivities<BroadcastTokenUpdateActivity>()
@@ -186,6 +196,9 @@ builder.WebHost.ConfigureKestrel(opts =>
 
 var app = builder.Build();
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Fleet.Temporal.Startup");
+
+// When the token says when it expires, say it once: it takes every Temporal call down when it does.
+TemporalConnect.LogTokenExpiry(startupLogger, app.Configuration, TimeProvider.System.GetUtcNow());
 
 if (configuredNamespaces.Length == 0)
 {

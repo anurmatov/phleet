@@ -137,6 +137,23 @@ public sealed class QdrantVectorStoreTests : IAsyncLifetime
     private static List<IndexPoint> Sections(string path, int count, string sparse = "ledger", string hash = "hash-1", double axis = 0) =>
         Enumerable.Range(0, count).Select(i => Section(path, i, count, Axis(axis), $"{sparse} part{i}", hash)).ToList();
 
+    [QdrantFact]
+    public async Task Each_side_limits_distinct_memories_not_sections_and_keeps_the_best_section()
+    {
+        await Store.UpsertAsync(Sections("/m/many.md", 150, "needle", axis: 0));
+        await Store.UpsertAsync([Section("/m/other.md", 0, 1, Axis(0.5), "needle other")]);
+        foreach (var hits in new[]
+        {
+            await Store.SearchDenseAsync(Axis(0), 2),
+            await Store.SearchSparseAsync("needle", 2),
+        })
+        {
+            Assert.Equal(2, hits.Count);
+            Assert.Equal(2, hits.Select(h => h.FilePathKey).Distinct().Count());
+            Assert.Contains(hits, h => h.FilePathKey == "/m/other.md");
+        }
+    }
+
     // ── Writing, and reading back at start ──────────────────────────────────
 
     [QdrantFact]

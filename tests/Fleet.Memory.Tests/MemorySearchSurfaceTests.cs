@@ -348,6 +348,22 @@ public sealed class MemorySearchSurfaceTests : IDisposable
         Assert.Equal(1, Assert.Single(denied.GetSnapshot()).Count);
     }
 
+    [Fact]
+    public async Task One_denied_memory_cannot_spend_the_candidate_pool_with_its_sections()
+    {
+        await _f.AddAsync("Hidden notes", string.Join("\n\n", Enumerable.Repeat(Words("needle", 27), 150)), project: "denied");
+        var allowed = await _f.AddAsync("Visible notes", "needle with other words", project: "allowed");
+        Assert.Equal(150, _f.Index.Points.Count(p => Equals(p.Payload[IndexPayload.Project], "denied")));
+
+        var (tool, _, _) = Tool(new() { ["agent-a"] = ["allowed"] });
+        var output = await tool.SearchAsync("needle", limit: 1);
+
+        Assert.StartsWith("Found 1 memories:", output);
+        Assert.Contains(allowed.Id, output);
+        Assert.DoesNotContain("Hidden notes", output);
+        Assert.Equal(2, (await _f.Service.SearchAsync("needle", limit: 2)).Count);
+    }
+
     // ── Settings ────────────────────────────────────────────────────────────
 
     private static (MemoryIndexSettings Settings, List<string> Warnings) Settings(params (string Key, string? Value)[] values)
@@ -366,7 +382,9 @@ public sealed class MemorySearchSurfaceTests : IDisposable
         var (settings, warnings) = Settings(("Search:SectionChars", ""), ("Search:MinMeaningScore", " "));
 
         Assert.Equal((1200, 200, 0f), (settings.SectionChars, settings.MaxSections, settings.MinMeaningScore));
-        Assert.Equal("onnx/all-MiniLM-L6-v2.onnx/384", settings.EmbedderId);
+        Assert.Contains(Path.GetFullPath("./models/all-MiniLM-L6-v2.onnx", AppContext.BaseDirectory), settings.EmbedderId);
+        Assert.Contains(Path.GetFullPath("./models/all-MiniLM-L6-v2-vocab.txt", AppContext.BaseDirectory), settings.EmbedderId);
+        Assert.EndsWith("/384", settings.EmbedderId);
         Assert.Empty(warnings);
     }
 

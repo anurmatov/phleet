@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text.Json;
 
 namespace Fleet.Memory.Services;
 
@@ -41,7 +43,11 @@ public sealed record MemoryIndexSettings
         var provider = configuration["Embedding:Provider"] ?? "onnx";
         var model = provider.Equals("ollama", StringComparison.OrdinalIgnoreCase)
             ? configuration["Embedding:Ollama:Model"] ?? "nomic-embed-text"
-            : Path.GetFileName(configuration["Embedding:Onnx:ModelPath"] ?? "all-MiniLM-L6-v2.onnx");
+            : JsonSerializer.Serialize(new[]
+            {
+                OnnxFileIdentity(configuration["Embedding:Onnx:ModelPath"] ?? "./models/all-MiniLM-L6-v2.onnx"),
+                OnnxFileIdentity(configuration["Embedding:Onnx:VocabPath"] ?? "./models/all-MiniLM-L6-v2-vocab.txt"),
+            });
 
         return new MemoryIndexSettings
         {
@@ -50,6 +56,16 @@ public sealed record MemoryIndexSettings
             MinMeaningScore = ReadScore(configuration, MinMeaningScoreKey, logger),
             EmbedderId = $"{provider.ToLowerInvariant()}/{model}/{configuration["Embedding:Dimensions"] ?? "384"}",
         };
+    }
+
+    // Read once at startup, not once per memory. Resolve relative paths as OnnxEmbeddingService
+    // does, and stream the digest so replacing files in place invalidates the index too.
+    private static string OnnxFileIdentity(string path)
+    {
+        var fullPath = Path.GetFullPath(path, AppContext.BaseDirectory);
+        if (!File.Exists(fullPath)) return fullPath + ":missing";
+        using var file = File.OpenRead(fullPath);
+        return fullPath + ":sha256:" + Convert.ToHexString(SHA256.HashData(file));
     }
 
     private static int ReadInt(IConfiguration configuration, string key, int fallback, int min, int max, ILogger logger)

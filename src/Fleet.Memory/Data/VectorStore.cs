@@ -155,40 +155,32 @@ public sealed class VectorStore(IOptions<QdrantOptions> qdrantOptions, IOptions<
 
     public async Task<List<IndexMatch>> SearchDenseAsync(float[] queryEmbedding, int limit, IndexFilter? filter = null, CancellationToken ct = default)
     {
-        var results = await _client.QueryAsync(
-            _collection,
-            query: queryEmbedding,
-            usingVector: DenseVectorName,
-            filter: BuildFilter(filter),
-            limit: (ulong)limit,
-            payloadSelector: MatchPayload,
-            cancellationToken: ct);
+        var groups = await _client.QueryGroupsAsync(
+            _collection, groupBy: IndexPayload.FilePath,
+            query: queryEmbedding, usingVector: DenseVectorName,
+            filter: BuildFilter(filter), limit: (ulong)limit, groupSize: 1,
+            payloadSelector: MatchPayload, cancellationToken: ct);
 
-        return ToMatches(results);
+        return ToMatches(groups.SelectMany(g => g.Hits));
     }
 
     public async Task<List<IndexMatch>> SearchSparseAsync(string queryText, int limit, IndexFilter? filter = null, CancellationToken ct = default)
     {
-        // Sparse query vector from BM25 tokenization. No keyword in the query: nothing can match.
         var (sparseIndices, sparseValues) = Bm25Tokenizer.Tokenize(queryText);
-        if (sparseIndices.Length == 0)
-            return [];
+        if (sparseIndices.Length == 0) return [];
 
         var query = new Query { Nearest = new VectorInput { Sparse = new SparseVector() } };
         query.Nearest.Sparse.Values.AddRange(sparseValues);
         query.Nearest.Sparse.Indices.AddRange(sparseIndices);
 
-        var results = await _client.QueryAsync(
-            _collection,
-            query: query,
-            usingVector: SparseVectorName,
-            filter: BuildFilter(filter),
-            limit: (ulong)limit,
-            payloadSelector: MatchPayload,
-            cancellationToken: ct);
+        // Limit groups, not section points: even thousands of sections cannot hide the next memory.
+        var groups = await _client.QueryGroupsAsync(
+            _collection, groupBy: IndexPayload.FilePath,
+            query: query, usingVector: SparseVectorName,
+            filter: BuildFilter(filter), limit: (ulong)limit, groupSize: 1,
+            payloadSelector: MatchPayload, cancellationToken: ct);
 
-        // A point that shares no keyword with the query is not a keyword hit, whatever came back.
-        return ToMatches(results.Where(r => r.Score > 0));
+        return ToMatches(groups.SelectMany(g => g.Hits).Where(r => r.Score > 0));
     }
 
     private static WithPayloadSelector MatchPayload => new()

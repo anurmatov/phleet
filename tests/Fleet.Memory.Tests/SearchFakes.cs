@@ -105,6 +105,7 @@ internal sealed class FakeVectorIndex : IVectorIndex
             .Where(p => Passes(p, filter))
             .Select(p => (Point: p, Score: Cosine(queryEmbedding, p.Dense)))
             .OrderByDescending(x => x.Score).ThenBy(x => x.Point.FilePathKey, StringComparer.Ordinal).ThenBy(x => x.Point.SectionIndex)
+            .DistinctBy(x => x.Point.FilePathKey)
             .Take(limit)
             .Select(x => Match(x.Point, x.Score))
             .ToList());
@@ -129,6 +130,7 @@ internal sealed class FakeVectorIndex : IVectorIndex
             })
             .Where(x => x.Score > 0)
             .OrderByDescending(x => x.Score).ThenBy(x => x.Point.FilePathKey, StringComparer.Ordinal).ThenBy(x => x.Point.SectionIndex)
+            .DistinctBy(x => x.Point.FilePathKey)
             .Take(limit)
             .Select(x => Match(x.Point, x.Score))
             .ToList());

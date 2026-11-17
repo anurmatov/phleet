@@ -125,6 +125,11 @@ The `Full index complete` line of the first start says how many sections there w
 
 An interrupted first start is continued, not repeated: what was embedded is skipped next time.
 
+ONNX invalidation includes the resolved model and vocabulary paths and their SHA-256 digests,
+read once at service startup with streaming reads. Changing either path (even to the same basename)
+or replacing either file in place re-embeds unchanged memories at the next start. Budget one model
+and vocabulary read at startup; this is not repeated for each memory. Restart after model changes.
+
 ## Rollback without losing other collections
 
 An earlier fleet-memory image does not understand section points and can list and return a long

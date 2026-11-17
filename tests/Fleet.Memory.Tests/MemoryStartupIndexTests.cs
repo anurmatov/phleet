@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Fleet.Memory.Configuration;
 using Fleet.Memory.Data;
 using Fleet.Memory.Models;
@@ -47,6 +48,41 @@ public sealed class MemoryStartupIndexTests : IDisposable
         var b = await _f.AddAsync("Ledger notes", LongContent());
         var c = await _f.AddAsync("Очередь задач", "Очередь переполнена после сбоя.");
         return (a, b, c);
+    }
+
+    [Theory]
+    [InlineData("model-path")]
+    [InlineData("vocab-path")]
+    [InlineData("model-content")]
+    [InlineData("vocab-content")]
+    public async Task Configured_onnx_model_and_vocabulary_changes_reembed_unchanged_memories(string change)
+    {
+        var oldDir = Path.Combine(_f.Dir, "old");
+        var newDir = Path.Combine(_f.Dir, "new");
+        Directory.CreateDirectory(oldDir);
+        Directory.CreateDirectory(newDir);
+        var model = Path.Combine(oldDir, "model.onnx");
+        var vocab = Path.Combine(oldDir, "vocab.txt");
+        await File.WriteAllTextAsync(model, "synthetic model");
+        await File.WriteAllTextAsync(vocab, "synthetic vocabulary");
+        MemoryIndexSettings Settings() => MemoryIndexSettings.FromConfiguration(
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Embedding:Onnx:ModelPath"] = model,
+                ["Embedding:Onnx:VocabPath"] = vocab,
+            }).Build(), NullLogger.Instance);
+        await _f.WriteAsync("Notes", "Unchanged body.");
+        Assert.Equal(1, await StartAsync(Settings()));
+        Assert.Equal(0, await StartAsync(Settings()));
+        switch (change)
+        {
+            case "model-path": File.Copy(model, Path.Combine(newDir, "model.onnx")); model = Path.Combine(newDir, "model.onnx"); break;
+            case "vocab-path": File.Copy(vocab, Path.Combine(newDir, "vocab.txt")); vocab = Path.Combine(newDir, "vocab.txt"); break;
+            case "model-content": await File.WriteAllTextAsync(model, "replacement model"); break;
+            case "vocab-content": await File.WriteAllTextAsync(vocab, "replacement vocabulary"); break;
+        }
+        Assert.Equal(1, await StartAsync(Settings()));
+        Assert.Equal(0, await StartAsync(Settings()));
     }
 
     [Fact]

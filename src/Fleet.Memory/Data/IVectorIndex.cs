@@ -23,12 +23,12 @@ public interface IVectorIndex
     /// <summary>Removes every point of a file.</summary>
     Task DeleteAsync(string filePathKey, CancellationToken ct = default);
 
-    /// <summary>The nearest points by meaning, best first. Several may belong to one memory.</summary>
+    /// <summary>The best section of each distinct memory by meaning, best first; limit counts memories.</summary>
     Task<List<IndexMatch>> SearchDenseAsync(float[] queryEmbedding, int limit, IndexFilter? filter = null, CancellationToken ct = default);
 
     /// <summary>
-    /// The points that share a keyword with the query, best first; none when the query has no
-    /// keyword. Several may belong to one memory.
+    /// The best keyword section of each distinct memory, best first; limit counts memories.
+    /// None when the query has no keyword.
     /// </summary>
     Task<List<IndexMatch>> SearchSparseAsync(string queryText, int limit, IndexFilter? filter = null, CancellationToken ct = default);
 

@@ -39,8 +39,8 @@ public sealed record MemorySearchHit(MemoryDocument Document, string Match, Sear
 /// </summary>
 public sealed partial class MemoryService
 {
-    // Points asked of each side per memory wanted, and its bounds: several points can be sections
-    // of one memory, and only the best of them counts.
+    // Each side returns distinct memories, retaining only their best section.
+    // The bounded extra candidates leave room for fusion and post-filter evictions.
     // The shortest query that matches as a part of a title.
     private const int MinTitlePartLength = 3;
 

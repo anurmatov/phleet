@@ -243,6 +243,23 @@ public sealed class MemorySearchTests : IDisposable
 
     // ── A4: filters ─────────────────────────────────────────────────────────
 
+    [Theory]
+    [InlineData("5e1f9a3c")]
+    [InlineData("Retry budget")]
+    [InlineData("queues")]
+    [InlineData("backoff")]
+    [InlineData("postponement")]
+    public async Task Filters_are_rechecked_against_the_file_when_the_catalogue_or_index_is_stale(string query)
+    {
+        _f.Embedder.Same["postponement"] = "backoff";
+        var doc = await _f.AddAsync("Retry budget", "Use backoff.",
+            id: "5e1f9a3c-0000-4000-8000-000000000001", tags: ["queues"], project: "alpha");
+        // The watcher has not caught up with an edit on disk: both candidate sources still say alpha.
+        await _f.Store.UpdateAsync(doc.FilePath, d => d.Project = "beta");
+
+        Assert.Empty(await _f.Service.SearchAsync(query, project: "alpha"));
+    }
+
     [Fact]
     public async Task Filters_apply_to_every_kind()
     {

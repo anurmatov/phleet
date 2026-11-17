@@ -59,13 +59,12 @@ public sealed partial class MemoryService
         var sinceTs = since?.ToUnixTimeSeconds();
 
         // ── 1 to 3: from the catalogue ───────────────────────────────────────
-        var entries = _catalogue.Entries
-            .Where(e => (type is null || e.Type == type)
+        bool PassesFilters(CatalogueEntry e) => (type is null || e.Type == type)
                 && (normalizedProject is null || e.Project == normalizedProject)
                 && (agent is null || e.Agent == agent)
                 && (tag is null || e.Tags.Contains(tag))
-                && (sinceTs is null || e.Updated.ToUnixTimeSeconds() >= sinceTs))
-            .ToList();
+                && (sinceTs is null || e.Updated.ToUnixTimeSeconds() >= sinceTs);
+        var entries = _catalogue.Entries.Where(PassesFilters).ToList();
 
         var candidates = new List<Candidate>();
         var taken = new HashSet<string>(StringComparer.Ordinal);
@@ -158,6 +157,9 @@ public sealed partial class MemoryService
                 continue;
             }
             if (doc is null) continue;
+            // The file can have moved project or changed metadata before the watcher catches up.
+            // Candidate filters are an optimization, not proof that the current document still fits.
+            if (!PassesFilters(CatalogueEntry.From(doc, candidate.FilePath))) continue;
 
             var section = candidate.Fused?.Section;
             var snippet = candidate.Match switch

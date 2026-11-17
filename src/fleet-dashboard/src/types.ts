@@ -446,15 +446,11 @@ export interface PromptSizeLimits {
   projectContext: { limitBytes: number | null; limitKey: string }
 }
 
-export interface MemorySearchResult {
-  id: string
-  title: string
-  project: string
-  type: string
-  tags: string[]
-  snippet: string
-  updated_at: string
-}
+/**
+ * One hit of `GET /api/memory/search`. `match`, `highlights` and `score` are absent on an older
+ * fleet-memory; memorySearch.ts is where they are read.
+ */
+export type { MemorySearchHit as MemorySearchResult } from './memorySearch.ts'
 
 export interface AgentReadStatsDto {
   count: number

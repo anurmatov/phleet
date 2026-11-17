@@ -99,6 +99,23 @@ made in the dashboard (**Credentials → Secret bindings**) or over REST with th
 See **[docs/secret-placeholders.md](secret-placeholders.md)** for setup, the GitHub App
 binding and the security limits.
 
+## Credentials for Qdrant and Temporal (optional)
+
+The Qdrant and the Temporal the example deployment starts take no credential. A deployment that has
+put one in front of either can give Fleet's services that credential to present. All three settings
+are unset by default, and with them unset nothing changes.
+
+| `.env` | Read by | Default | Meaning |
+|---|---|---|---|
+| `FLEET_QDRANT_URL` | fleet-memory (`Qdrant__Url`) | `http://qdrant:6334` | Qdrant's gRPC address. |
+| `FLEET_QDRANT_API_KEY` | fleet-memory (`Qdrant__ApiKey`) | empty | Qdrant's API key. With a key the address must be `https`, or fleet-memory exits 1 at startup. |
+| `FLEET_TEMPORAL_BEARER_TOKEN` | orchestrator (`Temporal__BearerToken`) and Temporal bridge (`TemporalBridge__BearerToken`) | empty | Sent to Temporal as `Authorization: Bearer <token>` on every call, over the same plaintext connection. The token alone, without `Bearer `; a value that cannot be sent as it is makes both exit 1 at startup. |
+
+Each is read at startup, so a replaced value takes a restart. None can be attached to an agent, and
+the config API does not serve them. These are the client's half only: see
+**[docs/datastore-client-auth.md](datastore-client-auth.md)** for the rules, an example for each
+service, and what the servers themselves, the Temporal UI and the `temporal` CLI need.
+
 ## Push notifications (optional)
 
 The orchestrator can notify the [iOS app](https://github.com/anurmatov/phleet-ios) when a gate is

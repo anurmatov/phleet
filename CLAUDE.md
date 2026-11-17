@@ -618,6 +618,35 @@ header (its CLI would skip the server); apply grants to an unverified name (it p
 skip them for a verified agent while enforcement is off; make identity depend on the journal key;
 change the token format without `TheFormat_IsPinned…` and the script.
 
+## Credentials for Qdrant and Temporal (#621)
+
+Off by default; with nothing set every connection is made as before. fleet-memory can send Qdrant an
+API key (`FLEET_QDRANT_API_KEY` → `Qdrant__ApiKey`, beside `FLEET_QDRANT_URL` → `Qdrant__Url`): a key
+needs an `https` URL, the platform validates the certificate, and a key with any other URL is exit 1
+at startup. `QdrantConnection` is the only place a Qdrant client is constructed. The orchestrator and
+the Temporal bridge can send Temporal a bearer token (`FLEET_TEMPORAL_BEARER_TOKEN` →
+`Temporal__BearerToken`, `TemporalBridge__BearerToken`) as `authorization` connection metadata on
+every call, over the same plaintext connection as before; a token of blanks, one that starts with
+`Bearer `, or one with a blank or a character a header cannot carry is exit 1 at startup in both.
+`TemporalBearerToken` (`Fleet.Shared`) is the one rule set. Each service's `TemporalConnect` is the
+only place it constructs a Temporal client or registers a hosted worker, and `Authenticate` there is
+the one piece that decides what a client is given. `TemporalConnectSeamTests` and
+`IndexConnectionTests` read `src` and fail on a client built anywhere else. A JWT's `exp` is logged
+once at startup (a warning under 30 days, an error when past, never a refusal). Both values are read
+once: a replaced one takes a restart. See `docs/datastore-client-auth.md`.
+
+MUST NOT: construct a Temporal or Qdrant client outside those seams; give the token to the SDK's
+`ApiKey` (in Temporalio 1.11.1 it turns TLS on when `Tls` is unset, pinned by
+`ThePinnedSdk_TurnsTlsOn_ForAnApiKeyWithNoTlsOptions`) or change Temporal's transport as a side effect;
+send the Qdrant key without TLS, add a switch that relaxes certificate validation, or connect
+without a configured credential that cannot be used; log, return or put in a message either value or
+any part of a token (the expiry instant only); read a claim other than `exp`, or refuse to start over
+it; deliver either to an agent (`ContainerSpecBuilder.IsNeverDelivered` covers both, every
+`FLEET_TEMPORAL_…_TOKEN` name and the services' own setting names, and `ConfigService.IsDenylisted`
+follows it). ⚠️ Not tested against a Temporal that checks tokens: the endpoint in
+`tests/fixtures/local-endpoint` shows what is sent, not what a server accepts. The Qdrant side is
+tested against a real one: `bash tests/memory-qdrant/secured.sh`.
+
 ## Run links
 
 Each `WorkflowSummary` (`/api/workflows`, the dashboard socket, the phone app) says what the run

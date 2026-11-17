@@ -182,6 +182,24 @@ public sealed class OrchestratorGrantCacheTests
         Assert.Equal(0, orchestrator.Reads);
     }
 
+    /// <summary>
+    /// The grants answer is what this server believes every agent may do, so it is read from the
+    /// configured address only: a redirect is not followed somewhere else.
+    /// </summary>
+    [Fact]
+    public void TheGrantsClient_FollowsNoRedirect()
+    {
+        var services = new ServiceCollection().AddLogging();
+        services.AddAgentIdentityFromOrchestrator(new ConfigurationBuilder().Build());
+        using var provider = services.BuildServiceProvider();
+
+        HttpMessageHandler? handler = provider.GetRequiredService<IHttpMessageHandlerFactory>()
+            .CreateHandler(OrchestratorGrantCache.HttpClientName);
+        while (handler is DelegatingHandler delegating) handler = delegating.InnerHandler;
+
+        Assert.False(Assert.IsType<SocketsHttpHandler>(handler).AllowAutoRedirect);
+    }
+
     // ── names a model used to type ───────────────────────────────────────────
 
     [Fact]

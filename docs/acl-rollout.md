@@ -57,7 +57,9 @@ Run these before flipping the flag:
 
 ## Validation probe
 
-After restart, run the ACL probe to confirm behaviour:
+After restart, run the ACL probe to confirm behaviour. With `FLEET_AGENT_IDENTITY_ENFORCE=true`,
+fleet-memory serves `/internal/*` to a service token only (`docs/agent-identity.md`): send
+`Authorization: Bearer <token>` with a token from `scripts/mint-identity-token.sh service operator`.
 
 1. Check denial counter baseline (should be 0):
    ```

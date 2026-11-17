@@ -267,3 +267,96 @@ public sealed class SearchFusionTests
         Assert.Equal(1f / 3, fused[1].Fused, 5);
     }
 }
+
+/// <summary>
+/// The splitter and the snippet cutter against text nobody wrote by hand: every mix of headings,
+/// fences, blank lines, long runs, scripts and surrogate pairs a fixed seed produces.
+/// </summary>
+public sealed class SearchPiecesRandomTextTests
+{
+    private static readonly string[] Pieces =
+    [
+        "word", "another", "Очередь", "задач", "ουρά", "再試行", "キュー", "の", "\U0001F680", "\U0002000B", "é", "under_score", "42",
+        " ", " ", " ", "  ", "\n", "\n\n", "\n\n\n", "\r\n\r\n", "\t", ". ", "! ", "? ", "。", "…", ", ", "-",
+        "\n# Heading\n", "\n## Sub heading\n\n", "\n```\n# not a heading\ncode()\n```\n", "\n~~~\n", "#", "#hash", "   ### deep\n",
+        "averyveryverylongunbrokenrunofletterswithoutanyspacewhatsoever", "\uD83D", "\uDE80",
+    ];
+
+    private static string RandomText(Random random, int pieces)
+    {
+        var text = new System.Text.StringBuilder();
+        for (var i = 0; i < pieces; i++) text.Append(Pieces[random.Next(Pieces.Length)]);
+        return text.ToString();
+    }
+
+    private static bool SplitsPair(string text, int index) =>
+        index > 0 && index < text.Length && char.IsLowSurrogate(text[index]) && char.IsHighSurrogate(text[index - 1]);
+
+    [Fact]
+    public void Sections_are_in_order_within_the_budget_and_lose_nothing_but_white_space()
+    {
+        var random = new Random(20260301);
+        for (var round = 0; round < 400; round++)
+        {
+            var content = RandomText(random, random.Next(1, 400));
+            var budget = random.Next(20, 300);
+
+            var sections = MemorySections.Split(content, budget);
+
+            Assert.NotEmpty(sections);
+            var at = 0;
+            for (var i = 0; i < sections.Count; i++)
+            {
+                var section = sections[i];
+                Assert.Equal(i, section.Index);
+                Assert.True(section.Start >= at, "sections overlap or are out of order");
+                // Only white space may lie between two sections.
+                Assert.True(content.AsSpan(at, section.Start - at).IsWhiteSpace(), "text was lost between sections");
+                if (sections.Count > 1)
+                {
+                    Assert.InRange(section.Length, 1, budget);
+                    Assert.False(SplitsPair(content, section.Start), "a section begins inside a surrogate pair");
+                    Assert.False(SplitsPair(content, section.Start + section.Length), "a section ends inside a surrogate pair");
+                }
+                at = section.Start + section.Length;
+            }
+            Assert.True(content.AsSpan(at).IsWhiteSpace(), "text was lost after the last section");
+        }
+    }
+
+    [Fact]
+    public void Snippets_stay_inside_their_text_and_mark_whole_words()
+    {
+        var random = new Random(20260302);
+        string[] queries = ["word another", "очередь", "ΟΥΡΆ", "再試行 キュー", "under_score 42", "é", "nothing-of-this", "\U0001F680"];
+        for (var round = 0; round < 400; round++)
+        {
+            var content = RandomText(random, random.Next(0, 300));
+            var query = queries[random.Next(queries.Length)];
+            var start = random.Next(-5, content.Length + 10);
+            var length = random.Next(-1, content.Length + 10);
+
+            foreach (var snippet in new[]
+                     {
+                         SearchSnippets.Start(content, query, start, length),
+                         SearchSnippets.AroundFirstMatch(content, query, start, length),
+                     })
+            {
+                Assert.InRange(snippet.Text.Length, 0, SearchSnippets.Length + 2);
+                Assert.DoesNotContain("  ", snippet.Text);
+                Assert.DoesNotContain('\n', snippet.Text);
+
+                var terms = Bm25Tokenizer.Terms(query).ToHashSet();
+                var end = 0;
+                foreach (var (at, count) in snippet.Highlights)
+                {
+                    Assert.True(at >= end && count > 0 && at + count <= snippet.Text.Length, "a highlight is out of place");
+                    Assert.False(SplitsPair(snippet.Text, at) || SplitsPair(snippet.Text, at + count), "a highlight splits a surrogate pair");
+                    // What is marked is a word of the query, as the index sees words.
+                    Assert.Subset(terms, Bm25Tokenizer.Terms(snippet.Text.Substring(at, count)).ToHashSet());
+                    end = at + count;
+                }
+            }
+        }
+    }
+}

@@ -641,9 +641,9 @@ MUST NOT: construct a Temporal or Qdrant client outside those seams; give the to
 send the Qdrant key without TLS, add a switch that relaxes certificate validation, or connect
 without a configured credential that cannot be used; log, return or put in a message either value or
 any part of a token (the expiry instant only); read a claim other than `exp`, or refuse to start over
-it; deliver either to an agent (`ContainerSpecBuilder.IsNeverDelivered` covers both, every
-`FLEET_TEMPORAL_…_TOKEN` name and the services' own setting names, and `ConfigService.IsDenylisted`
-follows it). ⚠️ Not tested against a Temporal that checks tokens: the endpoint in
+it; hand either to an agent by any automatic path (the compose file gives each to its own services
+only; nothing stops an operator attaching the `.env` name to an agent as an Env Ref, which the docs
+tell them not to do). ⚠️ Not tested against a Temporal that checks tokens: the endpoint in
 `tests/fixtures/local-endpoint` shows what is sent, not what a server accepts. The Qdrant side is
 tested against a real one: `bash tests/memory-qdrant/secured.sh`.
 

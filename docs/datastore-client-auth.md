@@ -98,8 +98,7 @@ and the workers. With it empty, none of them sends a credential.
 
 Both services read the same variable in the example compose file. To give each its own token (the
 orchestrator needs less than the bridge, see below), point one service's line at another variable
-and name it `FLEET_TEMPORAL_<something>_TOKEN`: every name of that form is kept from agents like
-the one above.
+and give it a name of its own in `.env`.
 
 In `.env`:
 
@@ -175,29 +174,19 @@ a warning at each start, because the registration it tries is refused, and the s
 initializer lists the attributes, finds none missing and adds nothing; the bridge carries on, as it
 does today when Temporal cannot be reached at start.
 
-## Neither credential reaches an agent
+## Keep both credentials away from agents
 
 The orchestrator reads the deployment's `.env` to provision agents, and both credentials are in
 it. Each is one service's own: an agent with the Qdrant key could read and write every memory's
 vectors around fleet-memory, and an agent with the Temporal token could run workflows around the
 bridge.
 
-- `FLEET_QDRANT_API_KEY`, `FLEET_TEMPORAL_BEARER_TOKEN`, any `FLEET_TEMPORAL_…_TOKEN`, and the
-  services' own setting names (`Qdrant__ApiKey`, `Temporal__BearerToken`,
-  `TemporalBridge__BearerToken`) cannot be attached to an agent as an Env Ref by anyone, the
-  operator included (`env_ref_reserved`), in any letter case.
-- A stored row that names one anyway is not delivered: provisioning leaves it out of the
-  container's environment, refuses an MCP header mapped to it, and the MCP tool listing does not
-  send it.
-- None can be given a secret binding (`secret_binding_key_unsupported`).
-- The config API (`/api/config`, the dashboard's credential pages, `set_config_values`) neither
-  returns nor accepts them. They are edited in `.env`.
-- In the example compose file the Qdrant key is handed to fleet-memory alone and the Temporal
-  token to the orchestrator and the bridge alone. `setup.sh` and `upgrade.sh` drop a value of any
-  of them exported in the shell, so `.env` decides.
-
-The Temporal bridge keeps no file with the token in it, and no path is mounted into an agent for
-either credential: both arrive as environment variables of their services.
+- Nothing gives either to an agent by itself. In the example compose file the Qdrant key is handed
+  to fleet-memory alone and the Temporal token to the orchestrator and the bridge alone, and no
+  path is mounted into an agent for either: both arrive as environment variables of their services.
+- `setup.sh` and `upgrade.sh` drop a value of any of them exported in the shell, so `.env` decides.
+- Nothing refuses an operator who attaches the `.env` name to an agent as an Env Ref, or maps it to
+  an MCP header: do not do that. An agent that needs memory or workflows already has the tools.
 
 ## What is tested, and what is not
 

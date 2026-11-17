@@ -234,15 +234,17 @@ public sealed class WireContractTests
     }
 
     /// <summary>
-    /// A PR run owns two technical phases, <c>technical-stalled</c> and <c>merge-hold</c>: it waits
-    /// on its own timers there and reads no signal. A signal is offered, announced by push and
-    /// counted in the badge only in a phase a registered signal names, so neither phase may appear
-    /// here, and no signal of that workflow may be offered in every phase.
+    /// A PR run owns three technical phases: <c>technical-stalled</c> and <c>merge-hold</c>, where
+    /// it waits on its own timers, and <c>merging</c>, where it issues the merge command. It asks
+    /// nobody for a decision in them (the hold reads late merge feedback, which is not a button).
+    /// A signal is offered, announced by push and counted in the badge only in a phase a
+    /// registered signal names, so none of these may appear here, and no signal of that workflow
+    /// may be offered in every phase.
     /// </summary>
     [Fact]
     public void No_signal_is_offered_in_a_phase_the_pr_run_owns()
     {
-        string[] owned = ["technical-stalled", "merge-hold"];
+        string[] owned = ["technical-stalled", "merge-hold", "merging"];
 
         Assert.All(SignalRegistry.Get("UwePrImplementationWorkflow")!, signal => Assert.NotNull(signal.ValidPhases));
         Assert.DoesNotContain(

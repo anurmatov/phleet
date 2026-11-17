@@ -65,16 +65,38 @@ public sealed class SeedEpicGrantDefinitionTests
     {
         var root = SeedHarness.Parse(workflow);   // throws if the validator refuses it
 
-        var waits = WorkflowDefinitionValidator.Walk(root).OfType<WaitForSignalStep>()
+        var all = WorkflowDefinitionValidator.Walk(root).OfType<WaitForSignalStep>()
             .Where(w => w.SignalName == gate).ToList();
+        // The gate is the wait that parks under the gate's phase. It is the only wait whose
+        // payload can become an approval, and it is guarded.
+        var waits = all.Where(w => w.Phase is not null).ToList();
         Assert.NotEmpty(waits);
         Assert.All(waits, w =>
         {
+            Assert.Equal(gate, w.Phase);
             Assert.Equal(visitVar, w.VisitVar);
             Assert.NotNull(w.DelegatedGuard);
             Assert.Equal("GrantId", w.DelegatedGuard!.Marker);
             Assert.Equal("{{vars." + visitVar + "}}", w.DelegatedGuard.Require!["VisitId"]);
             Assert.Equal("{{vars.review_ref}}", w.DelegatedGuard.Require["ArtifactRef"]);
+        });
+
+        // Every other wait on the gate's signal is a read of late feedback (the PR definition's
+        // merge hold, stall and merge entry). It mints no visit, parks under no phase, notifies
+        // nobody and writes a variable of its own, so nothing it takes can reach the steps that
+        // read the gate's decision: a delegated approval taken there is dropped, never used.
+        var gateVars = waits.Select(w => w.OutputVar).ToHashSet();
+        var others = all.Except(waits).ToList();
+        Assert.Equal(workflow == "UwePrImplementationWorkflow" ? 4 : 0, others.Count);
+        Assert.All(others, w =>
+        {
+            Assert.Null(w.VisitVar);
+            Assert.Null(w.DelegatedGuard);
+            Assert.Null(w.NotifyStep);
+            Assert.Null(w.BindTo);
+            Assert.True(w.AutoCompleteOnTimeout);
+            Assert.Equal("merge_late_signal", w.OutputVar);
+            Assert.DoesNotContain(w.OutputVar, gateVars);
         });
     }
 

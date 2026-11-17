@@ -35,7 +35,7 @@ What the feature does guarantee:
 
 | piece | role |
 |---|---|
-| engine (`wait_for_signal`) | `visitVar` mints `"<signal>:<n>"` per entry and publishes it as the `GateVisit` search attribute while parked; `delegatedGuard` discards a payload carrying `GrantId` unless its `VisitId` and `ArtifactRef` equal the current visit and `vars.review_ref` |
+| engine (`wait_for_signal`) | `visitVar` mints `"<signal>:<n>"` per entry and publishes it as the `GateVisit` search attribute while parked; `delegatedGuard` discards a payload carrying `GrantId` unless its `VisitId` and `ArtifactRef` equal the current visit and `vars.review_ref`; a `delegatedGuard` with `refuse: true`, on a wait that is not a gate visit, discards every payload carrying `GrantId` |
 | consensus (`ConsensusReviewWorkflow`) | `ReviewRef` in, `ExcludedAgents` refused (`ReviewerNotIndependent`), `AttestedRef` out only on a unanimous approval where every review ends `REVIEWED_REF: <ref>`; `ScrubAttested` for `PUBLIC_SCRUB: pass` |
 | definitions | publish `review_ref` / `ReviewRef` (and `ReviewScrub=pass`) only after an attested approval, clear them at the start of every review round, guard the gate |
 | bridge (`temporal_signal_workflow`) | the configured CTO's `approved` + `GrantId` is forwarded to the orchestrator, never signalled directly |
@@ -87,12 +87,22 @@ leaves the gate human-only.
 }
 ```
 
-A definition is delegation-capable for a gate only when **every** `wait_for_signal` on that gate
-has a literal `visitVar` and a `delegatedGuard` with marker exactly `GrantId`,
-`require.VisitId` exactly `{{vars.<that visitVar>}}` and `require.ArtifactRef` exactly
-`{{vars.review_ref}}`. One unguarded or differently guarded wait on the gate disqualifies the
-gate, and a wait with a templated `signalName` disqualifies the whole definition. Grant creation
-and D5 apply the same rule.
+A definition is delegation-capable for a gate only when at least one `wait_for_signal` on that
+gate is fully guarded, and **every** other wait on it is either fully guarded too or refusing:
+
+- **fully guarded** (the gate): a literal `visitVar` and a `delegatedGuard` with marker exactly
+  `GrantId`, `require.VisitId` exactly `{{vars.<that visitVar>}}` and `require.ArtifactRef`
+  exactly `{{vars.review_ref}}`;
+- **refusing** (a wait that reads the gate's signal without being a visit of the gate):
+  `delegatedGuard.marker` exactly `GrantId`, `delegatedGuard.refuse` exactly JSON `true`, and
+  neither a `visitVar` nor a `require` member. The engine discards every payload carrying
+  `GrantId` at such a wait, wherever it meets it, and the wait mints and publishes no visit, so
+  it can neither consume a delegated approval nor be decided. The engine's validator accepts
+  `refuse` only in this combination.
+
+Any other wait on the gate disqualifies the gate, refusing waits alone guard nothing, and a wait
+with a templated `signalName` disqualifies the whole definition. Grant creation, D5 and the
+autonomy preflight apply the same rule (`EpicJson.GuardedGates`).
 
 Only these fields are allowed. At creation, any failure stores nothing:
 
@@ -164,9 +174,10 @@ next attested review.
 On the PR definition the same feedback still counts after a delegated approval was consumed, until
 the pinned merge is dispatched: the run looks once for it at the entry to the merge turn, and on
 finding it withdraws the ref and takes the feedback route instead of merging. Only the gate's
-guarded wait can accept an approval. A delegated approval met by one of the reads of late feedback
-(the merge hold, the stall of a held merge, the merge entry) is dropped and never used; those
-reads log no discard. See "Late merge feedback" in `docs/pr-acceptance.md`.
+guarded wait can accept an approval. The reads of late feedback (the merge hold, the stall of a
+held merge, the merge entry) are refusing waits: a delegated approval that reaches one is
+discarded by the engine, does not end a hold's pause and is not left for a later gate. See "Late
+merge feedback" in `docs/pr-acceptance.md`.
 
 ## Expiry and revocation
 
@@ -204,6 +215,13 @@ reads log no discard. See "Late merge feedback" in `docs/pr-acceptance.md`.
   reference compose, the Telegram service).
 - Running workflows keep their definition snapshot; only runs started on the new versions are
   delegation-capable.
+- A definition that uses a refusing wait (`delegatedGuard.refuse`) is saved only after the Temporal
+  bridge and the orchestrator both know it. A bridge that does not refuses the definition at load,
+  and a run started on it waits at its first step, retrying the load, until the bridge is
+  upgraded. An orchestrator that does not treats the gate as not delegable (`gate_out_of_scope`)
+  until it is upgraded. `docs/pr-acceptance.md` has the table for the PR definition. The saved
+  definition is a new version with a new hash, so launch checklist item 3 applies again: a scope
+  is immutable, and a grant that pinned the old version is revoked and created anew.
 
 `setup.sh` writes the three keys with their defaults on a fresh install, and `upgrade.sh` adds any
 that are missing; neither prompts or changes a present value.
@@ -212,7 +230,9 @@ that are missing; neither prompts or changes a present value.
 
 - Orchestrator: `EpicGrant decision grant={id} workflow={wf} gate={gate} result={sent|send_failed|refused} reason={code}`;
   `epic_grants_misconfigured` when `ENABLED=true` with `MAX_DAYS ≤ 0` (treated as disabled).
-- Engine: `delegated signal discarded: stale visit or artifact (signal=… visit=…)`.
+- Engine: `delegated signal discarded: stale visit or artifact (signal=… visit=…)` at a gate, and
+  `delegated signal discarded: this wait accepts no delegated decision (signal=…)` at a refusing
+  wait.
 - Bridge: `Delegated <gate> approval for workflow …; outcome=…; reason=…`.
 - Dashboard decisions table: `sent` rows should follow reviews. `send_failed`, and `reserved`
   older than 60 s ("delivery unknown"), need a human look.

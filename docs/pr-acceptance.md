@@ -551,20 +551,33 @@ task, so no signal is delivered between them. That dispatch is the cutoff:
 feedback that arrives after it is not read, and belongs on the PR.
 
 Everything else one of these reads meets is dropped and decides nothing, there
-or at a later gate: a duplicate or stale approval, a delegated approval, a
-rejection, feedback whose `Ref` names another gate, a payload that is not an
-object. A payload dropped by a hold's pause ends that pause, so the pass runs
-early; the twelve passes are not extended. Two feedback signals behind one
-approval are one pass through the route, with the later comment.
+or at a later gate: a duplicate or stale approval, a rejection, feedback whose
+`Ref` names another gate, a payload that is not an object. A payload dropped by
+a hold's pause ends that pause, so the pass runs early; the twelve passes are
+not extended. Two feedback signals behind one approval are one pass through the
+route, with the later comment.
+
+A delegated approval (a payload carrying `GrantId`) never gets that far. Each
+read carries a refusing guard, `"delegatedGuard": {"marker": "GrantId",
+"refuse": true}`, and the engine discards a delegated payload there itself, with
+the warning `delegated signal discarded: this wait accepts no delegated
+decision`. It does not end a hold's pause (the pause keeps its original end),
+it is not left in the buffer for a later gate, and a look that meets one ends as
+the timeout it would have been. Only the gate's own guarded wait can consume a
+delegated approval. That is also what keeps the gate delegable under an epic
+grant: the orchestrator accepts a gate only when every wait on its signal is its
+fully guarded gate or a refusing wait (`docs/epic-grants.md`). Without the
+guard on even one of the four reads, `merge-approval` of this definition cannot
+be delegated at all.
 
 The reads are `wait_for_signal` steps that end as a timeout
 (`autoCompleteOnTimeout`, zero minutes for a look), with no phase, no notice, no
 `visitVar` and a variable of their own, `merge_late_signal`; the gate's payload
 in `merge_decision` is never overwritten by them. The route reads its comment
 from `merge_feedback_comment`, set by whichever read, or the gate, took the
-feedback. They are not gates: the gate's `Ref` binding, its guard and its stale
-counting are as they were, and the definition still has exactly one
-`merge-approval` gate.
+feedback. They are not gates: they mint no visit and publish no `GateVisit`, the
+gate's `Ref` binding, its guard and its stale counting are as they were, and the
+definition still has exactly one `merge-approval` gate.
 
 `temporal_signal_workflow` sends the configured CTO's `merge-approval` feedback
 only to a run that is Running with Phase `merge-approval` or `merge-hold`.
@@ -594,6 +607,22 @@ Known limits:
   definitions that are absent and never updates one that exists. The operator
   installs the new definition, and a run already started keeps the one it
   loaded.
+
+Installing it has an order, because the definition uses `refuse`, which an
+older bridge and an older orchestrator do not know. Upgrade the Temporal bridge
+and the orchestrator first, in either order, and save the definition after
+both. What each wrong order does:
+
+| state | effect |
+|---|---|
+| new definition, bridge without `refuse` | The bridge refuses the definition when a run loads it (`sets 'delegatedGuard' but has no 'visitVar'`). The load is retried without limit, from one second apart up to 100, so a run started in this state stays Running at its first step, calls no agent, and goes on by itself once the bridge is upgraded; or it can be cancelled. Runs already started are untouched: they keep the definition they loaded |
+| new definition, orchestrator with the old rule | The old rule needs every wait on `merge-approval` to be a fully guarded gate, so the gate is not delegable: a scope naming it does not validate, a delegated decision is refused with `gate_out_of_scope` and nothing is sent, and an autonomy admission answers `definition_unpinned`. Human approvals and feedback are unaffected. It becomes delegable when the orchestrator is upgraded |
+| old definition, new bridge and orchestrator | Nothing changes |
+
+Saving the definition makes a new version with a new hash. A grant or a charter
+pins a definition by version and hash and its scope cannot be edited, so one
+that pinned the old version does not cover runs of the new one: see the scope
+rules and the launch checklist in `docs/epic-grants.md`.
 
 **Merge turn.** `phase4_merge` is a plain delegate with `noRedelivery`, no
 continuation retries, a status variable and `ignoreFailure`; no step above it

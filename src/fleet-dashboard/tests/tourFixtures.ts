@@ -1,4 +1,5 @@
 import { configOf } from './support/fakeFleet'
+import { HANDBOOK_VERSIONS, RELEASE_VERSIONS } from '../src/fixtures/versionFixtures'
 // Synthetic answers for every route the dashboard reads, so each page can be drawn with
 // something on it. Used by the visual tour (tour.browser.spec.ts). Nothing here is real: no
 // address, no name, no key.
@@ -342,6 +343,24 @@ export function chatAnswer(method: string, path: string, body: unknown): unknown
 /** What this browser has shown of each thread: Agent 2's has moved on since. */
 export const chatSeen = { agent1: chatHistory.length, agent2: 6 }
 
+/** An instruction whose last four versions differ as real ones do: a reworded sentence, three lines replaced, a line gone. */
+const handbookDetail = {
+  name: 'base', currentVersion: 12,
+  versions: HANDBOOK_VERSIONS.map((content, i) => ({
+    versionNumber: 9 + i, content, createdAt: `2026-11-${10 + i} 09:${10 + i * 7}:00`, createdBy: i % 2 ? 'agent1' : 'owner',
+    reason: [null, 'Read the comments too', 'Reviews answer two questions; say when nobody answers', 'Headings are allowed again'][i],
+  })).reverse(),
+}
+
+/** A definition as the orchestrator sends it: each version one line of JSON. The last one moved two steps into a loop. */
+const releaseDetail = {
+  ...workflowDefinitions[0], createdAt: minutesAgo(90000), createdBy: 'owner', definition: RELEASE_VERSIONS[2],
+  versions: [
+    { version: 13, definition: RELEASE_VERSIONS[1], reason: 'Review up to three times', createdAt: minutesAgo(3000), createdBy: 'agent1' },
+    { version: 12, definition: RELEASE_VERSIONS[0], reason: 'Give the reviewer an hour', createdAt: minutesAgo(20000), createdBy: 'owner' },
+  ],
+}
+
 /** Every page of the dashboard, by the hash that opens it. */
 export const pages = [
   'agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles', 'repositories',
@@ -357,6 +376,8 @@ export const scenes = [
   { name: 'logs', hash: 'agents' },
   { name: 'instruction-open', hash: 'instructions' },
   { name: 'new-instruction', hash: 'instructions' },
+  { name: 'version-compare', hash: 'instructions', override: { '/api/instructions/base': handbookDetail } },
+  { name: 'definition-compare', hash: 'wf-definitions', override: { '/api/workflow-definitions/UwePrImplementationWorkflow': releaseDetail } },
   { name: 'start-workflow', hash: 'workflows' },
   { name: 'workflow-history', hash: 'workflows' },
   { name: 'signal-comment', hash: 'workflows' },

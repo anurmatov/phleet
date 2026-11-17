@@ -111,9 +111,21 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
   'instruction-open': async page => {
     await page.locator('.instr-header').first().click()
     await expect(page.locator('textarea.instr-editor')).toBeVisible()
-    await page.locator('.instr-version-item').nth(1).click()
   },
   'new-instruction': async page => { await page.getByRole('button', { name: 'New instruction' }).click() },
+  // What v11 changed: three lines replaced and one reworded, far enough apart to fold what lies between.
+  'version-compare': async page => {
+    await page.locator('.instr-header').first().click()
+    await page.getByRole('button', { name: 'Compare v11' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.getByRole('button', { name: 'Next change' }).click()
+  },
+  // JSON: two steps moved into a new loop, so only the loop's own lines are changes.
+  'definition-compare': async page => {
+    await page.locator('.instr-header').first().click()
+    await page.getByRole('button', { name: 'Compare v14' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+  },
   'start-workflow': async page => {
     await page.getByRole('button', { name: 'Start' }).click()
     await expect(page.getByRole('dialog')).toBeVisible()

@@ -3,18 +3,29 @@
  *
  * V1 corpus bound: 5000 memories total. Beyond 5000, revisit lazy-loading.
  *
- * Layout: left pane = collapsible tree (project → type → memory) + filter box + read-stats footer.
+ * Layout: left pane = search box and filters, then the collapsible tree (project → type → memory)
+ *         or, with a query, the search results; read-stats footer.
  *         right pane = MemoryContentView for the selected memory.
+ *
+ * Search: results come in two groups, the ones that matched the words (id, title, tag, keyword)
+ *         and the ones only related by meaning, and each says how it matched. The filters narrow
+ *         the search (sent as parameters) and, with no query, the tree. memorySearch.ts holds the
+ *         rules; an older fleet-memory that does not say how a hit matched gets one plain list.
  *
  * M2: project groups collapsed by default; state persisted to localStorage.
  *     When selectedId changes, auto-expands the target project/type and scrolls into view (S5).
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { MemoryListItem, MemorySearchResult, MemoryStatsResponse } from '../types'
 import { apiGet } from '../utils'
 import { useMemoryIdCache } from '../context/MemoryIdCacheContext'
 import MemoryContentView from './MemoryContentView'
 import Icon from './Icon'
+import {
+  NO_FILTERS, filterOptions, groupHits, hasFilters, matchDetail, matchKind, matchLabel, narrowList,
+  searchNotice, searchUrl, singleIdHit, snippetRuns, withChosen,
+} from '../memorySearch'
+import type { MemoryFilters } from '../memorySearch'
 
 const UNASSIGNED = '(unassigned)'
 // Key format matches spec: memory-tree-collapsed-{project} → "true" (expanded) | "false" (collapsed)
@@ -51,13 +62,57 @@ function lsSetExpanded(project: string, expanded: boolean) {
   try { localStorage.setItem(LS_PREFIX + project, String(expanded)) } catch { /* noop */ }
 }
 
+const FILTERS: { key: keyof MemoryFilters; label: string; any: string; options: 'projects' | 'types' | 'tags' }[] = [
+  { key: 'project', label: 'Project', any: 'All projects', options: 'projects' },
+  { key: 'type', label: 'Type', any: 'All types', options: 'types' },
+  { key: 'tag', label: 'Tag', any: 'All tags', options: 'tags' },
+]
+
+/** One search hit: its title, how it matched, where it lives, and its snippet with the matched words marked. */
+function SearchHit({ hit, query, selected, onOpen }: {
+  hit: MemorySearchResult; query: string; selected: boolean; onOpen: (id: string) => void
+}) {
+  const kind = matchKind(hit)
+  const detail = matchDetail(hit, query)
+  const where = [hit.project, hit.type].filter(Boolean).join(' · ')
+  return (
+    <button
+      className={`memory-tree-item memory-result-item${selected ? ' memory-selected' : ''}`}
+      onClick={() => onOpen(hit.id)}
+    >
+      <div className="memory-result-head">
+        <div className="memory-result-title">{hit.title}</div>
+        {kind && (
+          <span
+            className={`pill memory-result-match memory-result-match--${kind}`}
+            title={kind === 'meaning' && typeof hit.score === 'number' ? `Similarity ${hit.score.toFixed(2)}` : undefined}
+          >
+            {matchLabel(kind)}
+          </span>
+        )}
+      </div>
+      <div className="memory-result-meta">
+        {where}
+        {detail && <>{where && ' · '}<span className="memory-result-detail">{detail}</span></>}
+      </div>
+      <div className="memory-result-snippet">
+        {snippetRuns(hit.snippet ?? '', hit.highlights).map((run, i) =>
+          run.marked ? <mark key={i}>{run.text}</mark> : <span key={i}>{run.text}</span>)}
+      </div>
+    </button>
+  )
+}
+
 export default function MemoryView() {
   const [items, setItems] = useState<MemoryListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
+  const [filters, setFilters] = useState<MemoryFilters>(NO_FILTERS)
   const [searchResults, setSearchResults] = useState<MemorySearchResult[] | null>(null)
+  // The request `searchResults` answers. Enter acts on an answer only when it is for what is typed now.
+  const [answeredUrl, setAnsweredUrl] = useState('')
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState('')
   // M2: expandedProjects — present = expanded, absent = collapsed (default collapsed)
@@ -72,6 +127,10 @@ export default function MemoryView() {
   const [deleteToast, setDeleteToast] = useState('')
   const filterDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The request most recently sent: an answer to an earlier one is dropped, never drawn.
+  const latestSearch = useRef('')
+  // Set by Enter pressed before the answer is in: that request's one id hit opens when it arrives.
+  const openOnAnswer = useRef('')
   const { refresh: refreshIdCache } = useMemoryIdCache()
 
   const loadList = useCallback(async () => {
@@ -118,26 +177,51 @@ export default function MemoryView() {
   }, [loadList, loadStats])
 
   // Extracted so the retry button can call it directly (setFilter(f=>f) is a no-op in React)
-  const runSearch = useCallback(async (q: string) => {
+  const runSearch = useCallback(async (url: string) => {
+    latestSearch.current = url
     setSearchLoading(true)
     setSearchError('')
     try {
-      const data = await apiGet<MemorySearchResult[]>(`/api/memory/search?q=${encodeURIComponent(q)}`)
-      setSearchResults(data)
+      const data = await apiGet<MemorySearchResult[]>(url)
+      if (latestSearch.current !== url) return
+      const hits = Array.isArray(data) ? data : []
+      setSearchResults(hits)
+      setAnsweredUrl(url)
+      if (openOnAnswer.current === url) {
+        const id = singleIdHit(hits)
+        if (id) setSelectedId(id)
+      }
     } catch (e) {
+      if (latestSearch.current !== url) return
       setSearchError(e instanceof Error ? e.message : String(e))
       setSearchResults(null)
+      setAnsweredUrl('')
     } finally {
-      setSearchLoading(false)
+      if (latestSearch.current === url) {
+        openOnAnswer.current = ''
+        setSearchLoading(false)
+      }
     }
   }, [])
 
-  // Debounced semantic search
+  const query = filter.trim()
+  const currentUrl = query ? searchUrl(query, filters) : ''
+
+  // Debounced search: the query and the filters that are set.
   useEffect(() => {
     if (filterDebounce.current) clearTimeout(filterDebounce.current)
-    if (!filter.trim()) { setSearchResults(null); return }
-    filterDebounce.current = setTimeout(() => runSearch(filter), 250)
-  }, [filter, runSearch])
+    if (!currentUrl) {
+      latestSearch.current = ''
+      openOnAnswer.current = ''
+      setSearchResults(null)
+      setAnsweredUrl('')
+      setSearchLoading(false)
+      setSearchError('')
+      return
+    }
+    filterDebounce.current = setTimeout(() => runSearch(currentUrl), 250)
+    return () => { if (filterDebounce.current) clearTimeout(filterDebounce.current) }
+  }, [currentUrl, runSearch])
 
   // M2 + S5: auto-expand project/type containing selected memory, then scroll it into view.
   // Double rAF ensures the element is in the DOM after state update + paint before scrolling.
@@ -192,6 +276,21 @@ export default function MemoryView() {
     setSearchResults(null)
   }
 
+  // Enter on a query that is a memory's id opens that memory: the answer's one id hit. Pressed
+  // before the answer is in, it asks at once and opens the hit when it arrives.
+  function handleSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== 'Enter' || !currentUrl) return
+    e.preventDefault()
+    if (answeredUrl === currentUrl && searchResults) {
+      const id = singleIdHit(searchResults)
+      if (id) setSelectedId(id)
+      return
+    }
+    if (filterDebounce.current) clearTimeout(filterDebounce.current)
+    openOnAnswer.current = currentUrl
+    runSearch(currentUrl)
+  }
+
   // S4: keyboard navigation within the tree — Arrow keys move focus, Escape clears filter
   function handleTreeKeyDown(e: React.KeyboardEvent<HTMLButtonElement>, memId: string) {
     if (e.key === 'Escape') {
@@ -221,7 +320,15 @@ export default function MemoryView() {
     loadList()
   }
 
-  const tree = groupTree(items)
+  const options = useMemo(() => filterOptions(items), [items])
+  const filtered = hasFilters(filters)
+  // With no query the filters narrow the tree, so a filter always shows what it would search.
+  const tree = groupTree(narrowList(items, filters))
+  const groups = groupHits(searchResults ?? [])
+  // Said only of the answer to what is typed now, never of the one still on screen from before.
+  const notice = searchResults !== null && answeredUrl === currentUrl ? searchNotice(groups) : null
+  const hit = (r: MemorySearchResult) =>
+    <SearchHit key={r.id} hit={r} query={query} selected={selectedId === r.id} onOpen={setSelectedId} />
   const sortedProjects = [...tree.keys()].sort((a, b) =>
     a === UNASSIGNED ? 1 : b === UNASSIGNED ? -1 : a.localeCompare(b))
 
@@ -234,43 +341,77 @@ export default function MemoryView() {
           <div className="memory-search-wrap">
             <input
               className="memory-search-input"
-              placeholder="Filter tree…"
+              type="search"
+              aria-label="Search memories"
+              placeholder="Search memories or paste an id…"
               value={filter}
               onChange={e => setFilter(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
             />
             {filter && (
-              <button className="memory-search-clear" onClick={clearFilter} title="Clear filter">×</button>
+              <button className="memory-search-clear" onClick={clearFilter} title="Clear search">×</button>
+            )}
+          </div>
+          <div className="memory-filters" role="group" aria-label="Filters">
+            {FILTERS.map(f => (
+              <select
+                key={f.key}
+                className={`memory-filter${filters[f.key] ? ' memory-filter--set' : ''}`}
+                aria-label={f.label}
+                value={filters[f.key]}
+                onChange={e => setFilters(prev => ({ ...prev, [f.key]: e.target.value }))}
+              >
+                <option value="">{f.any}</option>
+                {withChosen(options[f.options], filters[f.key]).map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            ))}
+            {filtered && (
+              <button className="btn btn-quiet btn-s memory-filters-clear" onClick={() => setFilters(NO_FILTERS)}>
+                Clear filters
+              </button>
             )}
           </div>
         </div>
 
         {/* Search results (when filter active) */}
-        {filter.trim() ? (
+        {query ? (
           <div className="memory-search-results">
             {searchLoading && <div className="memory-tree-placeholder">Searching…</div>}
             {searchError && (
               <div className="memory-tree-error">
                 Search failed: {searchError}
-                <button className="memory-retry-btn" onClick={() => runSearch(filter)}>Retry</button>
+                <button className="memory-retry-btn" onClick={() => runSearch(currentUrl)}>Retry</button>
               </div>
             )}
-            {!searchLoading && searchResults !== null && searchResults.length === 0 && (
-              <div className="memory-tree-placeholder">
-                No results for "{filter}"
+            {!searchLoading && notice === 'none' && (
+              <div className="memory-tree-placeholder" role="status">
+                Nothing found for “{query}”{filtered ? ' with these filters' : ''}.
                 <button className="memory-retry-btn" onClick={clearFilter}>Clear</button>
               </div>
             )}
-            {searchResults?.map(r => (
-              <button
-                key={r.id}
-                className={`memory-tree-item memory-result-item${selectedId === r.id ? ' memory-selected' : ''}`}
-                onClick={() => setSelectedId(r.id)}
-              >
-                <div className="memory-result-title">{r.title}</div>
-                <div className="memory-result-meta">{r.project} · {r.type}</div>
-                <div className="memory-result-snippet">{r.snippet}</div>
-              </button>
-            ))}
+            {notice === 'related-only' && (
+              <div className="memory-results-notice" role="status">
+                Nothing matched the words “{query}”{filtered ? ' with these filters' : ''}.
+                The memories below are related by meaning only.
+              </div>
+            )}
+            {groups.matches.length > 0 && (
+              <section className="memory-results-group" aria-labelledby="memory-results-matches">
+                <h3 className="memory-results-heading" id="memory-results-matches">
+                  Matches<span className="memory-tree-count">{groups.matches.length}</span>
+                </h3>
+                {groups.matches.map(hit)}
+              </section>
+            )}
+            {groups.related.length > 0 && (
+              <section className="memory-results-group" aria-labelledby="memory-results-related">
+                <h3 className="memory-results-heading" id="memory-results-related">
+                  Related by meaning<span className="memory-tree-count">{groups.related.length}</span>
+                </h3>
+                {groups.related.map(hit)}
+              </section>
+            )}
+            {groups.ungrouped.map(hit)}
           </div>
         ) : (
           /* Tree */
@@ -284,6 +425,9 @@ export default function MemoryView() {
             )}
             {!loading && !loadError && items.length === 0 && (
               <div className="memory-tree-placeholder">No memories yet.</div>
+            )}
+            {!loading && !loadError && items.length > 0 && sortedProjects.length === 0 && (
+              <div className="memory-tree-placeholder" role="status">No memories match these filters.</div>
             )}
             {sortedProjects.map(project => {
               const byType = tree.get(project)!
@@ -398,7 +542,7 @@ export default function MemoryView() {
               onSaved={handleSaved}
             />
           : <div className="memory-cv-placeholder">
-              Select a memory from the tree to view it.
+              Select a memory to view it.
             </div>
         }
       </div>

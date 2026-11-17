@@ -6,7 +6,7 @@ import { temporalUiUrl, heartbeatAge } from '../utils'
 import AgentCard from './AgentCard'
 import Icon from './Icon'
 import { PhaseChip, RunElbow, RunOwner, WorkflowRefs, nestedRow, shortWorkflowId } from './WorkflowBits'
-import { arrangeRuns } from '../workflowTree'
+import { arrangeRuns, type PlacedRun } from '../workflowTree'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import CommsJournalPanel from './CommsJournalPanel'
 
@@ -77,9 +77,17 @@ export default function AgentsView({
   const activeWorkflows = workflows.filter(w =>
     w.status !== 'Completed' && w.status !== 'Failed' && w.status !== 'Canceled' && w.status !== 'Terminated' && w.status !== 'TimedOut'
   )
-  // What waits for a person goes first: it is the reason most visits to this page happen.
+  // What waits for a person goes first: it is the reason most visits to this page happen. A run
+  // nests under the run it belongs with, so the whole tree it sits in goes first.
   const waiting = activeWorkflows.filter(w => getSignalDefs(w).length > 0)
   const orderedWorkflows = [...waiting, ...activeWorkflows.filter(w => getSignalDefs(w).length === 0)]
+  const trees: PlacedRun<WorkflowSummary>[][] = []
+  for (const placed of arrangeRuns(orderedWorkflows)) {
+    if (placed.depth === 0 || trees.length === 0) trees.push([placed])
+    else trees[trees.length - 1].push(placed)
+  }
+  const waits = (tree: PlacedRun<WorkflowSummary>[]) => tree.some(p => getSignalDefs(p.run).length > 0)
+  const placedWorkflows = [...trees.filter(waits), ...trees.filter(t => !waits(t))].flat()
 
   const working = sorted.filter(a => a.effectiveStatus !== 'dead' && a.currentTask).length
   const offline = sorted.filter(a => a.effectiveStatus === 'dead').length
@@ -187,7 +195,7 @@ export default function AgentsView({
         <div className="wf-empty">No running workflows.</div>
       ) : (
         <div className="wf-table">
-          {arrangeRuns(orderedWorkflows).map(({ run: wf, depth, link, elsewhere }) => {
+          {placedWorkflows.map(({ run: wf, depth, link, elsewhere }) => {
             const url = temporalUiUrl(wf)
             const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)

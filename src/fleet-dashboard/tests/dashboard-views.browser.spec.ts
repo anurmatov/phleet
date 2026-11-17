@@ -1531,6 +1531,23 @@ test('agents: the page\u2019s own list of running workflows is the same tree', a
   await expect(rows.nth(2).locator('.wf-owner')).toHaveText('started by driver-7')
 })
 
+test('agents: a run waiting for a decision under a run that is not still goes first', async ({ page }) => {
+  // It nests under its owner, so the owner's whole tree moves up with it.
+  await open(page, 'agents', f => {
+    const [waiting, base] = f.workflows
+    f.workflows = [
+      { ...base, workflowId: 'other-3', runId: 'run-other-3', workflowType: 'OtherWorkflow' },
+      { ...base, workflowId: 'driver-7', runId: 'run-driver-7', workflowType: 'DriverWorkflow', phase: 'driving-epic' },
+      { ...waiting, waiterWorkflowId: 'driver-7' },
+    ] as typeof f.workflows
+  })
+  const rows = page.locator('.wf-table').first().locator('.wf-row')
+  await expect(rows.locator('.wf-type')).toHaveText(['DriverWorkflow', 'ReviewWorkflow', 'OtherWorkflow'])
+  const depths = await rows.evaluateAll(els => els.map(el => el.getAttribute('data-depth')))
+  expect(depths).toEqual(['0', '1', '0'])
+  await expect(rows.nth(1).getByRole('button', { name: 'Approve' })).toBeVisible()
+})
+
 test.describe('workflow tree on a 360px phone', () => {
   test.use({ viewport: { width: 360, height: 800 } })
 

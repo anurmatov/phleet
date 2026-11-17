@@ -12,6 +12,7 @@ interface DefVersion { version: number; definition: string; reason?: string; cre
 interface Definition {
   name: string; namespace: string; taskQueue: string; version: number; isActive: boolean
   description?: string; updatedAt: string; definition: string; versions: DefVersion[]
+  createdAt?: string; createdBy?: string
 }
 
 const T0 = '2026-11-12T12:00:00Z'
@@ -32,7 +33,8 @@ function workflow(workflowId: string, workflowType: string, phase: string | null
   }
 }
 
-function versioned(name: string, contents: string[], agents: string[] = [], isActive = true): Versioned {
+/** A versioned text whose versions are `contents`, oldest first; the last one is current. */
+export function versioned(name: string, contents: string[], agents: string[] = [], isActive = true): Versioned {
   return {
     name, isActive, agents, currentVersion: contents.length,
     versions: contents.map((content, i) => ({
@@ -250,7 +252,8 @@ export class FakeFleet {
       if (!def) return undefined
       if (m[2]) def.isActive = Boolean(body!.isActive)
       else {
-        def.versions.unshift({ version: def.version, definition: def.definition, reason: 'previous', createdAt: T0, createdBy: 'owner' })
+        // As the orchestrator does: the replaced version's row is stamped with this write's reason and author.
+        def.versions.unshift({ version: def.version, definition: def.definition, reason: body!.reason as string | undefined, createdAt: T0, createdBy: 'owner' })
         def.version += 1
         def.definition = String(body!.definition)
       }

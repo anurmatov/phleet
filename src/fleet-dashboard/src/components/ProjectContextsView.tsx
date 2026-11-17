@@ -1,13 +1,13 @@
 import { useState } from 'react'
 import type { ProjectContextSummary, ProjectContextDetail } from '../types'
 import type { VersionedResource } from '../hooks/useVersionedResource'
-import { computeDiff } from '../utils'
 import FieldHint from './FieldHint'
 import SizeMeter from './SizeMeter'
 import SizeCellView from './SizeCellView'
 import { sizeCell, type MeterLimit } from '../sizeMeter'
 import MemoryText from './MemoryText'
 import Icon from './Icon'
+import VersionCompare, { CompareButton, openFromRow } from './VersionCompare'
 
 interface ProjectContextsViewProps {
   /** The page's state and requests: the same versioned editor the instructions page uses. */
@@ -153,8 +153,6 @@ export default function ProjectContextsView({ state, sizeLimit }: ProjectContext
           const saveMsg = contextSaveMsg[ctx.name] ?? ''
           const selVer = selectedVersion[ctx.name] ?? null
           const currentContent = detail?.versions.find(v => v.versionNumber === detail.currentVersion)?.content ?? ''
-          const selVerContent = selVer !== null ? (detail?.versions.find(v => v.versionNumber === selVer)?.content ?? '') : ''
-          const diffLines = selVer !== null && selVerContent ? computeDiff(selVerContent, currentContent) : null
           const toggleConfirming = ctxToggleConfirm[ctx.name] ?? false
           const toggleState = ctxToggleState[ctx.name] ?? 'idle'
           const toggleMsg = ctxToggleMsg[ctx.name] ?? ''
@@ -255,14 +253,15 @@ export default function ProjectContextsView({ state, sizeLimit }: ProjectContext
                             return (
                               <div
                                 key={v.versionNumber}
-                                className={`instr-version-item${v.versionNumber === detail.currentVersion ? ' current' : ''}${selVer === v.versionNumber ? ' selected' : ''}`}
-                                onClick={() => onSelectVersion(ctx.name, selVer === v.versionNumber ? null : v.versionNumber)}
+                                className={`instr-version-item${v.versionNumber === detail.currentVersion ? ' current' : ''}`}
+                                onClick={e => openFromRow(e, () => onSelectVersion(ctx.name, v.versionNumber))}
                               >
                                 <div className="instr-version-header">
                                   <span className="instr-version-num">v{v.versionNumber}</span>
                                   {v.versionNumber === detail.currentVersion && (
                                     <span className="instr-current-badge">current</span>
                                   )}
+                                  <CompareButton version={v.versionNumber} onOpen={() => onSelectVersion(ctx.name, v.versionNumber)} />
                                   {v.versionNumber !== detail.currentVersion && (
                                     <button
                                       className={`instr-rollback-btn${isRbConfirming ? ' confirming' : ''}`}
@@ -284,28 +283,15 @@ export default function ProjectContextsView({ state, sizeLimit }: ProjectContext
                           })}
                         </div>
 
-                        {diffLines && selVer !== null && (
-                          <div className="instr-diff">
-                            <div className="config-label" style={{ marginBottom: 4 }}>
-                              diff: v{selVer} → v{detail.currentVersion}
-                            </div>
-                            <div className="instr-diff-body">
-                              {diffLines.map((line, i) => (
-                                <div key={i} className={`diff-line diff-${line.type}`}>
-                                  <span className="diff-prefix">
-                                    {line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '}
-                                  </span>
-                                  <span className="diff-text">
-                                    {line.segments
-                                      ? line.segments.map((seg, j) => (
-                                          <span key={j} className={seg.changed ? 'diff-highlight' : ''}>{seg.text}</span>
-                                        ))
-                                      : line.text}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
+                        {selVer !== null && (
+                          <VersionCompare
+                            name={ctx.name}
+                            versions={detail.versions.map(v => ({ number: v.versionNumber, content: v.content, when: v.createdAt, by: v.createdBy, reason: v.reason }))}
+                            current={detail.currentVersion}
+                            chosen={selVer}
+                            format="text"
+                            onClose={() => onSelectVersion(ctx.name, null)}
+                          />
                         )}
                       </div>
                     </div>

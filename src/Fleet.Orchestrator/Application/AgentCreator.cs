@@ -193,6 +193,10 @@ public sealed class AgentCreator(
         // #593: a new endpoint maps only Env Refs this request itself supplies; never the default bot
         // token added below, a global key or another agent's reference.
         var suppliedRefs = Clean(request.EnvRefs);
+        // The key that signs agent identities is attached by nobody, the operator's create included.
+        if (suppliedRefs.FirstOrDefault(ContainerSpecBuilder.IsNeverDelivered) is { } reserved)
+            return WriteFaults.Invalid("env_ref_reserved",
+                $"Env ref '{reserved}' signs agent identities and is never given to an agent. Nothing was changed.");
         foreach (var endpoint in (request.McpEndpoints ?? []).DistinctBy(e => e.McpName, StringComparer.OrdinalIgnoreCase))
         {
             IReadOnlyList<McpHeaderEnvRef?> mappings = endpoint.HeaderEnvRefs ?? [];

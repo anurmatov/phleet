@@ -1,5 +1,6 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
-import { FakeFleet, EDITED_DEFINITION, configOf } from './support/fakeFleet'
+import { FakeFleet, EDITED_DEFINITION, configOf, versioned } from './support/fakeFleet'
+import { HANDBOOK_VERSIONS, RELEASE_VERSIONS, largeDefinition } from '../src/fixtures/versionFixtures'
 import { FakeChat, PIXEL } from './support/fakeChat'
 
 // What the dashboard's views do, driven through the production App against a substituted
@@ -574,18 +575,24 @@ for (const kind of VERSIONED) {
     await expect(save).toBeDisabled()
   })
 
-  test(`${kind.hash}: choosing a version shows its diff, and rollback needs a second click`, async ({ page }) => {
+  test(`${kind.hash}: choosing a version shows its comparison, and rollback needs a second click`, async ({ page }) => {
     const fleet = await open(page, kind.hash)
     const row = rowByName(page, kind.name)
     await row.locator('.instr-header').click()
+    const v2 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v2$/ }) })
     const v1 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v1$/ }) })
-    await v1.click()
-    await expect(v1).toHaveClass(/selected/)
-    await expect(row.locator('.instr-diff')).toContainText('diff: v1 → v2')
-    await v1.click()
-    await expect(row.locator('.instr-diff')).toHaveCount(0)
+    // A press on the row opens the comparison on what that version changed.
+    await v2.locator('.instr-version-meta').click()
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    await expect(comparison.getByRole('status')).toContainText('v1 → v2')
+    await expect(comparison.locator('del.vc-row')).toHaveText(/-.*\bv1\b/)
+    await expect(comparison.locator('ins.vc-row')).toHaveText(/\+.*\bv2\b/)
+    await page.keyboard.press('Escape')
+    await expect(comparison).toHaveCount(0)
 
+    // The row's rollback is still its own button: it does not open the comparison.
     await v1.getByRole('button', { name: 'rollback' }).click()
+    await expect(comparison).toHaveCount(0)
     expect(fleet.writes('POST', `${kind.api}/${kind.name}/rollback/`)).toHaveLength(0)
     await v1.getByRole('button', { name: 'confirm rollback?' }).click()
     await expect(row.locator('.instr-save-row .config-feedback-success')).toHaveText('Rolled back to v1')
@@ -646,6 +653,8 @@ test('instructions: a version deploys to its agent on the second click', async (
   await row.locator('.instr-header').click()
   const v1 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v1$/ }) })
   await v1.getByRole('button', { name: 'deploy to alpha', exact: true }).click()
+  // A press on the deploy button is not a press on the row: no comparison opens.
+  await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(fleet.writes('POST', '/api/agents/alpha/restart-with-version')).toHaveLength(0)
   await v1.getByRole('button', { name: 'confirm deploy to alpha?' }).click()
   await expect(v1.locator('.instr-deploy-success')).toHaveText('Deployed to alpha')
@@ -679,6 +688,10 @@ test('wf-definitions: open, edit, save the next version', async ({ page }) => {
     .toEqual([{ definition: EDITED_DEFINITION, reason: 'wait longer' }])
   await expect(row.locator('.instr-header .instr-version')).toHaveText('v4')
   await expect(row.getByRole('button', { name: 'Save v5' })).toBeDisabled()
+  // A reason stands on the version it was given for: the one this save made, not the one it replaced.
+  await expect(versionRow(row, 4).locator('.instr-version-reason')).toHaveText('wait longer')
+  await expect(versionRow(row, 3).locator('.instr-version-reason')).toHaveText('shorter wait')
+  await expect(versionRow(row, 2).locator('.instr-version-reason')).toHaveCount(0)
 })
 
 test('wf-definitions: invalid JSON blocks the save', async ({ page }) => {
@@ -697,6 +710,7 @@ test('wf-definitions: rollback and disable each need a second click', async ({ p
   await row.locator('.instr-header').click()
   const v2 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v2$/ }) })
   await v2.getByRole('button', { name: 'rollback' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(fleet.writes('PUT', '/api/workflow-definitions/ReviewWorkflow')).toHaveLength(0)
   await v2.getByRole('button', { name: /confirm/ }).click()
   await expect(row.locator('.instr-save-row .config-feedback-success')).toHaveText('Rolled back to v2')
@@ -719,6 +733,351 @@ test('wf-definitions: search filters the list, and the count reaches the sidenav
   await expect(rowByName(page, 'ReviewWorkflow')).toHaveCount(0)
   await page.getByPlaceholder('Search definitions…').fill('review')
   await expect(rowByName(page, 'ReviewWorkflow')).toBeVisible()
+})
+
+// ── Comparing versions ──────────────────────────────────────────────────────────────────────────
+// One comparison for the three pages that keep versions. It opens over the page from a history
+// row, on what that version changed, and either side can then be any version.
+
+const versionRow = (row: Locator, version: number): Locator =>
+  row.locator('.instr-version-item', { has: row.page().locator('.instr-version-num', { hasText: new RegExp(`^v${version}$`) }) })
+/** How many comparisons the page has computed: each one is recorded on its performance timeline. */
+const comparisonsComputed = (page: Page) => page.evaluate(() => performance.getEntriesByName('version-compare').length)
+
+const TEXT_COMPARED = [
+  { hash: 'instructions', name: 'base', seed: (f: FakeFleet) => { f.instructions[0] = versioned('base', HANDBOOK_VERSIONS, ['alpha']) } },
+  { hash: 'project-contexts', name: 'fleet', seed: (f: FakeFleet) => { f.contexts[0] = versioned('fleet', HANDBOOK_VERSIONS, ['alpha']) } },
+] as const
+
+for (const kind of TEXT_COMPARED) {
+  test(`${kind.hash}: a version is compared with the one before it, with the current one, or with any other`, async ({ page }) => {
+    const fleet = await open(page, kind.hash, kind.seed)
+    const row = rowByName(page, kind.name)
+    await row.locator('.instr-header').click()
+    await versionRow(row, 3).getByRole('button', { name: 'Compare v3' }).click()
+
+    // It opens on what v3 changed: v2 against v3, each with its date, author and reason.
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    const older = comparison.getByLabel('Older version')
+    const newer = comparison.getByLabel('Newer version')
+    const summary = comparison.getByRole('status')
+    await expect(older).toHaveValue('2')
+    await expect(newer).toHaveValue('3')
+    await expect(summary).toHaveText(/v2 → v3\s*\+4\s*-4\s*2 changes/)
+    await expect(comparison.getByRole('button', { name: 'What v3 changed' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(comparison.locator('.vc-side').first()).toContainText('owner')
+    await expect(comparison.locator('.vc-side').first()).toContainText('revision 2')
+    await expect(comparison.locator('.vc-side').last()).toContainText('revision 3')
+
+    // Only the changes are drawn. Three replaced lines are one change: removed, then added, each
+    // marked by a sign as well as a colour, with the words that changed picked out.
+    await expect(comparison.locator('del.vc-row')).toHaveCount(4)
+    await expect(comparison.locator('ins.vc-row')).toHaveCount(4)
+    await expect(comparison.locator('del.vc-row').first()).toHaveText(/^20\s*-\s*A review answers one question/)
+    await expect(comparison.locator('ins.vc-row').first()).toHaveText(/^20\s*\+\s*A review answers two questions/)
+    await expect(comparison.locator('del.vc-row').first().locator('mark')).toHaveText(['one question'])
+    await expect(comparison.locator('ins.vc-row').first().locator('mark')).toHaveText(['two questions', 'correct, and is it '])
+    // Three lines of context around a change, and the rest folded until it is asked for.
+    await expect(comparison.getByText('## Reviews', { exact: true })).toBeVisible()
+    await expect(comparison.getByText('# Working agreement')).toHaveCount(0)
+    await expect(comparison.locator('.vc-fold').first()).toContainText('16 unchanged lines')
+    await comparison.getByRole('button', { name: 'Show all 16 unchanged lines' }).click()
+    await expect(comparison.getByText('# Working agreement')).toBeVisible()
+    await expect(comparison.locator('.vc-fold')).toHaveCount(2)
+
+    // The steps go from change to change, bring it into view and mark it.
+    const next = comparison.getByRole('button', { name: 'Next change' })
+    await expect(comparison.getByRole('button', { name: 'Previous change' })).toBeDisabled()
+    await next.click()
+    await expect(summary).toContainText('Change 1 of 2')
+    await expect(comparison.locator('.vc-at')).toHaveCount(6)
+    await next.click()
+    await expect(summary).toContainText('Change 2 of 2')
+    await expect(comparison.locator('.vc-at')).toHaveCount(2)
+    await expect(comparison.locator('.vc-at').first()).toBeInViewport()
+    await expect(next).toBeDisabled()
+    await comparison.getByRole('button', { name: 'Previous change' }).click()
+    await expect(summary).toContainText('Change 1 of 2')
+
+    // One press compares the same version with the one in use.
+    await comparison.getByRole('button', { name: 'Against current' }).click()
+    await expect(older).toHaveValue('3')
+    await expect(newer).toHaveValue('4')
+    await expect(summary).toHaveText(/v3 → v4\s*\+0\s*-1\s*1 change$/)
+    await expect(comparison.locator('del.vc-row')).toHaveText(/No headings in short answers/)
+
+    // Any two versions: each side is chosen freely, and a pair chosen backwards is put in order.
+    await newer.selectOption('2')
+    await expect(older).toHaveValue('2')
+    await expect(newer).toHaveValue('3')
+    await older.selectOption('1')
+    await expect(summary).toContainText('v1 → v3')
+    await older.selectOption('4')
+    await expect(older).toHaveValue('3')
+    await expect(newer).toHaveValue('4')
+    await expect(summary).toContainText('v3 → v4')
+    // Against nothing, every line is an added one.
+    await older.selectOption({ label: 'nothing' })
+    await expect(summary).toHaveText(/nothing → v4\s*\+39\s*-0\s*1 change$/)
+    await expect(comparison.locator('.vc-side').first()).toContainText('Before the first version')
+    await expect(comparison.locator('del.vc-row')).toHaveCount(0)
+    await expect(comparison.locator('ins.vc-row')).toHaveCount(39)
+    await comparison.getByRole('button', { name: 'What v3 changed' }).click()
+    await expect(summary).toContainText('v2 → v3')
+
+    // Closing puts the focus back on the row it was opened from, and nothing was written.
+    const computed = await comparisonsComputed(page)
+    await comparison.getByRole('button', { name: 'Close' }).click()
+    await expect(comparison).toHaveCount(0)
+    await expect(versionRow(row, 3).getByRole('button', { name: 'Compare v3' })).toBeFocused()
+    expect(fleet.calls).toHaveLength(0)
+
+    // With the versions still loaded, the editor beside them is typed in and nothing is compared.
+    await row.locator('textarea.instr-editor').pressSequentially(' and a few more words')
+    await expect(row.getByRole('button', { name: 'Save', exact: true })).toBeEnabled()
+    expect(await comparisonsComputed(page)).toBe(computed)
+  })
+
+  test(`${kind.hash}: the oldest version is compared with nothing, and a press on the row opens it too`, async ({ page }) => {
+    await open(page, kind.hash, kind.seed)
+    const row = rowByName(page, kind.name)
+    await row.locator('.instr-header').click()
+    await versionRow(row, 1).locator('.instr-version-meta').click()
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    await expect(comparison.getByLabel('Older version')).toHaveValue('')
+    await expect(comparison.getByRole('status')).toHaveText(/nothing → v1\s*\+39\s*-0/)
+    await expect(comparison.locator('.vc-note')).toHaveCount(0)
+    // The dialog has the focus, so Escape reaches it; it goes back to the row's own button.
+    await expect(comparison).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(comparison).toHaveCount(0)
+    await expect(versionRow(row, 1).getByRole('button', { name: 'Compare v1' })).toBeFocused()
+
+    // The current version is compared with the one before it, and has no "against current".
+    await versionRow(row, 4).getByRole('button', { name: 'Compare v4' }).click()
+    await expect(comparison.getByRole('status')).toContainText('v3 → v4')
+    await expect(comparison.getByLabel('Newer version').locator('option:checked')).toHaveText('v4 (current)')
+    await expect(comparison.getByRole('button', { name: 'Against current' })).toBeDisabled()
+    // The same version on both sides is said, not drawn as an empty comparison.
+    await comparison.getByLabel('Older version').selectOption('4')
+    await expect(comparison.locator('.vc-note')).toHaveText('v4 is on both sides: there is nothing to compare.')
+  })
+
+  test(`${kind.hash}: the oldest version kept, when earlier ones are gone, does not claim to have written every line`, async ({ page }) => {
+    // Only the newest versions are kept: here v1 and v2 have been dropped.
+    await open(page, kind.hash, f => {
+      kind.seed(f)
+      const kept = kind.hash === 'instructions' ? f.instructions[0] : f.contexts[0]
+      kept.versions = kept.versions.filter(v => v.versionNumber > 2)
+    })
+    const row = rowByName(page, kind.name)
+    await row.locator('.instr-header').click()
+    await versionRow(row, 3).getByRole('button', { name: 'Compare v3' }).click()
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    await expect(comparison.getByRole('status')).toContainText('nothing → v3')
+    await expect(comparison.locator('.vc-note')).toHaveText('Versions before v3 are not kept, so every line of v3 shows as added, not only what it changed.')
+    // With the one before it kept, the note goes.
+    await comparison.getByLabel('Newer version').selectOption('4')
+    await comparison.getByLabel('Older version').selectOption({ label: 'nothing' })
+    await expect(comparison.getByRole('status')).toContainText('nothing → v4')
+    await expect(comparison.locator('.vc-note')).toHaveCount(0)
+  })
+}
+
+/** A definition as the orchestrator sends it: every version one line of JSON, the history newest first. */
+function releaseDefinition(fleet: FakeFleet, versions: string[]) {
+  const [current, ...history] = versions.map((definition, i) => ({ version: i + 1, definition })).reverse()
+  fleet.definitions[0] = {
+    ...fleet.definitions[0], version: current.version, definition: current.definition,
+    createdAt: RELEASE_CREATED, createdBy: 'creator',
+    // A history row is stamped with the write that replaced its version.
+    versions: history.map(v => ({ ...v, reason: `reason for v${v.version + 1}`, createdAt: releaseWritten(v.version + 1), createdBy: `author-of-v${v.version + 1}` })),
+  }
+}
+const RELEASE_CREATED = '2026-11-01T08:30:00Z'
+/** When the write that made `version` happened: a different day for each. */
+const releaseWritten = (version: number) => `2026-11-${10 + version}T12:00:00Z`
+
+test('wf-definitions: a one-line definition is laid out and compared line by line', async ({ page }) => {
+  const fleet = await open(page, 'wf-definitions', f => releaseDefinition(f, RELEASE_VERSIONS))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  // The version in use is a row of the history like the others.
+  await versionRow(row, 3).getByRole('button', { name: 'Compare v3' }).click()
+
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  const older = comparison.getByLabel('Older version')
+  const newer = comparison.getByLabel('Newer version')
+  const summary = comparison.getByRole('status')
+  await expect(older).toHaveValue('2')
+  await expect(newer.locator('option:checked')).toHaveText('v3 (current)')
+  // v3 moved two steps into a loop: the loop's own six lines are the change, not the steps inside it.
+  await expect(summary).toHaveText(/v2 → v3\s*\+6\s*-0\s*2 changes/)
+  await expect(comparison.locator('ins.vc-row')).toHaveText([/\+\s*\{$/, /"type": "loop",$/, /"maxIterations": 3,$/, /"steps": \[$/, /\+\s*\]$/, /\+\s*\},$/])
+  await expect(comparison.locator('del.vc-row')).toHaveCount(0)
+  await expect(comparison.locator('.vc-note')).toHaveCount(0)
+  // Each version carries the reason and the author of the write that made it.
+  await expect(comparison.locator('.vc-side').last()).toContainText('reason for v3')
+  await expect(comparison.locator('.vc-side').last()).toContainText('author-of-v3')
+  await expect(comparison.locator('.vc-side').first()).toContainText('reason for v2')
+  await expect(comparison.getByRole('button', { name: 'Against current' })).toBeDisabled()
+
+  // A long fold opens twenty lines at a time from either end, or all at once.
+  const fold = comparison.locator('.vc-fold').first()
+  await expect(fold).toContainText('25 unchanged lines')
+  await expect(comparison.getByText('"type": "sequence",')).toHaveCount(0)
+  await fold.getByRole('button', { name: 'Show the last 20 of 25 unchanged lines' }).click()
+  await expect(fold).toContainText('5 unchanged lines')
+  await expect(comparison.getByText('"type": "sequence",')).toHaveCount(0)
+  await fold.getByRole('button', { name: 'Show all 5 unchanged lines' }).click()
+  await expect(comparison.getByText('"type": "sequence",')).toBeVisible()
+
+  await comparison.getByRole('button', { name: 'Next change' }).click()
+  await expect(summary).toContainText('Change 1 of 2')
+  await expect(comparison.locator('.vc-at')).toHaveCount(4)
+
+  // Another pair: v1 against v3 also has the longer review, with the number that changed picked out.
+  await older.selectOption('1')
+  await expect(summary).toContainText('v1 → v3')
+  await expect(comparison.locator('del.vc-row')).toHaveText(/-\s*"timeoutMinutes": 45,/)
+  await expect(comparison.locator('del.vc-row mark')).toHaveText('45')
+  await expect(comparison.locator('ins.vc-row mark').first()).toHaveText('60')
+
+  await page.keyboard.press('Escape')
+  await expect(comparison).toHaveCount(0)
+  await expect(versionRow(row, 3).getByRole('button', { name: 'Compare v3' })).toBeFocused()
+
+  // From an older row: what it changed, then the same version against the current one.
+  await versionRow(row, 2).locator('.instr-version-meta').click()
+  await expect(summary).toContainText('v1 → v2')
+  await comparison.getByRole('button', { name: 'Against current' }).click()
+  await expect(summary).toContainText('v2 → v3')
+  await comparison.getByRole('button', { name: 'Close' }).click()
+  await expect(versionRow(row, 2).getByRole('button', { name: 'Compare v2' })).toBeFocused()
+  expect(fleet.calls).toHaveLength(0)
+})
+
+test('wf-definitions: a history row and the comparison’s header say the same of a version', async ({ page }) => {
+  await open(page, 'wf-definitions', f => releaseDefinition(f, RELEASE_VERSIONS))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  // The date as this browser prints it, whatever its time zone.
+  const printed = (iso: string) => page.evaluate(d => new Date(d).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }), iso)
+
+  // Each version is described by the write that made it; the first, by the definition's own creation, and it has no reason.
+  const versions = [
+    { version: 3, written: releaseWritten(3), author: 'author-of-v3', reasons: ['reason for v3'] },
+    { version: 2, written: releaseWritten(2), author: 'author-of-v2', reasons: ['reason for v2'] },
+    { version: 1, written: RELEASE_CREATED, author: 'creator', reasons: [] },
+  ]
+  for (const { version, written, author, reasons } of versions) {
+    const item = versionRow(row, version)
+    const date = await item.locator('.instr-version-meta span').first().getAttribute('title')
+    expect(date).toBe(await printed(written))
+    await expect(item.locator('.instr-version-meta span')).toHaveText([/ago$/, author])
+    await expect(item.locator('.instr-version-reason')).toHaveText(reasons)
+
+    // The comparison opens with that version as its newer side, and says of it what the row says.
+    await item.getByRole('button', { name: `Compare v${version}` }).click()
+    await expect(comparison.getByLabel('Newer version')).toHaveValue(String(version))
+    const side = comparison.locator('.vc-side').last()
+    await expect(side.locator('.vc-side-facts')).toHaveText(`${date} · ${author}`)
+    await expect(side.locator('.vc-side-reason')).toHaveText(reasons)
+    await page.keyboard.press('Escape')
+    await expect(comparison).toHaveCount(0)
+  }
+})
+
+test('wf-definitions: a version that is not JSON is compared as plain text, and the comparison says so', async ({ page }) => {
+  await open(page, 'wf-definitions', f => releaseDefinition(f, ['{ "type": "sequence", not json', RELEASE_VERSIONS[0]]))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  await versionRow(row, 2).getByRole('button', { name: 'Compare v2' }).click()
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  await expect(comparison.locator('.vc-note-warn')).toHaveText('v1 is not valid JSON, so the two versions are compared as plain text.')
+  await expect(comparison.getByRole('status')).toHaveText(/v1 → v2\s*\+1\s*-1/)
+})
+
+test('wf-definitions: a definition of 240,000 characters compares at once, and redrawing the page behind computes nothing', async ({ page }) => {
+  const fleet = await open(page, 'wf-definitions', f => releaseDefinition(f, [largeDefinition(), largeDefinition(true)]))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  const editor = row.locator('textarea.instr-editor')
+  await expect(editor).toHaveValue(/release-approval/)
+  await versionRow(row, 2).getByRole('button', { name: 'Compare v2' }).click()
+
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  await expect(comparison.getByRole('status')).toHaveText(/v1 → v2\s*\+13\s*-30\s*6 changes/)
+  // Seven thousand lines, of which the changes and their context are drawn.
+  expect(await comparison.locator('.vc-row').count()).toBeLessThan(200)
+  await expect(comparison.locator('ins.vc-row mark', { hasText: 'every' })).toHaveCount(1)
+  const times = await page.evaluate(() => performance.getEntriesByName('version-compare').map(e => e.duration))
+  expect(times.length).toBeGreaterThan(0)
+  for (const time of times) expect(time).toBeLessThan(1000)
+
+  // The page behind the dialog redraws: its editor changes, heartbeats arrive. None of it compares again.
+  const computed = times.length
+  for (const draft of ['{ not json', '{ "type": "noop" }', '{ still not json']) {
+    await editor.fill(draft)
+    await expect(editor).toHaveValue(draft)
+  }
+  await expect(row.locator('.wfd-validation-item.blocking')).toContainText('JSON parse error')
+  for (let beat = 0; beat < 5; beat++) fleet.pushAgent('alpha', { currentTask: `task ${beat}` })
+  await page.waitForTimeout(700)
+  expect(await comparisonsComputed(page)).toBe(computed)
+
+  // A new pair is a new comparison; the same pair again is not.
+  await comparison.getByLabel('Older version').selectOption({ label: 'nothing' })
+  await expect(comparison.getByRole('status')).toContainText('nothing → v2')
+  // Every one of its seven thousand lines is drawn as added, and the page is still answering.
+  await expect(comparison.locator('del.vc-row, div.vc-row')).toHaveCount(0)
+  expect(await comparison.locator('ins.vc-row').count()).toBeGreaterThan(5000)
+  const afterNewPair = await comparisonsComputed(page)
+  expect(afterNewPair).toBeGreaterThan(computed)
+  await comparison.getByRole('button', { name: 'Next change' }).click()
+  await expect(comparison.getByRole('status')).toContainText('Change 1 of 1')
+  expect(await comparisonsComputed(page)).toBe(afterNewPair)
+
+  // Closed, there is no comparison at all: typing in the editor computes none.
+  await page.keyboard.press('Escape')
+  await expect(comparison).toHaveCount(0)
+  await editor.pressSequentially('abc')
+  await expect(editor).toHaveValue('{ still not jsonabc')
+  expect(await comparisonsComputed(page)).toBe(afterNewPair)
+})
+
+test.describe('comparing versions on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('the comparison takes the screen, and its lines wrap instead of scrolling sideways', async ({ page }) => {
+    const long = 'This rule is one very long line of prose, as real instructions have, and it goes on well past any screen. '.repeat(7)
+    const fleet = new FakeFleet()
+    fleet.instructions[0] = versioned('base', [`# Rules\n\n${long}\n`, `# Rules\n\n${long.replace('goes on', 'runs on')}\n`], ['alpha'])
+    await fleet.install(page)
+    await page.goto('/#instructions')
+    const row = rowByName(page, 'base')
+    await row.locator('.instr-header').click()
+    await versionRow(row, 2).getByRole('button', { name: 'Compare v2' }).click()
+    const comparison = page.getByRole('dialog', { name: 'Compare versions of base' })
+    await expect(comparison.locator('ins.vc-row mark').first()).toHaveText('runs')
+
+    // A sheet from the bottom edge, as wide as the screen.
+    const box = (await comparison.boundingBox())!
+    expect([box.x, box.width, box.y + box.height]).toEqual([0, 390, 844])
+    const widths = await page.evaluate(() => {
+      const body = document.querySelector('.vc-body')!
+      return { page: document.documentElement.scrollWidth, screen: window.innerWidth, body: body.scrollWidth, bodyBox: body.clientWidth }
+    })
+    expect(widths.page).toBeLessThanOrEqual(widths.screen)
+    expect(widths.body).toBeLessThanOrEqual(widths.bodyBox)
+    // The long line is drawn on many rows of the screen, not one.
+    expect((await comparison.locator('ins.vc-row').first().boundingBox())!.height).toBeGreaterThan(100)
+    // Every control is still there to press.
+    for (const name of ['What v2 changed', 'Against current', 'Previous change', 'Next change', 'Close']) {
+      await expect(comparison.getByRole('button', { name })).toBeInViewport()
+    }
+  })
 })
 
 // ── Chat ────────────────────────────────────────────────────────────────────────────────────────

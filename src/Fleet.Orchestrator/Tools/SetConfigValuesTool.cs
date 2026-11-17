@@ -18,11 +18,20 @@ public sealed class SetConfigValuesTool(
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
+    /// <summary>The header the config token is sent in beside an agent's identity in <c>Authorization</c>.</summary>
+    public const string ConfigTokenHeader = "X-Fleet-Config-Token";
+
+    private static bool IsConfigToken(string? presented, string configToken) =>
+        !string.IsNullOrEmpty(presented)
+        && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(presented)),
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(configToken)));
+
     [McpServerTool(Name = "set_config_values")]
     [Description("""
         Writes one or more keys to the orchestrator .env file and broadcasts config.changed to all peer-config consumers (fleet-telegram, fleet-temporal-bridge, etc.).
 
-        Auth: requires Authorization: Bearer <ORCHESTRATOR_CONFIG_TOKEN> (not the regular auth token). Calls without a valid config token return an authorization error.
+        Auth: requires the config token ORCHESTRATOR_CONFIG_TOKEN (not the regular auth token), sent as the X-Fleet-Config-Token header, or, from a configuration without agent identity, as Authorization: Bearer <token>. Calls without a valid config token return an authorization error.
 
         Parameter:
           values_json (string): JSON object mapping env var keys to string values.
@@ -48,14 +57,18 @@ public sealed class SetConfigValuesTool(
         if (string.IsNullOrWhiteSpace(configToken))
             return Err("config_api_unavailable", "ORCHESTRATOR_CONFIG_TOKEN is not configured on this orchestrator.");
 
-        var authHeader = httpContextAccessor.HttpContext?.Request.Headers.Authorization.FirstOrDefault();
+        // An agent's Authorization carries its identity token (docs/agent-identity.md), so the config
+        // token has its own header. The bearer form stays for configurations from before identity.
+        var request = httpContextAccessor.HttpContext?.Request;
+        var authHeader = request?.Headers.Authorization.FirstOrDefault();
         var bearerToken = authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true
             ? authHeader["Bearer ".Length..].Trim()
             : null;
 
-        if (bearerToken != configToken)
+        if (!IsConfigToken(request?.Headers[ConfigTokenHeader].FirstOrDefault(), configToken)
+            && !IsConfigToken(bearerToken, configToken))
             return Err("unauthorized",
-                "Missing or invalid Authorization header. Provide the config token as 'Authorization: Bearer <ORCHESTRATOR_CONFIG_TOKEN>'.");
+                $"Missing or invalid config token. Provide it as the '{ConfigTokenHeader}' header.");
 
         // 2. Parse values_json — use nullable value type to detect null entries explicitly
         Dictionary<string, string?>? rawKvs;

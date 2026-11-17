@@ -64,7 +64,12 @@ public static class AgentToolAuthorization
                 return result;
 
             var answer = await source.GrantsOfAsync(caller.Name, ct);
-            if (!answer.Known) return result;
+            if (!answer.Known)
+            {
+                // The same rule as a call: under enforcement an agent whose grants cannot be read is shown nothing.
+                if (services.GetService<AgentIdentitySettings>()?.Enforce == true) result.Tools = [];
+                return result;
+            }
             // An agent is shown what it may call. The rest exists, and is not its to see.
             result.Tools = [.. result.Tools.Where(t => AgentToolGrants.Allows(answer.Grants, serverName, t.Name))];
             return result;

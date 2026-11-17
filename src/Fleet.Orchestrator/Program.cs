@@ -104,6 +104,7 @@ if (!string.IsNullOrEmpty(connectionString))
 // Temporal workflow poller (disabled if Temporal:Address is empty)
 builder.Services.AddSingleton<WorkflowStore>();
 builder.Services.AddSingleton<TemporalClientRegistry>();
+builder.Services.AddSingleton<WorkflowWaiterIndex>();
 builder.Services.AddSingleton<IWorkflowSignalClient>(sp => sp.GetRequiredService<TemporalClientRegistry>());
 builder.Services.AddHostedService<TemporalPollerService>();
 

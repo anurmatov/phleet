@@ -262,6 +262,22 @@
   padding: 12px 10px 12px 18px;
 }
 .wf-row-signal-waiting { box-shadow: inset 3px 0 0 var(--warn); }
+
+/* A run that belongs to the one above it sits one step in, tied to it by an elbow. */
+.wf-table { --wf-pad: 18px; --wf-step: 26px; }
+.wf-row--nested { padding-left: calc(var(--wf-pad) + var(--wf-depth) * var(--wf-step)); }
+.wf-nest {
+  position: absolute;
+  top: 0;
+  left: calc(var(--wf-pad) + (var(--wf-depth) - 1) * var(--wf-step) + 6px);
+  width: 12px;
+  height: 25px;
+  border-bottom: 1.5px solid var(--border-strong);
+  border-left: 1.5px solid var(--border-strong);
+  border-bottom-left-radius: 7px;
+}
+/* A run whose owner is not in this list says so in words instead. */
+.wf-owner { color: var(--text-3); font-size: var(--fs-xs); white-space: nowrap; }
 .wf-row-muted:hover { background: var(--hover); }
 
 .wf-type { grid-area: type; font-size: var(--fs-l); font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
@@ -394,6 +410,9 @@
     padding: 12px 14px;
   }
   .wf-id { display: none; }
+  .wf-table { --wf-pad: 14px; --wf-step: 18px; }
+  .wf-row.wf-row--nested { padding-left: calc(var(--wf-pad) + var(--wf-depth) * var(--wf-step)); }
+  .wf-nest { left: calc(var(--wf-pad) + (var(--wf-depth) - 1) * var(--wf-step) + 2px); width: 10px; }
   .wf-type { padding-right: 40px; }
   .wf-actions { justify-content: flex-start; }
   .wf-actions:empty { display: none; }

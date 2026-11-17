@@ -219,7 +219,9 @@ public class ShippedOutputStyleTests
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !Directory.Exists(System.IO.Path.Combine(dir.FullName, ".git")))
+        while (dir is not null
+            && !Directory.Exists(System.IO.Path.Combine(dir.FullName, ".git"))
+            && !File.Exists(System.IO.Path.Combine(dir.FullName, ".git")))
             dir = dir.Parent;
         return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
     }

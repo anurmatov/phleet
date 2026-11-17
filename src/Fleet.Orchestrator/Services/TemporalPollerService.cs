@@ -14,6 +14,7 @@ public sealed class TemporalPollerService(
     WorkflowStore store,
     AgentRegistry registry,
     TemporalClientRegistry clientRegistry,
+    WorkflowWaiterIndex waiters,
     ILogger<TemporalPollerService> logger) : BackgroundService
 {
     private readonly TemporalOptions _opts = opts.Value;
@@ -100,7 +101,9 @@ public sealed class TemporalPollerService(
                                 Repo:         repo,
                                 DocPrs:       docPrs,
                                 Phase:        phase,
-                                GateRef:      gateRef));
+                                GateRef:      gateRef,
+                                ParentWorkflowId: wf.ParentId,
+                                ParentRunId:      wf.ParentRunId));
                         }
                         covered.Add(ns);
                     }
@@ -110,6 +113,9 @@ public sealed class TemporalPollerService(
                     }
                 }
 
+                // History is optional metadata: one budget for the complete snapshot, and every
+                // listed run is published even when that budget expires.
+                await waiters.EnrichAsync(clients, workflows, ct);
                 var changed = store.Update(workflows, covered);
                 if (changed)
                 {

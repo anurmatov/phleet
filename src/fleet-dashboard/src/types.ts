@@ -73,6 +73,11 @@ export interface WorkflowSummary {
   docPrs: string | null
   phase: string | null
   gateRef: string | null
+  /** The run that started this one as a child workflow. Absent from an older orchestrator. */
+  parentWorkflowId?: string | null
+  parentRunId?: string | null
+  /** The run that waits for this one: a driver that started it without being its Temporal parent. */
+  waiterWorkflowId?: string | null
 }
 
 export interface WorkflowEvent {

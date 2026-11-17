@@ -1453,3 +1453,68 @@ for (const colorScheme of ['light', 'dark'] as const) {
     })
   })
 }
+
+// ── Runs that belong together ───────────────────────────────────────────────────────────────────
+
+test('workflows: a driver, the run it started and that run\u2019s review are shown as a tree', async ({ page }, testInfo) => {
+  const fleet = await open(page, 'workflows', f => {
+    const base = f.workflows[1]
+    f.workflows = [
+      // Newest first, as the orchestrator sends them: the review, then its owners.
+      { ...base, workflowId: 'review-9', runId: 'run-review-9', workflowType: 'ConsensusReviewWorkflow', phase: null,
+        parentWorkflowId: 'wf-build-2', parentRunId: 'run-wf-build-2' },
+      { ...base, workflowId: 'driver-7', runId: 'run-driver-7', workflowType: 'DriverWorkflow', phase: 'driving-epic' },
+      { ...base, waiterWorkflowId: 'driver-7' },
+      { ...base, workflowId: 'solo-3', runId: 'run-solo-3', workflowType: 'SoloWorkflow' },
+      // Its owner waits in "Needs your attention", which is another list: said in words.
+      { ...base, workflowId: 'helper-4', runId: 'run-helper-4', workflowType: 'HelperWorkflow', parentWorkflowId: 'wf-review-1', parentRunId: 'run-wf-review-1' },
+      f.workflows[0],
+    ] as typeof f.workflows
+  })
+  const rows = page.locator('.wf-table').first().locator('.wf-row')
+  await expect(rows.locator('.wf-type')).toHaveText(['DriverWorkflow', 'BuildWorkflow', 'ConsensusReviewWorkflow', 'SoloWorkflow', 'HelperWorkflow'])
+  await expect(rows.nth(0)).toHaveAttribute('data-depth', '0')
+  await expect(rows.nth(1)).toHaveAttribute('data-depth', '1')
+  await expect(rows.nth(2)).toHaveAttribute('data-depth', '2')
+  await expect(rows.nth(3)).toHaveAttribute('data-depth', '0')
+  await expect(rows.nth(1).getByRole('img', { name: 'started by the run above' })).toBeVisible()
+  await expect(rows.nth(2).getByRole('img', { name: 'child of the run above' })).toBeVisible()
+  // Each step in really is further right.
+  const left = async (i: number) => (await rows.nth(i).locator('.wf-type').boundingBox())!.x
+  expect(await left(1)).toBeGreaterThan(await left(0))
+  expect(await left(2)).toBeGreaterThan(await left(1))
+  expect(await left(3)).toBe(await left(0))
+
+  await expect(rows.nth(4)).toHaveAttribute('data-depth', '0')
+  await expect(rows.nth(4).locator('.wf-owner')).toHaveText('child of ReviewWorkflow')
+  await page.screenshot({ path: testInfo.outputPath('workflow-tree.png'), fullPage: true })
+
+  // A run that ends leaves its children where they are, now saying whose they were.
+  fleet.pushWorkflows((fleet.workflows as Array<{ workflowId: string }>).filter(w => w.workflowId !== 'driver-7'))
+  await expect(rows.locator('.wf-type')).toHaveText(['BuildWorkflow', 'ConsensusReviewWorkflow', 'SoloWorkflow', 'HelperWorkflow'])
+  await expect(rows.nth(0)).toHaveAttribute('data-depth', '0')
+  await expect(rows.nth(0).locator('.wf-owner')).toHaveText('started by driver-7')
+  await expect(rows.nth(1)).toHaveAttribute('data-depth', '1')
+})
+
+test.describe('workflow tree on a 360px phone', () => {
+  test.use({ viewport: { width: 360, height: 800 } })
+
+  test('nests without sideways scroll', async ({ page }, testInfo) => {
+    const fleet = new FakeFleet()
+    const base = fleet.workflows[1]
+    fleet.workflows = [
+      { ...base, workflowId: 'review-9', runId: 'run-review-9', workflowType: 'ConsensusReviewWorkflow', parentWorkflowId: 'wf-build-2', parentRunId: 'run-wf-build-2' },
+      { ...base, workflowId: 'driver-7', runId: 'run-driver-7', workflowType: 'UweCarteBlancheWorkflow', phase: 'driving-epic' },
+      { ...base, workflowType: 'UwePrImplementationWorkflow', waiterWorkflowId: 'driver-7' },
+    ] as typeof fleet.workflows
+    await fleet.install(page)
+    await page.goto('/#workflows')
+    const rows = page.locator('.wf-table').first().locator('.wf-row')
+    await expect(rows.nth(2)).toHaveAttribute('data-depth', '2')
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+    const box = (await rows.nth(2).locator('.wf-type').boundingBox())!
+    expect(box.x + box.width).toBeLessThanOrEqual(360)
+    await page.screenshot({ path: testInfo.outputPath('workflow-tree-360.png'), fullPage: true })
+  })
+})

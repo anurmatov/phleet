@@ -229,7 +229,9 @@ public sealed class TemporalClientRegistry(
                         Namespace:    ns,
                         TaskQueue:    wf.TaskQueue,
                         Status:       wf.Status.ToString(),
-                        StartTime:    wf.StartTime));
+                        StartTime:    wf.StartTime,
+                        ParentWorkflowId: wf.ParentId,
+                        ParentRunId:      wf.ParentRunId));
                 }
                 covered.Add(ns);
             }
@@ -302,7 +304,9 @@ public sealed class TemporalClientRegistry(
                         Repo:         repo,
                         DocPrs:       docPrs,
                         Phase:        phase,
-                        GateRef:      gateRef));
+                        GateRef:      gateRef,
+                        ParentWorkflowId: wf.ParentId,
+                        ParentRunId:      wf.ParentRunId));
                 }
             }
             catch (Exception ex)

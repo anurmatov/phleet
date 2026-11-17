@@ -554,6 +554,34 @@ treat an auth lookup that could not complete as a pass; let a device token reach
 manage other devices; publish a command for an agent that is not chat-enabled, or let one agent's
 south token act on another agent's conversation; put a credential in a URL.
 
+## Agent identity
+
+How a fleet MCP server knows which agent is calling (`docs/agent-identity.md`). The orchestrator
+signs each agent's name with `FLEET_AGENT_IDENTITY_KEY` (`AgentIdentityTokens` in `Fleet.Shared`:
+`fa1.<purpose>.<subject>.<mac>`, purposes `agent` and `service`) and provisioning writes the token
+as an `Authorization` header on the fleet's own endpoints the agent reaches
+(`AgentConfigFiles.IdentityServerNames`: `fleet-memory`, `fleet-orchestrator`, `fleet-telegram`,
+`fleet-temporal`) at a trusted origin (`AgentConfigFiles.IdentityOrigins`, `AgentIdentity:TrustedOrigins`),
+beside any operator-mapped headers, for a provider that sends MCP headers. `set_config_values` takes
+its config token in `X-Fleet-Config-Token` (`SetConfigValuesTool.ConfigTokenHeader`), which is kept.
+`Fleet.Shared.Mcp` is the one implementation for the servers: `UseAgentIdentity` resolves the caller
+by `AgentIdentityRules.Resolve` (three states: no key, key, key + `FLEET_AGENT_IDENTITY_ENFORCE`)
+and `AddAgentToolAuthorization(serverName)` holds a verified agent to its grants on `tools/call`
+and `tools/list`. The orchestrator's `/mcp` is wired by `UseMcpAgentIdentity` after
+`UseFleetAccess` (service bearer or signed-in browser = operator; a phone is not), with grants
+read from the stored tools (`DbAgentGrantSource`, `AgentConfigFiles.EffectiveMcpGrants`, also served
+at `GET /internal/agent-mcp-grants`). `setup.sh`/`upgrade.sh` generate the key when missing and
+never replace it. Operator tool: `scripts/mint-identity-token.sh`.
+
+MUST NOT: take a caller's identity from `?agent=` or a tool argument when a token was sent; treat a
+wrong token as no token (with a key it is refused, enforced or not); send an agent or service token
+to an address that is not a trusted origin, whatever the endpoint is called; log, return or echo a token or the key
+(`upgrade.sh` writes the key without `add_missing_env_var`, which prints values); deliver the key to
+an agent (`ContainerSpecBuilder.IsNeverDelivered`, `env_ref_reserved`); give a Gemini agent the
+header (its CLI would skip the server); apply grants to an unverified name (it proves nothing) or
+skip them for a verified agent while enforcement is off; make identity depend on the journal key;
+change the token format without `TheFormat_IsPinned…` and the script.
+
 ## Run links
 
 Each `WorkflowSummary` (`/api/workflows`, the dashboard socket, the phone app) says what the run

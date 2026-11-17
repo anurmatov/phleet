@@ -515,6 +515,20 @@ public class SecretBindingEndpointsTests : IAsyncLifetime
         Assert.Equal(0, await DbAsync(db => db.AgentEnvRefs.CountAsync()));
     }
 
+    [Theory]
+    [InlineData("FLEET_AGENT_IDENTITY_KEY")]
+    [InlineData("fleet_agent_identity_key")]
+    public async Task TheKeyThatSignsAgentIdentities_CannotBeAttachedToAnAgent(string requested)
+    {
+        // An agent holding it could mint any agent's token. Not a bound secret: reserved outright.
+        await SeedAgentAsync("agent1");
+
+        var answer = await Tool().ManageAgentEnvRefsAsync("agent1", "add", requested);
+
+        Assert.Contains("signs agent identities", answer);
+        Assert.Equal(0, await DbAsync(db => db.AgentEnvRefs.CountAsync()));
+    }
+
     [Fact]
     public async Task McpTool_MayAttachABoundSecretMarkedAgentAttachable_AndAnyUnboundKey()
     {

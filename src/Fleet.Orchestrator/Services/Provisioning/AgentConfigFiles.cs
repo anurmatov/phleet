@@ -382,6 +382,120 @@ internal static class AgentConfigFiles
                 ? WithAgentParam(e.Url, agent.Name)
                 : e.Url;
 
+    /// <summary>
+    /// The fleet's own MCP servers, by the name every agent knows them under. These are the
+    /// endpoints an agent proves its identity to, and the names its grants for them carry.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> IdentityServerNames =
+        ["fleet-memory", "fleet-orchestrator", "fleet-telegram", "fleet-temporal"];
+
+    /// <summary>
+    /// The agent's identity token, or null when it gets none: no key is configured, its provider
+    /// does not send MCP headers (a header on such an agent's endpoint makes the agent skip the
+    /// server), or its name cannot be a token's subject. Such an agent is an unverified caller.
+    /// </summary>
+    internal static string? IdentityTokenFor(Agent agent, IReadOnlyList<byte[]> keys) =>
+        keys.Count > 0 && SupportsMcpHeaders(agent.Provider) && AgentIdentityTokens.IsValidSubject(agent.Name)
+            ? AgentIdentityTokens.Mint(keys[0], AgentIdentityTokens.PurposeAgent, agent.Name)
+            : null;
+
+    /// <summary>Where the fleet's own servers answer when the deployment does not say: the compose service names.</summary>
+    internal static readonly IReadOnlyList<string> DefaultIdentityOrigins =
+        ["http://fleet-orchestrator:3600", "http://fleet-telegram:3800", "http://fleet-temporal-bridge:3001"];
+
+    /// <summary>
+    /// The origins (scheme, host, port) an identity or service token may be sent to: the fleet's own
+    /// servers. <c>AgentIdentity:TrustedOrigins</c> (comma-separated) replaces
+    /// <see cref="DefaultIdentityOrigins"/>; fleet-memory's configured address is always one of them.
+    /// A token follows the address, never an endpoint's name: whoever can edit an endpoint must not
+    /// be able to point a fleet server's name somewhere else and collect what is sent to it.
+    /// </summary>
+    internal static IReadOnlyCollection<string> IdentityOrigins(IConfiguration config)
+    {
+        var configured = (config["AgentIdentity:TrustedOrigins"] ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var origins = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var url in (configured.Length > 0 ? configured : DefaultIdentityOrigins)
+                     .Append(NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"])))
+            if (OriginOf(url) is { } origin) origins.Add(origin);
+        return origins;
+    }
+
+    /// <summary>Whether <paramref name="url"/> is at one of <paramref name="origins"/>, exactly.</summary>
+    internal static bool IsIdentityDestination(string? url, IReadOnlyCollection<string> origins) =>
+        OriginOf(url) is { } origin && origins.Contains(origin);
+
+    /// <summary>The scheme, host and port of an <c>http(s)</c> address without user info; null for anything else.</summary>
+    private static string? OriginOf(string? url) =>
+        Uri.TryCreate(url?.Trim(), UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+        && uri.UserInfo.Length == 0
+            ? uri.GetLeftPart(UriPartial.Authority).ToLowerInvariant()
+            : null;
+
+    /// <summary>
+    /// <paramref name="mappedHeaders"/> with the agent's identity added to each of the fleet's own
+    /// servers it reaches at a trusted address (<paramref name="origins"/>), fleet-memory always
+    /// among them. The identity is the <c>Authorization</c> header and wins over a mapping of that
+    /// name: who an agent is cannot be configured per endpoint. Other mapped headers stay, such as
+    /// the config token <c>set_config_values</c> reads. Without a token the mappings come back as
+    /// they were.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WithIdentityHeaders(
+        Agent agent, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders, string? identityToken,
+        IReadOnlyCollection<string> origins, string fleetMemoryMcpUrl)
+    {
+        if (identityToken is null) return mappedHeaders;
+
+        var merged = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        foreach (var (name, headers) in mappedHeaders ?? new Dictionary<string, IReadOnlyDictionary<string, string>>())
+            merged[name] = headers;
+
+        // A row's own address decides; fleet-memory without a row is at the configured address.
+        var reached = agent.McpEndpoints
+            .Where(e => IdentityServerNames.Contains(e.McpName, StringComparer.Ordinal) && IsIdentityDestination(e.Url, origins))
+            .Select(e => e.McpName)
+            .Concat(agent.McpEndpoints.Any(e => e.McpName == "fleet-memory") || !IsIdentityDestination(fleetMemoryMcpUrl, origins)
+                ? [] : ["fleet-memory"])
+            .Distinct(StringComparer.Ordinal);
+        foreach (var name in reached)
+        {
+            var headers = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (merged.TryGetValue(name, out var mapped))
+                foreach (var (header, value) in mapped)
+                    if (!string.Equals(header, "Authorization", StringComparison.OrdinalIgnoreCase))
+                        headers[header] = value;
+            headers["Authorization"] = $"{AgentIdentityTokens.Scheme} {identityToken}";
+            merged[name] = headers;
+        }
+        return merged;
+    }
+
+    /// <summary>
+    /// What an agent may call on the fleet's own MCP servers: its enabled tools, and the two every
+    /// agent is given whether or not they are listed (<c>memory_get</c>, and <c>notify_cto</c> for
+    /// every agent but the CTO). The same list the generated allow-lists carry, so a server that
+    /// checks grants agrees with the agent's own CLI.
+    /// </summary>
+    internal static List<string> EffectiveMcpGrants(Agent agent, string? ctoAgentName)
+    {
+        var grants = agent.Tools.Where(t => t.IsEnabled).Select(t => t.ToolName)
+            .Where(name => IdentityServerNames.Any(server =>
+                name.StartsWith($"{AgentToolGrants.Prefix}{server}__", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, AgentToolGrants.Prefix + server, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (!grants.Contains("mcp__fleet-memory__memory_get", StringComparer.OrdinalIgnoreCase))
+            grants.Add("mcp__fleet-memory__memory_get");
+        if (!string.IsNullOrWhiteSpace(ctoAgentName)
+            && !string.Equals(agent.Name, ctoAgentName, StringComparison.OrdinalIgnoreCase)
+            && !grants.Contains("mcp__fleet-temporal__notify_cto", StringComparer.OrdinalIgnoreCase))
+            grants.Add("mcp__fleet-temporal__notify_cto");
+
+        grants.Sort(StringComparer.OrdinalIgnoreCase);
+        return grants;
+    }
+
     /// <param name="mappedHeaders">
     /// #593: each mapped endpoint's resolved headers (<see cref="ResolveMcpHeaders"/>), by endpoint name.
     /// An endpoint without an entry is written as it always was.
@@ -429,7 +543,10 @@ internal static class AgentConfigFiles
         if (!mcpServers.ContainsKey("fleet-memory"))
         {
             var url = WithAgentParam(fleetMemoryMcpUrl, agent.Name);
-            mcpServers["fleet-memory"] = new { type = "http", url };
+            // The agent's identity header goes to the memory server it is given, row or no row.
+            mcpServers["fleet-memory"] = mappedHeaders is not null && mappedHeaders.TryGetValue("fleet-memory", out var headers)
+                ? new { type = "http", url, headers }
+                : new { type = "http", url };
         }
 
         if (filesEnabled && (HasFilesGrant(agent) || JournalGrants.HasSendGrant(agent)) && agent.JournalEnabled && HasTelegramBot(agent)
@@ -470,6 +587,10 @@ internal static class AgentConfigFiles
             foreach (var mapping in mappings)
             {
                 var where = $"MCP endpoint '{endpoint.McpName}' header {mapping.HeaderName}";
+                // Never written into an agent's files, whatever a stored row says (ContainerSpecBuilder.BuildEnv).
+                if (ContainerSpecBuilder.IsNeverDelivered(mapping.EnvRefName))
+                    return (resolved, $"env_ref_reserved: {where} maps {mapping.EnvRefName}, which signs agent identities "
+                        + "and is never given to an agent. Remove the mapping (it blocks every provision of this agent until then).");
                 if (!agent.EnvRefs.Any(r => string.Equals(r.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)))
                     return (resolved, $"{McpHeaderMappings.RefMissing}: {where} maps {mapping.EnvRefName}, which is not an Env Ref "
                         + "of this agent. Correct or remove the mapping (it blocks every provision of this agent until then).");

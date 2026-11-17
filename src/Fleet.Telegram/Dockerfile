@@ -6,6 +6,7 @@ COPY src/Fleet.Telegram/Fleet.Telegram.csproj src/Fleet.Telegram/
 COPY src/Fleet.Contracts/Fleet.Contracts.csproj src/Fleet.Contracts/
 COPY src/Fleet.Shared/Fleet.Shared.csproj src/Fleet.Shared/
 COPY src/Fleet.Shared.Messaging/Fleet.Shared.Messaging.csproj src/Fleet.Shared.Messaging/
+COPY src/Fleet.Shared.Mcp/Fleet.Shared.Mcp.csproj src/Fleet.Shared.Mcp/
 COPY src/Fleet.Shared.Telegram/Fleet.Shared.Telegram.csproj src/Fleet.Shared.Telegram/
 RUN dotnet restore src/Fleet.Telegram/Fleet.Telegram.csproj
 COPY src/ src/

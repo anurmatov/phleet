@@ -141,6 +141,10 @@ public sealed class CallerAuthenticator : IDisposable
         string? authorizationHeader, string? cookieHeader, CancellationToken ct = default, bool fresh = false)
     {
         var bearer = BearerOf(authorizationHeader);
+        // An agent's identity token is not a sign-in credential: it is not looked up here, and so
+        // costs none of the budget for unverified ones. The MCP endpoint reads it.
+        if (Fleet.Shared.AgentIdentityTokens.LooksLikeToken(bearer))
+            return CallerIdentity.Anonymous;
         if (bearer is not null)
         {
             if (IsServiceToken(bearer))

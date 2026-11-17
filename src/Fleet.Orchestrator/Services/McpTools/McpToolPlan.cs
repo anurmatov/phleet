@@ -63,11 +63,13 @@ public static class McpToolPlan
         IReadOnlyDictionary<string, string> envValues,
         IReadOnlyCollection<SecretBinding> bindings,
         string fleetMemoryMcpUrl,
-        Func<string?> journalReadToken)
+        Func<string?> journalReadToken,
+        string? serviceToken = null,
+        IReadOnlyCollection<string>? identityOrigins = null)
     {
         var entries = new List<McpPlanEntry>();
         foreach (var endpoint in agent.McpEndpoints.OrderBy(e => e.McpName, StringComparer.Ordinal))
-            entries.Add(Plan(agent, endpoint, envValues, bindings, journalReadToken));
+            entries.Add(WithServiceIdentity(Plan(agent, endpoint, envValues, bindings, journalReadToken), serviceToken, identityOrigins));
 
         // Every agent is given fleet-memory, whether or not it has a row for it.
         if (!agent.McpEndpoints.Any(e => e.McpName == "fleet-memory"))
@@ -76,10 +78,32 @@ public static class McpToolPlan
             {
                 McpName = "fleet-memory", Url = fleetMemoryMcpUrl, TransportType = McpHeaderMappings.HttpTransport,
             };
-            entries.Add(Plan(agent, implicitMemory, envValues, bindings, journalReadToken));
+            entries.Add(WithServiceIdentity(Plan(agent, implicitMemory, envValues, bindings, journalReadToken), serviceToken, identityOrigins));
         }
 
         return [.. entries.OrderBy(e => e.Name, StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// The fleet's own servers are asked as the orchestrator, by its service token, not as the
+    /// agent: the list is for an operator choosing what to grant, so it must hold every tool, and a
+    /// server that requires tokens would refuse a caller without one. The token is held to no grant,
+    /// so it goes only to a fleet server's name at one of <paramref name="identityOrigins"/>; an
+    /// endpoint that carries the name but points elsewhere is asked without it, and with no origins
+    /// nothing is sent it.
+    /// </summary>
+    private static McpPlanEntry WithServiceIdentity(McpPlanEntry entry, string? serviceToken, IReadOnlyCollection<string>? identityOrigins)
+    {
+        if (serviceToken is null || identityOrigins is null || entry.Target is not { } target
+            || !AgentConfigFiles.IdentityServerNames.Contains(entry.Name, StringComparer.Ordinal)
+            || !AgentConfigFiles.IsIdentityDestination(target.Url.AbsoluteUri, identityOrigins))
+            return entry;
+
+        var headers = new Dictionary<string, string>(target.Headers, StringComparer.Ordinal)
+        {
+            ["Authorization"] = $"{AgentIdentityTokens.Scheme} {serviceToken}",
+        };
+        return entry with { Target = target with { Headers = headers } };
     }
 
     private static McpPlanEntry Plan(
@@ -129,6 +153,10 @@ public static class McpToolPlan
 
         foreach (var mapping in mappings)
         {
+            // The same refusal provisioning makes: the key that signs agent identities is sent nowhere.
+            if (ContainerSpecBuilder.IsNeverDelivered(mapping.EnvRefName))
+                return NotAsked(McpServerTools.Misconfigured,
+                    $"Header {mapping.HeaderName} maps {mapping.EnvRefName}, which signs agent identities and is never sent.");
             if (!agent.EnvRefs.Any(r => string.Equals(r.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)))
                 return NotAsked(McpServerTools.Misconfigured,
                     $"Header {mapping.HeaderName} maps {mapping.EnvRefName}, which is not an Env Ref of this agent.");

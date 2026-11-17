@@ -27,6 +27,8 @@ unset FLEET_QDRANT_VERSION
 unset FLEET_EPIC_GRANTS_ENABLED FLEET_EPIC_GRANTS_MAX_DAYS FLEET_EPIC_GRANTS_DENIED_REPOS FLEET_AUTONOMY_ENABLED
 unset FLEET_EPIC_WATCHER_ENABLED FLEET_EPIC_WATCHER_INTERVAL_SECONDS
 unset FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED FLEET_DURABLE_DELEGATION_ENABLED
+# Agent identity: the key in .env signs every agent's token, so an exported one must never stand in.
+unset FLEET_AGENT_IDENTITY_KEY FLEET_AGENT_IDENTITY_ENFORCE
 # Push notifications: likewise. A key exported in a shell must never stand in for the one in .env.
 unset FLEET_PUSH_ENABLED FLEET_PUSH_APNS_KEY_BASE64 FLEET_PUSH_APNS_KEY_ID FLEET_PUSH_APNS_TEAM_ID FLEET_PUSH_APNS_TOPIC
 # Secret placeholders (fleet-secrets): likewise, .env decides.
@@ -119,6 +121,17 @@ add_missing_env_var FLEET_AUTONOMY_ENABLED false
 add_missing_env_var FLEET_WORKFLOW_FAILURE_NOTIFIER_ENABLED false
 add_missing_env_var FLEET_DURABLE_DELEGATION_ENABLED false
 add_missing_env_var FLEET_PUSH_ENABLED false
+# Agent identity: every host gets the key, generated once and never replaced (every token minted
+# with it would stop verifying). Enforcement is added off and never changed: the operator turns it
+# on after every agent has been reprovisioned. See docs/agent-identity.md.
+if [[ -z "$(read_env_var "$ENV_FILE" "FLEET_AGENT_IDENTITY_KEY")" ]]; then
+  # Written here, not through add_missing_env_var: that prints the value it adds, and this is a key.
+  sed -i.bak -E '/^FLEET_AGENT_IDENTITY_KEY=[[:space:]]*$/d' "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+  [[ -s "$ENV_FILE" && -n "$(tail -c 1 "$ENV_FILE")" ]] && printf '\n' >> "$ENV_FILE"
+  printf 'FLEET_AGENT_IDENTITY_KEY=%s\n' "$(openssl rand 48 | base64 | tr '+/' '-_' | tr -d '=')" >> "$ENV_FILE"
+  ok "Generated FLEET_AGENT_IDENTITY_KEY: agents prove who they are to the fleet's MCP servers with it"
+fi
+add_missing_env_var FLEET_AGENT_IDENTITY_ENFORCE false
 # Secret placeholders: added off when missing, never changed when present.
 add_missing_env_var FLEET_SECRETS_ENABLED false
 

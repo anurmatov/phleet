@@ -9,6 +9,7 @@ import { PhaseChip, RunElbow, RunOwner, WorkflowRefs, nestedRow, shortWorkflowId
 import { arrangeRuns, type PlacedRun } from '../workflowTree'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import CommsJournalPanel from './CommsJournalPanel'
+import DecisionSent from './DecisionSent'
 
 interface AgentsViewProps {
   sorted: AgentState[]
@@ -70,7 +71,7 @@ export default function AgentsView({
     confirmAction: onWfAction,
     signalClick: onSignalClick,
     toggleMenu: onToggleMenu,
-    getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass, signalConfirmKey,
+    getSignalDefs, awaitsDecision, decisionSent, sendAgain, wfActionState, signalKey, wfKey, wfStatusClass, signalConfirmKey,
   } = workflowActions
   // Agent uptimes, heartbeat ages and workflow ages are relative to now: redraw as the clock moves.
   useTick()
@@ -79,14 +80,15 @@ export default function AgentsView({
   )
   // What waits for a person goes first: it is the reason most visits to this page happen. A run
   // nests under the run it belongs with, so the whole tree it sits in goes first.
-  const waiting = activeWorkflows.filter(w => getSignalDefs(w).length > 0)
-  const orderedWorkflows = [...waiting, ...activeWorkflows.filter(w => getSignalDefs(w).length === 0)]
+  // A run whose decision was already sent from here keeps its phase for a while, and is not waiting.
+  const waiting = activeWorkflows.filter(awaitsDecision)
+  const orderedWorkflows = [...waiting, ...activeWorkflows.filter(w => !awaitsDecision(w))]
   const trees: PlacedRun<WorkflowSummary>[][] = []
   for (const placed of arrangeRuns(orderedWorkflows)) {
     if (placed.depth === 0 || trees.length === 0) trees.push([placed])
     else trees[trees.length - 1].push(placed)
   }
-  const waits = (tree: PlacedRun<WorkflowSummary>[]) => tree.some(p => getSignalDefs(p.run).length > 0)
+  const waits = (tree: PlacedRun<WorkflowSummary>[]) => tree.some(p => awaitsDecision(p.run))
   const placedWorkflows = [...trees.filter(waits), ...trees.filter(t => !waits(t))].flat()
 
   const working = sorted.filter(a => a.effectiveStatus !== 'dead' && a.currentTask).length
@@ -200,7 +202,9 @@ export default function AgentsView({
             const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)
             const wfMsg = wfActionMsg[wfKey(wf)] ?? ''
-            const sigDefs = getSignalDefs(wf)
+            const sentLabel = decisionSent(wf)
+            const sigDefs = sentLabel === null ? getSignalDefs(wf) : []
+            const signalState = signalStates[signalKey(wf)]
             const wfClass = wfStatusClass(wf, sigDefs)
             const k = wfKey(wf)
             const menuOpen = wfMenuOpen[k] ?? false
@@ -229,7 +233,7 @@ export default function AgentsView({
                     : shortId}
                 </div>
                 <div className="wf-actions">
-                  {sigDefs.length > 0 && signalStates[signalKey(wf)] !== 'pending' && signalStates[signalKey(wf)] !== 'success' && signalStates[signalKey(wf)] !== 'error' && (
+                  {sigDefs.length > 0 && signalState !== 'pending' && signalState !== 'success' && signalState !== 'error' && (
                     <div className="wf-signal-groups">
                       {sigDefs.map(sig => (
                         <div key={sig.name} className="wf-signal-group">
@@ -254,9 +258,10 @@ export default function AgentsView({
                       ))}
                     </div>
                   )}
-                  {signalStates[signalKey(wf)] === 'pending' && <span className="wf-action-feedback wf-action-pending">…</span>}
-                  {signalStates[signalKey(wf)] === 'success' && <span className="wf-action-feedback wf-action-success">{signalMsg[signalKey(wf)]}</span>}
-                  {signalStates[signalKey(wf)] === 'error' && <span className="wf-action-feedback wf-action-error">{signalMsg[signalKey(wf)]}</span>}
+                  {signalState === 'pending' && <span className="wf-action-feedback wf-action-pending">…</span>}
+                  {sentLabel !== null && signalState !== 'pending' && <DecisionSent label={sentLabel} onSendAgain={() => sendAgain(wf)} />}
+                  {sentLabel === null && signalState === 'success' && <span className="wf-action-feedback wf-action-success">{signalMsg[signalKey(wf)]}</span>}
+                  {signalState === 'error' && <span className="wf-action-feedback wf-action-error">{signalMsg[signalKey(wf)]}</span>}
 
                   {(ws === 'idle' || ws === 'confirming-cancel' || ws === 'confirming-restart' || ws === 'confirming-terminate') && (
                     <div className="wf-secondary-actions">

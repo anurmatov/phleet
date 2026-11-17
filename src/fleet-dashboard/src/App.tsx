@@ -195,7 +195,7 @@ export default function App() {
   const create = useCreateAgent(agents)
   const log = useLogViewer()
 
-  const { pruneSentSignals, getSignalDefs, signalModal } = wfActions
+  const { pruneSentSignals, awaitsDecision, signalModal } = wfActions
   const { refreshWorkflows, refreshCompleted, receiveWorkflows } = wfLists
   const loadInstructions = instr.reload
   const loadProjectContexts = ctx.reload
@@ -367,7 +367,7 @@ export default function App() {
     return { agentByWorkflow, workflowByAgent }
   }, [agents, workflows])
 
-  const attentionCount = workflows.filter(wf => getSignalDefs(wf).length > 0).length
+  const attentionCount = workflows.filter(awaitsDecision).length
   const unreadAlerts = alerts.filter(a => !a.dismissed)
   const toastAlerts = alerts.filter(a => a.showToast)
   const sorted = Object.values(agents).sort((a, b) => a.agentName.localeCompare(b.agentName))
@@ -577,7 +577,7 @@ export default function App() {
           onClose={() => wfActions.setSignalModal(null)}
           onCommentChange={comment => wfActions.setSignalModal(m => m ? { ...m, comment } : null)}
           onSend={(payload) => {
-            wfActions.sendSignal(signalModal.wf, signalModal.signalName, payload ?? signalModal.button.payload, signalModal.comment || undefined)
+            wfActions.sendSignal(signalModal.wf, signalModal.signalName, payload ?? signalModal.button.payload, signalModal.comment || undefined, signalModal.button.label)
             wfActions.setSignalModal(null)
           }}
         />

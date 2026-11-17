@@ -431,10 +431,97 @@ test('workflows: a signal goes through the confirm bar and is then reported as s
 
   await card.getByRole('button', { name: 'Approve' }).click()
   await page.locator('.confirm-bar').getByRole('button', { name: 'Confirm' }).click()
-  await expect(card.locator('.wf-action-success')).toHaveText('Signal sent')
+  // The run is not waiting for anyone now: it leaves "Waiting for you" for the list, saying what was sent.
+  await expect(wfRow(page, 'ReviewWorkflow').locator('.wf-action-success')).toHaveText('Approve sent')
+  await expect(card).toHaveCount(0)
   const sent = fleet.writes('POST', '/api/workflows/fleet/signal/wf-review-1')
   expect(sent).toHaveLength(1)
   expect(sent[0].body).toMatchObject({ signalName: 'design-approval', payload: '{"Value":"approved"}', runId: 'run-wf-review-1' })
+})
+
+// ── A decision that was sent ────────────────────────────────────────────────────────────────────
+// The run keeps its phase until the workflow takes the signal up. Until then its buttons stay away
+// on both pages, it is not counted as waiting, and the note that replaces them offers them back.
+
+test('agents view: after a decision the buttons stay away, past the moment the result is shown', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const review = wfRow(page, 'ReviewWorkflow')
+  await expect(navBadge(page, 'Workflows')).toHaveText('1')
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await expect(review.locator('.wf-decision-sent')).toContainText('Approve sent')
+  await expect(review.locator('.wf-decision-sent')).toContainText('waiting for the workflow')
+  await expect(review).not.toHaveClass(/wf-row-signal-waiting/)
+  // Nothing waits for a person, so the Workflows badge counts the two that run.
+  await expect(navBadge(page, 'Workflows')).toHaveText('2')
+
+  // The result of a signal is shown for four seconds. The buttons used to come back after it.
+  await page.waitForTimeout(4500)
+  await expect(review.locator('.wf-decision-sent')).toContainText('Approve sent')
+  await expect(review.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+  await expect(review.getByRole('button', { name: 'Reject' })).toHaveCount(0)
+
+  // The same phase reported again changes nothing.
+  fleet.pushWorkflows([...fleet.workflows])
+  await expect(review.locator('.wf-decision-sent')).toBeVisible()
+  await expect(review.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+
+  // The workflows page agrees: the run is in the list, not under "Waiting for you".
+  await page.evaluate(() => { window.location.hash = '#workflows' })
+  await expect(wfRow(page, 'ReviewWorkflow').locator('.wf-decision-sent')).toContainText('Approve sent')
+  await expect(page.locator('.attention-card')).toHaveCount(0)
+})
+
+test('agents view: a sent decision ends when the run moves on, and the phase asks again when it returns', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const review = wfRow(page, 'ReviewWorkflow')
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await expect(review.locator('.wf-decision-sent')).toBeVisible()
+
+  const [waiting, other] = fleet.workflows as Array<Record<string, unknown>>
+  fleet.pushWorkflows([{ ...waiting, phase: 'building' }, other])
+  await expect(review.locator('.wf-decision-sent')).toHaveCount(0)
+  await expect(review.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+
+  fleet.pushWorkflows([waiting, other])
+  await expect(review.getByRole('button', { name: 'Approve' })).toBeVisible()
+  await expect(review.locator('.wf-decision-sent')).toHaveCount(0)
+  await expect(navBadge(page, 'Workflows')).toHaveText('1')
+})
+
+test('agents view: "Send again" brings the buttons back, and a second decision is sent', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const review = wfRow(page, 'ReviewWorkflow')
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await review.locator('.wf-decision-sent').getByRole('button', { name: 'Send again' }).click()
+  await expect(review.locator('.wf-decision-sent')).toHaveCount(0)
+  await expect(navBadge(page, 'Workflows')).toHaveText('1')
+
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await expect(review.locator('.wf-decision-sent')).toContainText('Approve sent')
+  expect(fleet.writes('POST', '/api/workflows/fleet/signal/wf-review-1')).toHaveLength(2)
+})
+
+test('a decision sent with a comment is named by its button, and one that fails keeps the buttons', async ({ page }) => {
+  const refused = 'POST /api/workflows/fleet/signal/wf-review-1'
+  const fleet = await open(page, 'workflows', f => { f.refuse[refused] = { status: 500, json: { error: 'temporal unavailable' } } })
+  const card = page.locator('.attention-card', { hasText: 'ReviewWorkflow' })
+  await card.getByRole('button', { name: 'Approve' }).click()
+  await page.locator('.confirm-bar').getByRole('button', { name: 'Confirm' }).click()
+  await expect(card.locator('.wf-action-error')).toBeVisible()
+  await expect(wfRow(page, 'ReviewWorkflow')).toHaveCount(0)
+  await expect(card.getByRole('button', { name: 'Reject' })).toBeVisible({ timeout: 6000 })
+  delete fleet.refuse[refused]
+
+  await card.getByRole('button', { name: 'Reject' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByPlaceholder('Comment (optional)').fill('needs a rollback plan')
+  await dialog.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(wfRow(page, 'ReviewWorkflow').locator('.wf-decision-sent')).toContainText('Reject sent')
+  await expect(card).toHaveCount(0)
 })
 
 test('workflows: a signal that needs a comment opens the dialog and sends the comment', async ({ page }) => {
@@ -503,7 +590,7 @@ test('agents view: its workflow rows confirm on the second click', async ({ page
   await review.getByRole('button', { name: 'Approve' }).click()
   expect(fleet.writes('POST', '/api/workflows/fleet/signal/')).toHaveLength(0)
   await review.getByRole('button', { name: 'confirm approve?' }).click()
-  await expect(review.locator('.wf-action-success')).toHaveText('Signal sent')
+  await expect(review.locator('.wf-action-success')).toHaveText('Approve sent')
   expect(fleet.writes('POST', '/api/workflows/fleet/signal/wf-review-1')).toHaveLength(1)
 
   const build = wfRow(page, 'BuildWorkflow')

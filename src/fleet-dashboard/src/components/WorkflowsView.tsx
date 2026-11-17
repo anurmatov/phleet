@@ -9,6 +9,7 @@ import { arrangeRuns } from '../workflowTree'
 import WorkflowHistoryPanel from './WorkflowHistoryPanel'
 import Icon from './Icon'
 import { PhaseChip, RunElbow, RunOwner, WorkflowRefs, nestedRow, shortWorkflowId } from './WorkflowBits'
+import DecisionSent from './DecisionSent'
 
 type CompletedStatusFilter = 'all' | 'failed' | 'completed' | 'canceled' | 'terminated'
 
@@ -41,13 +42,12 @@ interface SignalButtonsProps {
   signalStates: Record<string, 'idle' | 'pending' | 'success' | 'error'>
   signalMsg: Record<string, string>
   signalKey: (wf: WorkflowSummary) => string
-  sentSignals: Set<string>
   onSignalBtnClick: (wf: WorkflowSummary, sig: SignalDef, btn: SignalButton) => void
 }
 
 function SignalButtons({
   wf, sigDefs, signalStates, signalMsg,
-  signalKey, sentSignals, onSignalBtnClick,
+  signalKey, onSignalBtnClick,
 }: SignalButtonsProps) {
   const sk = signalKey(wf)
   const state = signalStates[sk]
@@ -55,8 +55,6 @@ function SignalButtons({
   if (state === 'pending') return <span className="wf-action-feedback wf-action-pending">…</span>
   if (state === 'success') return <span className="wf-action-feedback wf-action-success">{signalMsg[sk]}</span>
   if (state === 'error')   return <span className="wf-action-feedback wf-action-error">{signalMsg[sk]}</span>
-
-  if (sentSignals.has(`${wf.workflowId}::${wf.phase}`)) return null
 
   if (sigDefs.length === 0) return null
 
@@ -110,14 +108,14 @@ export default function WorkflowsView({
   } = lists
   const onStartWorkflow = () => lists.setStartOpen(true)
   const {
-    wfActionMsg, signalStates, signalMsg, sentSignals,
+    wfActionMsg, signalStates, signalMsg,
     menuOpen: wfMenuOpen,
     openDetail: onWfClick,
     signalClick: onSignalClick,
     toggleMenu: onToggleMenu,
     sendSignal: onSendSignal,
     runAction: onExecuteWfAction,
-    getSignalDefs, wfActionState, signalKey, wfKey, wfStatusClass,
+    getSignalDefs, awaitsDecision, decisionSent, sendAgain, wfActionState, signalKey, wfKey, wfStatusClass,
   } = actions
   // The rows show ages ("3m ago"): redraw as the clock moves.
   useTick()
@@ -183,7 +181,7 @@ export default function WorkflowsView({
     else if (wf.issueNumber) desc += ` — #${wf.issueNumber}`
     setPendingConfirm({
       description: desc,
-      onConfirm: () => onSendSignal(wf, sig.name, btn.payload),
+      onConfirm: () => onSendSignal(wf, sig.name, btn.payload, undefined, btn.label),
     })
   }
 
@@ -198,10 +196,11 @@ export default function WorkflowsView({
   }
 
   // All signal-waiting workflows, cross-namespace — for the attention section
-  const attentionWorkflows = workflows.filter(wf => getSignalDefs(wf).length > 0)
+  const attentionWorkflows = workflows.filter(awaitsDecision)
 
-  // Main table excludes signal-waiting workflows (they show in attention section instead)
-  const mainTableWorkflows = filteredWorkflows.filter(wf => getSignalDefs(wf).length === 0)
+  // Main table excludes signal-waiting workflows (they show in attention section instead). A run
+  // whose decision was sent from here is back in the table until the workflow takes it up.
+  const mainTableWorkflows = filteredWorkflows.filter(wf => !awaitsDecision(wf))
 
   return (
     <div className="view-page">
@@ -249,7 +248,6 @@ export default function WorkflowsView({
                       signalStates={signalStates}
                       signalMsg={signalMsg}
                       signalKey={signalKey}
-                      sentSignals={sentSignals}
                       onSignalBtnClick={handleSignalBtnClick}
                     />
                   </div>
@@ -289,8 +287,8 @@ export default function WorkflowsView({
             const shortId = shortWorkflowId(wf.workflowId)
             const ws = wfActionState(wf)
             const wfMsg = wfActionMsg[wfKey(wf)] ?? ''
-            const sigDefs = getSignalDefs(wf)
-            const wfClass = wfStatusClass(wf, sigDefs)
+            const sentLabel = decisionSent(wf)
+            const wfClass = wfStatusClass(wf, [])
             const k = wfKey(wf)
             const menuOpen = wfMenuOpen[k] ?? false
             const nest = nestedRow(depth)
@@ -321,6 +319,7 @@ export default function WorkflowsView({
                     : shortId}
                 </div>
                 <div className="wf-actions">
+                  {sentLabel !== null && <DecisionSent label={sentLabel} onSendAgain={() => sendAgain(wf)} />}
                   {ws === 'idle' && (
                     <div className="wf-secondary-actions wf-actions-desktop">
                       <button

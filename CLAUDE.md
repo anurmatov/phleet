@@ -292,6 +292,31 @@ with a card or card assignment lacks canonical content; `Program.cs` then exits 
 `app.Run()`. The Temporal delegate `repo` field stays for replay and the agent ignores it. Upgrade
 runbook: `docs/upgrading/remove-project-context-cards.md`.
 
+## Memory search
+
+fleet-memory indexes a memory as one Qdrant point per section (`MemorySections`, `MemoryIndexPlan`;
+`Search__SectionChars` 1200, `Search__MaxSections` 200) and answers a search in the order id, title,
+tag, keyword, meaning (`MemoryService.Search.cs`): the first three from the in-memory
+`MemoryCatalogue`, the last two from the index's two sides, fused in code by `SearchFusion` so a hit
+can say which side found it. Every point carries `index_hash` and `index_format`; at start
+`FileWatcherService.FullIndexAsync` reads them once and a file whose hash matches is not embedded
+again. `IVectorIndex` is the seam the tests fake (`VectorStore` is Qdrant); the real `VectorStore`
+is tested against a real Qdrant by `bash tests/memory-qdrant/run.sh` (the `*Qdrant*` test classes,
+skipped elsewhere), which a change to any Qdrant request must pass. See `docs/memory-search.md`.
+
+MUST NOT: fill the catalogue after the service listens (`FileWatcherService.StartAsync` reads the
+files before the web server starts; a search on an empty catalogue answers an id with its
+neighbours); change what is written for an unchanged memory (the terms of `Bm25Tokenizer` /
+`MemoryWords`, the dense or sparse text, the sections, the payload) without raising
+`MemoryIndexPlan.Format`, or leave an input of a point out of `MemoryIndexPlan.HashOf` (the start
+would skip the file as unchanged); give a point another id than `VectorStore.PointIdFor` (section 0
+keeps the id a memory's one point had, which is how old points are replaced); record a file's hash
+in `MemoryService._indexed` before all its points are written and its stale ones removed; return a
+section where a memory is listed, counted or found; change the JSON of
+`GET /internal/memory/search` (`MemorySearchResult`: the dashboard reads those names); weaken the
+`memory_search` ACL post-filter, which applies to every kind of hit; add the `Search__*` settings to
+a bound options class (they are parsed from the raw strings, like the size guidance).
+
 ## Secret placeholders
 
 Off by default (`FLEET_SECRETS_ENABLED=false` → orchestrator `SecretProxy__Enabled`; selects the
@@ -561,7 +586,9 @@ signs each agent's name with `FLEET_AGENT_IDENTITY_KEY` (`AgentIdentityTokens` i
 `fa1.<purpose>.<subject>.<mac>`, purposes `agent` and `service`) and provisioning writes the token
 as an `Authorization` header on the fleet's own endpoints the agent reaches
 (`AgentConfigFiles.IdentityServerNames`: `fleet-memory`, `fleet-orchestrator`, `fleet-telegram`,
-`fleet-temporal`), beside any operator-mapped headers, for a provider that sends MCP headers.
+`fleet-temporal`) at a trusted origin (`AgentConfigFiles.IdentityOrigins`, `AgentIdentity:TrustedOrigins`),
+beside any operator-mapped headers, for a provider that sends MCP headers. `set_config_values` takes
+its config token in `X-Fleet-Config-Token` (`SetConfigValuesTool.ConfigTokenHeader`), which is kept.
 `Fleet.Shared.Mcp` is the one implementation for the servers: `UseAgentIdentity` resolves the caller
 by `AgentIdentityRules.Resolve` (three states: no key, key, key + `FLEET_AGENT_IDENTITY_ENFORCE`)
 and `AddAgentToolAuthorization(serverName)` holds a verified agent to its grants on `tools/call`
@@ -583,7 +610,8 @@ credential on `fleet-net`, or an agent goes around the server that checks who it
 MUST NOT: read `Query["agent"]` in a fleet MCP server or attribute anything to a name a model typed
 when the call is made as an agent (`AgentCallerHttp.AgentNameOr`; a source test guards the three
 servers); take a caller's identity from `?agent=` or a tool argument when a token was sent; treat a
-wrong token as no token (it is refused in every state); log, return or echo a token or the key
+wrong token as no token (with a key it is refused, enforced or not); send an agent or service token
+to an address that is not a trusted origin, whatever the endpoint is called; log, return or echo a token or the key
 (`upgrade.sh` writes the key without `add_missing_env_var`, which prints values); deliver the key to
 an agent (`ContainerSpecBuilder.IsNeverDelivered`, `env_ref_reserved`); give a Gemini agent the
 header (its CLI would skip the server); apply grants to an unverified name (it proves nothing) or

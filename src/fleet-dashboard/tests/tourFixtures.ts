@@ -1,4 +1,5 @@
 import { configOf } from './support/fakeFleet'
+import { HANDBOOK_VERSIONS, RELEASE_VERSIONS } from '../src/fixtures/versionFixtures'
 // Synthetic answers for every route the dashboard reads, so each page can be drawn with
 // something on it. Used by the visual tour (tour.browser.spec.ts). Nothing here is real: no
 // address, no name, no key.
@@ -130,6 +131,27 @@ export const memoryDoc = {
   content: '# How deploys reach the host\n\nA merge to `main` builds the images. The deploy pipeline pulls them and recreates the services **one at a time**.\n\n- the orchestrator first\n- then the bridge\n- agents last, by reprovision\n\n```\n./deploy.sh --service orchestrator\n```\n',
 }
 
+// ── memory search ───────────────────────────────────────────────────────────────────────────────
+
+/** What a search answers: three hits that matched the words, then two that are only related by meaning. */
+export const memorySearchHits = [
+  { id: 'm-1', title: 'How deploys reach the host', project: 'project', type: 'reference', tags: ['deploy', 'ops'], updated_at: minutesAgo(300),
+    snippet: 'A merge to main builds the images. The pipeline pulls them and recreates the services one at a time.',
+    highlights: [], match: 'title', score: null },
+  { id: 'm-5', title: 'Rollback checklist', project: 'project', type: 'decision', tags: ['deploy'], updated_at: minutesAgo(700),
+    snippet: 'Before a rollback, check which image the host is running and whether a migration went with it.',
+    highlights: [], match: 'tag', score: null },
+  { id: 'm-6', title: 'Заметки о выкладке на стенд', project: 'project', type: 'learning', tags: ['ops'], updated_at: minutesAgo(2100),
+    snippet: '…перед выкладкой проверь, что deploy на стенде прошёл, и только потом запускай deploy на основном сервере…',
+    highlights: [[30, 6], [79, 6]], match: 'keyword', score: null },
+  { id: 'm-2', title: 'Provider CLI pins and why each one is where it is', project: 'project', type: 'decision', tags: ['providers'], updated_at: minutesAgo(1500),
+    snippet: 'Each provider CLI is pinned to one version in the image, and a bump changes every occurrence in the same commit.',
+    highlights: [], match: 'meaning', score: 0.62 },
+  { id: 'm-3', title: 'Review checklist the reviewers agreed on', project: 'project', type: 'learning', tags: ['review'], updated_at: minutesAgo(4000),
+    snippet: 'Read the diff before the description. Ask what happens when the service restarts halfway through.',
+    highlights: [], match: 'meaning', score: 0.48 },
+]
+
 export const devices = {
   devices: [
     { deviceId: 'd-1', kind: 'browser', name: 'This browser', registeredAt: minutesAgo(5000), lastSeenAt: minutesAgo(0), revokedAt: null, current: true },
@@ -156,6 +178,7 @@ export const routes: Record<string, unknown> = {
   '/api/repositories': repositories,
   '/api/memory': memories,
   '/api/memory/m-1': memoryDoc,
+  '/api/memory/search': memorySearchHits,
   '/api/memory/stats/reads': { since: minutesAgo(10000), entries: [] },
   '/api/prompt-size-policy': { unit: 'utf8Bytes', instruction: { limitBytes: 10000, limitKey: 'k' }, projectContext: { limitBytes: 10000, limitKey: 'k' } },
   '/api/chat/agents': { available: true, agents: [{ agentName: 'agent1', displayName: 'Agent 1' }, { agentName: 'agent2', displayName: 'Agent 2' }] },
@@ -342,6 +365,24 @@ export function chatAnswer(method: string, path: string, body: unknown): unknown
 /** What this browser has shown of each thread: Agent 2's has moved on since. */
 export const chatSeen = { agent1: chatHistory.length, agent2: 6 }
 
+/** An instruction whose last four versions differ as real ones do: a reworded sentence, three lines replaced, a line gone. */
+const handbookDetail = {
+  name: 'base', currentVersion: 12,
+  versions: HANDBOOK_VERSIONS.map((content, i) => ({
+    versionNumber: 9 + i, content, createdAt: `2026-11-${10 + i} 09:${10 + i * 7}:00`, createdBy: i % 2 ? 'agent1' : 'owner',
+    reason: [null, 'Read the comments too', 'Reviews answer two questions; say when nobody answers', 'Headings are allowed again'][i],
+  })).reverse(),
+}
+
+/** A definition as the orchestrator sends it: each version one line of JSON. The last one moved two steps into a loop. */
+const releaseDetail = {
+  ...workflowDefinitions[0], createdAt: minutesAgo(90000), createdBy: 'owner', definition: RELEASE_VERSIONS[2],
+  versions: [
+    { version: 13, definition: RELEASE_VERSIONS[1], reason: 'Review up to three times', createdAt: minutesAgo(3000), createdBy: 'agent1' },
+    { version: 12, definition: RELEASE_VERSIONS[0], reason: 'Give the reviewer an hour', createdAt: minutesAgo(20000), createdBy: 'owner' },
+  ],
+}
+
 /** Every page of the dashboard, by the hash that opens it. */
 export const pages = [
   'agents', 'workflows', 'chat', 'instructions', 'project-contexts', 'output-styles', 'repositories',
@@ -357,6 +398,9 @@ export const scenes = [
   { name: 'logs', hash: 'agents' },
   { name: 'instruction-open', hash: 'instructions' },
   { name: 'new-instruction', hash: 'instructions' },
+  { name: 'version-compare', hash: 'instructions', override: { '/api/instructions/base': handbookDetail } },
+  { name: 'definition-open', hash: 'wf-definitions', override: { '/api/workflow-definitions/UwePrImplementationWorkflow': releaseDetail } },
+  { name: 'definition-compare', hash: 'wf-definitions', override: { '/api/workflow-definitions/UwePrImplementationWorkflow': releaseDetail } },
   { name: 'start-workflow', hash: 'workflows' },
   { name: 'workflow-history', hash: 'workflows' },
   { name: 'signal-comment', hash: 'workflows' },
@@ -365,6 +409,8 @@ export const scenes = [
   { name: 'more-sheet', hash: 'agents' },
   { name: 'visual-editor', hash: 'wf-definitions' },
   { name: 'memory-open', hash: 'memory' },
+  { name: 'memory-search', hash: 'memory' },
+  { name: 'memory-search-related', hash: 'memory', override: { '/api/memory/search': memorySearchHits.filter(h => h.match === 'meaning') } },
   { name: 'chat-open', hash: 'chat' },
   { name: 'sign-in', hash: 'agents', override: { '/api/auth/session': { authRequired: true, signedIn: false } } },
   { name: 'first-run', hash: 'agents', override: {

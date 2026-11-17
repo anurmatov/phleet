@@ -54,7 +54,8 @@ internal sealed class AgentFileRenderer(
         // Who the agent is, to the fleet's own MCP servers: a header beside any the operator mapped.
         mappedHeaders = AgentConfigFiles.WithIdentityHeaders(
             agent, mappedHeaders,
-            AgentConfigFiles.IdentityTokenFor(agent, Fleet.Shared.Mcp.AgentIdentitySettings.From(config).Keys));
+            AgentConfigFiles.IdentityTokenFor(agent, Fleet.Shared.Mcp.AgentIdentitySettings.From(config).Keys),
+            AgentConfigFiles.IdentityOrigins(config), fleetMemoryMcpUrl);
         var hasMappedHeaders = mappedHeaders is { Count: > 0 };
         var appsettings = AgentConfigFiles.GenerateAppsettingsJson(
             agent, ctoAgentName, style, journal, _policy.PrimaryHumanRawValue(), chat, hasMappedHeaders);

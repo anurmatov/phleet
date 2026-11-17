@@ -49,6 +49,8 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
             "TOTP_SECRET",
             "GITHUB_APP_PEM",
             "POLYMARKET_PRIVATE_KEY",
+            // Signs every agent's identity token: whoever reads it can be any agent.
+            ContainerSpecBuilder.AgentIdentityKeyName,
         ], StringComparer.OrdinalIgnoreCase);
 
     public static bool IsDenylisted(string key) =>

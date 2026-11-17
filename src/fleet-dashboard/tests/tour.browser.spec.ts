@@ -111,9 +111,26 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
   'instruction-open': async page => {
     await page.locator('.instr-header').first().click()
     await expect(page.locator('textarea.instr-editor')).toBeVisible()
-    await page.locator('.instr-version-item').nth(1).click()
   },
   'new-instruction': async page => { await page.getByRole('button', { name: 'New instruction' }).click() },
+  // What v11 changed: three lines replaced and one reworded, far enough apart to fold what lies between.
+  'version-compare': async page => {
+    await page.locator('.instr-header').first().click()
+    await page.getByRole('button', { name: 'Compare v11' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.getByRole('button', { name: 'Next change' }).click()
+  },
+  // A definition's editor and its history: each version with the date, author and reason of its own write.
+  'definition-open': async page => {
+    await page.locator('.instr-header').first().click()
+    await expect(page.locator('textarea.instr-editor')).toBeVisible()
+  },
+  // JSON: two steps moved into a new loop, so only the loop's own lines are changes.
+  'definition-compare': async page => {
+    await page.locator('.instr-header').first().click()
+    await page.getByRole('button', { name: 'Compare v14' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+  },
   'start-workflow': async page => {
     await page.getByRole('button', { name: 'Start' }).click()
     await expect(page.getByRole('dialog')).toBeVisible()
@@ -136,6 +153,27 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
     if (await memory.count() === 0) await page.locator('.memory-tree-project-btn').first().click()
     if (await memory.count() === 0) await page.locator('.memory-tree-type-btn').first().click()
     await memory.click()
+  },
+  'memory-search': async (page, phone) => {
+    // Both groups, the marked words, and two filters set. A desktop has room to open a hit beside
+    // them; a phone folds the read stats away so the second group is on the screen too.
+    const filters = page.getByRole('group', { name: 'Filters' })
+    await filters.getByLabel('Project').selectOption('project')
+    await filters.getByLabel('Tag').selectOption('deploy')
+    await page.getByRole('searchbox', { name: 'Search memories' }).fill('deploy')
+    await expect(page.getByRole('region', { name: /^Related by meaning/ })).toBeVisible()
+    if (phone) {
+      // The alert toast lies over the foot of a phone's list: put it away, as a person would.
+      await page.locator('.toast-close').click()
+      await page.locator('.memory-stats-toggle-btn').click()
+      await page.mouse.move(0, 0)
+    } else await page.locator('.memory-result-item').first().click()
+  },
+  'memory-search-related': async (page, phone) => {
+    // Nothing matched the words: the page says so above what is only related.
+    await page.getByRole('searchbox', { name: 'Search memories' }).fill('nightly jobs')
+    await expect(page.locator('.memory-results-notice')).toBeVisible()
+    if (phone) await page.locator('.toast-close').click()
   },
   'chat-open': async page => {
     await page.locator('.chat-agent').first().click()

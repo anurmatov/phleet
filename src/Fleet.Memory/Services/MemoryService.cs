@@ -5,19 +5,24 @@ using Microsoft.Extensions.Options;
 
 namespace Fleet.Memory.Services;
 
-public sealed class MemoryService(
+public sealed partial class MemoryService(
     MemoryFileStore fileStore,
-    VectorStore vectorStore,
+    IVectorIndex vectorStore,
     IEmbeddingService embeddingService,
     IOptions<QdrantOptions> qdrantOptions,
     MemorySizeGuidance sizeGuidance,
-    ILogger<MemoryService> logger)
+    ILogger<MemoryService> logger,
+    MemoryCatalogue? catalogue = null,
+    MemoryIndexSettings? indexSettings = null)
 {
     private readonly float _similarityThreshold = qdrantOptions.Value.SimilarityThreshold;
+    private readonly MemoryCatalogue _catalogue = catalogue ?? new MemoryCatalogue();
+    private readonly MemoryIndexSettings _settings = indexSettings ?? new MemoryIndexSettings();
 
     /// <summary>
-    /// The exact string a memory is embedded as — one input, no chunking. The #346 size report and
-    /// guidance measure this string, so it is the one definition both the probe and the index use.
+    /// A memory's title and content as one string: what a memory of one section is embedded as, and
+    /// what the #346 size report and guidance measure for every memory. A longer memory is embedded
+    /// in sections (<see cref="MemoryIndexPlan"/>), each as the title, a blank line and the section.
     /// </summary>
     public static string EmbeddingText(MemoryDocument doc) => $"{doc.Title}\n\n{doc.Content}";
 
@@ -44,10 +49,15 @@ public sealed class MemoryService(
         {
             try
             {
-                var embedding = await embeddingService.EmbedAsync(EmbeddingText(doc), ct);
-                var candidates = await vectorStore.SearchDenseOnlyAsync(embedding, limit: 3, ct);
+                // The new memory's first section against every indexed section, one candidate per
+                // memory: a memory of one section is compared whole, as it always was.
+                var probe = MemoryIndexPlan.Build(doc, doc.FilePath, _settings);
+                var embedding = await embeddingService.EmbedAsync(probe.DenseText(probe.Sections[0]), ct);
+                var candidates = SearchFusion.BestPerMemory(
+                        await vectorStore.SearchDenseAsync(embedding, SimilarCandidates * SectionOverfetch, null, ct))
+                    .Take(SimilarCandidates);
 
-                foreach (var (filePath, score) in candidates)
+                foreach (var (filePath, score, _, _) in candidates)
                 {
                     if (score >= _similarityThreshold)
                     {
@@ -83,8 +93,7 @@ public sealed class MemoryService(
         MemoryDocument? onDisk = null;
         try
         {
-            onDisk = await ParseForIndexAsync(doc.FilePath);
-            await IndexDocumentAsync(onDisk, doc.FilePath, ct);
+            onDisk = await IndexCurrentFileAsync(doc.FilePath, ct);
         }
         catch (InvalidDataException ex)
         {
@@ -110,35 +119,6 @@ public sealed class MemoryService(
         sizeGuidance.LogWrite(size, surface, "store", doc.Id);
 
         return (doc, similarMemories, indexingWarning, size);
-    }
-
-    public async Task<List<MemoryDocument>> SearchAsync(string query, int limit = 10, string? type = null, string? project = null, string? agent = null, CancellationToken ct = default)
-    {
-        var queryEmbedding = await embeddingService.EmbedAsync(query, ct);
-
-        var filters = new Dictionary<string, string>();
-        if (type is not null) filters["memory_type"] = type;
-        if (project is not null) filters["project"] = MemoryDocument.NormalizeProject(project);
-        if (agent is not null) filters["agent_name"] = agent;
-
-        var results = await vectorStore.SearchAsync(queryEmbedding, query, limit, filters.Count > 0 ? filters : null, ct);
-
-        var documents = new List<MemoryDocument>();
-        foreach (var (filePath, score) in results)
-        {
-            try
-            {
-                var doc = await fileStore.ParseFileAsync(filePath);
-                if (doc is not null)
-                    documents.Add(doc);
-            }
-            catch (InvalidDataException ex)
-            {
-                logger.LogError(ex, "Corrupt memory file skipped during search result assembly: {Path}", filePath);
-            }
-        }
-
-        return documents;
     }
 
     public async Task<List<Dictionary<string, string>>> ListAsync(string? type = null, string? project = null, string? agent = null, string? tag = null)
@@ -229,8 +209,7 @@ public sealed class MemoryService(
         MemoryDocument? onDisk = null;
         try
         {
-            onDisk = await ParseForIndexAsync(filePath);
-            await IndexDocumentAsync(onDisk, filePath, ct);
+            onDisk = await IndexCurrentFileAsync(filePath, ct);
         }
         catch (InvalidDataException ex)
         {
@@ -258,8 +237,8 @@ public sealed class MemoryService(
 
         fileStore.Delete(filePath, permanent);
 
-        // Remove from Qdrant
-        await vectorStore.DeleteAsync(filePath, ct);
+        // Remove from the catalogue and from Qdrant
+        await RemoveIndexEntryAsync(filePath, ct);
     }
 
     public Dictionary<string, int> GetStats() => fileStore.GetStats();
@@ -270,49 +249,4 @@ public sealed class MemoryService(
     /// </summary>
     public Task<Dictionary<string, int>> GetScopedStatsAsync(Func<string?, bool> canRead, CancellationToken ct) =>
         fileStore.GetScopedStatsAsync(canRead, ct);
-
-    /// <summary>
-    /// Indexes a memory file into Qdrant.
-    /// Throws <see cref="InvalidDataException"/> if the file cannot be parsed (bad YAML or not a memory file).
-    /// Other exceptions indicate infrastructure failures (Qdrant, embedding) and propagate as-is.
-    /// </summary>
-    public async Task IndexFileAsync(string filePath, CancellationToken ct = default) =>
-        await IndexDocumentAsync(await ParseForIndexAsync(filePath), filePath, ct);
-
-    private async Task<MemoryDocument> ParseForIndexAsync(string filePath)
-    {
-        // ParseFileAsync throws InvalidDataException for bad YAML (corrupt file).
-        // Returns null only for files without a frontmatter header (not a memory file).
-        var doc = await fileStore.ParseFileAsync(filePath);
-        if (doc is null)
-            throw new InvalidDataException($"File is not a parseable memory file: {filePath}");
-        return doc;
-    }
-
-    private async Task IndexDocumentAsync(MemoryDocument doc, string filePath, CancellationToken ct)
-    {
-        var textToEmbed = EmbeddingText(doc);
-        var embedding = await embeddingService.EmbedAsync(textToEmbed, ct);
-
-        var payload = new Dictionary<string, object>
-        {
-            ["file_path"] = filePath,
-            ["memory_id"] = doc.Id,
-            ["memory_type"] = doc.Type,
-            ["agent_name"] = doc.Agent,
-            ["project"] = MemoryDocument.NormalizeProject(doc.Project),
-            ["title"] = doc.Title,
-            ["tags"] = doc.Tags,
-            ["created"] = doc.Created.ToString("o")
-        };
-
-        await vectorStore.UpsertAsync(filePath, embedding, textToEmbed, payload, ct);
-        logger.LogInformation("Indexed memory {Id} ({Type}): {Title}", doc.Id, doc.Type, doc.Title);
-    }
-
-    public async Task RemoveFromIndexAsync(string filePath, CancellationToken ct = default)
-    {
-        await vectorStore.DeleteAsync(filePath, ct);
-        logger.LogInformation("Removed {Path} from index", filePath);
-    }
 }

@@ -32,6 +32,7 @@ namespace Fleet.Orchestrator.Tests.Identity;
 public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
 {
     private const string ServiceBearer = "synthetic-service-token";
+    private const string ConfigToken = "synthetic-config-token";
     private static readonly byte[] Key = AgentIdentityTokensTests.Key;
 
     private SqliteConnection _connection = null!;
@@ -68,6 +69,7 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
             ["Provisioning:EnvFilePath"] = _envFile,
             ["AgentIdentity:Key"] = withKey ? AgentIdentityTokensTests.Encode(Key) : "",
             ["AgentIdentity:Enforce"] = enforce ? "true" : "false",
+            ["Orchestrator:ConfigToken"] = ConfigToken,
         });
         builder.Services.AddDbContext<OrchestratorDbContext>(o => o.UseSqlite(_connection));
         builder.Services.AddSingleton<ISecretHasher>(new Argon2idSecretHasher(memoryKib: 64, iterations: 1));
@@ -75,7 +77,11 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
         builder.Services.AddAgentIdentity(builder.Configuration);
         builder.Services.AddSingleton<DbAgentGrantSource>();
         builder.Services.AddSingleton<IAgentGrantSource>(sp => sp.GetRequiredService<DbAgentGrantSource>());
+        builder.Services.Configure<Fleet.Orchestrator.Configuration.RabbitMqOptions>(o => { o.Host = ""; o.Exchange = ""; });
+        builder.Services.AddSingleton<ConfigService>();
+        builder.Services.AddSingleton<IConfigWriter>(sp => sp.GetRequiredService<ConfigService>());
         builder.Services.AddMcpServer().WithHttpTransport().WithTools<StandInTools>()
+            .WithTools<Fleet.Orchestrator.Tools.SetConfigValuesTool>()
             .AddAgentToolAuthorization(OrchestratorMcp.ServerName);
 
         _app = builder.Build();
@@ -84,7 +90,8 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
             var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
             await db.Database.EnsureCreatedAsync();
             db.Agents.Add(NewAgent("worker", "mcp__fleet-orchestrator__list_agents"));
-            db.Agents.Add(NewAgent("cto-agent", "mcp__fleet-orchestrator__list_agents", "mcp__fleet-orchestrator__update_agent_config"));
+            db.Agents.Add(NewAgent("cto-agent", "mcp__fleet-orchestrator__list_agents", "mcp__fleet-orchestrator__update_agent_config",
+                "mcp__fleet-orchestrator__set_config_values"));
             await db.SaveChangesAsync();
         }
 
@@ -112,19 +119,23 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
 
     private static string AgentToken(string name) => AgentIdentityTokens.Mint(Key, AgentIdentityTokens.PurposeAgent, name);
 
-    private Task<McpClient> ConnectAsync(string? bearer) =>
-        McpClient.CreateAsync(new HttpClientTransport(
+    private Task<McpClient> ConnectAsync(string? bearer, Dictionary<string, string>? headers = null)
+    {
+        headers ??= [];
+        if (bearer is not null) headers["Authorization"] = $"Bearer {bearer}";
+        return McpClient.CreateAsync(new HttpClientTransport(
             new HttpClientTransportOptions
             {
                 Endpoint = new Uri("http://localhost/mcp"),
                 TransportMode = HttpTransportMode.StreamableHttp,
-                AdditionalHeaders = bearer is null ? null : new Dictionary<string, string> { ["Authorization"] = $"Bearer {bearer}" },
+                AdditionalHeaders = headers.Count == 0 ? null : headers,
             },
             new HttpClient(_app.GetTestServer().CreateHandler()), loggerFactory: null, ownsHttpClient: true));
+    }
 
-    private static async Task<string> CallAsync(McpClient client, string tool)
+    private static async Task<string> CallAsync(McpClient client, string tool, Dictionary<string, object?>? arguments = null)
     {
-        var result = await client.CallToolAsync(tool);
+        var result = await client.CallToolAsync(tool, arguments);
         var text = string.Concat(result.Content.OfType<TextContentBlock>().Select(c => c.Text));
         return (result.IsError == true ? "ERROR " : "") + text;
     }
@@ -141,6 +152,60 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
         if (bearer is not null) request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {bearer}");
         using var response = await http.SendAsync(request);
         return response.StatusCode;
+    }
+
+    private static Dictionary<string, object?> ConfigWrite(string value) =>
+        new() { ["values_json"] = JsonSerializer.Serialize(new Dictionary<string, string> { ["EXAMPLE_SETTING"] = value }) };
+
+    /// <summary>
+    /// <c>set_config_values</c> needs the config token, and an agent's <c>Authorization</c> is its
+    /// identity: the config token travels in its own header, which provisioning keeps beside the
+    /// identity. Both checks still apply, with enforcement off and on.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SetConfigValues_TakesTheConfigTokenBesideTheIdentity_AndStillChecksBoth(bool enforce)
+    {
+        await StartAsync(enforce);
+        var withConfig = new Dictionary<string, string> { [Fleet.Orchestrator.Tools.SetConfigValuesTool.ConfigTokenHeader] = ConfigToken };
+        var wrongConfig = new Dictionary<string, string> { [Fleet.Orchestrator.Tools.SetConfigValuesTool.ConfigTokenHeader] = "not-the-config-token" };
+
+        await using (var coordinator = await ConnectAsync(AgentToken("cto-agent"), withConfig))
+        {
+            var said = await CallAsync(coordinator, "set_config_values", ConfigWrite("one"));
+            Assert.True(said.Contains("EXAMPLE_SETTING"), said);
+        }
+        Assert.Contains("EXAMPLE_SETTING=one", await File.ReadAllTextAsync(_envFile));
+
+        await using (var wrong = await ConnectAsync(AgentToken("cto-agent"), wrongConfig))
+            Assert.Contains("unauthorized", await CallAsync(wrong, "set_config_values", ConfigWrite("two")));
+        await using (var none = await ConnectAsync(AgentToken("cto-agent")))
+            Assert.Contains("unauthorized", await CallAsync(none, "set_config_values", ConfigWrite("two")));
+        // The config token is not a grant: an agent without the tool is refused before it runs.
+        await using (var worker = await ConnectAsync(AgentToken("worker"), withConfig))
+            Assert.StartsWith("ERROR " + AgentToolAuthorization.NotGrantedCode, await CallAsync(worker, "set_config_values", ConfigWrite("two")));
+        Assert.DoesNotContain("EXAMPLE_SETTING=two", await File.ReadAllTextAsync(_envFile));
+    }
+
+    /// <summary>A configuration from before the header still works while tokens are not required, and is refused once they are.</summary>
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task SetConfigValues_ByTheConfigTokenAsBearer_WorksOnlyWhileTokensAreNotRequired(bool enforce, bool served)
+    {
+        await StartAsync(enforce);
+
+        if (served)
+        {
+            await using var legacy = await ConnectAsync(ConfigToken);
+            Assert.Contains("EXAMPLE_SETTING", await CallAsync(legacy, "set_config_values", ConfigWrite("legacy")));
+            Assert.Contains("EXAMPLE_SETTING=legacy", await File.ReadAllTextAsync(_envFile));
+        }
+        else
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, await ListStatusAsync(ConfigToken));
+        }
     }
 
     [Fact]
@@ -206,7 +271,7 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
 
         await using (var byBearer = await ConnectAsync(ServiceBearer))
         {
-            Assert.Equal(2, (await byBearer.ListToolsAsync()).Count);
+            Assert.Equal(3, (await byBearer.ListToolsAsync()).Count);
             Assert.Equal("updated", await CallAsync(byBearer, "update_agent_config"));
         }
 

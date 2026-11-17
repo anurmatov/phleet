@@ -329,6 +329,9 @@
 .wf-action-feedback { padding: 4px 10px; border-radius: var(--r-pill); font-size: var(--fs-s); overflow-wrap: anywhere; }
 .wf-action-pending { color: var(--text-3); }
 .wf-action-success { background: var(--accent-soft); color: var(--accent); }
+/* In place of a run's decision buttons once a decision was sent (components/DecisionSent.tsx). */
+.wf-decision-sent { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.wf-decision-wait { color: var(--text-2); font-size: var(--fs-s); }
 .wf-action-error { background: var(--danger-soft); color: var(--danger); }
 
 .wf-status-completed, .phase-green { background: var(--accent-soft); color: var(--accent); }

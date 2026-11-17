@@ -302,6 +302,7 @@ public sealed class AgentIdentityMcpTests
             await using var client = await enforcing.ConnectAsync(AgentToken("agent-1"));
 
             Assert.StartsWith("ERROR " + AgentToolAuthorization.GrantsUnavailableCode, await CallAsync(client, "whoami"));
+            Assert.Empty(await client.ListToolsAsync());
         }
 
         await using var observing = await StartAsync(withKey: true, enforce: false);
@@ -309,6 +310,7 @@ public sealed class AgentIdentityMcpTests
         await using var served = await observing.ConnectAsync(AgentToken("agent-1"));
 
         Assert.Equal("Agent:agent-1", await CallAsync(served, "whoami"));
+        Assert.Equal(2, (await served.ListToolsAsync()).Count);
     }
 
     // ── settings ─────────────────────────────────────────────────────────────

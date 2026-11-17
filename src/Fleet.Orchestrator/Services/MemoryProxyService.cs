@@ -35,8 +35,30 @@ public sealed class MemoryProxyService(IHttpClientFactory httpClientFactory, ICo
     public async Task<HttpResponseMessage> GetIdsAsync(CancellationToken ct = default) =>
         await CreateClient().GetAsync($"{BaseUrl}/internal/memory/ids", ct);
 
-    public async Task<HttpResponseMessage> SearchAsync(string q, CancellationToken ct = default) =>
-        await CreateClient().GetAsync($"{BaseUrl}/internal/memory/search?q={Uri.EscapeDataString(q)}", ct);
+    /// <summary>
+    /// The search parameters fleet-memory accepts besides <c>q</c>, in the order they are sent.
+    /// Nothing else a caller puts on <c>/api/memory/search</c> is forwarded.
+    /// </summary>
+    public static readonly IReadOnlyList<string> SearchFilterNames = ["project", "type", "tag", "since", "limit"];
+
+    /// <summary>
+    /// <c>q</c> and each named filter that has a value, escaped. A value is passed as it was typed:
+    /// fleet-memory is the one that says a <c>since</c> or a <c>limit</c> is wrong (a 400).
+    /// </summary>
+    public static string BuildSearchQuery(string q, Func<string, string?> filter)
+    {
+        var query = new System.Text.StringBuilder("q=").Append(Uri.EscapeDataString(q));
+        foreach (var name in SearchFilterNames)
+        {
+            var value = filter(name);
+            if (!string.IsNullOrEmpty(value))
+                query.Append('&').Append(name).Append('=').Append(Uri.EscapeDataString(value));
+        }
+        return query.ToString();
+    }
+
+    public async Task<HttpResponseMessage> SearchAsync(string q, Func<string, string?> filter, CancellationToken ct = default) =>
+        await CreateClient().GetAsync($"{BaseUrl}/internal/memory/search?{BuildSearchQuery(q, filter)}", ct);
 
     public async Task<HttpResponseMessage> GetAsync(string id, CancellationToken ct = default) =>
         await CreateClient().GetAsync($"{BaseUrl}/internal/memory/{Uri.EscapeDataString(id)}", ct);

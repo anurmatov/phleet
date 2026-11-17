@@ -167,7 +167,10 @@ public static class OrchestratorGrantCacheRegistration
     public static IServiceCollection AddAgentIdentityFromOrchestrator(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddAgentIdentity(configuration);
-        services.AddHttpClient(OrchestratorGrantCache.HttpClientName);
+        // The answer is what this server believes every agent may do: from the configured address
+        // only, never from wherever a redirect points.
+        services.AddHttpClient(OrchestratorGrantCache.HttpClientName)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false });
         services.AddSingleton<OrchestratorGrantCache>();
         services.AddSingleton<IAgentGrantSource>(sp => sp.GetRequiredService<OrchestratorGrantCache>());
         services.AddHostedService(sp => sp.GetRequiredService<OrchestratorGrantCache>());

@@ -56,7 +56,9 @@ public static class MemoryEndpoints
         app.MapGet("/api/memory/search", async (HttpRequest req, string? q, MemoryProxyService memProxy, CancellationToken ct) =>
         {
             if (!CheckMemoryAuth(req)) return Results.Unauthorized();
-            var resp = await memProxy.SearchAsync(q ?? "", ct);
+            // q and the filters fleet-memory knows, and nothing else on the query string. Its answer,
+            // a 400 for a bad since or limit included, goes back with its own status and body.
+            var resp = await memProxy.SearchAsync(q ?? "", name => req.Query[name].FirstOrDefault(), ct);
             var body = await resp.Content.ReadAsStringAsync(ct);
             return Results.Content(body, "application/json", null, (int)resp.StatusCode);
         });

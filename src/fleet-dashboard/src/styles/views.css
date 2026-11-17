@@ -34,6 +34,14 @@
   line-height: 1;
 }
 .memory-search-clear:hover { background: var(--hover); color: var(--text); }
+/* The browser's own clear button would sit under ours. */
+.memory-search-input::-webkit-search-cancel-button { display: none; }
+/* Project, type and tag: three in a row at any width the pane has, each a third of it and cut
+   short rather than pushing the row wider. "Clear filters" takes the line under them. */
+.memory-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.memory-filter { flex: 1 1 calc((100% - 12px) / 3); min-width: 0; padding: 0 6px; font-size: var(--fs-s); text-overflow: ellipsis; }
+.memory-filter--set { border-color: var(--accent-line); background: var(--accent-soft); }
+.memory-filters-clear { margin-left: auto; }
 
 .memory-tree, .memory-search-results { flex: 1; min-height: 0; padding: 6px; overflow-y: auto; }
 .memory-tree-placeholder { padding: 16px 12px; color: var(--text-3); font-size: var(--fs-m); }
@@ -88,7 +96,61 @@
 }
 .memory-result-title, .memory-stats-row-title { overflow: hidden; font-size: var(--fs-m); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .memory-result-meta, .memory-stats-row-meta { margin-top: 1px; color: var(--text-3); font-size: var(--fs-xs); }
-.memory-result-snippet { margin-top: 2px; overflow: hidden; color: var(--text-2); font-size: var(--fs-s); text-overflow: ellipsis; white-space: nowrap; }
+/* A snippet is the passage that matched: up to three lines of it, so the marked words are seen. */
+.memory-result-snippet {
+  display: -webkit-box;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+.memory-result-snippet mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--warn) 30%, transparent);
+  color: var(--text);
+  font-weight: 600;
+}
+.memory-result-head { display: flex; align-items: center; gap: 8px; }
+.memory-result-head .memory-result-title { flex: 1; min-width: 0; }
+.memory-result-match { flex-shrink: 0; height: 18px; padding: 0 7px; font-size: var(--fs-2xs); }
+.memory-result-match--id, .memory-result-match--title, .memory-result-match--tag, .memory-result-match--keyword {
+  background: var(--info-soft);
+  color: var(--info);
+}
+.memory-result-match--id { font-family: var(--mono); }
+.memory-result-detail { color: var(--text-2); font-family: var(--mono); }
+.memory-result-meta { overflow-wrap: anywhere; }
+.memory-results-group + .memory-results-group { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.memory-results-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px 4px;
+  color: var(--text-3);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.memory-results-heading .memory-tree-count { margin-left: 0; letter-spacing: 0; }
+.memory-results-notice {
+  margin: 4px 4px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--r-m);
+  background: var(--warn-soft);
+  color: var(--text);
+  font-size: var(--fs-s);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
 
 .memory-stats-panel { flex-shrink: 0; border-top: 1px solid var(--border); }
 .memory-stats-header { display: flex; align-items: center; gap: 4px; padding: 4px 6px; }
@@ -310,6 +372,124 @@
 .wf-ev-workflowfailed .wf-ev-type, .wf-ev-activityfailed .wf-ev-type, .wf-ev-activitytaskfailed .wf-ev-type { color: var(--danger); }
 .wf-ev-workflowcanceled .wf-ev-type, .wf-ev-signalreceived .wf-ev-type { color: var(--warn); }
 
+/* ── Comparing two versions ──────────────────────────────────────────────── */
+/* Opened from a version history, in the frame a workflow's history has but wider: an
+   instruction's lines are long. One column: a change is its removed lines, then its added ones. */
+
+.vc-modal { width: min(1180px, 100%); height: min(900px, calc(100dvh - 48px)); }
+.vc-head { display: flex; flex-direction: column; flex-shrink: 0; gap: 12px; padding: 14px 20px 12px; border-bottom: 1px solid var(--border); }
+.vc-pair { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; gap: 8px 10px; }
+.vc-arrow { display: flex; align-items: center; height: var(--control); color: var(--text-3); }
+.vc-side { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.vc-side-pick { display: flex; align-items: center; gap: 8px; }
+.vc-side-label { color: var(--text-3); font-size: var(--fs-2xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.vc-select { flex: 1; min-width: 0; max-width: 220px; }
+.vc-side-facts { color: var(--text-3); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.vc-side-reason {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.vc-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
+.vc-summary {
+  display: flex;
+  align-items: baseline;
+  flex: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 10px;
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  font-variant-numeric: tabular-nums;
+}
+.vc-summary-pair, .vc-count-add, .vc-count-remove { font-family: var(--mono); font-weight: 600; }
+.vc-summary-pair { color: var(--text); }
+.vc-count-add { color: var(--accent); }
+.vc-count-remove { color: var(--danger); }
+.vc-steps { display: flex; flex-shrink: 0; gap: 2px; }
+.vc-presets .seg-btn:disabled { opacity: 0.5; }
+
+.vc-body {
+  /* How wide one level of a line's indentation is drawn, and where it stops growing. */
+  --vc-unit: 1ch;
+  --vc-cap: 60ch;
+  flex: 1;
+  min-height: 0;
+  padding: 8px 0 16px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+.vc-note { margin: 6px 20px 10px; padding: 10px 12px; border-radius: var(--r-m); background: var(--surface-2); color: var(--text-2); font-family: var(--font); font-size: var(--fs-s); line-height: 1.45; }
+.vc-note-warn { border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--warn); }
+
+/* A line: its number on each side, its mark, its text. Added and removed lines keep the mark as
+   well as the colour, so they read without it. */
+.vc-row { display: flex; min-height: 1.6em; color: var(--text-2); text-decoration: none; scroll-margin-top: 5.5em; }
+.vc-no {
+  flex: 0 0 calc(var(--vc-digits, 3) * 1ch + 16px);
+  padding-right: 6px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+.vc-mark { flex: 0 0 3ch; font-weight: 700; text-align: center; white-space: pre; user-select: none; }
+/* A wrapped line continues under its own first word, not under the margin. */
+.vc-text {
+  --vc-pad: min(calc(var(--vc-lead, 0) * var(--vc-unit)), var(--vc-cap));
+  flex: 1;
+  min-width: 0;
+  padding: 0 16px 0 var(--vc-pad);
+  text-indent: calc(var(--vc-pad) * -1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.vc-lead { display: inline-block; width: var(--vc-pad); overflow: hidden; text-indent: 0; vertical-align: top; white-space: pre; tab-size: 4; }
+.vc-add { background: var(--accent-soft); color: var(--text); }
+.vc-remove { background: var(--danger-soft); color: var(--text); }
+.vc-add .vc-mark { color: var(--accent); }
+.vc-remove .vc-mark { color: var(--danger); }
+.vc-add .vc-no, .vc-remove .vc-no { color: var(--text-2); }
+/* The words that changed inside a changed line. */
+.vc-word { border-radius: 3px; background: color-mix(in srgb, var(--accent) 34%, transparent); color: inherit; }
+.vc-remove .vc-word { background: color-mix(in srgb, var(--danger) 32%, transparent); }
+/* The change the steps stand on. */
+.vc-at { box-shadow: inset 4px 0 0 var(--info); }
+.vc-at .vc-no { color: var(--info); font-weight: 600; }
+
+/* Unchanged lines, folded away: how many, and more of them on request. */
+.vc-fold {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  margin: 6px 0;
+  padding: 2px 12px;
+  border-block: 1px solid var(--border);
+  background: var(--surface-2);
+  font-family: var(--font);
+}
+.vc-fold-count { padding: 0 8px; color: var(--text-3); font-size: var(--fs-s); font-variant-numeric: tabular-nums; }
+.vc-fold-btn {
+  min-height: var(--control-s);
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.vc-fold-btn:hover { background: var(--hover); color: var(--text); }
+
 /* ── Logs ────────────────────────────────────────────────────────────────── */
 /* The whole screen, in one type, for reading. */
 
@@ -352,6 +532,21 @@
 @media (max-width: 899px) {
   .wf-detail-overlay { align-items: flex-end; padding: 0; }
   .wf-detail-modal { width: 100%; height: calc(100dvh - 24px - env(safe-area-inset-top, 0px)); border-width: 1px 0 0; border-radius: var(--r-xl) var(--r-xl) 0 0; }
+  .vc-head { gap: 10px; padding: 12px 14px 10px; }
+  /* Each side's label above its choice, so the choice has the column's width. */
+  .vc-side-pick { flex-direction: column; align-items: stretch; gap: 4px; }
+  .vc-select { max-width: none; }
+  .vc-arrow { margin-top: 20px; }
+  /* The two ways to compare on one line, the counts and the steps on the next. */
+  .vc-presets { flex: 0 0 100%; }
+  .vc-presets .seg-btn { flex: 1; justify-content: center; }
+  .vc-summary { justify-content: flex-start; }
+  /* No room for line numbers beside the text; the marks stay. */
+  .vc-no { display: none; }
+  .vc-text { padding-right: 12px; }
+  .vc-body { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .vc-body-json { --vc-unit: 0.4ch; --vc-cap: 14ch; }
+  .vc-note { margin-inline: 12px; }
   .wf-ev-type { min-width: 0; }
   /* Two rows: whose logs and the way out, then what to do with them. */
   .log-panel-header { column-gap: 4px; padding-left: 14px; }

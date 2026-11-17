@@ -1,5 +1,6 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
-import { FakeFleet, EDITED_DEFINITION, configOf } from './support/fakeFleet'
+import { FakeFleet, EDITED_DEFINITION, configOf, versioned } from './support/fakeFleet'
+import { HANDBOOK_VERSIONS, RELEASE_VERSIONS, largeDefinition } from '../src/fixtures/versionFixtures'
 import { FakeChat, PIXEL } from './support/fakeChat'
 
 // What the dashboard's views do, driven through the production App against a substituted
@@ -430,10 +431,97 @@ test('workflows: a signal goes through the confirm bar and is then reported as s
 
   await card.getByRole('button', { name: 'Approve' }).click()
   await page.locator('.confirm-bar').getByRole('button', { name: 'Confirm' }).click()
-  await expect(card.locator('.wf-action-success')).toHaveText('Signal sent')
+  // The run is not waiting for anyone now: it leaves "Waiting for you" for the list, saying what was sent.
+  await expect(wfRow(page, 'ReviewWorkflow').locator('.wf-action-success')).toHaveText('Approve sent')
+  await expect(card).toHaveCount(0)
   const sent = fleet.writes('POST', '/api/workflows/fleet/signal/wf-review-1')
   expect(sent).toHaveLength(1)
   expect(sent[0].body).toMatchObject({ signalName: 'design-approval', payload: '{"Value":"approved"}', runId: 'run-wf-review-1' })
+})
+
+// ── A decision that was sent ────────────────────────────────────────────────────────────────────
+// The run keeps its phase until the workflow takes the signal up. Until then its buttons stay away
+// on both pages, it is not counted as waiting, and the note that replaces them offers them back.
+
+test('agents view: after a decision the buttons stay away, past the moment the result is shown', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const review = wfRow(page, 'ReviewWorkflow')
+  await expect(navBadge(page, 'Workflows')).toHaveText('1')
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await expect(review.locator('.wf-decision-sent')).toContainText('Approve sent')
+  await expect(review.locator('.wf-decision-sent')).toContainText('waiting for the workflow')
+  await expect(review).not.toHaveClass(/wf-row-signal-waiting/)
+  // Nothing waits for a person, so the Workflows badge counts the two that run.
+  await expect(navBadge(page, 'Workflows')).toHaveText('2')
+
+  // The result of a signal is shown for four seconds. The buttons used to come back after it.
+  await page.waitForTimeout(4500)
+  await expect(review.locator('.wf-decision-sent')).toContainText('Approve sent')
+  await expect(review.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+  await expect(review.getByRole('button', { name: 'Reject' })).toHaveCount(0)
+
+  // The same phase reported again changes nothing.
+  fleet.pushWorkflows([...fleet.workflows])
+  await expect(review.locator('.wf-decision-sent')).toBeVisible()
+  await expect(review.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+
+  // The workflows page agrees: the run is in the list, not under "Waiting for you".
+  await page.evaluate(() => { window.location.hash = '#workflows' })
+  await expect(wfRow(page, 'ReviewWorkflow').locator('.wf-decision-sent')).toContainText('Approve sent')
+  await expect(page.locator('.attention-card')).toHaveCount(0)
+})
+
+test('agents view: a sent decision ends when the run moves on, and the phase asks again when it returns', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const review = wfRow(page, 'ReviewWorkflow')
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await expect(review.locator('.wf-decision-sent')).toBeVisible()
+
+  const [waiting, other] = fleet.workflows as Array<Record<string, unknown>>
+  fleet.pushWorkflows([{ ...waiting, phase: 'building' }, other])
+  await expect(review.locator('.wf-decision-sent')).toHaveCount(0)
+  await expect(review.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+
+  fleet.pushWorkflows([waiting, other])
+  await expect(review.getByRole('button', { name: 'Approve' })).toBeVisible()
+  await expect(review.locator('.wf-decision-sent')).toHaveCount(0)
+  await expect(navBadge(page, 'Workflows')).toHaveText('1')
+})
+
+test('agents view: "Send again" brings the buttons back, and a second decision is sent', async ({ page }) => {
+  const fleet = await open(page, 'agents')
+  const review = wfRow(page, 'ReviewWorkflow')
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await review.locator('.wf-decision-sent').getByRole('button', { name: 'Send again' }).click()
+  await expect(review.locator('.wf-decision-sent')).toHaveCount(0)
+  await expect(navBadge(page, 'Workflows')).toHaveText('1')
+
+  await review.getByRole('button', { name: 'Approve' }).click()
+  await review.getByRole('button', { name: 'confirm approve?' }).click()
+  await expect(review.locator('.wf-decision-sent')).toContainText('Approve sent')
+  expect(fleet.writes('POST', '/api/workflows/fleet/signal/wf-review-1')).toHaveLength(2)
+})
+
+test('a decision sent with a comment is named by its button, and one that fails keeps the buttons', async ({ page }) => {
+  const refused = 'POST /api/workflows/fleet/signal/wf-review-1'
+  const fleet = await open(page, 'workflows', f => { f.refuse[refused] = { status: 500, json: { error: 'temporal unavailable' } } })
+  const card = page.locator('.attention-card', { hasText: 'ReviewWorkflow' })
+  await card.getByRole('button', { name: 'Approve' }).click()
+  await page.locator('.confirm-bar').getByRole('button', { name: 'Confirm' }).click()
+  await expect(card.locator('.wf-action-error')).toBeVisible()
+  await expect(wfRow(page, 'ReviewWorkflow')).toHaveCount(0)
+  await expect(card.getByRole('button', { name: 'Reject' })).toBeVisible({ timeout: 6000 })
+  delete fleet.refuse[refused]
+
+  await card.getByRole('button', { name: 'Reject' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByPlaceholder('Comment (optional)').fill('needs a rollback plan')
+  await dialog.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(wfRow(page, 'ReviewWorkflow').locator('.wf-decision-sent')).toContainText('Reject sent')
+  await expect(card).toHaveCount(0)
 })
 
 test('workflows: a signal that needs a comment opens the dialog and sends the comment', async ({ page }) => {
@@ -502,7 +590,7 @@ test('agents view: its workflow rows confirm on the second click', async ({ page
   await review.getByRole('button', { name: 'Approve' }).click()
   expect(fleet.writes('POST', '/api/workflows/fleet/signal/')).toHaveLength(0)
   await review.getByRole('button', { name: 'confirm approve?' }).click()
-  await expect(review.locator('.wf-action-success')).toHaveText('Signal sent')
+  await expect(review.locator('.wf-action-success')).toHaveText('Approve sent')
   expect(fleet.writes('POST', '/api/workflows/fleet/signal/wf-review-1')).toHaveLength(1)
 
   const build = wfRow(page, 'BuildWorkflow')
@@ -574,18 +662,24 @@ for (const kind of VERSIONED) {
     await expect(save).toBeDisabled()
   })
 
-  test(`${kind.hash}: choosing a version shows its diff, and rollback needs a second click`, async ({ page }) => {
+  test(`${kind.hash}: choosing a version shows its comparison, and rollback needs a second click`, async ({ page }) => {
     const fleet = await open(page, kind.hash)
     const row = rowByName(page, kind.name)
     await row.locator('.instr-header').click()
+    const v2 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v2$/ }) })
     const v1 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v1$/ }) })
-    await v1.click()
-    await expect(v1).toHaveClass(/selected/)
-    await expect(row.locator('.instr-diff')).toContainText('diff: v1 → v2')
-    await v1.click()
-    await expect(row.locator('.instr-diff')).toHaveCount(0)
+    // A press on the row opens the comparison on what that version changed.
+    await v2.locator('.instr-version-meta').click()
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    await expect(comparison.getByRole('status')).toContainText('v1 → v2')
+    await expect(comparison.locator('del.vc-row')).toHaveText(/-.*\bv1\b/)
+    await expect(comparison.locator('ins.vc-row')).toHaveText(/\+.*\bv2\b/)
+    await page.keyboard.press('Escape')
+    await expect(comparison).toHaveCount(0)
 
+    // The row's rollback is still its own button: it does not open the comparison.
     await v1.getByRole('button', { name: 'rollback' }).click()
+    await expect(comparison).toHaveCount(0)
     expect(fleet.writes('POST', `${kind.api}/${kind.name}/rollback/`)).toHaveLength(0)
     await v1.getByRole('button', { name: 'confirm rollback?' }).click()
     await expect(row.locator('.instr-save-row .config-feedback-success')).toHaveText('Rolled back to v1')
@@ -646,6 +740,8 @@ test('instructions: a version deploys to its agent on the second click', async (
   await row.locator('.instr-header').click()
   const v1 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v1$/ }) })
   await v1.getByRole('button', { name: 'deploy to alpha', exact: true }).click()
+  // A press on the deploy button is not a press on the row: no comparison opens.
+  await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(fleet.writes('POST', '/api/agents/alpha/restart-with-version')).toHaveLength(0)
   await v1.getByRole('button', { name: 'confirm deploy to alpha?' }).click()
   await expect(v1.locator('.instr-deploy-success')).toHaveText('Deployed to alpha')
@@ -679,6 +775,10 @@ test('wf-definitions: open, edit, save the next version', async ({ page }) => {
     .toEqual([{ definition: EDITED_DEFINITION, reason: 'wait longer' }])
   await expect(row.locator('.instr-header .instr-version')).toHaveText('v4')
   await expect(row.getByRole('button', { name: 'Save v5' })).toBeDisabled()
+  // A reason stands on the version it was given for: the one this save made, not the one it replaced.
+  await expect(versionRow(row, 4).locator('.instr-version-reason')).toHaveText('wait longer')
+  await expect(versionRow(row, 3).locator('.instr-version-reason')).toHaveText('shorter wait')
+  await expect(versionRow(row, 2).locator('.instr-version-reason')).toHaveCount(0)
 })
 
 test('wf-definitions: invalid JSON blocks the save', async ({ page }) => {
@@ -697,6 +797,7 @@ test('wf-definitions: rollback and disable each need a second click', async ({ p
   await row.locator('.instr-header').click()
   const v2 = row.locator('.instr-version-item', { has: page.locator('.instr-version-num', { hasText: /^v2$/ }) })
   await v2.getByRole('button', { name: 'rollback' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(fleet.writes('PUT', '/api/workflow-definitions/ReviewWorkflow')).toHaveLength(0)
   await v2.getByRole('button', { name: /confirm/ }).click()
   await expect(row.locator('.instr-save-row .config-feedback-success')).toHaveText('Rolled back to v2')
@@ -719,6 +820,351 @@ test('wf-definitions: search filters the list, and the count reaches the sidenav
   await expect(rowByName(page, 'ReviewWorkflow')).toHaveCount(0)
   await page.getByPlaceholder('Search definitions…').fill('review')
   await expect(rowByName(page, 'ReviewWorkflow')).toBeVisible()
+})
+
+// ── Comparing versions ──────────────────────────────────────────────────────────────────────────
+// One comparison for the three pages that keep versions. It opens over the page from a history
+// row, on what that version changed, and either side can then be any version.
+
+const versionRow = (row: Locator, version: number): Locator =>
+  row.locator('.instr-version-item', { has: row.page().locator('.instr-version-num', { hasText: new RegExp(`^v${version}$`) }) })
+/** How many comparisons the page has computed: each one is recorded on its performance timeline. */
+const comparisonsComputed = (page: Page) => page.evaluate(() => performance.getEntriesByName('version-compare').length)
+
+const TEXT_COMPARED = [
+  { hash: 'instructions', name: 'base', seed: (f: FakeFleet) => { f.instructions[0] = versioned('base', HANDBOOK_VERSIONS, ['alpha']) } },
+  { hash: 'project-contexts', name: 'fleet', seed: (f: FakeFleet) => { f.contexts[0] = versioned('fleet', HANDBOOK_VERSIONS, ['alpha']) } },
+] as const
+
+for (const kind of TEXT_COMPARED) {
+  test(`${kind.hash}: a version is compared with the one before it, with the current one, or with any other`, async ({ page }) => {
+    const fleet = await open(page, kind.hash, kind.seed)
+    const row = rowByName(page, kind.name)
+    await row.locator('.instr-header').click()
+    await versionRow(row, 3).getByRole('button', { name: 'Compare v3' }).click()
+
+    // It opens on what v3 changed: v2 against v3, each with its date, author and reason.
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    const older = comparison.getByLabel('Older version')
+    const newer = comparison.getByLabel('Newer version')
+    const summary = comparison.getByRole('status')
+    await expect(older).toHaveValue('2')
+    await expect(newer).toHaveValue('3')
+    await expect(summary).toHaveText(/v2 → v3\s*\+4\s*-4\s*2 changes/)
+    await expect(comparison.getByRole('button', { name: 'What v3 changed' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(comparison.locator('.vc-side').first()).toContainText('owner')
+    await expect(comparison.locator('.vc-side').first()).toContainText('revision 2')
+    await expect(comparison.locator('.vc-side').last()).toContainText('revision 3')
+
+    // Only the changes are drawn. Three replaced lines are one change: removed, then added, each
+    // marked by a sign as well as a colour, with the words that changed picked out.
+    await expect(comparison.locator('del.vc-row')).toHaveCount(4)
+    await expect(comparison.locator('ins.vc-row')).toHaveCount(4)
+    await expect(comparison.locator('del.vc-row').first()).toHaveText(/^20\s*-\s*A review answers one question/)
+    await expect(comparison.locator('ins.vc-row').first()).toHaveText(/^20\s*\+\s*A review answers two questions/)
+    await expect(comparison.locator('del.vc-row').first().locator('mark')).toHaveText(['one question'])
+    await expect(comparison.locator('ins.vc-row').first().locator('mark')).toHaveText(['two questions', 'correct, and is it '])
+    // Three lines of context around a change, and the rest folded until it is asked for.
+    await expect(comparison.getByText('## Reviews', { exact: true })).toBeVisible()
+    await expect(comparison.getByText('# Working agreement')).toHaveCount(0)
+    await expect(comparison.locator('.vc-fold').first()).toContainText('16 unchanged lines')
+    await comparison.getByRole('button', { name: 'Show all 16 unchanged lines' }).click()
+    await expect(comparison.getByText('# Working agreement')).toBeVisible()
+    await expect(comparison.locator('.vc-fold')).toHaveCount(2)
+
+    // The steps go from change to change, bring it into view and mark it.
+    const next = comparison.getByRole('button', { name: 'Next change' })
+    await expect(comparison.getByRole('button', { name: 'Previous change' })).toBeDisabled()
+    await next.click()
+    await expect(summary).toContainText('Change 1 of 2')
+    await expect(comparison.locator('.vc-at')).toHaveCount(6)
+    await next.click()
+    await expect(summary).toContainText('Change 2 of 2')
+    await expect(comparison.locator('.vc-at')).toHaveCount(2)
+    await expect(comparison.locator('.vc-at').first()).toBeInViewport()
+    await expect(next).toBeDisabled()
+    await comparison.getByRole('button', { name: 'Previous change' }).click()
+    await expect(summary).toContainText('Change 1 of 2')
+
+    // One press compares the same version with the one in use.
+    await comparison.getByRole('button', { name: 'Against current' }).click()
+    await expect(older).toHaveValue('3')
+    await expect(newer).toHaveValue('4')
+    await expect(summary).toHaveText(/v3 → v4\s*\+0\s*-1\s*1 change$/)
+    await expect(comparison.locator('del.vc-row')).toHaveText(/No headings in short answers/)
+
+    // Any two versions: each side is chosen freely, and a pair chosen backwards is put in order.
+    await newer.selectOption('2')
+    await expect(older).toHaveValue('2')
+    await expect(newer).toHaveValue('3')
+    await older.selectOption('1')
+    await expect(summary).toContainText('v1 → v3')
+    await older.selectOption('4')
+    await expect(older).toHaveValue('3')
+    await expect(newer).toHaveValue('4')
+    await expect(summary).toContainText('v3 → v4')
+    // Against nothing, every line is an added one.
+    await older.selectOption({ label: 'nothing' })
+    await expect(summary).toHaveText(/nothing → v4\s*\+39\s*-0\s*1 change$/)
+    await expect(comparison.locator('.vc-side').first()).toContainText('Before the first version')
+    await expect(comparison.locator('del.vc-row')).toHaveCount(0)
+    await expect(comparison.locator('ins.vc-row')).toHaveCount(39)
+    await comparison.getByRole('button', { name: 'What v3 changed' }).click()
+    await expect(summary).toContainText('v2 → v3')
+
+    // Closing puts the focus back on the row it was opened from, and nothing was written.
+    const computed = await comparisonsComputed(page)
+    await comparison.getByRole('button', { name: 'Close' }).click()
+    await expect(comparison).toHaveCount(0)
+    await expect(versionRow(row, 3).getByRole('button', { name: 'Compare v3' })).toBeFocused()
+    expect(fleet.calls).toHaveLength(0)
+
+    // With the versions still loaded, the editor beside them is typed in and nothing is compared.
+    await row.locator('textarea.instr-editor').pressSequentially(' and a few more words')
+    await expect(row.getByRole('button', { name: 'Save', exact: true })).toBeEnabled()
+    expect(await comparisonsComputed(page)).toBe(computed)
+  })
+
+  test(`${kind.hash}: the oldest version is compared with nothing, and a press on the row opens it too`, async ({ page }) => {
+    await open(page, kind.hash, kind.seed)
+    const row = rowByName(page, kind.name)
+    await row.locator('.instr-header').click()
+    await versionRow(row, 1).locator('.instr-version-meta').click()
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    await expect(comparison.getByLabel('Older version')).toHaveValue('')
+    await expect(comparison.getByRole('status')).toHaveText(/nothing → v1\s*\+39\s*-0/)
+    await expect(comparison.locator('.vc-note')).toHaveCount(0)
+    // The dialog has the focus, so Escape reaches it; it goes back to the row's own button.
+    await expect(comparison).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(comparison).toHaveCount(0)
+    await expect(versionRow(row, 1).getByRole('button', { name: 'Compare v1' })).toBeFocused()
+
+    // The current version is compared with the one before it, and has no "against current".
+    await versionRow(row, 4).getByRole('button', { name: 'Compare v4' }).click()
+    await expect(comparison.getByRole('status')).toContainText('v3 → v4')
+    await expect(comparison.getByLabel('Newer version').locator('option:checked')).toHaveText('v4 (current)')
+    await expect(comparison.getByRole('button', { name: 'Against current' })).toBeDisabled()
+    // The same version on both sides is said, not drawn as an empty comparison.
+    await comparison.getByLabel('Older version').selectOption('4')
+    await expect(comparison.locator('.vc-note')).toHaveText('v4 is on both sides: there is nothing to compare.')
+  })
+
+  test(`${kind.hash}: the oldest version kept, when earlier ones are gone, does not claim to have written every line`, async ({ page }) => {
+    // Only the newest versions are kept: here v1 and v2 have been dropped.
+    await open(page, kind.hash, f => {
+      kind.seed(f)
+      const kept = kind.hash === 'instructions' ? f.instructions[0] : f.contexts[0]
+      kept.versions = kept.versions.filter(v => v.versionNumber > 2)
+    })
+    const row = rowByName(page, kind.name)
+    await row.locator('.instr-header').click()
+    await versionRow(row, 3).getByRole('button', { name: 'Compare v3' }).click()
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    await expect(comparison.getByRole('status')).toContainText('nothing → v3')
+    await expect(comparison.locator('.vc-note')).toHaveText('Versions before v3 are not kept, so every line of v3 shows as added, not only what it changed.')
+    // With the one before it kept, the note goes.
+    await comparison.getByLabel('Newer version').selectOption('4')
+    await comparison.getByLabel('Older version').selectOption({ label: 'nothing' })
+    await expect(comparison.getByRole('status')).toContainText('nothing → v4')
+    await expect(comparison.locator('.vc-note')).toHaveCount(0)
+  })
+}
+
+/** A definition as the orchestrator sends it: every version one line of JSON, the history newest first. */
+function releaseDefinition(fleet: FakeFleet, versions: string[]) {
+  const [current, ...history] = versions.map((definition, i) => ({ version: i + 1, definition })).reverse()
+  fleet.definitions[0] = {
+    ...fleet.definitions[0], version: current.version, definition: current.definition,
+    createdAt: RELEASE_CREATED, createdBy: 'creator',
+    // A history row is stamped with the write that replaced its version.
+    versions: history.map(v => ({ ...v, reason: `reason for v${v.version + 1}`, createdAt: releaseWritten(v.version + 1), createdBy: `author-of-v${v.version + 1}` })),
+  }
+}
+const RELEASE_CREATED = '2026-11-01T08:30:00Z'
+/** When the write that made `version` happened: a different day for each. */
+const releaseWritten = (version: number) => `2026-11-${10 + version}T12:00:00Z`
+
+test('wf-definitions: a one-line definition is laid out and compared line by line', async ({ page }) => {
+  const fleet = await open(page, 'wf-definitions', f => releaseDefinition(f, RELEASE_VERSIONS))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  // The version in use is a row of the history like the others.
+  await versionRow(row, 3).getByRole('button', { name: 'Compare v3' }).click()
+
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  const older = comparison.getByLabel('Older version')
+  const newer = comparison.getByLabel('Newer version')
+  const summary = comparison.getByRole('status')
+  await expect(older).toHaveValue('2')
+  await expect(newer.locator('option:checked')).toHaveText('v3 (current)')
+  // v3 moved two steps into a loop: the loop's own six lines are the change, not the steps inside it.
+  await expect(summary).toHaveText(/v2 → v3\s*\+6\s*-0\s*2 changes/)
+  await expect(comparison.locator('ins.vc-row')).toHaveText([/\+\s*\{$/, /"type": "loop",$/, /"maxIterations": 3,$/, /"steps": \[$/, /\+\s*\]$/, /\+\s*\},$/])
+  await expect(comparison.locator('del.vc-row')).toHaveCount(0)
+  await expect(comparison.locator('.vc-note')).toHaveCount(0)
+  // Each version carries the reason and the author of the write that made it.
+  await expect(comparison.locator('.vc-side').last()).toContainText('reason for v3')
+  await expect(comparison.locator('.vc-side').last()).toContainText('author-of-v3')
+  await expect(comparison.locator('.vc-side').first()).toContainText('reason for v2')
+  await expect(comparison.getByRole('button', { name: 'Against current' })).toBeDisabled()
+
+  // A long fold opens twenty lines at a time from either end, or all at once.
+  const fold = comparison.locator('.vc-fold').first()
+  await expect(fold).toContainText('25 unchanged lines')
+  await expect(comparison.getByText('"type": "sequence",')).toHaveCount(0)
+  await fold.getByRole('button', { name: 'Show the last 20 of 25 unchanged lines' }).click()
+  await expect(fold).toContainText('5 unchanged lines')
+  await expect(comparison.getByText('"type": "sequence",')).toHaveCount(0)
+  await fold.getByRole('button', { name: 'Show all 5 unchanged lines' }).click()
+  await expect(comparison.getByText('"type": "sequence",')).toBeVisible()
+
+  await comparison.getByRole('button', { name: 'Next change' }).click()
+  await expect(summary).toContainText('Change 1 of 2')
+  await expect(comparison.locator('.vc-at')).toHaveCount(4)
+
+  // Another pair: v1 against v3 also has the longer review, with the number that changed picked out.
+  await older.selectOption('1')
+  await expect(summary).toContainText('v1 → v3')
+  await expect(comparison.locator('del.vc-row')).toHaveText(/-\s*"timeoutMinutes": 45,/)
+  await expect(comparison.locator('del.vc-row mark')).toHaveText('45')
+  await expect(comparison.locator('ins.vc-row mark').first()).toHaveText('60')
+
+  await page.keyboard.press('Escape')
+  await expect(comparison).toHaveCount(0)
+  await expect(versionRow(row, 3).getByRole('button', { name: 'Compare v3' })).toBeFocused()
+
+  // From an older row: what it changed, then the same version against the current one.
+  await versionRow(row, 2).locator('.instr-version-meta').click()
+  await expect(summary).toContainText('v1 → v2')
+  await comparison.getByRole('button', { name: 'Against current' }).click()
+  await expect(summary).toContainText('v2 → v3')
+  await comparison.getByRole('button', { name: 'Close' }).click()
+  await expect(versionRow(row, 2).getByRole('button', { name: 'Compare v2' })).toBeFocused()
+  expect(fleet.calls).toHaveLength(0)
+})
+
+test('wf-definitions: a history row and the comparison’s header say the same of a version', async ({ page }) => {
+  await open(page, 'wf-definitions', f => releaseDefinition(f, RELEASE_VERSIONS))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  // The date as this browser prints it, whatever its time zone.
+  const printed = (iso: string) => page.evaluate(d => new Date(d).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }), iso)
+
+  // Each version is described by the write that made it; the first, by the definition's own creation, and it has no reason.
+  const versions = [
+    { version: 3, written: releaseWritten(3), author: 'author-of-v3', reasons: ['reason for v3'] },
+    { version: 2, written: releaseWritten(2), author: 'author-of-v2', reasons: ['reason for v2'] },
+    { version: 1, written: RELEASE_CREATED, author: 'creator', reasons: [] },
+  ]
+  for (const { version, written, author, reasons } of versions) {
+    const item = versionRow(row, version)
+    const date = await item.locator('.instr-version-meta span').first().getAttribute('title')
+    expect(date).toBe(await printed(written))
+    await expect(item.locator('.instr-version-meta span')).toHaveText([/ago$/, author])
+    await expect(item.locator('.instr-version-reason')).toHaveText(reasons)
+
+    // The comparison opens with that version as its newer side, and says of it what the row says.
+    await item.getByRole('button', { name: `Compare v${version}` }).click()
+    await expect(comparison.getByLabel('Newer version')).toHaveValue(String(version))
+    const side = comparison.locator('.vc-side').last()
+    await expect(side.locator('.vc-side-facts')).toHaveText(`${date} · ${author}`)
+    await expect(side.locator('.vc-side-reason')).toHaveText(reasons)
+    await page.keyboard.press('Escape')
+    await expect(comparison).toHaveCount(0)
+  }
+})
+
+test('wf-definitions: a version that is not JSON is compared as plain text, and the comparison says so', async ({ page }) => {
+  await open(page, 'wf-definitions', f => releaseDefinition(f, ['{ "type": "sequence", not json', RELEASE_VERSIONS[0]]))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  await versionRow(row, 2).getByRole('button', { name: 'Compare v2' }).click()
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  await expect(comparison.locator('.vc-note-warn')).toHaveText('v1 is not valid JSON, so the two versions are compared as plain text.')
+  await expect(comparison.getByRole('status')).toHaveText(/v1 → v2\s*\+1\s*-1/)
+})
+
+test('wf-definitions: a definition of 240,000 characters compares at once, and redrawing the page behind computes nothing', async ({ page }) => {
+  const fleet = await open(page, 'wf-definitions', f => releaseDefinition(f, [largeDefinition(), largeDefinition(true)]))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  const editor = row.locator('textarea.instr-editor')
+  await expect(editor).toHaveValue(/release-approval/)
+  await versionRow(row, 2).getByRole('button', { name: 'Compare v2' }).click()
+
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  await expect(comparison.getByRole('status')).toHaveText(/v1 → v2\s*\+13\s*-30\s*6 changes/)
+  // Seven thousand lines, of which the changes and their context are drawn.
+  expect(await comparison.locator('.vc-row').count()).toBeLessThan(200)
+  await expect(comparison.locator('ins.vc-row mark', { hasText: 'every' })).toHaveCount(1)
+  const times = await page.evaluate(() => performance.getEntriesByName('version-compare').map(e => e.duration))
+  expect(times.length).toBeGreaterThan(0)
+  for (const time of times) expect(time).toBeLessThan(1000)
+
+  // The page behind the dialog redraws: its editor changes, heartbeats arrive. None of it compares again.
+  const computed = times.length
+  for (const draft of ['{ not json', '{ "type": "noop" }', '{ still not json']) {
+    await editor.fill(draft)
+    await expect(editor).toHaveValue(draft)
+  }
+  await expect(row.locator('.wfd-validation-item.blocking')).toContainText('JSON parse error')
+  for (let beat = 0; beat < 5; beat++) fleet.pushAgent('alpha', { currentTask: `task ${beat}` })
+  await page.waitForTimeout(700)
+  expect(await comparisonsComputed(page)).toBe(computed)
+
+  // A new pair is a new comparison; the same pair again is not.
+  await comparison.getByLabel('Older version').selectOption({ label: 'nothing' })
+  await expect(comparison.getByRole('status')).toContainText('nothing → v2')
+  // Every one of its seven thousand lines is drawn as added, and the page is still answering.
+  await expect(comparison.locator('del.vc-row, div.vc-row')).toHaveCount(0)
+  expect(await comparison.locator('ins.vc-row').count()).toBeGreaterThan(5000)
+  const afterNewPair = await comparisonsComputed(page)
+  expect(afterNewPair).toBeGreaterThan(computed)
+  await comparison.getByRole('button', { name: 'Next change' }).click()
+  await expect(comparison.getByRole('status')).toContainText('Change 1 of 1')
+  expect(await comparisonsComputed(page)).toBe(afterNewPair)
+
+  // Closed, there is no comparison at all: typing in the editor computes none.
+  await page.keyboard.press('Escape')
+  await expect(comparison).toHaveCount(0)
+  await editor.pressSequentially('abc')
+  await expect(editor).toHaveValue('{ still not jsonabc')
+  expect(await comparisonsComputed(page)).toBe(afterNewPair)
+})
+
+test.describe('comparing versions on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('the comparison takes the screen, and its lines wrap instead of scrolling sideways', async ({ page }) => {
+    const long = 'This rule is one very long line of prose, as real instructions have, and it goes on well past any screen. '.repeat(7)
+    const fleet = new FakeFleet()
+    fleet.instructions[0] = versioned('base', [`# Rules\n\n${long}\n`, `# Rules\n\n${long.replace('goes on', 'runs on')}\n`], ['alpha'])
+    await fleet.install(page)
+    await page.goto('/#instructions')
+    const row = rowByName(page, 'base')
+    await row.locator('.instr-header').click()
+    await versionRow(row, 2).getByRole('button', { name: 'Compare v2' }).click()
+    const comparison = page.getByRole('dialog', { name: 'Compare versions of base' })
+    await expect(comparison.locator('ins.vc-row mark').first()).toHaveText('runs')
+
+    // A sheet from the bottom edge, as wide as the screen.
+    const box = (await comparison.boundingBox())!
+    expect([box.x, box.width, box.y + box.height]).toEqual([0, 390, 844])
+    const widths = await page.evaluate(() => {
+      const body = document.querySelector('.vc-body')!
+      return { page: document.documentElement.scrollWidth, screen: window.innerWidth, body: body.scrollWidth, bodyBox: body.clientWidth }
+    })
+    expect(widths.page).toBeLessThanOrEqual(widths.screen)
+    expect(widths.body).toBeLessThanOrEqual(widths.bodyBox)
+    // The long line is drawn on many rows of the screen, not one.
+    expect((await comparison.locator('ins.vc-row').first().boundingBox())!.height).toBeGreaterThan(100)
+    // Every control is still there to press.
+    for (const name of ['What v2 changed', 'Against current', 'Previous change', 'Next change', 'Close']) {
+      await expect(comparison.getByRole('button', { name })).toBeInViewport()
+    }
+  })
 })
 
 // ── Chat ────────────────────────────────────────────────────────────────────────────────────────
@@ -1567,5 +2013,308 @@ test.describe('workflow tree on a 360px phone', () => {
     const box = (await rows.nth(2).locator('.wf-type').boundingBox())!
     expect(box.x + box.width).toBeLessThanOrEqual(360)
     await page.screenshot({ path: testInfo.outputPath('workflow-tree-360.png'), fullPage: true })
+  })
+})
+
+// ── Memory search ───────────────────────────────────────────────────────────────────────────────
+
+type MemoryAnswer = { status?: number; json: unknown; delayMs?: number }
+
+const MEMORY_ID = '5e1f9a3c-3c1f-4b7e-9d52-0a1b2c3d4e5f'
+const MEMORY_TWIN = '5e1f9a3c-9e0d-4c3b-8a7f-6e5d4c3b2a19'
+
+const memoryItem = (id: string, title: string, project: string, type: string, tags: string[]) =>
+  ({ id, title, project, type, tags, updated_at: '2026-01-05T10:00:00Z' })
+
+const MEMORY_LIST = [
+  memoryItem(MEMORY_ID, 'How a deploy reaches the host', 'atlas', 'reference', ['deploy', 'ops']),
+  memoryItem(MEMORY_TWIN, 'Rollback checklist', 'atlas', 'decision', ['deploy']),
+  memoryItem('1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed', 'Заметки о выкладке', 'borealis', 'learning', ['заметки', 'ops']),
+  memoryItem('9c858901-8a57-4791-81fe-4c455b099bc9', 'Why reviews need two readers', 'borealis', 'decision', ['review']),
+  memoryItem('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', 'Staging hosts and what runs on each', 'atlas', 'reference', ['ops']),
+]
+
+/** A search hit for a listed memory, as the memory service answers since it says how a hit matched. */
+const memoryHit = (id: string, match: string | undefined, snippet: string, highlights?: unknown, score: number | null = null) => {
+  const { updated_at, ...item } = MEMORY_LIST.find(m => m.id === id)!
+  return match === undefined
+    ? { ...item, snippet, updated_at }
+    : { ...item, snippet, highlights: highlights ?? [], match, score, updated_at }
+}
+
+/** Opens #memory with `/api/memory/search` answered by `respond`, called with each request's query and its number. */
+async function openMemory(page: Page, respond: (query: URLSearchParams, n: number) => MemoryAnswer) {
+  const fleet = new FakeFleet()
+  await fleet.install(page)
+  const searches: URLSearchParams[] = []
+  await page.route(url => url.pathname.startsWith('/api/memory'), async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/memory') { await route.fulfill({ json: MEMORY_LIST }); return }
+    if (url.pathname === '/api/memory/ids') { await route.fulfill({ json: MEMORY_LIST.map(m => m.id) }); return }
+    if (url.pathname === '/api/memory/stats/reads') { await route.fulfill({ json: { since: '2026-01-01T00:00:00Z', entries: [] } }); return }
+    if (url.pathname === '/api/memory/search') {
+      searches.push(url.searchParams)
+      const answer = respond(url.searchParams, searches.length)
+      if (answer.delayMs) await new Promise(r => setTimeout(r, answer.delayMs))
+      await route.fulfill({ status: answer.status ?? 200, json: answer.json }).catch(() => { /* the page moved on */ })
+      return
+    }
+    const item = MEMORY_LIST.find(m => m.id === decodeURIComponent(url.pathname.slice('/api/memory/'.length)))
+    if (!item) { await route.fulfill({ status: 404, json: { error: 'Memory not found' } }); return }
+    await route.fulfill({ json: { ...item, agent: 'agent1', source: 'conversation', created_at: item.updated_at, content: `Body of ${item.title}` } })
+  })
+  await page.goto('/#memory')
+  await expect(memorySearchBox(page)).toBeVisible()
+  await expect(page.locator('.memory-tree-project-btn').first()).toBeVisible()
+  return searches
+}
+
+const memorySearchBox = (page: Page) => page.getByRole('searchbox', { name: 'Search memories' })
+const memoryGroup = (page: Page, name: string) => page.getByRole('region', { name: new RegExp(`^${name}`) })
+const memoryResult = (page: Page, title: string) =>
+  page.locator('.memory-result-item', { has: page.locator('.memory-result-title', { hasText: new RegExp(`^${title}$`) }) })
+/** What a search sent, name by name, in the order it was sent. */
+const sent = (query: URLSearchParams) => [...query.entries()].map(([k, v]) => `${k}=${v}`)
+
+const BOTH_GROUPS = [
+  memoryHit(MEMORY_ID, 'title', 'A merge builds the images and the pipeline recreates the services one at a time.'),
+  memoryHit(MEMORY_TWIN, 'tag', 'Before a rollback, check which image the host is running.'),
+  memoryHit('1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed', 'keyword', '…перед тем как deploy дойдёт до сервера, проверь выкладку на стенде…', [[15, 6], [49, 8]]),
+  memoryHit('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', 'meaning', 'Two staging hosts; the second one runs the nightly jobs.', [], 0.71),
+  memoryHit('9c858901-8a57-4791-81fe-4c455b099bc9', 'meaning', 'One reader misses what the author also missed. <img src=x onerror="window.__marked=1">', [[400, 9]], 0.44),
+]
+
+test('memory search: what matched the words comes first, what is only related comes apart, and each hit says how it matched', async ({ page }, testInfo) => {
+  const searches = await openMemory(page, () => ({ json: BOTH_GROUPS }))
+  await memorySearchBox(page).fill('deploy')
+
+  const matches = memoryGroup(page, 'Matches')
+  const related = memoryGroup(page, 'Related by meaning')
+  await expect(matches.locator('.memory-result-title')).toHaveText(['How a deploy reaches the host', 'Rollback checklist', 'Заметки о выкладке'])
+  await expect(matches.locator('.memory-result-match')).toHaveText(['Title', 'Tag', 'Keyword'])
+  await expect(related.locator('.memory-result-title')).toHaveText(['Staging hosts and what runs on each', 'Why reviews need two readers'])
+  await expect(related.locator('.memory-result-match')).toHaveText(['Meaning', 'Meaning'])
+  await expect(matches.getByRole('heading')).toHaveText('Matches3')
+  await expect(related.getByRole('heading')).toHaveText('Related by meaning2')
+  // The matches are above the related ones on the page, not only in the markup.
+  const lastMatch = (await matches.locator('.memory-result-item').last().boundingBox())!
+  const firstRelated = (await related.locator('.memory-result-item').first().boundingBox())!
+  expect(lastMatch.y + lastMatch.height).toBeLessThanOrEqual(firstRelated.y)
+  await expect(page.locator('.memory-results-notice')).toHaveCount(0)
+
+  // The matched words are marked where the service said, and the snippet is otherwise untouched.
+  const keyword = memoryResult(page, 'Заметки о выкладке')
+  await expect(keyword.locator('.memory-result-snippet mark')).toHaveText(['deploy', 'выкладку'])
+  await expect(keyword.locator('.memory-result-snippet')).toHaveText('…перед тем как deploy дойдёт до сервера, проверь выкладку на стенде…')
+  // A tag hit names the tag; a hit with no highlights has no mark.
+  await expect(memoryResult(page, 'Rollback checklist').locator('.memory-result-detail')).toHaveText('#deploy')
+  await expect(memoryResult(page, 'How a deploy reaches the host').locator('mark')).toHaveCount(0)
+  // A range outside the snippet marks nothing, and a snippet is text, whatever it holds.
+  const hostile = memoryResult(page, 'Why reviews need two readers')
+  await expect(hostile.locator('mark')).toHaveCount(0)
+  await expect(hostile.locator('.memory-result-snippet')).toContainText('<img src=x onerror="window.__marked=1">')
+  await expect(hostile.locator('img')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { __marked?: number }).__marked)).toBeUndefined()
+
+  expect(sent(searches.at(-1)!)).toEqual(['q=deploy'])
+  await page.screenshot({ path: testInfo.outputPath('memory-search-groups.png') })
+})
+
+test('memory search: when nothing matched the words the page says so, and when nothing is related either it says nothing was found', async ({ page }) => {
+  await openMemory(page, query => ({
+    json: query.get('q') === 'nightly' ? BOTH_GROUPS.filter(h => h.match === 'meaning') : [],
+  }))
+
+  await memorySearchBox(page).fill('nightly')
+  await expect(page.locator('.memory-results-notice')).toHaveText(
+    'Nothing matched the words “nightly”. The memories below are related by meaning only.')
+  await expect(memoryGroup(page, 'Matches')).toHaveCount(0)
+  await expect(memoryGroup(page, 'Related by meaning').locator('.memory-result-item')).toHaveCount(2)
+
+  await memorySearchBox(page).fill('zzzz')
+  await expect(page.getByText('Nothing found for “zzzz”.')).toBeVisible()
+  await expect(page.locator('.memory-result-item')).toHaveCount(0)
+  await expect(page.locator('.memory-results-notice')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: /Related by meaning|Matches/ })).toHaveCount(0)
+})
+
+test('memory search: project, type and tag are filled from the loaded list, each is sent as its parameter, and clearing sends none', async ({ page }) => {
+  const searches = await openMemory(page, () => ({ json: BOTH_GROUPS }))
+  const filters = page.getByRole('group', { name: 'Filters' })
+  const options = (label: string) => filters.getByLabel(label).locator('option').allTextContents()
+  expect(await options('Project')).toEqual(['All projects', 'atlas', 'borealis'])
+  expect(await options('Type')).toEqual(['All types', 'decision', 'learning', 'reference'])
+  expect(await options('Tag')).toEqual(['All tags', 'deploy', 'ops', 'review', 'заметки'])
+
+  // With nothing typed a filter asks nothing and narrows the tree.
+  await filters.getByLabel('Tag').selectOption('review')
+  await expect(page.locator('.memory-tree-project-name')).toHaveText(['borealis'])
+  await expect(page.locator('.memory-tree-project-btn .memory-tree-count')).toHaveText('1')
+  await filters.getByLabel('Project').selectOption('atlas')
+  await expect(page.getByText('No memories match these filters.')).toBeVisible()
+  await filters.getByRole('button', { name: 'Clear filters' }).click()
+  await expect(page.locator('.memory-tree-project-name')).toHaveText(['atlas', 'borealis'])
+  await expect(filters.getByRole('button', { name: 'Clear filters' })).toHaveCount(0)
+  expect(searches).toHaveLength(0)
+
+  await memorySearchBox(page).fill('deploy')
+  await expect.poll(() => searches.length).toBe(1)
+  expect(sent(searches[0])).toEqual(['q=deploy'])
+
+  await filters.getByLabel('Project').selectOption('atlas')
+  await expect.poll(() => searches.length).toBe(2)
+  expect(sent(searches[1])).toEqual(['q=deploy', 'project=atlas'])
+
+  await filters.getByLabel('Type').selectOption('decision')
+  await expect.poll(() => searches.length).toBe(3)
+  expect(sent(searches[2])).toEqual(['q=deploy', 'project=atlas', 'type=decision'])
+
+  await filters.getByLabel('Project').selectOption('')
+  await filters.getByLabel('Type').selectOption('')
+  await filters.getByLabel('Tag').selectOption('заметки')
+  await expect.poll(() => sent(searches.at(-1)!)).toEqual(['q=deploy', 'tag=заметки'])
+
+  await filters.getByRole('button', { name: 'Clear filters' }).click()
+  await expect.poll(() => sent(searches.at(-1)!)).toEqual(['q=deploy'])
+  await expect(filters.getByLabel('Tag')).toHaveValue('')
+})
+
+test('memory search: a filtered search that finds nothing says the filters were part of it', async ({ page }) => {
+  await openMemory(page, () => ({ json: [] }))
+  await page.getByRole('group', { name: 'Filters' }).getByLabel('Type').selectOption('learning')
+  await memorySearchBox(page).fill('deploy')
+  await expect(page.getByText('Nothing found for “deploy” with these filters.')).toBeVisible()
+})
+
+test('memory search: a memory id comes first, and Enter opens the one memory it names', async ({ page }) => {
+  const searches = await openMemory(page, query => ({
+    json: query.get('q') === '5e1f9a3c'
+      // Two memories start with these eight characters.
+      ? [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.'), memoryHit(MEMORY_TWIN, 'id', 'Before a rollback.')]
+      : [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.'),
+        memoryHit('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', 'meaning', 'Two staging hosts.', [], 0.3)],
+  }))
+
+  await memorySearchBox(page).fill('5e1f9a3c-3c1f')
+  const first = page.locator('.memory-result-item').first()
+  await expect(first.locator('.memory-result-title')).toHaveText('How a deploy reaches the host')
+  await expect(first.locator('.memory-result-match')).toHaveText('ID')
+  await expect(first.locator('.memory-result-detail')).toHaveText('5e1f9a3c')
+  await expect(page.locator('.memory-cv-title')).toHaveCount(0)
+
+  await memorySearchBox(page).press('Enter')
+  await expect(page.locator('.memory-cv-title')).toHaveText('How a deploy reaches the host')
+  await expect(first).toHaveClass(/memory-selected/)
+  // The results stay; Enter did not ask again.
+  expect(searches).toHaveLength(1)
+
+  // An id that names two memories opens neither: both are listed to choose from.
+  await memorySearchBox(page).fill('5e1f9a3c')
+  await expect(page.locator('.memory-result-match')).toHaveText(['ID', 'ID'])
+  await memorySearchBox(page).press('Enter')
+  await page.waitForTimeout(300)
+  await expect(page.locator('.memory-cv-title')).toHaveText('How a deploy reaches the host')
+  await expect(page.locator('.memory-result-item.memory-selected')).toHaveCount(1)
+})
+
+test('memory search: Enter pressed before the answer is in opens the id hit when it arrives, and only for what is typed now', async ({ page }) => {
+  const searches = await openMemory(page, query => query.get('q') === '5e1f9a3c-3c1f'
+    ? { json: [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.')], delayMs: 100 }
+    : { json: [memoryHit(MEMORY_TWIN, 'keyword', 'Before a rollback.')] })
+
+  // Pasted and entered at once: no wait for the pause after typing.
+  await memorySearchBox(page).fill('5e1f9a3c-3c1f')
+  await memorySearchBox(page).press('Enter')
+  await expect(page.locator('.memory-cv-title')).toHaveText('How a deploy reaches the host')
+  expect(searches).toHaveLength(1)
+
+  // Entered, then changed before the answer: the id hit of the abandoned query opens nothing.
+  await page.reload()
+  await expect(page.locator('.memory-tree-project-btn').first()).toBeVisible()
+  await memorySearchBox(page).fill('5e1f9a3c-3c1f')
+  await memorySearchBox(page).press('Enter')
+  await memorySearchBox(page).fill('rollback')
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+  await page.waitForTimeout(800)
+  await expect(page.locator('.memory-cv-title')).toHaveCount(0)
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+})
+
+test('memory search: an older answer never replaces a newer one', async ({ page }) => {
+  await openMemory(page, query => query.get('q') === 'slow'
+    ? { json: [memoryHit(MEMORY_ID, 'keyword', 'The slow answer.')], delayMs: 1100 }
+    : { json: [memoryHit(MEMORY_TWIN, 'keyword', 'The fast answer.')] })
+
+  await memorySearchBox(page).fill('slow')
+  await page.waitForTimeout(450)   // past the pause after typing: the slow request is out
+  await memorySearchBox(page).fill('fast')
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+  await page.waitForTimeout(1300)
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+  await expect(page.getByText('Searching…')).toHaveCount(0)
+})
+
+test('memory search: an older memory service, which does not say how a hit matched, gets one plain list', async ({ page }) => {
+  await openMemory(page, () => ({
+    json: [
+      memoryHit('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', undefined, 'Two staging hosts; the second one runs the nightly jobs.'),
+      memoryHit(MEMORY_ID, undefined, 'A merge builds the images and the pipeline recreates the services.'),
+    ],
+  }))
+  await memorySearchBox(page).fill('deploy')
+
+  await expect(page.locator('.memory-result-title')).toHaveText(['Staging hosts and what runs on each', 'How a deploy reaches the host'])
+  await expect(page.locator('.memory-result-snippet').first()).toHaveText('Two staging hosts; the second one runs the nightly jobs.')
+  await expect(page.locator('.memory-result-meta').first()).toHaveText('atlas · reference')
+  // Nothing is claimed that the answer did not say.
+  await expect(page.locator('.memory-result-match')).toHaveCount(0)
+  await expect(page.locator('.memory-result-item mark')).toHaveCount(0)
+  await expect(page.locator('.memory-results-heading')).toHaveCount(0)
+  await expect(page.locator('.memory-results-notice')).toHaveCount(0)
+  // Enter has no id hit to open.
+  await memorySearchBox(page).press('Enter')
+  await page.waitForTimeout(300)
+  await expect(page.locator('.memory-cv-title')).toHaveCount(0)
+  await page.locator('.memory-result-item').first().click()
+  await expect(page.locator('.memory-cv-title')).toHaveText('Staging hosts and what runs on each')
+})
+
+test('memory search: a search the memory service refuses shows its words, and Retry asks again', async ({ page }) => {
+  const searches = await openMemory(page, (_, n) => n === 1
+    ? { status: 400, json: { error: 'Invalid \'limit\': expected a number from 1 to 50' } }
+    : { json: BOTH_GROUPS })
+  await memorySearchBox(page).fill('deploy')
+  await expect(page.locator('.memory-tree-error')).toContainText('Search failed: Invalid \'limit\': expected a number from 1 to 50')
+  await expect(page.locator('.memory-result-item')).toHaveCount(0)
+  await page.locator('.memory-tree-error').getByRole('button', { name: 'Retry' }).click()
+  await expect(memoryGroup(page, 'Matches').locator('.memory-result-item')).toHaveCount(3)
+  expect(sent(searches[1])).toEqual(['q=deploy'])
+})
+
+test.describe('memory search on a 360px phone', () => {
+  test.use({ viewport: { width: 360, height: 800 } })
+
+  test('filters, labels and marked snippets fit the screen, and a hit opens over the list', async ({ page }, testInfo) => {
+    await openMemory(page, () => ({ json: BOTH_GROUPS }))
+    const filters = page.getByRole('group', { name: 'Filters' })
+    await filters.getByLabel('Project').selectOption('borealis')
+    await filters.getByLabel('Tag').selectOption('заметки')
+    await memorySearchBox(page).fill('deploy')
+    await expect(memoryGroup(page, 'Related by meaning').locator('.memory-result-item')).toHaveCount(2)
+
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+    for (const part of [filters, page.locator('.memory-result-match').first(), page.locator('.memory-result-snippet mark').last()]) {
+      const box = (await part.boundingBox())!
+      expect(box.x).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width).toBeLessThanOrEqual(360)
+    }
+    await page.screenshot({ path: testInfo.outputPath('memory-search-360.png'), fullPage: true })
+
+    await memoryResult(page, 'Rollback checklist').click()
+    await expect(page.locator('.memory-cv-title')).toHaveText('Rollback checklist')
+    await expect(memorySearchBox(page)).toBeHidden()
+    await page.getByRole('button', { name: 'All memories' }).click()
+    await expect(memorySearchBox(page)).toHaveValue('deploy')
+    await expect(filters.getByLabel('Tag')).toHaveValue('заметки')
   })
 })

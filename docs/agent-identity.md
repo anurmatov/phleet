@@ -39,9 +39,10 @@ server with the key ignores it whenever a token is sent.
 | set | `false` | A token is verified when one is sent, and such an agent is held to its grants. A caller without a token is still served by the name it gives, and is logged (`agent_identity_unverified_call`, at most once in ten minutes per name). |
 | set | `true` | A caller without a valid token is refused with `401` and `agent_identity_required`. |
 
-A token that is present and wrong is refused in every state (`401`, `agent_identity_invalid`): it
-is never treated as "no token". Enforcement without a key stops the service at startup
-(`agent_identity_misconfigured`).
+Once a key is set, a token that is present and wrong is refused, enforced or not (`401`,
+`agent_identity_invalid`): it is never treated as "no token". Without a key nothing can be verified,
+so a token is ignored and the caller is believed by the name it gives, as before tokens.
+Enforcement without a key stops the service at startup (`agent_identity_misconfigured`).
 
 The middle state is what makes a rollout possible: services are deployed one at a time, agents are
 reprovisioned after them, and the coordinating agent is not reprovisioned automatically.
@@ -50,10 +51,16 @@ reprovisioned after them, and the coordinating agent is not reprovisioned automa
 
 1. Upgrade the orchestrator and the other services (`./upgrade.sh` adds the key and
    `FLEET_AGENT_IDENTITY_ENFORCE=false`).
-2. Reprovision **every** agent, the coordinating agent included. Each gets its token.
-3. Watch the logs of each server for `agent_identity_unverified_call`. A name that still appears is
+2. **Before any reprovision**, find each agent whose `fleet-orchestrator` endpoint maps
+   `Authorization` to `ORCHESTRATOR_CONFIG_TOKEN` (an agent that calls `set_config_values`), and
+   remap that mapping to the header `X-Fleet-Config-Token`. The first reprovision with the key
+   replaces a mapped `Authorization` on that endpoint with the agent's identity, and
+   `set_config_values` would then answer `unauthorized`. The two stay separate: the identity says
+   who the agent is and which tools it is granted, the config token says it may write `.env`.
+3. Reprovision **every** agent, the coordinating agent included. Each gets its token.
+4. Watch the logs of each server for `agent_identity_unverified_call`. A name that still appears is
    an agent that has not been reprovisioned, or a caller that is not an agent.
-4. Set `FLEET_AGENT_IDENTITY_ENFORCE=true` in `.env` and recreate the services.
+5. Set `FLEET_AGENT_IDENTITY_ENFORCE=true` in `.env` and recreate the services.
 
 To go back, set it to `false` and recreate the services. No agent needs reprovisioning for that.
 
@@ -81,6 +88,14 @@ After ten minutes without a successful read a server no longer believes what it 
 verified agents under enforcement (`tool_grants_unavailable`) rather than serve from a list nobody
 can vouch for.
 
+A token follows the address, not the name. Provisioning writes it, and the dashboard's tool listing
+sends the orchestrator's service token, only to an endpoint of one of these names whose URL is at a
+trusted origin (scheme, host and port): by default `http://fleet-orchestrator:3600`,
+`http://fleet-telegram:3800` and `http://fleet-temporal-bridge:3001`, plus fleet-memory's own
+`FleetMemory:McpUrl`. An endpoint that carries a fleet server's name but points elsewhere gets no
+token, so whoever can edit an endpoint cannot collect one with it. A deployment whose servers answer
+elsewhere sets `AgentIdentity:TrustedOrigins`.
+
 ### fleet-memory's REST API
 
 `/internal/*` on fleet-memory lists, reads, changes and deletes any memory with no project check.
@@ -97,6 +112,13 @@ routes to a service token only: an agent's own token, valid as it is, gets `403`
 - the operator: the service bearer (`ORCHESTRATOR_AUTH_TOKEN`), a signed-in browser, or a service
   token. An enrolled phone is not an operator here;
 - while enforcement is off, anybody, as before.
+
+`set_config_values` also needs the config token. An agent's `Authorization` is its identity, so it
+sends the config token as `X-Fleet-Config-Token`: map that header to the `ORCHESTRATOR_CONFIG_TOKEN`
+Env Ref on the agent's `fleet-orchestrator` endpoint. Provisioning keeps it beside the identity, and
+both are checked: the agent must be granted the tool and present the token. An `Authorization`
+mapping of the config token still works while enforcement is off, and only on an endpoint that is
+not given the identity; under enforcement it is refused.
 
 `GET /internal/agent-mcp-grants` serves every agent's grants on the four servers, for the other
 servers to check against. It is Docker-network-only and takes no credential, like
@@ -160,6 +182,7 @@ It prints the token and nothing else. Whoever holds it is not held to any agent'
 |---|---|---|---|
 | `FLEET_AGENT_IDENTITY_KEY` | `AgentIdentity__Key` | generated | base64url, at least 32 bytes. A comma-separated list rotates: the first signs, all verify. |
 | `FLEET_AGENT_IDENTITY_ENFORCE` | `AgentIdentity__Enforce` | `false` | `true` refuses a caller without a valid token. Anything but `true` or `false` stops the service. |
+| (orchestrator only) | `AgentIdentity__TrustedOrigins` | the three compose addresses | Comma-separated origins a token may be sent to; replaces the default. fleet-memory's `FleetMemory:McpUrl` is always trusted. |
 | (none) | `AgentIdentity__OrchestratorUrl` | `http://fleet-orchestrator:3600` | Where fleet-memory, fleet-telegram and the bridge read agents' grants. |
 
 All four services read the same key and the same switch. A service with enforcement on and one

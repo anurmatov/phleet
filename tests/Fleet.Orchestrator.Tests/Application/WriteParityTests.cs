@@ -377,6 +377,27 @@ public sealed class WriteParityTests : IAsyncLifetime
         Assert.Single(await DbAsync(db => db.Agents.ToListAsync()));
     }
 
+    /// <summary>
+    /// The key that signs agent identities cannot be attached by any path, the operator's create
+    /// included: an agent holding it could make any agent's token.
+    /// </summary>
+    [Fact]
+    public async Task Create_WithTheAgentIdentityKeyAsAnEnvRef_IsRefused_AndNothingIsWritten()
+    {
+        await SeedAgentAsync("agent1");
+
+        var rest = await _client.PostAsJsonAsync("/api/agents", new
+        {
+            name = "dev-rest", role = "developer", model = "sonnet", provision = false,
+            envRefs = new[] { "fleet_agent_identity_key" },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, rest.StatusCode);
+        Assert.Contains("signs agent identities", (await rest.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.Single(await DbAsync(db => db.Agents.ToListAsync()));
+        Assert.Empty(await DbAsync(db => db.AgentEnvRefs.ToListAsync()));
+    }
+
     [Fact]
     public async Task Create_NeverTakesAPortAnotherAgentAnswersOn()
     {

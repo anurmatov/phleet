@@ -546,6 +546,10 @@ internal static class AgentConfigFiles
             foreach (var mapping in mappings)
             {
                 var where = $"MCP endpoint '{endpoint.McpName}' header {mapping.HeaderName}";
+                // Never written into an agent's files, whatever a stored row says (ContainerSpecBuilder.BuildEnv).
+                if (ContainerSpecBuilder.IsNeverDelivered(mapping.EnvRefName))
+                    return (resolved, $"env_ref_reserved: {where} maps {mapping.EnvRefName}, which signs agent identities "
+                        + "and is never given to an agent. Remove the mapping (it blocks every provision of this agent until then).");
                 if (!agent.EnvRefs.Any(r => string.Equals(r.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)))
                     return (resolved, $"{McpHeaderMappings.RefMissing}: {where} maps {mapping.EnvRefName}, which is not an Env Ref "
                         + "of this agent. Correct or remove the mapping (it blocks every provision of this agent until then).");

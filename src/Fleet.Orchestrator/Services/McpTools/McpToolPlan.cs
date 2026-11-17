@@ -148,6 +148,10 @@ public static class McpToolPlan
 
         foreach (var mapping in mappings)
         {
+            // The same refusal provisioning makes: the key that signs agent identities is sent nowhere.
+            if (ContainerSpecBuilder.IsNeverDelivered(mapping.EnvRefName))
+                return NotAsked(McpServerTools.Misconfigured,
+                    $"Header {mapping.HeaderName} maps {mapping.EnvRefName}, which signs agent identities and is never sent.");
             if (!agent.EnvRefs.Any(r => string.Equals(r.EnvKeyName, mapping.EnvRefName, StringComparison.Ordinal)))
                 return NotAsked(McpServerTools.Misconfigured,
                     $"Header {mapping.HeaderName} maps {mapping.EnvRefName}, which is not an Env Ref of this agent.");

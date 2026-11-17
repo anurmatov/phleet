@@ -147,6 +147,43 @@ public sealed class AgentIdentityProvisioningTests
         Assert.DoesNotContain(AgentIdentityTokensTests.Encode(Key), body);
     }
 
+    /// <summary>A stored header mapping is the other way a value reaches an agent's files: it is refused there too.</summary>
+    [Fact]
+    public async Task TheKeyItself_IsNeverWrittenIntoAHeader_EvenWhereAStoredMappingAsksForIt()
+    {
+        var agent = NewAgent();
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = ContainerSpecBuilder.AgentIdentityKeyName });
+        agent.McpEndpoints.Single(e => e.McpName == "example").HeaderEnvRefsJson =
+            McpHeaderMappings.Serialize([new McpHeaderEnvRef("X-Example-Key", ContainerSpecBuilder.AgentIdentityKeyName)]);
+        await using var harness = await StartAsync(agent);
+        File.AppendAllText(harness.EnvFile, $"{ContainerSpecBuilder.AgentIdentityKeyName}={AgentIdentityTokensTests.Encode(Key)}\n");
+
+        var result = await harness.Service.ProvisionAsync("agent1");
+
+        Assert.False(result.Success);
+        Assert.StartsWith("env_ref_reserved", result.Message);
+        Assert.Empty(harness.CreateBodies);
+        var generated = harness.GeneratedDir("fleet-agent1");
+        if (Directory.Exists(generated))
+            foreach (var file in Directory.EnumerateFiles(generated, "*", SearchOption.AllDirectories))
+                Assert.DoesNotContain(AgentIdentityTokensTests.Encode(Key), File.ReadAllText(file));
+    }
+
+    [Fact]
+    public void TheToolListing_DoesNotSendTheKey_EvenWhereAStoredMappingAsksForIt()
+    {
+        var agent = NewAgent();
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = ContainerSpecBuilder.AgentIdentityKeyName });
+        agent.McpEndpoints.Single(e => e.McpName == "example").HeaderEnvRefsJson =
+            McpHeaderMappings.Serialize([new McpHeaderEnvRef("X-Example-Key", ContainerSpecBuilder.AgentIdentityKeyName)]);
+        var env = new Dictionary<string, string> { [ContainerSpecBuilder.AgentIdentityKeyName] = AgentIdentityTokensTests.Encode(Key) };
+
+        var entry = McpToolPlan.Build(agent, env, [], "http://fleet-memory:3100", () => null).Single(e => e.Name == "example");
+
+        Assert.Null(entry.Target);
+        Assert.NotNull(entry.NotAsked);
+    }
+
     // ── the pieces ───────────────────────────────────────────────────────────
 
     [Fact]

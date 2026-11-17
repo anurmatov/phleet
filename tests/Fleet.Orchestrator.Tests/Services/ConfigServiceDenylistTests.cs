@@ -217,6 +217,25 @@ public sealed class ConfigServiceDenylistTests : IDisposable
         Assert.Equal("true", values.Literals["FLEET_COMMS_ENABLED"]);
     }
 
+    /// <summary>
+    /// The agent identity key signs every agent's token: whoever reads it can be any agent, and
+    /// whoever writes it chooses the key. Neither config surface serves it, and neither writes it.
+    /// </summary>
+    [Fact]
+    public async Task The_agent_identity_key_is_neither_served_nor_written()
+    {
+        var service = await ServiceWithJournalKeysAsync();
+        var before = await File.ReadAllTextAsync(_envFile);
+
+        Assert.True(ConfigService.IsDenylisted("FLEET_AGENT_IDENTITY_KEY"));
+        Assert.True(ConfigService.IsDenylisted("fleet_agent_identity_key"));
+        Assert.False(service.GetAll().ContainsKey("FLEET_AGENT_IDENTITY_KEY"));
+        Assert.False((await service.GetValuesAsync(["FLEET_AGENT_IDENTITY_KEY"])).Literals.ContainsKey("FLEET_AGENT_IDENTITY_KEY"));
+        await Assert.ThrowsAsync<DenylistedException>(() => service.PutValuesAsync(
+            new Dictionary<string, string> { ["FLEET_AGENT_IDENTITY_KEY"] = "replaced" }));
+        Assert.Equal(before, await File.ReadAllTextAsync(_envFile));
+    }
+
     /// <summary><c>set_config_values</c> refuses the key before anything is written.</summary>
     [Fact]
     public async Task Set_config_values_refuses_the_signing_key()
@@ -259,7 +278,8 @@ public sealed class ConfigServiceDenylistTests : IDisposable
             + "FLEET_COMMS_MINIO_ROOT_USER=root\n"
             + "FLEET_COMMS_MINIO_ROOT_PASSWORD=a-root-password\n"
             + "FLEET_COMMS_JOURNAL_RETENTION=365.00:00:00\n"
-            + "FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS=example-reviewer\n");
+            + "FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS=example-reviewer\n"
+            + "FLEET_AGENT_IDENTITY_KEY=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v\n");
 
         var db = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
             .UseInMemoryDatabase($"denylist_{Guid.NewGuid():N}").Options);

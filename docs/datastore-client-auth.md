@@ -180,7 +180,9 @@ Nothing gives either credential to an agent by itself. In the example compose fi
 is handed to fleet-memory alone and the Temporal token to the orchestrator and the bridge alone,
 and no path is mounted into an agent for either: both arrive as environment variables of their
 services. `setup.sh` and `upgrade.sh` drop a value of any of them exported in the shell, so `.env`
-decides.
+decides. The config API does not serve or write `FLEET_QDRANT_API_KEY` or
+`FLEET_TEMPORAL_BEARER_TOKEN` (`/api/config/*` and `set_config_values` refuse them, like the
+database's credentials): set them in `.env`.
 
 Like every other value in `.env`, either can be attached to an agent as an Env Ref by an operator
 who wants that agent to reach the server directly. That is a choice with a cost: an agent with the

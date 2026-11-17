@@ -236,6 +236,31 @@ public sealed class ConfigServiceDenylistTests : IDisposable
         Assert.Equal(before, await File.ReadAllTextAsync(_envFile));
     }
 
+    /// <summary>
+    /// The credentials Fleet's services present to Qdrant and Temporal are the services' own, like
+    /// the database's: whoever reads one can go around fleet-memory or the bridge, and whoever
+    /// writes one decides what the services send. Neither config surface serves or writes them.
+    /// </summary>
+    [Theory]
+    [InlineData("FLEET_QDRANT_API_KEY")]
+    [InlineData("FLEET_TEMPORAL_BEARER_TOKEN")]
+    [InlineData("fleet_temporal_bearer_token")]
+    public async Task A_datastore_credential_is_neither_served_nor_written(string key)
+    {
+        var service = await ServiceWithJournalKeysAsync();
+        var before = await File.ReadAllTextAsync(_envFile);
+        var name = key.ToUpperInvariant();
+
+        Assert.True(ConfigService.IsDenylisted(key));
+        Assert.False(service.GetAll().ContainsKey(name));
+        Assert.False((await service.GetValuesAsync([name])).Literals.ContainsKey(name));
+        await Assert.ThrowsAsync<DenylistedException>(() => service.PutValuesAsync(
+            new Dictionary<string, string> { [name] = "replaced" }));
+        Assert.Equal(before, await File.ReadAllTextAsync(_envFile));
+        // The address is not a credential: fleet-memory's Qdrant URL stays readable.
+        Assert.False(ConfigService.IsDenylisted("FLEET_QDRANT_URL"));
+    }
+
     /// <summary><c>set_config_values</c> refuses the key before anything is written.</summary>
     [Fact]
     public async Task Set_config_values_refuses_the_signing_key()
@@ -279,7 +304,9 @@ public sealed class ConfigServiceDenylistTests : IDisposable
             + "FLEET_COMMS_MINIO_ROOT_PASSWORD=a-root-password\n"
             + "FLEET_COMMS_JOURNAL_RETENTION=365.00:00:00\n"
             + "FLEET_COMMS_JOURNAL_READ_ALL_SUBJECTS=example-reviewer\n"
-            + "FLEET_AGENT_IDENTITY_KEY=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v\n");
+            + "FLEET_AGENT_IDENTITY_KEY=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v\n"
+            + "FLEET_QDRANT_API_KEY=synthetic-qdrant-key\n"
+            + "FLEET_TEMPORAL_BEARER_TOKEN=synthetic-temporal-token\n");
 
         var db = new OrchestratorDbContext(new DbContextOptionsBuilder<OrchestratorDbContext>()
             .UseInMemoryDatabase($"denylist_{Guid.NewGuid():N}").Options);

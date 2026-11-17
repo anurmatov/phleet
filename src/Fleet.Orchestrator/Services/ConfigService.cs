@@ -51,6 +51,10 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
             "POLYMARKET_PRIVATE_KEY",
             // Signs every agent's identity token: whoever reads it can be any agent.
             ContainerSpecBuilder.AgentIdentityKeyName,
+            // What fleet-memory and the Temporal clients present to their servers
+            // (docs/datastore-client-auth.md): whoever reads one goes around the service that holds it.
+            "FLEET_QDRANT_API_KEY",
+            "FLEET_TEMPORAL_BEARER_TOKEN",
         ], StringComparer.OrdinalIgnoreCase);
 
     public static bool IsDenylisted(string key) =>

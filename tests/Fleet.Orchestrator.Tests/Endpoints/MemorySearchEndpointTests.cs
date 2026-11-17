@@ -21,21 +21,21 @@ namespace Fleet.Orchestrator.Tests.Endpoints;
 public sealed class MemorySearchEndpointTests
 {
     private const string Token = "synthetic-service-token";
-    private const string Hits = """[{"id":"76a05a22-0000-4000-8000-000000000001","title":"Заметка","match":"id","highlights":[],"score":null}]""";
+    private const string Hits = """[{"id":"5e1f9a3c-0000-4000-8000-000000000001","title":"Заметка","match":"id","highlights":[],"score":null}]""";
 
     [Fact]
     public async Task OnlyQ_IsForwardedAlone()
     {
         await using var host = await Host.StartAsync(_ => Json(HttpStatusCode.OK, Hits));
 
-        var response = await host.Client.GetAsync("/api/memory/search?q=76a05a22");
+        var response = await host.Client.GetAsync("/api/memory/search?q=5e1f9a3c");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(Hits, await response.Content.ReadAsStringAsync());
         var call = Assert.Single(host.Calls);
         Assert.Equal("fleet-memory.invalid", call.Host);
         Assert.Equal("/internal/memory/search", call.AbsolutePath);
-        Assert.Equal("?q=76a05a22", call.Query);
+        Assert.Equal("?q=5e1f9a3c", call.Query);
     }
 
     [Fact]

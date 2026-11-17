@@ -1574,8 +1574,8 @@ test.describe('workflow tree on a 360px phone', () => {
 
 type MemoryAnswer = { status?: number; json: unknown; delayMs?: number }
 
-const MEMORY_ID = '76a05a22-3c1f-4b7e-9d52-0a1b2c3d4e5f'
-const MEMORY_TWIN = '76a05a22-9e0d-4c3b-8a7f-6e5d4c3b2a19'
+const MEMORY_ID = '5e1f9a3c-3c1f-4b7e-9d52-0a1b2c3d4e5f'
+const MEMORY_TWIN = '5e1f9a3c-9e0d-4c3b-8a7f-6e5d4c3b2a19'
 
 const memoryItem = (id: string, title: string, project: string, type: string, tags: string[]) =>
   ({ id, title, project, type, tags, updated_at: '2026-01-05T10:00:00Z' })
@@ -1742,18 +1742,18 @@ test('memory search: a filtered search that finds nothing says the filters were 
 
 test('memory search: a memory id comes first, and Enter opens the one memory it names', async ({ page }) => {
   const searches = await openMemory(page, query => ({
-    json: query.get('q') === '76a05a22'
+    json: query.get('q') === '5e1f9a3c'
       // Two memories start with these eight characters.
       ? [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.'), memoryHit(MEMORY_TWIN, 'id', 'Before a rollback.')]
       : [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.'),
         memoryHit('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', 'meaning', 'Two staging hosts.', [], 0.3)],
   }))
 
-  await memorySearchBox(page).fill('76a05a22-3c1f')
+  await memorySearchBox(page).fill('5e1f9a3c-3c1f')
   const first = page.locator('.memory-result-item').first()
   await expect(first.locator('.memory-result-title')).toHaveText('How a deploy reaches the host')
   await expect(first.locator('.memory-result-match')).toHaveText('ID')
-  await expect(first.locator('.memory-result-detail')).toHaveText('76a05a22')
+  await expect(first.locator('.memory-result-detail')).toHaveText('5e1f9a3c')
   await expect(page.locator('.memory-cv-title')).toHaveCount(0)
 
   await memorySearchBox(page).press('Enter')
@@ -1763,7 +1763,7 @@ test('memory search: a memory id comes first, and Enter opens the one memory it 
   expect(searches).toHaveLength(1)
 
   // An id that names two memories opens neither: both are listed to choose from.
-  await memorySearchBox(page).fill('76a05a22')
+  await memorySearchBox(page).fill('5e1f9a3c')
   await expect(page.locator('.memory-result-match')).toHaveText(['ID', 'ID'])
   await memorySearchBox(page).press('Enter')
   await page.waitForTimeout(300)
@@ -1772,12 +1772,12 @@ test('memory search: a memory id comes first, and Enter opens the one memory it 
 })
 
 test('memory search: Enter pressed before the answer is in opens the id hit when it arrives, and only for what is typed now', async ({ page }) => {
-  const searches = await openMemory(page, query => query.get('q') === '76a05a22-3c1f'
+  const searches = await openMemory(page, query => query.get('q') === '5e1f9a3c-3c1f'
     ? { json: [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.')], delayMs: 500 }
     : { json: [memoryHit(MEMORY_TWIN, 'keyword', 'Before a rollback.')] })
 
   // Pasted and entered at once: no wait for the pause after typing.
-  await memorySearchBox(page).fill('76a05a22-3c1f')
+  await memorySearchBox(page).fill('5e1f9a3c-3c1f')
   await memorySearchBox(page).press('Enter')
   await expect(page.locator('.memory-cv-title')).toHaveText('How a deploy reaches the host')
   expect(searches).toHaveLength(1)
@@ -1785,7 +1785,7 @@ test('memory search: Enter pressed before the answer is in opens the id hit when
   // Entered, then changed before the answer: the id hit of the abandoned query opens nothing.
   await page.reload()
   await expect(page.locator('.memory-tree-project-btn').first()).toBeVisible()
-  await memorySearchBox(page).fill('76a05a22-3c1f')
+  await memorySearchBox(page).fill('5e1f9a3c-3c1f')
   await memorySearchBox(page).press('Enter')
   await memorySearchBox(page).fill('rollback')
   await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])

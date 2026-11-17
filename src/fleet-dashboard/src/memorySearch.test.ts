@@ -63,15 +63,15 @@ test('a kind is one of the five the service names, exactly, and each has its wor
 })
 
 test('Enter opens the one id hit, and nothing when there is none or more than one', () => {
-  assert.equal(singleIdHit([hit('76a05a22-1', 'id'), hit('b', 'keyword'), hit('c', 'meaning')]), '76a05a22-1')
-  assert.equal(singleIdHit([hit('76a05a22-1', 'id'), hit('76a05a22-2', 'id')]), null)
+  assert.equal(singleIdHit([hit('5e1f9a3c-1', 'id'), hit('b', 'keyword'), hit('c', 'meaning')]), '5e1f9a3c-1')
+  assert.equal(singleIdHit([hit('5e1f9a3c-1', 'id'), hit('5e1f9a3c-2', 'id')]), null)
   assert.equal(singleIdHit([hit('a', 'title')]), null)
   assert.equal(singleIdHit([hit('a')]), null)
   assert.equal(singleIdHit([]), null)
 })
 
 test('an id hit shows the start of its id and a tag hit the tag that was typed', () => {
-  assert.equal(matchDetail(hit('76a05a22-0000-4000-8000-000000000001', 'id'), '76a05a'), '76a05a22')
+  assert.equal(matchDetail(hit('5e1f9a3c-0000-4000-8000-000000000001', 'id'), '5e1f9a'), '5e1f9a3c')
   assert.equal(matchDetail(hit('a', 'tag', { tags: ['ops', 'Deploy'] }), ' deploy '), '#Deploy')
   assert.equal(matchDetail(hit('a', 'tag', { tags: ['ops'] }), 'deploy'), null)
   assert.equal(matchDetail(hit('a', 'keyword', { tags: ['deploy'] }), 'deploy'), null)
@@ -81,7 +81,7 @@ test('an id hit shows the start of its id and a tag hit the tag that was typed',
 // ── the request ──────────────────────────────────────────────────────────────────────────────────
 
 test('a search sends the trimmed query and only the filters that are set, each escaped', () => {
-  assert.equal(searchUrl('  76a05a22 ', NO_FILTERS), '/api/memory/search?q=76a05a22')
+  assert.equal(searchUrl('  5e1f9a3c ', NO_FILTERS), '/api/memory/search?q=5e1f9a3c')
   assert.equal(
     searchUrl('поиск a&b=c', { project: 'atlas/north', type: 'how to', tag: 'c#&more' }),
     '/api/memory/search?q=%D0%BF%D0%BE%D0%B8%D1%81%D0%BA%20a%26b%3Dc&project=atlas%2Fnorth&type=how%20to&tag=c%23%26more')

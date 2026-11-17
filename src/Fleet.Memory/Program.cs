@@ -103,7 +103,7 @@ app.MapGet("/internal/memory", async (MemoryService memoryService) =>
             project    = d.GetValueOrDefault("project") ?? "",
             type       = d.GetValueOrDefault("memory_type") ?? "",
             tags,
-            updated_at = d.GetValueOrDefault("created") ?? "",
+            updated_at = MemoryListEntry.UpdatedAt(d),
         };
     });
     return Results.Ok(result);

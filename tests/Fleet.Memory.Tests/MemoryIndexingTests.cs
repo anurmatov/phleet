@@ -151,6 +151,31 @@ public sealed class MemoryIndexingTests : IDisposable
     }
 
     [Fact]
+    public async Task A_listed_memory_says_when_it_was_updated_not_when_it_was_created()
+    {
+        var created = new DateTimeOffset(2026, 1, 5, 9, 0, 0, TimeSpan.Zero);
+        var doc = await _f.Store.SaveAsync(new MemoryDocument
+        {
+            Id = Guid.NewGuid().ToString(), Type = "learning", Title = "Retry budget", Content = LongContent(),
+            Created = created, Updated = created.AddDays(40),
+        });
+        await _f.Service.IndexFileAsync(doc.FilePath);
+        var old = await _f.WriteAsync("Indexed before", "Three attempts.", updated: created);
+        _f.Index.AddLegacyPoint(old, _f.Embedder.Embed("old"));
+
+        var listed = await _f.Service.ListAsync();
+
+        // What GET /internal/memory answers as updated_at.
+        var entry = listed.Single(e => e["memory_id"] == doc.Id);
+        Assert.Equal(created.AddDays(40), DateTimeOffset.Parse(Fleet.Memory.Endpoints.MemoryListEntry.UpdatedAt(entry)));
+        Assert.NotEqual(entry["created"], Fleet.Memory.Endpoints.MemoryListEntry.UpdatedAt(entry));
+        // A point from before the payload carried it has only the created time to give.
+        var legacy = listed.Single(e => e["memory_id"] == old.Id);
+        Assert.Equal(legacy["created"], Fleet.Memory.Endpoints.MemoryListEntry.UpdatedAt(legacy));
+        Assert.Equal("", Fleet.Memory.Endpoints.MemoryListEntry.UpdatedAt(new Dictionary<string, string>()));
+    }
+
+    [Fact]
     public async Task The_duplicate_hint_names_a_memory_of_many_similar_sections_once()
     {
         using var f = new MemoryFixture(Small, similarityThreshold: 0.85f);

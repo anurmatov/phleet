@@ -846,6 +846,7 @@ for (const kind of TEXT_COMPARED) {
     const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
     await expect(comparison.getByLabel('Older version')).toHaveValue('')
     await expect(comparison.getByRole('status')).toHaveText(/nothing → v1\s*\+39\s*-0/)
+    await expect(comparison.locator('.vc-note')).toHaveCount(0)
     // The dialog has the focus, so Escape reaches it; it goes back to the row's own button.
     await expect(comparison).toBeFocused()
     await page.keyboard.press('Escape')
@@ -860,6 +861,26 @@ for (const kind of TEXT_COMPARED) {
     // The same version on both sides is said, not drawn as an empty comparison.
     await comparison.getByLabel('Older version').selectOption('4')
     await expect(comparison.locator('.vc-note')).toHaveText('v4 is on both sides: there is nothing to compare.')
+  })
+
+  test(`${kind.hash}: the oldest version kept, when earlier ones are gone, does not claim to have written every line`, async ({ page }) => {
+    // Only the newest versions are kept: here v1 and v2 have been dropped.
+    await open(page, kind.hash, f => {
+      kind.seed(f)
+      const kept = kind.hash === 'instructions' ? f.instructions[0] : f.contexts[0]
+      kept.versions = kept.versions.filter(v => v.versionNumber > 2)
+    })
+    const row = rowByName(page, kind.name)
+    await row.locator('.instr-header').click()
+    await versionRow(row, 3).getByRole('button', { name: 'Compare v3' }).click()
+    const comparison = page.getByRole('dialog', { name: `Compare versions of ${kind.name}` })
+    await expect(comparison.getByRole('status')).toContainText('nothing → v3')
+    await expect(comparison.locator('.vc-note')).toHaveText('Versions before v3 are not kept, so every line of v3 shows as added, not only what it changed.')
+    // With the one before it kept, the note goes.
+    await comparison.getByLabel('Newer version').selectOption('4')
+    await comparison.getByLabel('Older version').selectOption({ label: 'nothing' })
+    await expect(comparison.getByRole('status')).toContainText('nothing → v4')
+    await expect(comparison.locator('.vc-note')).toHaveCount(0)
   })
 }
 

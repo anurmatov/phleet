@@ -3,7 +3,7 @@ import {
   compareTexts, expand, layOut, EXPAND_STEP,
   type CompareFormat, type CompareResult, type DiffRow, type Expansion, type Section,
 } from '../versionDiff'
-import { againstCurrent, changesOf, samePair, withSide, type ComparedVersion, type VersionPair } from '../versionHistory'
+import { againstCurrent, changesOf, previousVersion, samePair, withSide, type ComparedVersion, type VersionPair } from '../versionHistory'
 import Modal from './Modal'
 import Icon from './Icon'
 
@@ -79,6 +79,8 @@ export default function VersionCompare({ name, versions, current, chosen, format
 
   const changes = result.ok ? result.blocks.length : 0
   const digits = result.ok ? String(result.rows.length).length : 1
+  // Only the newest versions are kept: against nothing, the oldest one kept looks as if it wrote every line.
+  const earlierGone = pair.older === null && pair.newer > 1 && previousVersion(numbers, pair.newer) === null
 
   return (
     <Modal label={`Compare versions of ${name}`} overlayClassName="wf-detail-overlay" className="wf-detail-modal vc-modal" onClose={onClose}>
@@ -159,6 +161,11 @@ export default function VersionCompare({ name, versions, current, chosen, format
           <div className="vc-note vc-note-warn">
             {result.notJson.map(side => versionLabel(side === 'older' ? pair.older : pair.newer)).join(' and ')}
             {result.notJson.length === 1 ? ' is' : ' are'} not valid JSON, so the two versions are compared as plain text.
+          </div>
+        )}
+        {result.ok && earlierGone && (
+          <div className="vc-note">
+            Versions before v{pair.newer} are not kept, so every line of v{pair.newer} shows as added, not only what it changed.
           </div>
         )}
         {result.ok && changes === 0 && (

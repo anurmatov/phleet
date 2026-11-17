@@ -4,13 +4,15 @@ The overview diagram and the five-step summary are in the [README](../README.md#
 
 ## What runs
 
-`setup.sh` provisions the following services, all on the `fleet-net` Docker network:
+`setup.sh` provisions the following services. Agents and most services share the `fleet-net`
+Docker network; Temporal and Qdrant, which take no credential, are on networks of their own that
+no agent joins ([docs/agent-identity.md](agent-identity.md#networks)):
 
 - `rabbitmq` — message broker
 - `fleet-mysql` — agent config + task history
-- `qdrant` — vector store for Fleet Memory
-- `temporal-postgresql` — Temporal persistence
-- `temporal-server` + `temporal-ui` — workflow engine
+- `qdrant` — vector store for Fleet Memory (on `fleet-memory-net`, with `fleet-memory`)
+- `temporal-postgresql` — Temporal persistence (on `fleet-temporal-net`)
+- `temporal-server` + `temporal-ui` — workflow engine (on `fleet-temporal-net`, with the orchestrator and the Temporal bridge)
 - `fleet-minio` (+ `fleet-minio-init`) — S3-compatible store for inter-agent file sharing
 - `fleet-memory` — semantic memory MCP server
 - `fleet-playwright` — browser automation MCP server

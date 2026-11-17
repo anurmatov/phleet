@@ -102,6 +102,28 @@ routes to a service token only: an agent's own token, valid as it is, gets `403`
 servers to check against. It is Docker-network-only and takes no credential, like
 `/internal/agent-project-access`: names of agents and of tools.
 
+## Networks
+
+Identity on the MCP servers is only as good as the absence of a way around them. Two services
+take no credential at all, and used to share `fleet-net` with the agents:
+
+| Service | What an agent on its network could do | Now on |
+|---|---|---|
+| Temporal (`temporal-server`, `temporal-ui`, `temporal-postgresql`) | Signal any gate, cancel or terminate any workflow, without the bridge and its checks | `fleet-temporal-net`, with the orchestrator and the Temporal bridge |
+| Qdrant | Read and delete memory vectors without fleet-memory and its project check | `fleet-memory-net` (internal), with fleet-memory |
+
+No agent joins either network: agents are provisioned onto `fleet-net` and whatever networks an
+operator adds to them. The host ports (`7233`, `8080`) are unchanged, and loopback by default.
+
+A deployment with its own compose file gets this only by making the same change there. An
+existing stack needs its services recreated once (`./upgrade.sh` does) so they join the new
+networks; no data moves.
+
+Not closed by this: RabbitMQ is on `fleet-net` because agents use it, with one shared account, so
+an agent can still publish to another agent's queue. `fleet-bridge` (port 3300) takes no
+credential and prompts the CTO agent by design, for callers outside the fleet. Both are separate
+pieces of work.
+
 ## Limits
 
 - **Claude and Codex agents only.** A Gemini agent's CLI is not proven to send MCP headers, and an

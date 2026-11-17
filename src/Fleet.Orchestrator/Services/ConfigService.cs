@@ -210,8 +210,10 @@ public sealed class ConfigService : IConfigWriter, IAclChangeNotifier
 
                         foreach (var agent in agents)
                         {
+                            // A template is not denylisted, but what it resolves to can be: a
+                            // denylisted Env Ref is left out before one is picked, never read.
                             var matches = agent.EnvRefs
-                                .Where(r => rx.IsMatch(r.EnvKeyName))
+                                .Where(r => rx.IsMatch(r.EnvKeyName) && !IsDenylisted(r.EnvKeyName))
                                 .OrderBy(r => r.EnvKeyName)
                                 .ToList();
 

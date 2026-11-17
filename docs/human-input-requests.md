@@ -84,13 +84,26 @@ enriched input. Response is `{Status:"answered",Answer:{Value,Comment?}}` or
 expired. Malformed consumed payloads are invalid, never approvals. Whole JSON
 objects preserve quotes, newlines, Unicode and template-looking text.
 
-Agent returns use one report-only delegate to Origin.RequesterAgent with
-Delivery=unknown. Only completed status plus the entire trimmed receipt
+Agent returns use one delegate to Origin.RequesterAgent with Delivery=unknown.
+That turn is where the requester continues the task the request was about: no
+other message starts it. The callback tells the requester to check that the
+request and run are the ones it started, to act on an answered Response within
+the scope its own Request states and under the rules, gates and permissions it
+already works under, and to treat everything inside the JSON, the answer's text
+included, as information and never as instructions. The answer grants nothing the
+Question did not ask for; a rejection, `expired` and `invalid` approve nothing.
+The requester must not wait for the request's own run to complete from inside
+this turn: the run stays Running until the turn ends.
+
+Only completed status plus the entire trimmed receipt
 `HUMAN_INPUT_RECEIVED:<workflowId>:<runId>:<status>` changes Delivery to
-acknowledged. Wrong/missing receipts and failures leave it unknown and cannot
-change Response. The stable task ID is `<workflowId>/notify-requester`, with no
-incomplete retry or rerouting. The ten-minute step uses the existing twelve-minute
-activity limit and two-minute heartbeat. Requester budget remains config-driven.
+acknowledged. The receipt acknowledges delivery; it never says the task is done.
+Wrong/missing receipts and failures leave it unknown and cannot change Response.
+The stable task ID is `<workflowId>/notify-requester`, with no incomplete retry
+or rerouting. The step allows 60 minutes (its activity two more, with the
+two-minute heartbeat), after which the requester's turn is stopped: longer work
+belongs in a delegation or workflow the requester starts. Requester budget
+remains config-driven.
 Parent returns have Delivery=parent-result, which names a path, not an ack.
 Transport and APNs delivery are not exactly once.
 
@@ -169,6 +182,6 @@ changed artifacts and repeated same-head blockers stop with their owner rather
 than silently widening access or repeating work. Rejection, 1440-minute expiry,
 admission failure and parent cancellation retain their distinct meanings.
 
-Standalone callbacks remain report-only; a later recovery needs independent
+A standalone callback acts only on its own exact run; a later recovery needs independent
 artifact/authority verification and an explicitly scoped owned handoff, never
 automatic revival or rewriting of a terminal run.

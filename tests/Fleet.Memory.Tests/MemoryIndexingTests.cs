@@ -2,6 +2,10 @@ using Fleet.Memory.Data;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Fleet.Memory.Configuration;
+using NSubstitute;
 
 namespace Fleet.Memory.Tests;
 
@@ -225,6 +229,72 @@ public sealed class MemoryIndexingTests : IDisposable
     }
 
     // ── Failures ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Removal_clears_the_catalogue_after_queued_indexers_finish()
+    {
+        var doc = await _f.WriteAsync("Queued note", "Original content.");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var embedder = Substitute.For<IEmbeddingService>();
+        embedder.EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(async call =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(call.Arg<CancellationToken>());
+            return _f.Embedder.Embed(call.Arg<string>());
+        });
+        var service = new MemoryService(_f.Store, _f.Index, embedder,
+            Options.Create(new QdrantOptions { Url = "http://localhost:1", SimilarityThreshold = 0 }),
+            new MemorySizeGuidance(0, NullLogger.Instance), _f.Log, new MemoryCatalogue(), Small);
+        var first = service.IndexFileAsync(doc.FilePath);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var queued = service.IndexFileAsync(doc.FilePath);
+        var removal = service.RemoveFromIndexAsync(doc.FilePath);
+        release.SetResult();
+        await Task.WhenAll(first, queued, removal).WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Empty(_f.Index.PointsOf(doc.FilePath));
+        Assert.Empty(service.Catalogue.Entries);
+    }
+
+    [Fact]
+    public async Task A_queued_index_reads_the_current_file_only_after_it_owns_the_path()
+    {
+        var doc = await _f.WriteAsync("Queued note", "Original content.", project: "alpha");
+        var saved = await File.ReadAllBytesAsync(doc.FilePath);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var embedder = Substitute.For<IEmbeddingService>();
+        var calls = 0;
+        embedder.EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(async call =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                entered.SetResult();
+                await release.Task.WaitAsync(call.Arg<CancellationToken>());
+            }
+            return _f.Embedder.Embed(call.Arg<string>());
+        });
+        var service = new MemoryService(_f.Store, _f.Index, embedder,
+            Options.Create(new QdrantOptions { Url = "http://localhost:1", SimilarityThreshold = 0 }),
+            new MemorySizeGuidance(0, NullLogger.Instance), _f.Log, new MemoryCatalogue(), Small);
+        var first = service.IndexFileAsync(doc.FilePath);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // A temporary bad file must not be read by a caller still waiting behind the first index.
+        await File.WriteAllTextAsync(doc.FilePath, "not a memory");
+        var queued = service.IndexFileAsync(doc.FilePath);
+        try
+        {
+            await Task.WhenAny(queued, Task.Delay(100));
+            await File.WriteAllBytesAsync(doc.FilePath, saved);
+            await _f.Store.UpdateAsync(doc.FilePath, d => { d.Content = "Latest content."; d.Project = "beta"; });
+        }
+        finally { release.TrySetResult(); }
+        await Task.WhenAll(first, queued).WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains("Latest content.", Assert.Single(_f.Index.PointsOf(doc.FilePath)).SparseText);
+        Assert.Equal("beta", Assert.Single(service.Catalogue.Entries).Project);
+    }
 
     [Fact]
     public async Task An_embedder_that_fails_half_way_leaves_the_index_as_it_was_and_the_next_attempt_does_it_all()

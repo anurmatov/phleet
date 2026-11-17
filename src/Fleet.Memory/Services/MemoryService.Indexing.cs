@@ -89,8 +89,8 @@ public sealed partial class MemoryService
     /// Throws <see cref="InvalidDataException"/> if the file cannot be parsed (bad YAML or not a memory file).
     /// Other exceptions indicate infrastructure failures (Qdrant, embedding) and propagate as-is.
     /// </summary>
-    public async Task IndexFileAsync(string filePath, CancellationToken ct = default) =>
-        await IndexDocumentAsync(await ParseForIndexAsync(filePath), filePath, ct);
+    public Task IndexFileAsync(string filePath, CancellationToken ct = default) =>
+        IndexCurrentFileAsync(filePath, ct);
 
     private async Task<MemoryDocument> ParseForIndexAsync(string filePath)
     {
@@ -116,9 +116,11 @@ public sealed partial class MemoryService
         return doc;
     }
 
-    private async Task IndexDocumentAsync(MemoryDocument doc, string filePath, CancellationToken ct)
+    private async Task<MemoryDocument> IndexCurrentFileAsync(string filePath, CancellationToken ct)
     {
         using var turn = await _paths.EnterAsync(filePath, ct);
+        // A queued caller must not retain a document read before an earlier writer or delete finished.
+        var doc = await ParseForIndexAsync(filePath);
 
         // The file is the memory: it is in the catalogue as parsed, whether or not the index can be written.
         _catalogue.Set(doc, filePath);
@@ -128,7 +130,7 @@ public sealed partial class MemoryService
         {
             Interlocked.Increment(ref _unchangedMemories);
             logger.LogDebug("Memory {Id} is unchanged in the index; not embedded again", doc.Id);
-            return;
+            return doc;
         }
 
         Forget(filePath);
@@ -165,6 +167,7 @@ public sealed partial class MemoryService
         Interlocked.Increment(ref _embeddedMemories);
         Interlocked.Add(ref _embeddedSections, points.Count);
         logger.LogInformation("Indexed memory {Id} ({Type}) in {Sections} section(s): {Title}", doc.Id, doc.Type, points.Count, doc.Title);
+        return doc;
     }
 
     public async Task RemoveFromIndexAsync(string filePath, CancellationToken ct = default)
@@ -175,10 +178,9 @@ public sealed partial class MemoryService
 
     private async Task RemoveIndexEntryAsync(string filePath, CancellationToken ct)
     {
-        // Out of the catalogue first: that needs nothing that can fail.
-        _catalogue.Remove(filePath);
-
         using var turn = await _paths.EnterAsync(filePath, ct);
+        // Remove after earlier indexers finish, or a queued indexer could put it back in the catalogue.
+        _catalogue.Remove(filePath);
         Forget(filePath);
         try
         {

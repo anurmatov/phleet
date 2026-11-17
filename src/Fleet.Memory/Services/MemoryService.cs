@@ -93,8 +93,7 @@ public sealed partial class MemoryService(
         MemoryDocument? onDisk = null;
         try
         {
-            onDisk = await ParseForIndexAsync(doc.FilePath);
-            await IndexDocumentAsync(onDisk, doc.FilePath, ct);
+            onDisk = await IndexCurrentFileAsync(doc.FilePath, ct);
         }
         catch (InvalidDataException ex)
         {
@@ -210,8 +209,7 @@ public sealed partial class MemoryService(
         MemoryDocument? onDisk = null;
         try
         {
-            onDisk = await ParseForIndexAsync(filePath);
-            await IndexDocumentAsync(onDisk, filePath, ct);
+            onDisk = await IndexCurrentFileAsync(filePath, ct);
         }
         catch (InvalidDataException ex)
         {

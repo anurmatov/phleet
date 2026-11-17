@@ -300,8 +300,9 @@ tag, keyword, meaning (`MemoryService.Search.cs`): the first three from the in-m
 `MemoryCatalogue`, the last two from the index's two sides, fused in code by `SearchFusion` so a hit
 can say which side found it. Every point carries `index_hash` and `index_format`; at start
 `FileWatcherService.FullIndexAsync` reads them once and a file whose hash matches is not embedded
-again. `IVectorIndex` is the seam the tests fake (`VectorStore` is Qdrant). See
-`docs/memory-search.md`.
+again. `IVectorIndex` is the seam the tests fake (`VectorStore` is Qdrant); the real `VectorStore`
+is tested against a real Qdrant by `bash tests/memory-qdrant/run.sh` (the `*Qdrant*` test classes,
+skipped elsewhere), which a change to any Qdrant request must pass. See `docs/memory-search.md`.
 
 MUST NOT: change what is written for an unchanged memory (the terms of `Bm25Tokenizer` /
 `MemoryWords`, the dense or sparse text, the sections, the payload) without raising

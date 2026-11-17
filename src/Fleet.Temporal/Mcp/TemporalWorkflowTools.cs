@@ -6,6 +6,7 @@ using Fleet.Temporal.Engine;
 using ModelContextProtocol.Server;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Temporal.Mcp;
 
@@ -113,7 +114,7 @@ public sealed class TemporalWorkflowTools(
             if (humanInputRequest)
             {
                 workflow_type = HumanInputRequestContract.WorkflowType;
-                requester = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+                requester = AgentCallerHttp.AgentNameOf(httpContextAccessor);
                 inputObj = HumanInputRequestContract.Enrich(inputObj is JsonElement element ? element : default,
                     requester, workflow_id, @namespace, task_queue, client.Options.DataConverter.PayloadConverter);
                 id_reuse_policy = "reject_duplicate";
@@ -254,7 +255,7 @@ public sealed class TemporalWorkflowTools(
         // shape that existed before #436 — never reach this check.
         if (delegatedGate is not null && CarriesGrantId(args, out var strayDecision))
         {
-            var strayCaller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            var strayCaller = AgentCallerHttp.AgentNameOf(httpContextAccessor);
             LogDelegatedApproval(LogLevel.Warning, delegatedGate, workflow_id, strayCaller, null, "blocked", "grant_id_without_approved",
                 decision: strayDecision ?? "unavailable");
             return $"Error: '{delegatedGate}' was not sent because the payload carries {GrantIdField} with Decision " +
@@ -270,7 +271,7 @@ public sealed class TemporalWorkflowTools(
 
         if (feedbackGate is not null)
         {
-            var caller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+            var caller = AgentCallerHttp.AgentNameOf(httpContextAccessor);
             var configuredCto = ctoAgentConfig.GetCtoAgent();
             JsonElement? argsElement = null;
 
@@ -556,7 +557,7 @@ public sealed class TemporalWorkflowTools(
         JsonElement args,
         string @namespace)
     {
-        var caller = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var caller = AgentCallerHttp.AgentNameOf(httpContextAccessor);
         var configuredCto = ctoAgentConfig.GetCtoAgent();
         var grantId = GetStringPropertyIgnoreCase(args, GrantIdField);
 
@@ -933,7 +934,7 @@ public sealed class TemporalWorkflowTools(
         [Description("Short descriptive title (5-10 words). Used for retrieval — be specific.")] string title,
         [Description("Full memory content. Include: what was learned/decided, why it matters, and how to apply it.")] string content,
         [Description("Project this memory relates to (e.g. 'my-project').")] string project,
-        [Description("Your agent name (e.g. 'my-agent'). Used to identify the requester.")] string agent,
+        [Description("Your agent name (e.g. 'my-agent'). Ignored when the call is made as an agent: the requester is then the caller.")] string agent,
         [Description("Optional comma-separated tags for categorization (e.g. 'testing,ci,dotnet').")] string tags = "",
         [Description("Optional source context (e.g. workflow ID, PR number, issue number).")] string source = "")
     {
@@ -944,7 +945,9 @@ public sealed class TemporalWorkflowTools(
             Title = title,
             Content = content,
             Project = project,
-            Agent = agent,
+            // The requester is who called, not what the model typed: the workflow sends a revision
+            // request to this name, so a typed one could point it at any agent.
+            Agent = AgentCallerHttp.AgentNameOr(httpContextAccessor, agent),
             Tags = tags,
             Source = source
         };

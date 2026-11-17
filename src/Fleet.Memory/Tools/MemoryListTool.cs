@@ -4,6 +4,7 @@ using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tools;
 
@@ -27,13 +28,13 @@ public sealed class MemoryListTool(
         if (type is not null && !MemoryDocument.ValidTypes.Contains(type))
             return $"memory_list: invalid value for 'type' filter: '{type}'.\nValid types: {string.Join(", ", MemoryDocument.ValidTypes)}.";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var agentName = AgentCallerHttp.AgentNameOf(httpContextAccessor);
 
         if (aclCache.IsAclEnabled && !aclCache.IsAvailable)
             return "memory_list: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
         if (aclCache.IsAclEnabled && string.IsNullOrWhiteSpace(agentName))
-            return "memory_list: agent identity required — missing '?agent=' query parameter.";
+            return "memory_list: agent identity required — this call was not made as an agent.";
 
         var results = await memoryService.ListDocumentsAsync(type, project, agent, tag);
 

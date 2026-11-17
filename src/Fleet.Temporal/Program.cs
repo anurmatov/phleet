@@ -9,6 +9,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using Temporalio.Converters;
 using Temporalio.Extensions.Hosting;
+using Fleet.Shared.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -81,8 +82,9 @@ builder.Services.AddHttpClient(OrchestratorEpicGrantForwarder.HttpClientName, (s
     client.Timeout = OrchestratorEpicGrantForwarder.Timeout;
 });
 
-// HTTP context accessor — needed by NotifyCtoTool to read the ?agent= query param
-builder.Services.AddHttpContextAccessor();
+// Who is calling: an agent by its identity token, held to the tools it is granted (read from the
+// orchestrator). "Is this the CTO" is decided by that, never by the URL. See docs/agent-identity.md.
+builder.Services.AddAgentIdentityFromOrchestrator(builder.Configuration);
 
 // Core services
 builder.Services.AddSingleton<TaskCompletionRegistry>();
@@ -173,7 +175,8 @@ foreach (var @namespace in configuredNamespaces)
 builder.Services
     .AddMcpServer()
     .WithHttpTransport()
-    .WithToolsFromAssembly();
+    .WithToolsFromAssembly()
+    .AddAgentToolAuthorization(BridgeIdentity.ServerName);
 
 // Bind to port 3001 for MCP
 builder.WebHost.ConfigureKestrel(opts =>
@@ -199,6 +202,9 @@ else
 // CtoAgent may be empty at startup — it will be set by PeerConfigHostedService on bootstrap.
 var fleetWorkflowOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetWorkflowOptions>>().Value;
 FleetWorkflowConfig.Initialize(fleetWorkflowOptions);
+
+// The MCP endpoint is at the root: everything but the three status routes below.
+app.UseAgentIdentity(context => BridgeIdentity.IsMcp(context.Request.Path));
 
 app.MapMcp();
 // The status code and `status` are unchanged on purpose: compose's healthcheck is `curl -f` on this

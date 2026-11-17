@@ -5,6 +5,7 @@ using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tools;
 
@@ -24,14 +25,14 @@ public sealed class MemoryGetTool(
         if (string.IsNullOrWhiteSpace(id))
             return "memory_get: missing required parameter 'id'.\nHint: pass the memory ID (full UUID or first 8 characters) from memory_search or memory_list.";
 
-        var agentName = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault();
+        var agentName = AgentCallerHttp.AgentNameOf(httpContextAccessor);
 
         // When ACL is enabled: fail-closed if cache unavailable, require agent identity
         if (aclCache.IsAvailable is false && aclCache.IsAclEnabled)
             return "memory_get: ACL cache unavailable — orchestrator unreachable. Try again shortly.";
 
         if (string.IsNullOrWhiteSpace(agentName) && aclCache.IsAclEnabled)
-            return "memory_get: agent identity required — missing '?agent=' query parameter.";
+            return "memory_get: agent identity required — this call was not made as an agent.";
 
         if (aclCache.IsAclEnabled)
         {

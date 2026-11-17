@@ -11,6 +11,8 @@ using Telegram.Bot.Requests;
 using Telegram.Bot.Requests.Abstractions;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Telegram.Tests.Tools;
 
@@ -44,7 +46,8 @@ public class SendMessageToolTests
         }
 
         var httpContext = new DefaultHttpContext();
-        httpContext.Request.QueryString = new QueryString("?agent=testagent");
+        // The identity middleware does this in the service; a tool test stands in for it.
+        AgentCallerHttp.Set(httpContext, new AgentCaller("testagent", AgentCallerKind.Agent));
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns(httpContext);
 

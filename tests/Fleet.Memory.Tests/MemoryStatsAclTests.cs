@@ -10,6 +10,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Memory.Tests;
 
@@ -111,7 +113,8 @@ public sealed class MemoryStatsAclTests : IAsyncLifetime
         var memory = new MemoryService(_store, new VectorStore(qdrant, Options.Create(new EmbeddingOptions()), NullLogger<VectorStore>.Instance),
             _embedding, qdrant, new MemorySizeGuidance(0, NullLogger.Instance), NullLogger<MemoryService>.Instance);
         var http = new DefaultHttpContext();
-        if (agent is not null) http.Request.QueryString = new QueryString("?agent=" + agent);
+        // The identity middleware does this in the service; a tool test stands in for it.
+        if (agent is not null) AgentCallerHttp.Set(http, new AgentCaller(agent, AgentCallerKind.Agent));
         return new MemoryStatsTool(memory, acl, new HttpContextAccessor { HttpContext = http }, NullLogger<MemoryStatsTool>.Instance);
     }
 

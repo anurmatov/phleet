@@ -59,15 +59,35 @@ To go back, set it to `false` and recreate the services. No agent needs reprovis
 
 ## Which servers
 
-| Server | Name in grants | Reads the token | Checks grants |
-|---|---|---|---|
-| Orchestrator `/mcp` | `fleet-orchestrator` | yes | yes |
-| fleet-memory | `fleet-memory` | not yet | not yet |
-| fleet-telegram | `fleet-telegram` | not yet | not yet |
-| Temporal bridge | `fleet-temporal` | not yet | not yet |
+| Server | Name in grants | What the caller's identity decides there |
+|---|---|---|
+| Orchestrator `/mcp` | `fleet-orchestrator` | Which tools it may call. |
+| fleet-memory | `fleet-memory` | Which tools it may call, which projects it may read and write (when the project ACL is on), and whose name a stored memory carries. |
+| fleet-telegram | `fleet-telegram` | Which tools it may call, and whose bot sends the message or reaction. |
+| Temporal bridge | `fleet-temporal` | Which tools it may call, whether it is the CTO (gate feedback, a forwarded grant approval), and who a human-input request, a `notify_cto` or a memory request is from. |
 
-An agent is given its token for all four names already, so the three that do not read it yet need
-no further reprovision when they start to.
+All four read the token and check grants the same way (`Fleet.Shared.Mcp`). None of them takes the
+caller's name from the URL or from a tool's arguments any more: a tool asks who called.
+
+Three tool arguments used to let the model type a name: `memory_store`'s `agent` (the author),
+`request_memory_store`'s `agent` (the requester, to whom a revision request is sent) and
+`get_chat_info`'s `agent_name` (whose bot to use, which won over the caller). Each is now ignored
+when the call is made as an agent, and stands only for a caller that is not one.
+
+The three servers that are not the orchestrator read every agent's grants from the orchestrator's
+`GET /internal/agent-mcp-grants`, every 30 seconds, and once more when an agent they have not heard
+of calls. `AgentIdentity__OrchestratorUrl` says where (default `http://fleet-orchestrator:3600`).
+After ten minutes without a successful read a server no longer believes what it holds, and refuses
+verified agents under enforcement (`tool_grants_unavailable`) rather than serve from a list nobody
+can vouch for.
+
+### fleet-memory's REST API
+
+`/internal/*` on fleet-memory lists, reads, changes and deletes any memory with no project check.
+It is the orchestrator's, for the dashboard's Memory page, and never an agent's. The orchestrator
+now sends its service token with every such request. Under enforcement fleet-memory serves these
+routes to a service token only: an agent's own token, valid as it is, gets `403` and
+`service_identity_required`. Until enforcement they are served as they always were.
 
 ### The orchestrator's MCP endpoint
 
@@ -118,10 +138,17 @@ It prints the token and nothing else. Whoever holds it is not held to any agent'
 |---|---|---|---|
 | `FLEET_AGENT_IDENTITY_KEY` | `AgentIdentity__Key` | generated | base64url, at least 32 bytes. A comma-separated list rotates: the first signs, all verify. |
 | `FLEET_AGENT_IDENTITY_ENFORCE` | `AgentIdentity__Enforce` | `false` | `true` refuses a caller without a valid token. Anything but `true` or `false` stops the service. |
+| (none) | `AgentIdentity__OrchestratorUrl` | `http://fleet-orchestrator:3600` | Where fleet-memory, fleet-telegram and the bridge read agents' grants. |
+
+All four services read the same key and the same switch. A service with enforcement on and one
+without disagree only about callers that have no token, so turn it on for all of them together.
 
 ## Tests
 
 `tests/Fleet.Orchestrator.Tests/Identity/`: the token and the rule for who a caller is; the shared
 middleware and grant filters against a real MCP server hosted in the test and called by the real
-MCP client; what provisioning writes for each provider; and the orchestrator's endpoint behind its
-production pipeline. Nothing here has run against a deployed fleet or a provider's own CLI.
+MCP client; what provisioning writes for each provider; the orchestrator's endpoint behind its
+production pipeline; the grant cache the other servers use; and a check of the three servers'
+sources that none reads the caller from the URL. Each server's own tests cover its routes and its
+tools with the caller set as the middleware sets it. Nothing here has run against a deployed fleet
+or a provider's own CLI.

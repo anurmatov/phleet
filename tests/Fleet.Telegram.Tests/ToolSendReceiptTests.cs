@@ -15,6 +15,8 @@ using Telegram.Bot.Exceptions;
 using Telegram.Bot.Requests;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Telegram.Tests;
 
@@ -450,8 +452,10 @@ public sealed class ToolSendReceiptTests
     private static IHttpContextAccessor Accessor(string? formattingMode = null)
     {
         var httpContext = new DefaultHttpContext();
-        httpContext.Request.QueryString = new QueryString(
-            $"?agent={AgentName}" + (formattingMode is null ? "" : $"&formatting_mode={formattingMode}"));
+        // The agent is who the identity middleware says called; the formatting mode stays in the URL.
+        AgentCallerHttp.Set(httpContext, new AgentCaller(AgentName, AgentCallerKind.Agent));
+        if (formattingMode is not null)
+            httpContext.Request.QueryString = new QueryString($"?formatting_mode={formattingMode}");
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns(httpContext);
         return accessor;

@@ -15,7 +15,19 @@ public sealed class MemoryProxyService(IHttpClientFactory httpClientFactory, ICo
 
     private string BaseUrl => (config["FleetMemory:Url"] ?? "http://fleet-memory:3100").TrimEnd('/');
 
-    private HttpClient CreateClient() => httpClientFactory.CreateClient("fleet-memory");
+    /// <summary>
+    /// The client for fleet-memory's <c>/internal</c> routes. They read, change and delete any memory
+    /// with no project check, so fleet-memory serves them to a service only once identity is
+    /// enforced: every request carries this orchestrator's service token when there is a key.
+    /// </summary>
+    private HttpClient CreateClient()
+    {
+        var client = httpClientFactory.CreateClient("fleet-memory");
+        if (Fleet.Shared.Mcp.AgentIdentitySettings.From(config).ServiceToken(OrchestratorMcp.ServerName) is { } token)
+            client.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue(Fleet.Shared.AgentIdentityTokens.Scheme, token);
+        return client;
+    }
 
     public async Task<HttpResponseMessage> GetListAsync(CancellationToken ct = default) =>
         await CreateClient().GetAsync($"{BaseUrl}/internal/memory", ct);

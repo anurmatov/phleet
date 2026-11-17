@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using Fleet.Temporal.Configuration;
 using ModelContextProtocol.Server;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Temporal.Mcp;
 
@@ -33,7 +34,7 @@ public sealed class NotifyCtoTool(
         if (string.IsNullOrWhiteSpace(ctoAgent))
             return Error("notify_cto: FLEET_CTO_AGENT is not configured");
 
-        var sender = httpContextAccessor.HttpContext?.Request.Query["agent"].FirstOrDefault()
+        var sender = AgentCallerHttp.AgentNameOf(httpContextAccessor)
                      ?? "an agent";
 
         if (string.Equals(sender, ctoAgent, StringComparison.OrdinalIgnoreCase))

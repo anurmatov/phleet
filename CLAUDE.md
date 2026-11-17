@@ -565,13 +565,19 @@ as an `Authorization` header on the fleet's own endpoints the agent reaches
 `Fleet.Shared.Mcp` is the one implementation for the servers: `UseAgentIdentity` resolves the caller
 by `AgentIdentityRules.Resolve` (three states: no key, key, key + `FLEET_AGENT_IDENTITY_ENFORCE`)
 and `AddAgentToolAuthorization(serverName)` holds a verified agent to its grants on `tools/call`
-and `tools/list`. The orchestrator's `/mcp` is wired by `UseMcpAgentIdentity` after
+and `tools/list`. fleet-memory, fleet-telegram and the Temporal bridge use
+`AddAgentIdentityFromOrchestrator` (grants from `OrchestratorGrantCache`: read every 30 s, unknown
+after 10 min without a read) and their tools ask `AgentCallerHttp` who called; fleet-memory's
+`/internal/*` is `UseServiceIdentity` (a service token only, under enforcement; the orchestrator's
+`MemoryProxyService` sends one). The orchestrator's `/mcp` is wired by `UseMcpAgentIdentity` after
 `UseFleetAccess` (service bearer or signed-in browser = operator; a phone is not), with grants
 read from the stored tools (`DbAgentGrantSource`, `AgentConfigFiles.EffectiveMcpGrants`, also served
 at `GET /internal/agent-mcp-grants`). `setup.sh`/`upgrade.sh` generate the key when missing and
 never replace it. Operator tool: `scripts/mint-identity-token.sh`.
 
-MUST NOT: take a caller's identity from `?agent=` or a tool argument when a token was sent; treat a
+MUST NOT: read `Query["agent"]` in a fleet MCP server or attribute anything to a name a model typed
+when the call is made as an agent (`AgentCallerHttp.AgentNameOr`; a source test guards the three
+servers); take a caller's identity from `?agent=` or a tool argument when a token was sent; treat a
 wrong token as no token (it is refused in every state); log, return or echo a token or the key
 (`upgrade.sh` writes the key without `add_missing_env_var`, which prints values); deliver the key to
 an agent (`ContainerSpecBuilder.IsNeverDelivered`, `env_ref_reserved`); give a Gemini agent the

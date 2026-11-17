@@ -8,6 +8,8 @@ using Microsoft.Extensions.Options;
 using NSubstitute;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
+using Fleet.Shared;
+using Fleet.Shared.Mcp;
 
 namespace Fleet.Temporal.Tests.Mcp;
 
@@ -96,7 +98,7 @@ public sealed class TemporalWorkflowToolsTests
 
         var httpContext = new DefaultHttpContext();
         if (caller is not null)
-            httpContext.Request.QueryString = new QueryString($"?agent={Uri.EscapeDataString(caller)}");
+            AgentCallerHttp.Set(httpContext, new AgentCaller(caller, AgentCallerKind.Agent));
 
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns(httpContext);

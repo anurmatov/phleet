@@ -561,7 +561,9 @@ signs each agent's name with `FLEET_AGENT_IDENTITY_KEY` (`AgentIdentityTokens` i
 `fa1.<purpose>.<subject>.<mac>`, purposes `agent` and `service`) and provisioning writes the token
 as an `Authorization` header on the fleet's own endpoints the agent reaches
 (`AgentConfigFiles.IdentityServerNames`: `fleet-memory`, `fleet-orchestrator`, `fleet-telegram`,
-`fleet-temporal`), beside any operator-mapped headers, for a provider that sends MCP headers.
+`fleet-temporal`) at a trusted origin (`AgentConfigFiles.IdentityOrigins`, `AgentIdentity:TrustedOrigins`),
+beside any operator-mapped headers, for a provider that sends MCP headers. `set_config_values` takes
+its config token in `X-Fleet-Config-Token` (`SetConfigValuesTool.ConfigTokenHeader`), which is kept.
 `Fleet.Shared.Mcp` is the one implementation for the servers: `UseAgentIdentity` resolves the caller
 by `AgentIdentityRules.Resolve` (three states: no key, key, key + `FLEET_AGENT_IDENTITY_ENFORCE`)
 and `AddAgentToolAuthorization(serverName)` holds a verified agent to its grants on `tools/call`
@@ -572,7 +574,8 @@ at `GET /internal/agent-mcp-grants`). `setup.sh`/`upgrade.sh` generate the key w
 never replace it. Operator tool: `scripts/mint-identity-token.sh`.
 
 MUST NOT: take a caller's identity from `?agent=` or a tool argument when a token was sent; treat a
-wrong token as no token (it is refused in every state); log, return or echo a token or the key
+wrong token as no token (with a key it is refused, enforced or not); send an agent or service token
+to an address that is not a trusted origin, whatever the endpoint is called; log, return or echo a token or the key
 (`upgrade.sh` writes the key without `add_missing_env_var`, which prints values); deliver the key to
 an agent (`ContainerSpecBuilder.IsNeverDelivered`, `env_ref_reserved`); give a Gemini agent the
 header (its CLI would skip the server); apply grants to an unverified name (it proves nothing) or

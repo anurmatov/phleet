@@ -48,7 +48,8 @@ public sealed class McpToolDiscovery(
             () => journalTokens.DescribeKeyFault() is null
                 ? journalTokens.Mint(JournalTokenService.PurposeRead, agent.Name)
                 : null,
-            Fleet.Shared.Mcp.AgentIdentitySettings.From(config).ServiceToken(OrchestratorMcp.ServerName));
+            Fleet.Shared.Mcp.AgentIdentitySettings.From(config).ServiceToken(OrchestratorMcp.ServerName),
+            AgentConfigFiles.IdentityOrigins(config));
 
         var answers = await Task.WhenAll(plan.Select(entry =>
             entry.Target is { } target ? lister.ListAsync(target, ct) : Task.FromResult(entry.NotAsked!)));

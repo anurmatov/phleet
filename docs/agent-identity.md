@@ -39,9 +39,10 @@ server with the key ignores it whenever a token is sent.
 | set | `false` | A token is verified when one is sent, and such an agent is held to its grants. A caller without a token is still served by the name it gives, and is logged (`agent_identity_unverified_call`, at most once in ten minutes per name). |
 | set | `true` | A caller without a valid token is refused with `401` and `agent_identity_required`. |
 
-A token that is present and wrong is refused in every state (`401`, `agent_identity_invalid`): it
-is never treated as "no token". Enforcement without a key stops the service at startup
-(`agent_identity_misconfigured`).
+Once a key is set, a token that is present and wrong is refused, enforced or not (`401`,
+`agent_identity_invalid`): it is never treated as "no token". Without a key nothing can be verified,
+so a token is ignored and the caller is believed by the name it gives, as before tokens.
+Enforcement without a key stops the service at startup (`agent_identity_misconfigured`).
 
 The middle state is what makes a rollout possible: services are deployed one at a time, agents are
 reprovisioned after them, and the coordinating agent is not reprovisioned automatically.
@@ -69,6 +70,14 @@ To go back, set it to `false` and recreate the services. No agent needs reprovis
 An agent is given its token for all four names already, so the three that do not read it yet need
 no further reprovision when they start to.
 
+A token follows the address, not the name. Provisioning writes it, and the dashboard's tool listing
+sends the orchestrator's service token, only to an endpoint of one of these names whose URL is at a
+trusted origin (scheme, host and port): by default `http://fleet-orchestrator:3600`,
+`http://fleet-telegram:3800` and `http://fleet-temporal-bridge:3001`, plus fleet-memory's own
+`FleetMemory:McpUrl`. An endpoint that carries a fleet server's name but points elsewhere gets no
+token, so whoever can edit an endpoint cannot collect one with it. A deployment whose servers answer
+elsewhere sets `AgentIdentity:TrustedOrigins`.
+
 ### The orchestrator's MCP endpoint
 
 `/mcp` takes no sign-in credential, because agents have none. It is served to:
@@ -77,6 +86,13 @@ no further reprovision when they start to.
 - the operator: the service bearer (`ORCHESTRATOR_AUTH_TOKEN`), a signed-in browser, or a service
   token. An enrolled phone is not an operator here;
 - while enforcement is off, anybody, as before.
+
+`set_config_values` also needs the config token. An agent's `Authorization` is its identity, so it
+sends the config token as `X-Fleet-Config-Token`: map that header to the `ORCHESTRATOR_CONFIG_TOKEN`
+Env Ref on the agent's `fleet-orchestrator` endpoint. Provisioning keeps it beside the identity, and
+both are checked: the agent must be granted the tool and present the token. An `Authorization`
+mapping of the config token still works while enforcement is off, and only on an endpoint that is
+not given the identity; under enforcement it is refused.
 
 `GET /internal/agent-mcp-grants` serves every agent's grants on the four servers, for the other
 servers to check against. It is Docker-network-only and takes no credential, like
@@ -118,6 +134,7 @@ It prints the token and nothing else. Whoever holds it is not held to any agent'
 |---|---|---|---|
 | `FLEET_AGENT_IDENTITY_KEY` | `AgentIdentity__Key` | generated | base64url, at least 32 bytes. A comma-separated list rotates: the first signs, all verify. |
 | `FLEET_AGENT_IDENTITY_ENFORCE` | `AgentIdentity__Enforce` | `false` | `true` refuses a caller without a valid token. Anything but `true` or `false` stops the service. |
+| (orchestrator only) | `AgentIdentity__TrustedOrigins` | the three compose addresses | Comma-separated origins a token may be sent to; replaces the default. fleet-memory's `FleetMemory:McpUrl` is always trusted. |
 
 ## Tests
 

@@ -399,14 +399,51 @@ internal static class AgentConfigFiles
             ? AgentIdentityTokens.Mint(keys[0], AgentIdentityTokens.PurposeAgent, agent.Name)
             : null;
 
+    /// <summary>Where the fleet's own servers answer when the deployment does not say: the compose service names.</summary>
+    internal static readonly IReadOnlyList<string> DefaultIdentityOrigins =
+        ["http://fleet-orchestrator:3600", "http://fleet-telegram:3800", "http://fleet-temporal-bridge:3001"];
+
+    /// <summary>
+    /// The origins (scheme, host, port) an identity or service token may be sent to: the fleet's own
+    /// servers. <c>AgentIdentity:TrustedOrigins</c> (comma-separated) replaces
+    /// <see cref="DefaultIdentityOrigins"/>; fleet-memory's configured address is always one of them.
+    /// A token follows the address, never an endpoint's name: whoever can edit an endpoint must not
+    /// be able to point a fleet server's name somewhere else and collect what is sent to it.
+    /// </summary>
+    internal static IReadOnlyCollection<string> IdentityOrigins(IConfiguration config)
+    {
+        var configured = (config["AgentIdentity:TrustedOrigins"] ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var origins = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var url in (configured.Length > 0 ? configured : DefaultIdentityOrigins)
+                     .Append(NormalizeFleetMemoryMcpUrl(config["FleetMemory:McpUrl"])))
+            if (OriginOf(url) is { } origin) origins.Add(origin);
+        return origins;
+    }
+
+    /// <summary>Whether <paramref name="url"/> is at one of <paramref name="origins"/>, exactly.</summary>
+    internal static bool IsIdentityDestination(string? url, IReadOnlyCollection<string> origins) =>
+        OriginOf(url) is { } origin && origins.Contains(origin);
+
+    /// <summary>The scheme, host and port of an <c>http(s)</c> address without user info; null for anything else.</summary>
+    private static string? OriginOf(string? url) =>
+        Uri.TryCreate(url?.Trim(), UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+        && uri.UserInfo.Length == 0
+            ? uri.GetLeftPart(UriPartial.Authority).ToLowerInvariant()
+            : null;
+
     /// <summary>
     /// <paramref name="mappedHeaders"/> with the agent's identity added to each of the fleet's own
-    /// servers it reaches, fleet-memory always among them. The identity is the
-    /// <c>Authorization</c> header and wins over a mapping of that name: who an agent is cannot be
-    /// configured per endpoint. Without a token the mappings come back as they were.
+    /// servers it reaches at a trusted address (<paramref name="origins"/>), fleet-memory always
+    /// among them. The identity is the <c>Authorization</c> header and wins over a mapping of that
+    /// name: who an agent is cannot be configured per endpoint. Other mapped headers stay, such as
+    /// the config token <c>set_config_values</c> reads. Without a token the mappings come back as
+    /// they were.
     /// </summary>
     internal static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WithIdentityHeaders(
-        Agent agent, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders, string? identityToken)
+        Agent agent, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? mappedHeaders, string? identityToken,
+        IReadOnlyCollection<string> origins, string fleetMemoryMcpUrl)
     {
         if (identityToken is null) return mappedHeaders;
 
@@ -414,8 +451,12 @@ internal static class AgentConfigFiles
         foreach (var (name, headers) in mappedHeaders ?? new Dictionary<string, IReadOnlyDictionary<string, string>>())
             merged[name] = headers;
 
-        var reached = agent.McpEndpoints.Select(e => e.McpName).Append("fleet-memory")
-            .Where(name => IdentityServerNames.Contains(name, StringComparer.Ordinal))
+        // A row's own address decides; fleet-memory without a row is at the configured address.
+        var reached = agent.McpEndpoints
+            .Where(e => IdentityServerNames.Contains(e.McpName, StringComparer.Ordinal) && IsIdentityDestination(e.Url, origins))
+            .Select(e => e.McpName)
+            .Concat(agent.McpEndpoints.Any(e => e.McpName == "fleet-memory") || !IsIdentityDestination(fleetMemoryMcpUrl, origins)
+                ? [] : ["fleet-memory"])
             .Distinct(StringComparer.Ordinal);
         foreach (var name in reached)
         {

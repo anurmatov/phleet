@@ -115,7 +115,7 @@ described next. A host with neither a container nor the volume is a fresh instal
 blocked.
 
 Qdrant holds an index, not the memories. The memory files under `fleet/memories` are the source of
-truth and fleet-memory indexes all of them again on every start. To drop the index, stop the stack,
+truth and fleet-memory brings the index in line with them on every start. To drop the index, stop the stack,
 remove the `qdrant` container and the `fleet_qdrant_data` volume, and start again; the index is
 rebuilt.
 

@@ -6,6 +6,10 @@ Read the note that applies before upgrading an existing installation. Day-to-day
 
 Before upgrading past the loopback-ports change, read **[docs/upgrading/internal-ports-loopback.md](internal-ports-loopback.md)**: Temporal, its UI, fleet-memory and fleet-bridge stop being reachable from other machines, and Qdrant is pinned, so `upgrade.sh` refuses to move Qdrant by more than one minor release, or backwards.
 
+## Memory search re-index
+
+The first start of fleet-memory after the memory-search change embeds every memory again, once, in sections: several embedding calls per memory, one after the other. The service answers during it. What to expect, and how to go back to an earlier image, is in **[docs/memory-search.md](../memory-search.md#what-a-start-costs)**.
+
 ## Pi provider removed
 
 Before upgrading from a release with Pi, [move every Pi agent to Claude or Codex and reprovision](remove-pi.md).

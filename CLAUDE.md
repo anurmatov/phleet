@@ -292,6 +292,28 @@ with a card or card assignment lacks canonical content; `Program.cs` then exits 
 `app.Run()`. The Temporal delegate `repo` field stays for replay and the agent ignores it. Upgrade
 runbook: `docs/upgrading/remove-project-context-cards.md`.
 
+## Memory search
+
+fleet-memory indexes a memory as one Qdrant point per section (`MemorySections`, `MemoryIndexPlan`;
+`Search__SectionChars` 1200, `Search__MaxSections` 200) and answers a search in the order id, title,
+tag, keyword, meaning (`MemoryService.Search.cs`): the first three from the in-memory
+`MemoryCatalogue`, the last two from the index's two sides, fused in code by `SearchFusion` so a hit
+can say which side found it. Every point carries `index_hash` and `index_format`; at start
+`FileWatcherService.FullIndexAsync` reads them once and a file whose hash matches is not embedded
+again. `IVectorIndex` is the seam the tests fake (`VectorStore` is Qdrant). See
+`docs/memory-search.md`.
+
+MUST NOT: change what is written for an unchanged memory (the terms of `Bm25Tokenizer` /
+`MemoryWords`, the dense or sparse text, the sections, the payload) without raising
+`MemoryIndexPlan.Format`, or leave an input of a point out of `MemoryIndexPlan.HashOf` (the start
+would skip the file as unchanged); give a point another id than `VectorStore.PointIdFor` (section 0
+keeps the id a memory's one point had, which is how old points are replaced); record a file's hash
+in `MemoryService._indexed` before all its points are written and its stale ones removed; return a
+section where a memory is listed, counted or found; change the JSON of
+`GET /internal/memory/search` (`MemorySearchResult`: the dashboard reads those names); weaken the
+`memory_search` ACL post-filter, which applies to every kind of hit; add the `Search__*` settings to
+a bound options class (they are parsed from the raw strings, like the size guidance).
+
 ## Secret placeholders
 
 Off by default (`FLEET_SECRETS_ENABLED=false` → orchestrator `SecretProxy__Enabled`; selects the

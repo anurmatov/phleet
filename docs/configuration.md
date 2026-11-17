@@ -111,8 +111,8 @@ are unset by default, and with them unset nothing changes.
 | `FLEET_QDRANT_API_KEY` | fleet-memory (`Qdrant__ApiKey`) | empty | Qdrant's API key. With a key the address must be `https`, or fleet-memory exits 1 at startup. |
 | `FLEET_TEMPORAL_BEARER_TOKEN` | orchestrator (`Temporal__BearerToken`) and Temporal bridge (`TemporalBridge__BearerToken`) | empty | Sent to Temporal as `Authorization: Bearer <token>` on every call, over the same plaintext connection. The token alone, without `Bearer `; a value that cannot be sent as it is makes both exit 1 at startup. |
 
-Each is read at startup, so a replaced value takes a restart. They are for these services alone: do
-not attach one to an agent as an Env Ref. These are the client's half only: see
+Each is read at startup, so a replaced value takes a restart. No agent gets one unless an operator
+attaches it as an Env Ref. These are the client's half only: see
 **[docs/datastore-client-auth.md](datastore-client-auth.md)** for the rules, an example for each
 service, and what the servers themselves, the Temporal UI and the `temporal` CLI need.
 

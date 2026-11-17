@@ -1569,3 +1569,306 @@ test.describe('workflow tree on a 360px phone', () => {
     await page.screenshot({ path: testInfo.outputPath('workflow-tree-360.png'), fullPage: true })
   })
 })
+
+// ── Memory search ───────────────────────────────────────────────────────────────────────────────
+
+type MemoryAnswer = { status?: number; json: unknown; delayMs?: number }
+
+const MEMORY_ID = '76a05a22-3c1f-4b7e-9d52-0a1b2c3d4e5f'
+const MEMORY_TWIN = '76a05a22-9e0d-4c3b-8a7f-6e5d4c3b2a19'
+
+const memoryItem = (id: string, title: string, project: string, type: string, tags: string[]) =>
+  ({ id, title, project, type, tags, updated_at: '2026-01-05T10:00:00Z' })
+
+const MEMORY_LIST = [
+  memoryItem(MEMORY_ID, 'How a deploy reaches the host', 'atlas', 'reference', ['deploy', 'ops']),
+  memoryItem(MEMORY_TWIN, 'Rollback checklist', 'atlas', 'decision', ['deploy']),
+  memoryItem('1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed', 'Заметки о выкладке', 'borealis', 'learning', ['заметки', 'ops']),
+  memoryItem('9c858901-8a57-4791-81fe-4c455b099bc9', 'Why reviews need two readers', 'borealis', 'decision', ['review']),
+  memoryItem('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', 'Staging hosts and what runs on each', 'atlas', 'reference', ['ops']),
+]
+
+/** A search hit for a listed memory, as the memory service answers since it says how a hit matched. */
+const memoryHit = (id: string, match: string | undefined, snippet: string, highlights?: unknown, score: number | null = null) => {
+  const { updated_at, ...item } = MEMORY_LIST.find(m => m.id === id)!
+  return match === undefined
+    ? { ...item, snippet, updated_at }
+    : { ...item, snippet, highlights: highlights ?? [], match, score, updated_at }
+}
+
+/** Opens #memory with `/api/memory/search` answered by `respond`, called with each request's query and its number. */
+async function openMemory(page: Page, respond: (query: URLSearchParams, n: number) => MemoryAnswer) {
+  const fleet = new FakeFleet()
+  await fleet.install(page)
+  const searches: URLSearchParams[] = []
+  await page.route(url => url.pathname.startsWith('/api/memory'), async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/memory') { await route.fulfill({ json: MEMORY_LIST }); return }
+    if (url.pathname === '/api/memory/ids') { await route.fulfill({ json: MEMORY_LIST.map(m => m.id) }); return }
+    if (url.pathname === '/api/memory/stats/reads') { await route.fulfill({ json: { since: '2026-01-01T00:00:00Z', entries: [] } }); return }
+    if (url.pathname === '/api/memory/search') {
+      searches.push(url.searchParams)
+      const answer = respond(url.searchParams, searches.length)
+      if (answer.delayMs) await new Promise(r => setTimeout(r, answer.delayMs))
+      await route.fulfill({ status: answer.status ?? 200, json: answer.json }).catch(() => { /* the page moved on */ })
+      return
+    }
+    const item = MEMORY_LIST.find(m => m.id === decodeURIComponent(url.pathname.slice('/api/memory/'.length)))
+    if (!item) { await route.fulfill({ status: 404, json: { error: 'Memory not found' } }); return }
+    await route.fulfill({ json: { ...item, agent: 'agent1', source: 'conversation', created_at: item.updated_at, content: `Body of ${item.title}` } })
+  })
+  await page.goto('/#memory')
+  await expect(memorySearchBox(page)).toBeVisible()
+  await expect(page.locator('.memory-tree-project-btn').first()).toBeVisible()
+  return searches
+}
+
+const memorySearchBox = (page: Page) => page.getByRole('searchbox', { name: 'Search memories' })
+const memoryGroup = (page: Page, name: string) => page.getByRole('region', { name: new RegExp(`^${name}`) })
+const memoryResult = (page: Page, title: string) =>
+  page.locator('.memory-result-item', { has: page.locator('.memory-result-title', { hasText: new RegExp(`^${title}$`) }) })
+/** What a search sent, name by name, in the order it was sent. */
+const sent = (query: URLSearchParams) => [...query.entries()].map(([k, v]) => `${k}=${v}`)
+
+const BOTH_GROUPS = [
+  memoryHit(MEMORY_ID, 'title', 'A merge builds the images and the pipeline recreates the services one at a time.'),
+  memoryHit(MEMORY_TWIN, 'tag', 'Before a rollback, check which image the host is running.'),
+  memoryHit('1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed', 'keyword', '…перед тем как deploy дойдёт до сервера, проверь выкладку на стенде…', [[15, 6], [49, 8]]),
+  memoryHit('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', 'meaning', 'Two staging hosts; the second one runs the nightly jobs.', [], 0.71),
+  memoryHit('9c858901-8a57-4791-81fe-4c455b099bc9', 'meaning', 'One reader misses what the author also missed. <img src=x onerror="window.__marked=1">', [[400, 9]], 0.44),
+]
+
+test('memory search: what matched the words comes first, what is only related comes apart, and each hit says how it matched', async ({ page }, testInfo) => {
+  const searches = await openMemory(page, () => ({ json: BOTH_GROUPS }))
+  await memorySearchBox(page).fill('deploy')
+
+  const matches = memoryGroup(page, 'Matches')
+  const related = memoryGroup(page, 'Related by meaning')
+  await expect(matches.locator('.memory-result-title')).toHaveText(['How a deploy reaches the host', 'Rollback checklist', 'Заметки о выкладке'])
+  await expect(matches.locator('.memory-result-match')).toHaveText(['Title', 'Tag', 'Keyword'])
+  await expect(related.locator('.memory-result-title')).toHaveText(['Staging hosts and what runs on each', 'Why reviews need two readers'])
+  await expect(related.locator('.memory-result-match')).toHaveText(['Meaning', 'Meaning'])
+  await expect(matches.getByRole('heading')).toHaveText('Matches3')
+  await expect(related.getByRole('heading')).toHaveText('Related by meaning2')
+  // The matches are above the related ones on the page, not only in the markup.
+  const lastMatch = (await matches.locator('.memory-result-item').last().boundingBox())!
+  const firstRelated = (await related.locator('.memory-result-item').first().boundingBox())!
+  expect(lastMatch.y + lastMatch.height).toBeLessThanOrEqual(firstRelated.y)
+  await expect(page.locator('.memory-results-notice')).toHaveCount(0)
+
+  // The matched words are marked where the service said, and the snippet is otherwise untouched.
+  const keyword = memoryResult(page, 'Заметки о выкладке')
+  await expect(keyword.locator('.memory-result-snippet mark')).toHaveText(['deploy', 'выкладку'])
+  await expect(keyword.locator('.memory-result-snippet')).toHaveText('…перед тем как deploy дойдёт до сервера, проверь выкладку на стенде…')
+  // A tag hit names the tag; a hit with no highlights has no mark.
+  await expect(memoryResult(page, 'Rollback checklist').locator('.memory-result-detail')).toHaveText('#deploy')
+  await expect(memoryResult(page, 'How a deploy reaches the host').locator('mark')).toHaveCount(0)
+  // A range outside the snippet marks nothing, and a snippet is text, whatever it holds.
+  const hostile = memoryResult(page, 'Why reviews need two readers')
+  await expect(hostile.locator('mark')).toHaveCount(0)
+  await expect(hostile.locator('.memory-result-snippet')).toContainText('<img src=x onerror="window.__marked=1">')
+  await expect(hostile.locator('img')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { __marked?: number }).__marked)).toBeUndefined()
+
+  expect(sent(searches.at(-1)!)).toEqual(['q=deploy'])
+  await page.screenshot({ path: testInfo.outputPath('memory-search-groups.png') })
+})
+
+test('memory search: when nothing matched the words the page says so, and when nothing is related either it says nothing was found', async ({ page }) => {
+  await openMemory(page, query => ({
+    json: query.get('q') === 'nightly' ? BOTH_GROUPS.filter(h => h.match === 'meaning') : [],
+  }))
+
+  await memorySearchBox(page).fill('nightly')
+  await expect(page.locator('.memory-results-notice')).toHaveText(
+    'Nothing matched the words “nightly”. The memories below are related by meaning only.')
+  await expect(memoryGroup(page, 'Matches')).toHaveCount(0)
+  await expect(memoryGroup(page, 'Related by meaning').locator('.memory-result-item')).toHaveCount(2)
+
+  await memorySearchBox(page).fill('zzzz')
+  await expect(page.getByText('Nothing found for “zzzz”.')).toBeVisible()
+  await expect(page.locator('.memory-result-item')).toHaveCount(0)
+  await expect(page.locator('.memory-results-notice')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: /Related by meaning|Matches/ })).toHaveCount(0)
+})
+
+test('memory search: project, type and tag are filled from the loaded list, each is sent as its parameter, and clearing sends none', async ({ page }) => {
+  const searches = await openMemory(page, () => ({ json: BOTH_GROUPS }))
+  const filters = page.getByRole('group', { name: 'Filters' })
+  const options = (label: string) => filters.getByLabel(label).locator('option').allTextContents()
+  expect(await options('Project')).toEqual(['All projects', 'atlas', 'borealis'])
+  expect(await options('Type')).toEqual(['All types', 'decision', 'learning', 'reference'])
+  expect(await options('Tag')).toEqual(['All tags', 'deploy', 'ops', 'review', 'заметки'])
+
+  // With nothing typed a filter asks nothing and narrows the tree.
+  await filters.getByLabel('Tag').selectOption('review')
+  await expect(page.locator('.memory-tree-project-name')).toHaveText(['borealis'])
+  await expect(page.locator('.memory-tree-project-btn .memory-tree-count')).toHaveText('1')
+  await filters.getByLabel('Project').selectOption('atlas')
+  await expect(page.getByText('No memories match these filters.')).toBeVisible()
+  await filters.getByRole('button', { name: 'Clear filters' }).click()
+  await expect(page.locator('.memory-tree-project-name')).toHaveText(['atlas', 'borealis'])
+  await expect(filters.getByRole('button', { name: 'Clear filters' })).toHaveCount(0)
+  expect(searches).toHaveLength(0)
+
+  await memorySearchBox(page).fill('deploy')
+  await expect.poll(() => searches.length).toBe(1)
+  expect(sent(searches[0])).toEqual(['q=deploy'])
+
+  await filters.getByLabel('Project').selectOption('atlas')
+  await expect.poll(() => searches.length).toBe(2)
+  expect(sent(searches[1])).toEqual(['q=deploy', 'project=atlas'])
+
+  await filters.getByLabel('Type').selectOption('decision')
+  await expect.poll(() => searches.length).toBe(3)
+  expect(sent(searches[2])).toEqual(['q=deploy', 'project=atlas', 'type=decision'])
+
+  await filters.getByLabel('Project').selectOption('')
+  await filters.getByLabel('Type').selectOption('')
+  await filters.getByLabel('Tag').selectOption('заметки')
+  await expect.poll(() => sent(searches.at(-1)!)).toEqual(['q=deploy', 'tag=заметки'])
+
+  await filters.getByRole('button', { name: 'Clear filters' }).click()
+  await expect.poll(() => sent(searches.at(-1)!)).toEqual(['q=deploy'])
+  await expect(filters.getByLabel('Tag')).toHaveValue('')
+})
+
+test('memory search: a filtered search that finds nothing says the filters were part of it', async ({ page }) => {
+  await openMemory(page, () => ({ json: [] }))
+  await page.getByRole('group', { name: 'Filters' }).getByLabel('Type').selectOption('learning')
+  await memorySearchBox(page).fill('deploy')
+  await expect(page.getByText('Nothing found for “deploy” with these filters.')).toBeVisible()
+})
+
+test('memory search: a memory id comes first, and Enter opens the one memory it names', async ({ page }) => {
+  const searches = await openMemory(page, query => ({
+    json: query.get('q') === '76a05a22'
+      // Two memories start with these eight characters.
+      ? [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.'), memoryHit(MEMORY_TWIN, 'id', 'Before a rollback.')]
+      : [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.'),
+        memoryHit('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', 'meaning', 'Two staging hosts.', [], 0.3)],
+  }))
+
+  await memorySearchBox(page).fill('76a05a22-3c1f')
+  const first = page.locator('.memory-result-item').first()
+  await expect(first.locator('.memory-result-title')).toHaveText('How a deploy reaches the host')
+  await expect(first.locator('.memory-result-match')).toHaveText('ID')
+  await expect(first.locator('.memory-result-detail')).toHaveText('76a05a22')
+  await expect(page.locator('.memory-cv-title')).toHaveCount(0)
+
+  await memorySearchBox(page).press('Enter')
+  await expect(page.locator('.memory-cv-title')).toHaveText('How a deploy reaches the host')
+  await expect(first).toHaveClass(/memory-selected/)
+  // The results stay; Enter did not ask again.
+  expect(searches).toHaveLength(1)
+
+  // An id that names two memories opens neither: both are listed to choose from.
+  await memorySearchBox(page).fill('76a05a22')
+  await expect(page.locator('.memory-result-match')).toHaveText(['ID', 'ID'])
+  await memorySearchBox(page).press('Enter')
+  await page.waitForTimeout(300)
+  await expect(page.locator('.memory-cv-title')).toHaveText('How a deploy reaches the host')
+  await expect(page.locator('.memory-result-item.memory-selected')).toHaveCount(1)
+})
+
+test('memory search: Enter pressed before the answer is in opens the id hit when it arrives, and only for what is typed now', async ({ page }) => {
+  const searches = await openMemory(page, query => query.get('q') === '76a05a22-3c1f'
+    ? { json: [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.')], delayMs: 500 }
+    : { json: [memoryHit(MEMORY_TWIN, 'keyword', 'Before a rollback.')] })
+
+  // Pasted and entered at once: no wait for the pause after typing.
+  await memorySearchBox(page).fill('76a05a22-3c1f')
+  await memorySearchBox(page).press('Enter')
+  await expect(page.locator('.memory-cv-title')).toHaveText('How a deploy reaches the host')
+  expect(searches).toHaveLength(1)
+
+  // Entered, then changed before the answer: the id hit of the abandoned query opens nothing.
+  await page.reload()
+  await expect(page.locator('.memory-tree-project-btn').first()).toBeVisible()
+  await memorySearchBox(page).fill('76a05a22-3c1f')
+  await memorySearchBox(page).press('Enter')
+  await memorySearchBox(page).fill('rollback')
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+  await page.waitForTimeout(800)
+  await expect(page.locator('.memory-cv-title')).toHaveCount(0)
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+})
+
+test('memory search: an older answer never replaces a newer one', async ({ page }) => {
+  await openMemory(page, query => query.get('q') === 'slow'
+    ? { json: [memoryHit(MEMORY_ID, 'keyword', 'The slow answer.')], delayMs: 1100 }
+    : { json: [memoryHit(MEMORY_TWIN, 'keyword', 'The fast answer.')] })
+
+  await memorySearchBox(page).fill('slow')
+  await page.waitForTimeout(450)   // past the pause after typing: the slow request is out
+  await memorySearchBox(page).fill('fast')
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+  await page.waitForTimeout(1300)
+  await expect(page.locator('.memory-result-title')).toHaveText(['Rollback checklist'])
+  await expect(page.getByText('Searching…')).toHaveCount(0)
+})
+
+test('memory search: an older memory service, which does not say how a hit matched, gets one plain list', async ({ page }) => {
+  await openMemory(page, () => ({
+    json: [
+      memoryHit('6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b', undefined, 'Two staging hosts; the second one runs the nightly jobs.'),
+      memoryHit(MEMORY_ID, undefined, 'A merge builds the images and the pipeline recreates the services.'),
+    ],
+  }))
+  await memorySearchBox(page).fill('deploy')
+
+  await expect(page.locator('.memory-result-title')).toHaveText(['Staging hosts and what runs on each', 'How a deploy reaches the host'])
+  await expect(page.locator('.memory-result-snippet').first()).toHaveText('Two staging hosts; the second one runs the nightly jobs.')
+  await expect(page.locator('.memory-result-meta').first()).toHaveText('atlas · reference')
+  // Nothing is claimed that the answer did not say.
+  await expect(page.locator('.memory-result-match')).toHaveCount(0)
+  await expect(page.locator('.memory-result-item mark')).toHaveCount(0)
+  await expect(page.locator('.memory-results-heading')).toHaveCount(0)
+  await expect(page.locator('.memory-results-notice')).toHaveCount(0)
+  // Enter has no id hit to open.
+  await memorySearchBox(page).press('Enter')
+  await page.waitForTimeout(300)
+  await expect(page.locator('.memory-cv-title')).toHaveCount(0)
+  await page.locator('.memory-result-item').first().click()
+  await expect(page.locator('.memory-cv-title')).toHaveText('Staging hosts and what runs on each')
+})
+
+test('memory search: a search the memory service refuses shows its words, and Retry asks again', async ({ page }) => {
+  const searches = await openMemory(page, (_, n) => n === 1
+    ? { status: 400, json: { error: 'Invalid \'limit\': expected a number from 1 to 50' } }
+    : { json: BOTH_GROUPS })
+  await memorySearchBox(page).fill('deploy')
+  await expect(page.locator('.memory-tree-error')).toContainText('Search failed: Invalid \'limit\': expected a number from 1 to 50')
+  await expect(page.locator('.memory-result-item')).toHaveCount(0)
+  await page.locator('.memory-tree-error').getByRole('button', { name: 'Retry' }).click()
+  await expect(memoryGroup(page, 'Matches').locator('.memory-result-item')).toHaveCount(3)
+  expect(sent(searches[1])).toEqual(['q=deploy'])
+})
+
+test.describe('memory search on a 360px phone', () => {
+  test.use({ viewport: { width: 360, height: 800 } })
+
+  test('filters, labels and marked snippets fit the screen, and a hit opens over the list', async ({ page }, testInfo) => {
+    await openMemory(page, () => ({ json: BOTH_GROUPS }))
+    const filters = page.getByRole('group', { name: 'Filters' })
+    await filters.getByLabel('Project').selectOption('borealis')
+    await filters.getByLabel('Tag').selectOption('заметки')
+    await memorySearchBox(page).fill('deploy')
+    await expect(memoryGroup(page, 'Related by meaning').locator('.memory-result-item')).toHaveCount(2)
+
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+    for (const part of [filters, page.locator('.memory-result-match').first(), page.locator('.memory-result-snippet mark').last()]) {
+      const box = (await part.boundingBox())!
+      expect(box.x).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width).toBeLessThanOrEqual(360)
+    }
+    await page.screenshot({ path: testInfo.outputPath('memory-search-360.png'), fullPage: true })
+
+    await memoryResult(page, 'Rollback checklist').click()
+    await expect(page.locator('.memory-cv-title')).toHaveText('Rollback checklist')
+    await expect(memorySearchBox(page)).toBeHidden()
+    await page.getByRole('button', { name: 'All memories' }).click()
+    await expect(memorySearchBox(page)).toHaveValue('deploy')
+    await expect(filters.getByLabel('Tag')).toHaveValue('заметки')
+  })
+})

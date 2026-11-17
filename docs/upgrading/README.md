@@ -11,6 +11,14 @@ replaces that endpoint's `Authorization` with the agent's identity, and `set_con
 then refuse. Enforcement stays off (`FLEET_AGENT_IDENTITY_ENFORCE=false`) until the operator turns
 it on. See [docs/agent-identity.md](../agent-identity.md#turning-it-on).
 
+## Temporal and Qdrant leave the agents' network
+
+Temporal (server, UI, database) and Qdrant move off `fleet-net` to networks no agent joins.
+`./upgrade.sh` recreates them on a generated stack. A deployment with its own compose file makes the
+change by hand, and anything that reached Temporal, its UI, its database or Qdrant by Docker name
+from `fleet-net` stops working. Steps, checks and rollback:
+[docs/agent-identity.md](../agent-identity.md#moving-an-existing-install).
+
 ## Loopback ports and the Qdrant pin
 
 Before upgrading past the loopback-ports change, read **[docs/upgrading/internal-ports-loopback.md](internal-ports-loopback.md)**: Temporal, its UI, fleet-memory and fleet-bridge stop being reachable from other machines, and Qdrant is pinned, so `upgrade.sh` refuses to move Qdrant by more than one minor release, or backwards.

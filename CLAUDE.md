@@ -602,6 +602,11 @@ read from the stored tools (`DbAgentGrantSource`, `AgentConfigFiles.EffectiveMcp
 at `GET /internal/agent-mcp-grants`). `setup.sh`/`upgrade.sh` generate the key when missing and
 never replace it. Operator tool: `scripts/mint-identity-token.sh`.
 
+Temporal (server, UI, database) and Qdrant take no credential, so the example compose keeps them
+off `fleet-net`, the network agents are on: `fleet-temporal-net` (also the orchestrator and the
+bridge) and `fleet-memory-net` (internal; also fleet-memory). MUST NOT put a service that takes no
+credential on `fleet-net`, or an agent goes around the server that checks who it is.
+
 MUST NOT: read `Query["agent"]` in a fleet MCP server or attribute anything to a name a model typed
 when the call is made as an agent (`AgentCallerHttp.AgentNameOr`; a source test guards the three
 servers); take a caller's identity from `?agent=` or a tool argument when a token was sent; treat a

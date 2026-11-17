@@ -56,8 +56,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    # Not on fleet-net: Qdrant takes no credential, and agents are on fleet-net. Only fleet-memory
+    # reaches it, so an agent reads and writes memory through fleet-memory, which knows who it is
+    # (docs/agent-identity.md), and cannot go around it to the vectors.
     networks:
-      - fleet-net
+      - fleet-memory-net
 
   fleet-mysql:
     image: mysql:8.0
@@ -96,8 +99,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Not on fleet-net: see temporal-server.
     networks:
-      - fleet-net
+      - fleet-temporal-net
 
   temporal-server:
     image: temporalio/auto-setup:1.29.1
@@ -127,8 +131,12 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
+    # Not on fleet-net: Temporal's frontend takes no credential, and agents are on fleet-net. An
+    # agent starts, signals and cancels workflows through the Temporal bridge, which knows who it
+    # is and what it is granted (docs/agent-identity.md). On the same network it could go around
+    # the bridge and signal any gate itself. Only the orchestrator, the bridge and the UI join.
     networks:
-      - fleet-net
+      - fleet-temporal-net
 
   temporal-ui:
     image: temporalio/ui:2.34.0
@@ -142,8 +150,10 @@ services:
     depends_on:
       temporal-server:
         condition: service_healthy
+    # Not on fleet-net: the UI can signal, cancel and terminate, and takes no credential. It is
+    # read through its host port (loopback by default), not from inside the agents' network.
     networks:
-      - fleet-net
+      - fleet-temporal-net
 
   # ── MinIO (optional — for agent file sharing) ──────────────────────────────
 
@@ -268,6 +278,7 @@ services:
       retries: 5
     networks:
       - fleet-net
+      - fleet-memory-net
 
   fleet-telegram:
     build:
@@ -413,6 +424,7 @@ services:
       retries: 5
     networks:
       - fleet-net
+      - fleet-temporal-net
 
   fleet-playwright:
     image: mcr.microsoft.com/playwright:v1.59.1-noble
@@ -508,6 +520,7 @@ services:
       start_period: 15s
     networks:
       - fleet-net
+      - fleet-temporal-net
 
   # Secret placeholders, only with `--profile secrets` (setup.sh and upgrade.sh add the profile when
   # FLEET_SECRETS_ENABLED=true). An agent that holds a bound secret reaches this service at its fixed
@@ -924,9 +937,22 @@ volumes:
   minio_data:
 
 networks:
+  # The network agents are on. Whatever is on it, an agent's shell can reach, so a service that
+  # takes no credential must not be: see fleet-temporal-net and fleet-memory-net.
   fleet-net:
     name: fleet-net
     driver: bridge
+  # Temporal (its database, its frontend, its UI) with the two services that use it: the
+  # orchestrator and the Temporal bridge. No agent joins. Not `internal`: the frontend and the UI
+  # publish host ports, which an internal network cannot.
+  fleet-temporal-net:
+    name: fleet-temporal-net
+    driver: bridge
+  # Qdrant with fleet-memory, its only client. No agent joins, and nothing here needs the internet.
+  fleet-memory-net:
+    name: fleet-memory-net
+    driver: bridge
+    internal: true
   # Created only with the `secrets` profile. Internal: it carries agent-to-forwarder traffic and
   # nothing else. The subnet is fixed because the forwarder and every granted agent have a fixed
   # address on it; set FLEET_SECRETS_SUBNET (and FLEET_SECRETS_ADDRESS) if it overlaps a network on

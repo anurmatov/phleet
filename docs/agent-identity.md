@@ -124,6 +124,65 @@ not given the identity; under enforcement it is refused.
 servers to check against. It is Docker-network-only and takes no credential, like
 `/internal/agent-project-access`: names of agents and of tools.
 
+## Networks
+
+Identity on the MCP servers is only as good as the absence of a way around them. Two services
+take no credential at all, and used to share `fleet-net` with the agents:
+
+| Service | What an agent on its network could do | Now on |
+|---|---|---|
+| Temporal (`temporal-server`, `temporal-ui`, `temporal-postgresql`) | Signal any gate, cancel or terminate any workflow, without the bridge and its checks | `fleet-temporal-net`, with the orchestrator and the Temporal bridge |
+| Qdrant | Read and delete memory vectors without fleet-memory and its project check | `fleet-memory-net` (internal), with fleet-memory |
+
+No agent joins either network: agents are provisioned onto `fleet-net` and whatever networks an
+operator adds to them. The host ports (`7233`, `8080`) are unchanged, and loopback by default.
+
+Not closed by this: RabbitMQ is on `fleet-net` because agents use it, with one shared account, so
+an agent can still publish to another agent's queue. `fleet-bridge` (port 3300) takes no
+credential and prompts the CTO agent by design, for callers outside the fleet. Both are separate
+pieces of work.
+
+### Moving an existing install
+
+A stack whose compose file is generated from the example gets this from `./upgrade.sh`, which
+writes the new file and recreates the services whose networks changed. A deployment with its own
+compose file gets nothing from merging this and makes the same change by hand:
+
+1. Add `fleet-temporal-net` (bridge) and `fleet-memory-net` (bridge, `internal: true`) to the
+   top-level `networks:`.
+2. Move `temporal-postgresql`, `temporal-server` and `temporal-ui` from `fleet-net` to
+   `fleet-temporal-net`, and add `fleet-temporal-net` to the orchestrator and the Temporal bridge,
+   which keep `fleet-net`.
+3. Move `qdrant` to `fleet-memory-net`, and add `fleet-memory-net` to fleet-memory, which keeps
+   `fleet-net`. Qdrant must not publish a host port: a container on an internal network cannot.
+4. Recreate those seven services (`docker compose up -d --force-recreate --no-deps <services>`).
+   Named volumes and host ports do not change, no data moves, and no agent is reprovisioned.
+5. Check the orchestrator's, the bridge's and fleet-memory's `/health`, a memory search, and the
+   dashboard's workflow list; from an agent's container, `temporal-server` and `qdrant` no longer
+   resolve.
+
+To roll back, put the seven services back on `fleet-net`, remove the networks they were given, and
+recreate the same services. Volumes and host ports are untouched either way. Removing the two
+networks afterwards (`docker network rm`) is optional once nothing is attached.
+
+### What stops working from inside `fleet-net`
+
+- **Temporal by its Docker name**: an agent browsing `http://temporal-ui:8080` through
+  fleet-playwright, or a `temporal` CLI container on `fleet-net`. That is the point: the UI and the
+  frontend can signal, cancel and terminate. Both are still on their host ports (`7233`, `8080`,
+  loopback by default through `FLEET_INTERNAL_BIND_ADDRESS`). A tool that needs them runs on the
+  host or joins `fleet-temporal-net`, an operator's decision and never an agent's.
+- **Qdrant by its Docker name**: a debug container or a job that used its HTTP API (snapshots, for
+  example) over `fleet-net` now joins `fleet-memory-net` or uses `docker exec qdrant`. A backup of
+  the `qdrant_data` volume is unaffected.
+- **Temporal's database**: a backup job that connected to `temporal-postgresql` over `fleet-net`
+  joins `fleet-temporal-net` or uses `docker exec`.
+
+This needs no token and changes nothing about identity: `FLEET_AGENT_IDENTITY_ENFORCE` stays
+`false` until the operator turns it on. The example's network graph is checked by
+`ComposeNetworkTests`; whether a particular deployed stack has moved is for its operator to check,
+as above.
+
 ## Limits
 
 - **Claude and Codex agents only.** A Gemini agent's CLI is not proven to send MCP headers, and an

@@ -2132,7 +2132,7 @@ test('memory search: a memory id comes first, and Enter opens the one memory it 
 
 test('memory search: Enter pressed before the answer is in opens the id hit when it arrives, and only for what is typed now', async ({ page }) => {
   const searches = await openMemory(page, query => query.get('q') === '5e1f9a3c-3c1f'
-    ? { json: [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.')], delayMs: 500 }
+    ? { json: [memoryHit(MEMORY_ID, 'id', 'A merge builds the images.')], delayMs: 100 }
     : { json: [memoryHit(MEMORY_TWIN, 'keyword', 'Before a rollback.')] })
 
   // Pasted and entered at once: no wait for the pause after typing.

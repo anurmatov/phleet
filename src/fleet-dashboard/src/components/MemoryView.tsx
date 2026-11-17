@@ -210,9 +210,10 @@ export default function MemoryView() {
   // Debounced search: the query and the filters that are set.
   useEffect(() => {
     if (filterDebounce.current) clearTimeout(filterDebounce.current)
+    // Invalidate the old answer now, not when the next debounced request starts.
+    latestSearch.current = ''
+    openOnAnswer.current = ''
     if (!currentUrl) {
-      latestSearch.current = ''
-      openOnAnswer.current = ''
       setSearchResults(null)
       setAnsweredUrl('')
       setSearchLoading(false)

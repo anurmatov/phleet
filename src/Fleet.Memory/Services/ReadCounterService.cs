@@ -5,7 +5,7 @@ namespace Fleet.Memory.Services;
 /// <summary>
 /// In-process read counter for memory_get calls.
 /// Resets to empty on container restart — no persistence by design.
-/// Agent attribution comes from the ?agent= query parameter on the MCP URL.
+/// Agent attribution is the caller memory_get resolved (AgentCallerHttp), never the URL.
 /// Missing attribution buckets to "unknown" rather than dropping the read.
 /// </summary>
 public sealed class ReadCounterService

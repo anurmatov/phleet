@@ -5,6 +5,7 @@ using Fleet.Memory.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 
 namespace Fleet.Memory.Tests;
 
@@ -179,6 +180,36 @@ public sealed class MemoryStartupIndexTests : IDisposable
         Assert.Equal(doc.Id, Assert.Single(await _f.Service.SearchAsync("5e1f9a3c")).Document.Id);
         Assert.Equal(MemoryMatch.Title, Assert.Single(await _f.Service.SearchAsync("retry budget")).Match);
         Assert.Equal(MemoryMatch.Tag, Assert.Single(await _f.Service.SearchAsync("queues")).Match);
+    }
+
+    [Fact]
+    public async Task The_catalogue_is_complete_when_the_watcher_has_started_whatever_the_index_is_doing()
+    {
+        // The host starts the web server only after this service's StartAsync has returned. A search
+        // that arrived while the catalogue was still empty answered an id with its nearest neighbours.
+        var doc = await _f.WriteAsync("Retry budget", "Three attempts.", id: "5e1f9a3c-0000-4000-8000-000000000001", tags: ["queues"]);
+        var neighbour = await _f.AddAsync("Neighbour", "Three attempts too.");
+        var service = _f.Restart(Small);
+        // An index that does not answer: nothing of the scan can have run.
+        var silent = Substitute.For<IVectorIndex>();
+        silent.EnsureCollectionAsync(Arg.Any<CancellationToken>())
+            .Returns(call => Task.Delay(Timeout.Infinite, call.Arg<CancellationToken>()));
+        var watcher = new FileWatcherService(service, _f.Store, silent, new MemorySizeGuidance(0, NullLogger.Instance),
+            Options.Create(new StorageOptions { Path = _f.Dir }), _log);
+
+        await watcher.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.Equal(2, service.Catalogue.Count);
+            var hit = Assert.Single(await service.SearchAsync("5e1f9a3c"));
+            Assert.Equal((doc.Id, MemoryMatch.Id), (hit.Document.Id, hit.Match));
+            Assert.Equal(MemoryMatch.Tag, (await service.SearchAsync("queues")).First().Match);
+            Assert.NotEqual(neighbour.Id, hit.Document.Id);
+        }
+        finally
+        {
+            await watcher.StopAsync(CancellationToken.None);
+        }
     }
 
     [Fact]

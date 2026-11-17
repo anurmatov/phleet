@@ -304,7 +304,9 @@ again. `IVectorIndex` is the seam the tests fake (`VectorStore` is Qdrant); the 
 is tested against a real Qdrant by `bash tests/memory-qdrant/run.sh` (the `*Qdrant*` test classes,
 skipped elsewhere), which a change to any Qdrant request must pass. See `docs/memory-search.md`.
 
-MUST NOT: change what is written for an unchanged memory (the terms of `Bm25Tokenizer` /
+MUST NOT: fill the catalogue after the service listens (`FileWatcherService.StartAsync` reads the
+files before the web server starts; a search on an empty catalogue answers an id with its
+neighbours); change what is written for an unchanged memory (the terms of `Bm25Tokenizer` /
 `MemoryWords`, the dense or sparse text, the sections, the payload) without raising
 `MemoryIndexPlan.Format`, or leave an input of a point out of `MemoryIndexPlan.HashOf` (the start
 would skip the file as unchanged); give a point another id than `VectorStore.PointIdFor` (section 0

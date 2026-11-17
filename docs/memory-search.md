@@ -30,7 +30,7 @@ Things worth knowing:
   far they are; that is why they are labelled and carry a score. `Search__MinMeaningScore` drops
   the ones below a similarity (see [Settings](#settings)).
 - **`id`, `title` and `tag` hits need neither Qdrant nor the embedder.** They come from a catalogue
-  held in memory, built from the files at start. With the embedder down, keyword hits still work;
+  held in memory, built from the files before the service starts to listen. With the embedder down, keyword hits still work;
   with Qdrant down, the first three still work. A search that found nothing while a part of it
   could not run fails instead of saying "nothing found".
 - **Keywords are words in any script**: runs of Unicode letters, digits and underscore, lower-cased.
@@ -111,7 +111,8 @@ yours to measure:
 
 The `Full index complete` line of the first start says how many sections there were. During it:
 
-- the service answers; searches by id, title and tag are complete from the first seconds;
+- the service answers; searches by id, title and tag are complete from the first request, because
+  the service reads the memory files before it starts to listen;
 - a memory not reached yet is still found by keyword and meaning through its old index entry, with
   the old limits (English keywords only, no `since`), until its turn comes;
 - a memory written or updated through the API or a tool is indexed at once, as always;

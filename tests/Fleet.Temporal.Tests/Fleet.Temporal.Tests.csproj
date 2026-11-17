@@ -32,6 +32,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- A local HTTP/2 endpoint that records what reaches it, for what a Temporal client this service
+         builds puts on the wire, and a way to start the service itself as a process, for what it
+         does at startup. Shared source. -->
+    <Compile Include="..\fixtures\local-endpoint\GrpcStub.cs" Link="GrpcStub.cs" />
+    <Compile Include="..\fixtures\local-endpoint\ServiceProcess.cs" Link="ServiceProcess.cs" />
+    <Compile Include="..\fixtures\local-endpoint\SyntheticJwt.cs" Link="SyntheticJwt.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The wire contracts are used throughout; see src/Fleet.Contracts. -->
     <Using Include="Fleet.Contracts" />
   </ItemGroup>

@@ -161,6 +161,13 @@ A human `changes_requested` at a PR or design gate withdraws the published ref (
 re-entered without a new review, that visit is a human decision only; delegation resumes after the
 next attested review.
 
+On the PR definition the same feedback still counts after a delegated approval was consumed, until
+the pinned merge is dispatched: the run looks once for it at the entry to the merge turn, and on
+finding it withdraws the ref and takes the feedback route instead of merging. Only the gate's
+guarded wait can accept an approval. A delegated approval met by one of the reads of late feedback
+(the merge hold, the stall of a held merge, the merge entry) is dropped and never used; those
+reads log no discard. See "Late merge feedback" in `docs/pr-acceptance.md`.
+
 ## Expiry and revocation
 
 - Expiry is decided in D11's transaction (orchestrator clock); D2 is an early exit. There is no

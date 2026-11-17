@@ -277,7 +277,7 @@ Recover a missing URL from the one branch's PR list, not by opening a duplicate.
 | UNRESOLVED | Report threads only; no push; unresolved threads → IMPLEMENT; none → PIN |
 | PIN | Re-read actual head, all CI pages, immutable plan evidence, owner access, prior receipts and counters |
 | CI_WAIT | Literal 300-second timer, maximum 12; repeat PIN; a reported different head → INVALIDATED; still not success → STALLED(ci_timeout) |
-| STALLED | Owned technical state, no gate and no signal: one coordinator notice, then 24 1800-second timers each followed by one read. The read is a probe for `ci_timeout` and the merge check (re-pin, then preflight) for `merge_held`. Clear → resume route (REVIEW, PIN or MERGE), failure → IMPLEMENT, head moved → INVALIDATED, last read not clear → TIMEOUT |
+| STALLED | Owned technical state, no gate: one coordinator notice, then 24 1800-second timers each followed by one read. The read is a probe for `ci_timeout`; for `merge_held` it is one look for late merge feedback, then the merge check (re-pin, then preflight). Clear → resume route (REVIEW, PIN or MERGE), late feedback → MERGE_FEEDBACK, failure → IMPLEMENT, head moved → INVALIDATED, last read not clear → TIMEOUT |
 | CLEANUP_WAIT | Literal 1800-second timer, maximum 16; repeat PIN; still dirty → cleanup_pending |
 | ACCEPT | Enforce batch entry guard, update counters, W1, then one awaited exact-head child |
 | CLASSIFY | Code-validated unanimous classification of failed attempt receipts; no synthesizer verdict |
@@ -285,9 +285,10 @@ Recover a missing URL from the one branch's PR list, not by opening a duplicate.
 | CONTINUE_GATE | CEO-only acceptance-decision; continue resets batch only, stop → STOPPED |
 | BLOCKED | CEO-only acceptance-decision; continue → PIN and full revalidation, stop → STOPPED. Never entered for `ci_timeout` |
 | INVALIDATED | W4 clear; publish sanitized head invalidation; withdraw review ref and fresh delta REVIEW |
-| MERGE_GATE | Required Phase/GateRef/Acceptance write then bound CEO merge wait. Delegated approval → re-pin → MERGE or INVALIDATED; human approval → MERGE_HOLD |
-| MERGE_HOLD | Human approvals only, entered once per gate visit. Re-pin, then a read-only preflight; clear → MERGE, CI failure → IMPLEMENT, head moved → INVALIDATED, anything else → 300-second timer and again, 12 passes, then STALLED(merge_held). The approval is kept |
-| MERGE | Delegated: pinned merge, one read. Human: the merge command once per gate visit, then up to three reads of the actual merged state |
+| MERGE_GATE | Required Phase/GateRef/Acceptance write then bound CEO merge wait. Delegated approval → re-pin → MERGE or INVALIDATED; human approval → MERGE_HOLD; changes_requested → MERGE_FEEDBACK |
+| MERGE_HOLD | Human approvals only, entered once per gate visit. Re-pin, then a read-only preflight; clear → MERGE, CI failure → IMPLEMENT, head moved → INVALIDATED, anything else → a 300-second pause and again, 12 passes, then STALLED(merge_held). The pause listens for late merge feedback → MERGE_FEEDBACK; otherwise the approval is kept |
+| MERGE | Entry, by every route: one look for late merge feedback → MERGE_FEEDBACK, else Phase `merging`. Then delegated: pinned merge, one read. Human: the merge command once per gate visit, then up to three reads of the actual merged state |
+| MERGE_FEEDBACK | The one feedback route, from the gate, the hold, a held merge's stall and the merge entry: withdraw the review ref, Phase `revision`, review of the feedback; upheld → IMPLEMENT, not upheld → fresh REVIEW, `needs_human_review` → a human-review pause. An approval given before it is void |
 | STOPPED | PR remains open, sanitized summary, waiter cancelled; no merge |
 | EXHAUSTED | No terminal sentinel after 60 delivery passes; notify, waiter cancelled, no merge |
 
@@ -436,12 +437,14 @@ changes_requested needs matching Ref. Grants retain existing VisitId/ArtifactRef
 guards, author/CTO exclusions and unanimously published ReviewRef/Scrub evidence.
 No new grant authority or grant creation is introduced. A delegated approval
 then takes the re-pin and pinned merge it always took; a human approval goes to
-MERGE_HOLD. Nothing after either changes a gate's timers.
+MERGE_HOLD; `changes_requested` goes to MERGE_FEEDBACK. Nothing after any of
+them changes a gate's timers.
 
-`technical-stalled` and `merge-hold` are phases of no wait and are in no signal
-registry: there is no button, no push notice and no badge for them, and a click
-kept from the merge gate is refused as `stale_phase` because GateRef is left as
-published while Phase has moved on.
+`technical-stalled`, `merge-hold` and `merging` are phases of no gate and are in
+no signal registry: there is no button, no push notice and no badge for them,
+and a click kept from the merge gate is refused as `stale_phase` because GateRef
+is left as published while Phase has moved on. What the run still reads of
+`merge-approval` after its gate is described under "Late merge feedback".
 
 Acceptance waits have timeout/matching-decision/stale routing only. Continue/stop
 is CEO dashboard-only, including for the configured CTO. Timeout is 720 minutes,
@@ -492,9 +495,10 @@ held. A clear check restores the gate's Acceptance record under Phase
 both, a failure goes to IMPLEMENT, a moved head invalidates, and a 24th read
 that is not clear ends the run as TIMEOUT, the outcome of a gate timeout:
 waiter `cancelled`, PR open, run not Failed. The phase and the blocked record
-stay as written for as long as the stall waits. No signal is read; a signal of
-any name changes neither the timers nor the outcome. A human can cancel the
-run.
+stay as written for as long as the stall waits. No signal decides anything
+here: a signal of any name changes neither the timers nor the outcome, with one
+exception, late merge feedback in a `merge_held` stall (below). A human can
+cancel the run.
 
 **After a human approval.** MERGE_HOLD first re-pins. Head moved → INVALIDATED.
 `CI: failure` → IMPLEMENT. `CI: success` → preflight. Anything else is held.
@@ -503,9 +507,10 @@ state,mergeStateStatus,mergeable,isDraft,headRefOid`) and the only place a hold
 can be reported: `MERGE_PREFLIGHT: clear|held`, `HOLD_REASON:
 checks_pending|queue|window_closed|other` and `IS_DRAFT: true|false`. An absent,
 failed or unparseable answer is held, never clear. Held writes Phase
-`merge-hold` and repeats timer, re-pin and preflight. The approval is kept
-throughout: one consensus round, one gate visit. When the passes are spent the
-run stalls with `merge_held`, and the stall's 24 reads are the same check.
+`merge-hold` and repeats pause, re-pin and preflight. The approval is kept
+throughout, unless late feedback voids it: one consensus round, one gate visit.
+When the passes are spent the run stalls with `merge_held`, and the stall's 24
+reads are the same check.
 
 The longest a held merge can take, whatever CI does:
 
@@ -519,6 +524,76 @@ In that time the configured CTO gets one stall notice and makes at most 12 + 24
 re-pins after the one at approval, and as many preflights. No merge command is
 issued. The run then ends as TIMEOUT: waiter `cancelled`, PR open, run not
 Failed. The times do not include the turns themselves.
+
+**Late merge feedback.** An approval is the last word only once the merge
+command has been dispatched. Until then, `merge-approval` with `Decision`
+exactly `changes_requested`, and either no `Ref` or the `Ref` of the gate that
+was approved, voids the approval and sends the PR down the gate's own feedback
+route, MERGE_FEEDBACK: review ref withdrawn, Phase `revision`, the review of the
+feedback, then IMPLEMENT or a fresh REVIEW. A later merge gate is a new visit
+and needs a new approval. A signal that arrives while nothing waits for it is
+buffered by the engine, one per signal name, the latest replacing the earlier;
+the run reads that buffer in three places:
+
+| where | read |
+|---|---|
+| MERGE_HOLD | One look without waiting on the pass after the approval. Each later pass's five-minute pause is a wait for the signal, so feedback ends the pause at once |
+| STALLED(`merge_held`) | One look without waiting before each read |
+| entry to MERGE, by every route (hold cleared, delegated approval, stall resumed) | One look without waiting |
+
+A hold entered before the gate (the preflight was held, so the gate is still
+owed) reads the same way: feedback there sends the PR back before the gate
+opens, and there is no approval to void.
+
+After the last look the run writes Phase `merging` and issues the merge command
+in the same workflow task. Nothing between the look and the command can end the
+task, so no signal is delivered between them. That dispatch is the cutoff:
+feedback that arrives after it is not read, and belongs on the PR.
+
+Everything else one of these reads meets is dropped and decides nothing, there
+or at a later gate: a duplicate or stale approval, a delegated approval, a
+rejection, feedback whose `Ref` names another gate, a payload that is not an
+object. A payload dropped by a hold's pause ends that pause, so the pass runs
+early; the twelve passes are not extended. Two feedback signals behind one
+approval are one pass through the route, with the later comment.
+
+The reads are `wait_for_signal` steps that end as a timeout
+(`autoCompleteOnTimeout`, zero minutes for a look), with no phase, no notice, no
+`visitVar` and a variable of their own, `merge_late_signal`; the gate's payload
+in `merge_decision` is never overwritten by them. The route reads its comment
+from `merge_feedback_comment`, set by whichever read, or the gate, took the
+feedback. They are not gates: the gate's `Ref` binding, its guard and its stale
+counting are as they were, and the definition still has exactly one
+`merge-approval` gate.
+
+`temporal_signal_workflow` sends the configured CTO's `merge-approval` feedback
+only to a run that is Running with Phase `merge-approval` or `merge-hold`.
+Anywhere else it is refused with the status and phase, and nothing is sent:
+`merging`, `revision`, `implementing`, `technical-stalled`, no phase, a closed
+run, a describe that fails or times out. `design-approval` feedback is checked
+the same way against its own gate. A dashboard send is checked by the
+orchestrator instead, as before: `merge-approval` is accepted in Phase
+`merge-approval` only, and a click during the hold is refused as `stale_phase`.
+So in the hold, late feedback comes through this tool; a human who wants to
+stop a held merge asks the configured CTO to send it, or cancels the run. A
+second click made while the gate still shows carries the gate's own `Ref`, which
+is why feedback with that `Ref` is accepted.
+
+Known limits:
+
+- A run that loaded an older definition and sits in `merge-hold` has no step
+  that reads feedback: the tool lets it through and the run ignores it.
+- The tool's describe and its signal are two calls. Feedback sent in the
+  instant a run leaves the hold for the merge can be accepted and never read.
+- A `merge_held` stall reports Phase `technical-stalled`, so the tool refuses
+  feedback there. What the stall's looks take is what was buffered before it.
+- Feedback that arrives after an earlier one was taken, during the review of
+  that feedback for instance, stays buffered and is the first thing the next
+  merge gate takes, as Ref-less feedback sent between gates always was.
+- The seed does not change a deployment's stored definition: DbSeeder creates
+  definitions that are absent and never updates one that exists. The operator
+  installs the new definition, and a run already started keeps the one it
+  loaded.
 
 **Merge turn.** `phase4_merge` is a plain delegate with `noRedelivery`, no
 continuation retries, a status variable and `ignoreFailure`; no step above it
@@ -561,7 +636,8 @@ Not covered:
   `phase4_merge_pinned` are the steps that shipped before, instruction text
   included. The pinned merge keeps continuation retries and the five-minute
   re-send, and a re-pin that is not green after a delegated approval still
-  invalidates it.
+  invalidates it. Its route to the merge turn passes the same last look for
+  late feedback as every other route.
 - The pause after merge-gate feedback (`post_feedback_human_review_signal`) is
   not preceded by a probe.
 - PIN itself is unchanged: a PIN that reports no head still invalidates, and a
@@ -637,7 +713,8 @@ not a synthesizer override. Render failure withholds the public comment, not the
 protected result; gate notice reports evidence comment withheld.
 
 A run in `technical-stalled` or `merge-hold` is waiting on a timer, not on a
-person. `technical-stalled` with `block=ci_timeout` or `block=merge_held` that
+person; `merging` is the merge command and the reads after it.
+`technical-stalled` with `block=ci_timeout` or `block=merge_held` that
 ends as a timeout is the signal to look at the PR's checks or merge state.
 Monitor Phase, GateRef and Acceptance. A merge gate is healthy only when the
 record head equals PR head and result passed (or off/doc-only not_required). Keyword

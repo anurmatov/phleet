@@ -11,7 +11,7 @@ Each memory is returned once, under the strongest way it matched, in this order:
 | Match | When | Needs |
 |---|---|---|
 | `id` | The whole query is 6 or more hexadecimal digits, with or without the dashes of a UUID, and a memory's id begins with them. Case does not matter. | the files |
-| `title` | The query is part of the title, whatever the case. A title that is the query comes first, then one that begins with it. | the files |
+| `title` | The query is part of the title, whatever the case. A query of one or two characters matches only a title it equals. A title that is the query comes first, then one that begins with it. | the files |
 | `tag` | The query is one of the memory's tags, whatever the case. | the files |
 | `keyword` | A word of the query is in the title, a tag or the content. | the index |
 | `meaning` | The memory is near the query by embedding, and no word matched. Carries its similarity as `score`. | the index and the embedder |

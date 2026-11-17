@@ -27,7 +27,7 @@ public sealed record MemorySearchHit(MemoryDocument Document, string Match, Sear
 /// Search. A memory is returned once, under the strongest way it matched, in this order:
 ///
 /// 1. id: the query is an id or the start of one (<see cref="MemoryIdQuery"/>);
-/// 2. title: the query is part of the title, whatever the case;
+/// 2. title: the query (three characters or more) is part of the title, or is the title, whatever the case;
 /// 3. tag: the query is one of the tags, whatever the case;
 /// 4. keyword and meaning: the index's two sides, fused (<see cref="SearchFusion"/>). A hit the
 ///    keyword side returned is a keyword hit; one only the meaning side returned is a meaning hit
@@ -41,6 +41,9 @@ public sealed partial class MemoryService
 {
     // Points asked of each side per memory wanted, and its bounds: several points can be sections
     // of one memory, and only the best of them counts.
+    // The shortest query that matches as a part of a title.
+    private const int MinTitlePartLength = 3;
+
     private const int MinSideFetch = 64;
     private const int MaxSideFetch = 400;
 
@@ -78,7 +81,10 @@ public sealed partial class MemoryService
             }
         }
 
-        foreach (var e in entries.Where(e => e.Title.Contains(text, StringComparison.OrdinalIgnoreCase))
+        // One or two characters are in nearly every title: that short, only the whole title counts.
+        foreach (var e in entries.Where(e => text.Length >= MinTitlePartLength
+                         ? e.Title.Contains(text, StringComparison.OrdinalIgnoreCase)
+                         : e.Title.Equals(text, StringComparison.OrdinalIgnoreCase))
                      .OrderBy(e => TitleRank(e.Title, text)).ThenByDescending(e => e.Updated).ThenBy(e => e.FilePath, StringComparer.Ordinal))
         {
             if (taken.Add(e.FilePath)) candidates.Add(new Candidate(e.FilePath, MemoryMatch.Title));

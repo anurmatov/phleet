@@ -330,6 +330,21 @@ public sealed class MemorySearchTests : IDisposable
     }
 
     [Fact]
+    public async Task One_or_two_characters_match_a_title_only_when_they_are_the_whole_title()
+    {
+        await _f.AddAsync("Retry budget", "Use backoff between attempts.");
+        await _f.AddAsync("Rebuild notes", "How the index is rebuilt.");
+        var whole = await _f.AddAsync("Re", "A reply prefix.");
+        _f.Index.Down = true;
+
+        var hits = await _f.Service.SearchAsync("re");
+
+        var hit = Assert.Single(hits);
+        Assert.Equal((whole.Id, MemoryMatch.Title), (hit.Document.Id, hit.Match));
+        Assert.Equal(2, (await _f.Service.SearchAsync("reb")).Count + (await _f.Service.SearchAsync("ret")).Count);
+    }
+
+    [Fact]
     public async Task Without_the_index_ids_titles_and_tags_are_still_found()
     {
         await _f.AddAsync("Retry budget", "Use backoff between attempts.", id: "5e1f9a3c-0000-4000-8000-000000000001", tags: ["queues"]);

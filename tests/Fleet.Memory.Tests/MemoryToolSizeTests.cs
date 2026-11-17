@@ -94,8 +94,9 @@ public sealed class MemoryToolSizeTests : IDisposable
             result[prefix.Length..]);
         Assert.True(File.Exists(_store.FindFileById(id)));
 
-        // bytes is the exact EmbedAsync input.
-        Assert.Equal(25_003, Encoding.UTF8.GetByteCount(Assert.Single(_embedded)));
+        // The size is the memory's title + content. A memory this long is embedded in sections:
+        // what reached the embedder (which fails on the first call) is the title and the first one.
+        Assert.Equal(3 + MemoryIndexSettings.DefaultSectionChars, Encoding.UTF8.GetByteCount(Assert.Single(_embedded)));
     }
 
     [Fact]

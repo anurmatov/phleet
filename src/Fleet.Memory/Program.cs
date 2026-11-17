@@ -1,5 +1,6 @@
 using Fleet.Memory.Configuration;
 using Fleet.Memory.Data;
+using Fleet.Memory.Endpoints;
 using Fleet.Memory.Models;
 using Fleet.Memory.Services;
 
@@ -15,6 +16,7 @@ builder.Services.Configure<OrchestratorOptions>(builder.Configuration.GetSection
 // Data layer
 builder.Services.AddSingleton<MemoryFileStore>();
 builder.Services.AddSingleton<VectorStore>();
+builder.Services.AddSingleton<IVectorIndex>(sp => sp.GetRequiredService<VectorStore>());
 
 // Embedding provider — config-driven
 var embeddingConfig = builder.Configuration.GetSection(EmbeddingOptions.Section).Get<EmbeddingOptions>()
@@ -38,6 +40,12 @@ else
 // bound into EmbeddingOptions above: a typo there would be a crash loop, here it is one Warning.
 builder.Services.AddSingleton(sp => MemorySizeGuidance.FromConfiguration(
     builder.Configuration, sp.GetRequiredService<ILogger<MemorySizeGuidance>>()));
+
+// Search: the in-memory catalogue, and the section and cut-off settings. Like the guidance above,
+// the settings are parsed from the raw strings: a bad value is the default and one Warning.
+builder.Services.AddSingleton<MemoryCatalogue>();
+builder.Services.AddSingleton(sp => MemoryIndexSettings.FromConfiguration(
+    builder.Configuration, sp.GetRequiredService<ILogger<MemoryIndexSettings>>()));
 
 // Services
 builder.Services.AddSingleton<MemoryService>();
@@ -95,7 +103,7 @@ app.MapGet("/internal/memory", async (MemoryService memoryService) =>
             project    = d.GetValueOrDefault("project") ?? "",
             type       = d.GetValueOrDefault("memory_type") ?? "",
             tags,
-            updated_at = d.GetValueOrDefault("created") ?? "",
+            updated_at = MemoryListEntry.UpdatedAt(d),
         };
     });
     return Results.Ok(result);
@@ -112,25 +120,8 @@ app.MapGet("/internal/memory/ids", async (MemoryService memoryService) =>
     return Results.Ok(ids);
 });
 
-// GET /internal/memory/search?q=...
-app.MapGet("/internal/memory/search", async (string? q, MemoryService memoryService) =>
-{
-    if (string.IsNullOrWhiteSpace(q))
-        return Results.BadRequest(new { error = "Missing query parameter 'q'" });
-
-    var docs = await memoryService.SearchAsync(q, limit: 20);
-    var result = docs.Select(d => new
-    {
-        id         = d.Id,
-        title      = d.Title,
-        project    = d.Project,
-        type       = d.Type,
-        tags       = d.Tags,
-        snippet    = d.Content.Length > 200 ? d.Content[..200] + "…" : d.Content,
-        updated_at = d.Updated,
-    });
-    return Results.Ok(result);
-});
+// GET /internal/memory/search?q=...&project=&type=&tag=&since=&limit=
+app.MapGet("/internal/memory/search", MemorySearchEndpoint.HandleAsync);
 
 // GET /internal/memory/{id} — full content + metadata
 app.MapGet("/internal/memory/{id}", async (string id, MemoryService memoryService, MemorySizeGuidance sizeGuidance) =>

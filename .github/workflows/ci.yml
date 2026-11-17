@@ -588,6 +588,33 @@ jobs:
           fi
           echo "$passed test(s) executed against mysql:8.0, 0 skipped."
 
+  memory-qdrant:
+    name: Memory index (Qdrant)
+    runs-on: ubuntu-latest
+
+    # Every other fleet-memory test uses an in-memory stand-in for the index, and in the job above
+    # the tests named *Qdrant* are skipped with their reason. This is where the real VectorStore
+    # meets a real server: sectioned upserts, both sides of a search under every filter, listings,
+    # the removal of stale and orphaned points, and what a start reads back. The script starts the
+    # container itself and fails when any of those tests was skipped or none ran.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Against the Qdrant release docker-compose.example.yml pins
+        run: bash tests/memory-qdrant/run.sh
+
+      # Qdrant moves one minor release at a time (docs/upgrading/internal-ports-loopback.md), so a
+      # host one release behind the pin is a supported place to be until it steps up. Move this
+      # with the pin.
+      - name: Against the release before the pin
+        run: QDRANT_VERSION=v1.19.1 bash tests/memory-qdrant/run.sh
+
   whisper-tests:
     name: Whisper service tests
     runs-on: ubuntu-latest

@@ -131,6 +131,27 @@ export const memoryDoc = {
   content: '# How deploys reach the host\n\nA merge to `main` builds the images. The deploy pipeline pulls them and recreates the services **one at a time**.\n\n- the orchestrator first\n- then the bridge\n- agents last, by reprovision\n\n```\n./deploy.sh --service orchestrator\n```\n',
 }
 
+// ── memory search ───────────────────────────────────────────────────────────────────────────────
+
+/** What a search answers: three hits that matched the words, then two that are only related by meaning. */
+export const memorySearchHits = [
+  { id: 'm-1', title: 'How deploys reach the host', project: 'project', type: 'reference', tags: ['deploy', 'ops'], updated_at: minutesAgo(300),
+    snippet: 'A merge to main builds the images. The pipeline pulls them and recreates the services one at a time.',
+    highlights: [], match: 'title', score: null },
+  { id: 'm-5', title: 'Rollback checklist', project: 'project', type: 'decision', tags: ['deploy'], updated_at: minutesAgo(700),
+    snippet: 'Before a rollback, check which image the host is running and whether a migration went with it.',
+    highlights: [], match: 'tag', score: null },
+  { id: 'm-6', title: 'Заметки о выкладке на стенд', project: 'project', type: 'learning', tags: ['ops'], updated_at: minutesAgo(2100),
+    snippet: '…перед выкладкой проверь, что deploy на стенде прошёл, и только потом запускай deploy на основном сервере…',
+    highlights: [[30, 6], [79, 6]], match: 'keyword', score: null },
+  { id: 'm-2', title: 'Provider CLI pins and why each one is where it is', project: 'project', type: 'decision', tags: ['providers'], updated_at: minutesAgo(1500),
+    snippet: 'Each provider CLI is pinned to one version in the image, and a bump changes every occurrence in the same commit.',
+    highlights: [], match: 'meaning', score: 0.62 },
+  { id: 'm-3', title: 'Review checklist the reviewers agreed on', project: 'project', type: 'learning', tags: ['review'], updated_at: minutesAgo(4000),
+    snippet: 'Read the diff before the description. Ask what happens when the service restarts halfway through.',
+    highlights: [], match: 'meaning', score: 0.48 },
+]
+
 export const devices = {
   devices: [
     { deviceId: 'd-1', kind: 'browser', name: 'This browser', registeredAt: minutesAgo(5000), lastSeenAt: minutesAgo(0), revokedAt: null, current: true },
@@ -157,6 +178,7 @@ export const routes: Record<string, unknown> = {
   '/api/repositories': repositories,
   '/api/memory': memories,
   '/api/memory/m-1': memoryDoc,
+  '/api/memory/search': memorySearchHits,
   '/api/memory/stats/reads': { since: minutesAgo(10000), entries: [] },
   '/api/prompt-size-policy': { unit: 'utf8Bytes', instruction: { limitBytes: 10000, limitKey: 'k' }, projectContext: { limitBytes: 10000, limitKey: 'k' } },
   '/api/chat/agents': { available: true, agents: [{ agentName: 'agent1', displayName: 'Agent 1' }, { agentName: 'agent2', displayName: 'Agent 2' }] },
@@ -387,6 +409,8 @@ export const scenes = [
   { name: 'more-sheet', hash: 'agents' },
   { name: 'visual-editor', hash: 'wf-definitions' },
   { name: 'memory-open', hash: 'memory' },
+  { name: 'memory-search', hash: 'memory' },
+  { name: 'memory-search-related', hash: 'memory', override: { '/api/memory/search': memorySearchHits.filter(h => h.match === 'meaning') } },
   { name: 'chat-open', hash: 'chat' },
   { name: 'sign-in', hash: 'agents', override: { '/api/auth/session': { authRequired: true, signedIn: false } } },
   { name: 'first-run', hash: 'agents', override: {

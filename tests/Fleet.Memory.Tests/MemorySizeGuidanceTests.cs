@@ -86,8 +86,8 @@ public sealed class MemorySizeGuidanceTests
     {
         var report = Guidance(25_000).Evaluate(Id, null, "t\n\n" + new string('a', 25_000));
 
-        const string tail = "The whole memory is embedded as one input and re-embedded on every fleet-memory restart; " +
-            "text past the embedding model's input window may be cut off or rejected, leaving the memory partly or wholly unsearchable. " +
+        const string tail = "A long memory is indexed in sections and stays searchable (up to the section cap), but every " +
+            "change embeds all of it again and a reader gets it whole. " +
             "Consider splitting it by topic and linking the parts by id.";
         Assert.Equal(
             "Memory 0123abcd embedding input (title + content) is 25,003 UTF-8 bytes, 3 over the 25,000-byte guidance (Embedding:InputGuidanceBytes). Saved anyway. " + tail,
@@ -103,7 +103,7 @@ public sealed class MemorySizeGuidanceTests
         var report = Guidance(1_000).Evaluate(Id, new string('a', 2_000), new string('a', 1_500));
 
         Assert.StartsWith(
-            "Memory 0123abcd embedding input is still over the 1,000-byte guidance (Embedding:InputGuidanceBytes): 2,000 → 1,500 UTF-8 bytes. Saved anyway. The whole memory",
+            "Memory 0123abcd embedding input is still over the 1,000-byte guidance (Embedding:InputGuidanceBytes): 2,000 → 1,500 UTF-8 bytes. Saved anyway. A long memory",
             report.Warning);
         Assert.StartsWith("\nSize: 2,000 → 1,500 UTF-8 bytes embedded; embedding-input guidance 1,000 (Embedding:InputGuidanceBytes).\nSize warning: ",
             MemorySizeGuidance.RenderMcpLines(report));

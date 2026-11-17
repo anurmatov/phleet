@@ -154,6 +154,27 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
     if (await memory.count() === 0) await page.locator('.memory-tree-type-btn').first().click()
     await memory.click()
   },
+  'memory-search': async (page, phone) => {
+    // Both groups, the marked words, and two filters set. A desktop has room to open a hit beside
+    // them; a phone folds the read stats away so the second group is on the screen too.
+    const filters = page.getByRole('group', { name: 'Filters' })
+    await filters.getByLabel('Project').selectOption('project')
+    await filters.getByLabel('Tag').selectOption('deploy')
+    await page.getByRole('searchbox', { name: 'Search memories' }).fill('deploy')
+    await expect(page.getByRole('region', { name: /^Related by meaning/ })).toBeVisible()
+    if (phone) {
+      // The alert toast lies over the foot of a phone's list: put it away, as a person would.
+      await page.locator('.toast-close').click()
+      await page.locator('.memory-stats-toggle-btn').click()
+      await page.mouse.move(0, 0)
+    } else await page.locator('.memory-result-item').first().click()
+  },
+  'memory-search-related': async (page, phone) => {
+    // Nothing matched the words: the page says so above what is only related.
+    await page.getByRole('searchbox', { name: 'Search memories' }).fill('nightly jobs')
+    await expect(page.locator('.memory-results-notice')).toBeVisible()
+    if (phone) await page.locator('.toast-close').click()
+  },
   'chat-open': async page => {
     await page.locator('.chat-agent').first().click()
     await expect(page.locator('.chat-working')).toBeVisible()

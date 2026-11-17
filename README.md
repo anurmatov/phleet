@@ -130,6 +130,7 @@ Off by default. When it is on, each agent sends one row for every provider turn 
 | Services, task flow, consensus review, workflow editor | [docs/architecture.md](docs/architecture.md) |
 | Platforms and providers | [docs/platform-support.md](docs/platform-support.md) |
 | Configuration files, size warnings, agent config fields | [docs/configuration.md](docs/configuration.md) |
+| Memory search: what it finds, filters, settings | [docs/memory-search.md](docs/memory-search.md) |
 | Sign-in and devices | [docs/sign-in.md](docs/sign-in.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Upgrade notes for existing installations | [docs/upgrading/](docs/upgrading/README.md) |

@@ -24,11 +24,11 @@ Advisory size feedback, measured in UTF-8 bytes (not tokens). A write over a lim
 |---|---|---|---|
 | `PromptSizeWarnings__InstructionBytes` | orchestrator | 10000 | one role instruction |
 | `PromptSizeWarnings__ProjectContextBytes` | orchestrator | 10000 | one project context |
-| `Embedding__InputGuidanceBytes` (`FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES`) | fleet-memory | 0 (off) | one memory's embedding input, `{title}\n\n{content}` |
+| `Embedding__InputGuidanceBytes` (`FLEET_MEMORY_EMBEDDING_INPUT_GUIDANCE_BYTES`) | fleet-memory | 0 (off) | one memory's title and content, `{title}\n\n{content}` |
 
 `0` turns a check off. An empty value counts as unset; an invalid value falls back to the default with one startup warning. Values are read once at startup, so recreate the service after a change (`docker compose restart` re-reads nothing). A hand-managed compose file must add the fleet-memory `environment:` line itself.
 
-fleet-memory embeds each memory as one input and re-embeds every file on restart, so text past the model's input window may be cut off or rejected. Rough starting points, not token maths:
+The memory guidance is advice about how long one memory should be, not a limit of search. fleet-memory indexes a long memory in sections ([docs/memory-search.md](memory-search.md)), so text past the embedding model's input window is searchable like any other, and a memory that has not changed is not embedded again at start. A long memory still costs: every change embeds all of its sections again, a search returns it as one result, and a reader gets it whole. About one input window of the model is a reasonable size for one topic. Rough starting points, not token maths:
 
 | Embedding setup | Input window | Suggested starting value |
 |---|---|---|
@@ -37,6 +37,18 @@ fleet-memory embeds each memory as one input and re-embeds every file on restart
 | anything else | model card | measure on your own corpus |
 
 After every fleet-memory start, a `Full index size check:` line reports `scanned`, `indexed`, `indexFailures`, `corrupt` and `overGuidance`; it is a Warning when any of the last three is non-zero.
+
+## Memory search
+
+Three fleet-memory settings, read once at start; none has a variable in the shipped compose file, so add a line such as `- Search__MinMeaningScore=0.35` to the `fleet-memory` service's `environment:` and recreate it. An empty value is the default; a value that cannot be used is the default with one startup warning.
+
+| Key (env form) | Default | Meaning |
+|---|---|---|
+| `Search__SectionChars` | 1200 (200 to 8000) | A memory longer than this many characters is indexed in sections of at most this length |
+| `Search__MaxSections` | 200 (1 to 2000) | The most sections of one memory that are indexed; one warning names a memory that has more |
+| `Search__MinMeaningScore` | 0 (off; 0 to 1) | A search result found by meaning alone is dropped below this similarity. Off by default because the right value depends on the embedding model |
+
+Changing either of the first two, or the embedding provider, model or dimensions, embeds every memory again at the next start. What a search returns, the filters and what the first start after an upgrade costs are in [docs/memory-search.md](memory-search.md).
 
 See `.env.example` for all required variables with descriptions.
 

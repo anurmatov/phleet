@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Fleet.Memory.Configuration;
 using Fleet.Memory.Data;
+using Fleet.Memory.Models;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Memory.Services;
@@ -9,7 +10,7 @@ namespace Fleet.Memory.Services;
 public sealed class FileWatcherService(
     MemoryService memoryService,
     MemoryFileStore fileStore,
-    VectorStore vectorStore,
+    IVectorIndex vectorStore,
     MemorySizeGuidance sizeGuidance,
     IOptions<StorageOptions> storageOptions,
     ILogger<FileWatcherService> logger) : BackgroundService
@@ -27,6 +28,27 @@ public sealed class FileWatcherService(
     // or the embedder no longer leaves a memory unsearchable until the next restart.
     private readonly PendingIndexWork _pendingIndex = new(
         memoryService.IndexFileAsync, memoryService.RemoveFromIndexAsync, TimeProvider.System, logger);
+
+    // The files as StartAsync read them, for the scan that follows to use once.
+    private (List<MemoryDocument> Documents, int Corrupt)? _readAtStart;
+
+    /// <summary>
+    /// Reads the memory files and enters them in the catalogue before anything else starts. The
+    /// host starts its services one after the other and the web server last, so the service does
+    /// not listen until it knows which memories exist. Were the catalogue filled by the scan in
+    /// <see cref="ExecuteAsync"/> instead, a search arriving in the first seconds would find it
+    /// empty and answer a query for a memory's id with that id's nearest neighbours.
+    /// </summary>
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        fileStore.EnsureDirectories();
+        var read = await fileStore.ListAllAsync();
+        memoryService.SeedCatalogue(read.Documents);
+        _readAtStart = read;
+        logger.LogInformation("Read {Count} memory file(s): searchable by id, title and tag from now on", read.Documents.Count);
+
+        await base.StartAsync(cancellationToken);
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -81,12 +103,24 @@ public sealed class FileWatcherService(
         }
     }
 
-    private async Task FullIndexAsync(CancellationToken ct)
+    /// <summary>
+    /// Brings the index in line with every file on disk, once, at start. The files were read and
+    /// entered in the catalogue by <see cref="StartAsync"/>, so a search by id, title or tag works
+    /// before the first memory is embedded. Here the index's payloads are read once: a file the
+    /// index already holds exactly is not embedded again, and what remains (new and changed files,
+    /// and every file after a change of the index format, the embedding model or the section
+    /// settings) is embedded one after the other.
+    /// </summary>
+    internal async Task FullIndexAsync(CancellationToken ct)
     {
         logger.LogInformation("Starting full index of {Path}", _basePath);
 
-        var (allDocs, corrupt) = await fileStore.ListAllAsync();
-        var existingKeys = await vectorStore.GetAllFilePathKeysAsync(ct);
+        // What StartAsync read a moment ago; read here when the scan is run by itself.
+        var (allDocs, corrupt) = _readAtStart ?? await fileStore.ListAllAsync();
+        _readAtStart = null;
+        memoryService.SeedCatalogue(allDocs);
+        var existingKeys = await memoryService.LoadIndexStateAsync(ct);
+        var before = memoryService.IndexCounts;
 
         var filePathsOnDisk = new HashSet<string>();
 
@@ -136,7 +170,10 @@ public sealed class FileWatcherService(
             }
         }
 
-        logger.LogInformation("Full index complete: {Indexed} indexed, {Orphans} orphans removed", indexed, orphans.Count);
+        var after = memoryService.IndexCounts;
+        logger.LogInformation(
+            "Full index complete: {Indexed} indexed ({Embedded} embedded in {Sections} sections, {Unchanged} unchanged and not embedded), {Orphans} orphans removed",
+            indexed, after.Embedded - before.Embedded, after.Sections - before.Sections, after.Unchanged - before.Unchanged, orphans.Count);
 
         // #346: the size check reuses the documents parsed above — no extra I/O, no embedding calls.
         // Over-guidance memories were indexed like any other; this only reports them.

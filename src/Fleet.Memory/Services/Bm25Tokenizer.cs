@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace Fleet.Memory.Services;
 
@@ -8,8 +7,13 @@ namespace Fleet.Memory.Services;
 /// Produces sparse BM25 term-frequency vectors compatible with Qdrant's server-side IDF modifier.
 /// Tokenizes text, computes term frequencies, and hashes tokens to uint32 indices.
 /// Qdrant applies IDF weighting automatically when the sparse vector is configured with Modifier.Idf.
+///
+/// A term is a word as <see cref="MemoryWords"/> finds it, lower-cased with the invariant culture and
+/// composed (NFC), so text in any script has terms. A word of plain ASCII letters, digits and
+/// underscore gives the term it always gave. English stop words and one-character words are left
+/// out; a Han or Hiragana character is a word by itself and is kept.
 /// </summary>
-public static partial class Bm25Tokenizer
+public static class Bm25Tokenizer
 {
     private static readonly HashSet<string> StopWords =
     [
@@ -24,7 +28,7 @@ public static partial class Bm25Tokenizer
     /// </summary>
     public static (uint[] Indices, float[] Values) Tokenize(string text)
     {
-        var tokens = TokenizeText(text);
+        var tokens = Terms(text);
         if (tokens.Count == 0)
             return ([], []);
 
@@ -51,20 +55,32 @@ public static partial class Bm25Tokenizer
         return (indices, values);
     }
 
-    private static List<string> TokenizeText(string text)
+    /// <summary>The terms of a text in the order they occur, repeats included.</summary>
+    public static List<string> Terms(string text)
     {
-        var lower = text.ToLowerInvariant();
-        var matches = WordPattern().Matches(lower);
-
         var tokens = new List<string>();
-        foreach (Match match in matches)
+        foreach (var word in MemoryWords.Scan(text))
         {
-            var word = match.Value;
-            if (word.Length >= 2 && !StopWords.Contains(word))
-                tokens.Add(word);
+            var term = Term(text, word);
+            if (term is not null)
+                tokens.Add(term);
         }
 
         return tokens;
+    }
+
+    /// <summary>The term one word is indexed as, or null when the word is not indexed.</summary>
+    public static string? Term(string text, MemoryWords.Word word)
+    {
+        var term = text.Substring(word.Start, word.Length).ToLowerInvariant();
+        if (!term.IsNormalized(NormalizationForm.FormC))
+            term = term.Normalize(NormalizationForm.FormC);
+
+        if (StopWords.Contains(term))
+            return null;
+        if (term.Length >= 2)
+            return term;
+        return term.Length == 1 && Rune.TryCreate(term[0], out var rune) && MemoryWords.IsUnspacedScript(rune) ? term : null;
     }
 
     private static uint HashToken(string token)
@@ -72,7 +88,4 @@ public static partial class Bm25Tokenizer
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(token));
         return BitConverter.ToUInt32(bytes, 0);
     }
-
-    [GeneratedRegex(@"[a-z0-9_]+")]
-    private static partial Regex WordPattern();
 }

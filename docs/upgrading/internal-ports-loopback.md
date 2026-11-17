@@ -110,14 +110,20 @@ replace the step you saved. Three cases cannot be decided and are refused as wel
 - Qdrant storage (the `fleet_qdrant_data` volume) with no `qdrant` container to read;
 - Compose not naming the release it would start, on a host that has either of the above.
 
-In the first two, start the container on the release that wrote the storage, or drop the index as
-described next. A host with neither a container nor the volume is a fresh install and is not
-blocked.
+In the first two, recover the recorded release that wrote the storage before starting the container.
+Do not guess a release or remove the volume to bypass the guard. If the release cannot be established,
+stop and agree an operator-scoped backup/restore plan. A host with neither a container nor the volume
+is a fresh install and is not blocked.
 
-Qdrant holds an index, not the memories. The memory files under `fleet/memories` are the source of
-truth and fleet-memory indexes all of them again on every start. To drop the index, stop the stack,
-remove the `qdrant` container and the `fleet_qdrant_data` volume, and start again; the index is
-rebuilt.
+The memory files under `fleet/memories` are fleet-memory's source of truth, but the shared Qdrant
+volume can hold unrelated collections. **Never stop the whole stack or delete the shared Qdrant
+container or volume to rebuild a memory index.** For an operator-authorized memory-index rollback,
+follow [the preservation procedure](../memory-search.md#rollback-without-losing-other-collections):
+record images/configuration and unrelated collection counts, back up the Markdown files, stop only
+memory receivers, and use a verified-absent dedicated collection for the retained image. Keep Qdrant,
+unrelated services and existing collections unchanged, and verify rebuild, searches, ACL refusals and
+unrelated collection counts before resuming use. This rebuild does not repair an incompatible Qdrant
+storage version; that still requires the recorded compatible release or the scoped restore plan.
 
 ### Kokoro TTS: a version change
 

@@ -7,8 +7,9 @@ namespace Fleet.Memory.Services;
 
 /// <summary>
 /// The size of one memory write, returned as <c>size</c> on <c>PUT /internal/memory/{id}</c>
-/// (snake_case, like the rest of the fleet-memory API). <see cref="Bytes"/> is the exact embedding
-/// input: <c>{title}\n\n{content}</c> as parsed back from disk.
+/// (snake_case, like the rest of the fleet-memory API). <see cref="Bytes"/> is the size of
+/// <c>{title}\n\n{content}</c> as parsed back from disk: the embedding input of a memory of one
+/// section, and the text a longer memory's sections are cut from.
 /// </summary>
 public sealed record MemorySizeReport(
     [property: JsonPropertyName("kind")] string Kind,
@@ -21,10 +22,11 @@ public sealed record MemorySizeReport(
     [property: JsonPropertyName("warning")] string? Warning);
 
 /// <summary>
-/// Embedding-input size guidance for memories (#346), off by default. fleet-memory embeds each
-/// memory as one input with no chunking, and re-embeds every file on every start; text past the
-/// model's input window may be cut off or rejected. The platform does not know the operator's
-/// tokenizer, so there is no default limit and nothing here talks about tokens.
+/// Size guidance for memories (#346), off by default. It is advice about how long one memory
+/// should be, not a limit of the index: a long memory is indexed in sections and stays searchable,
+/// but every change embeds all of it again, a search returns it as one result and a reader gets it
+/// whole. The platform does not know the operator's tokenizer, so there is no default limit and
+/// nothing here talks about tokens.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -53,9 +55,9 @@ public sealed class MemorySizeGuidance
     public const int MaxListedOverGuidance = 20;
 
     private const string WarningTail =
-        "The whole memory is embedded as one input and re-embedded on every fleet-memory restart; " +
-        "text past the embedding model's input window may be cut off or rejected, leaving the memory " +
-        "partly or wholly unsearchable. Consider splitting it by topic and linking the parts by id.";
+        "A long memory is indexed in sections and stays searchable (up to the section cap), but every " +
+        "change embeds all of it again and a reader gets it whole. " +
+        "Consider splitting it by topic and linking the parts by id.";
 
     private readonly ILogger _logger;
 

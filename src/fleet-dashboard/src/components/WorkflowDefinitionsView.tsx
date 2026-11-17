@@ -2,7 +2,7 @@ import { useState, useRef } from 'react'
 import type { WorkflowDefinitionsState } from '../hooks/useWorkflowDefinitions'
 import { useTick } from '../hooks/useTick'
 import { relativeTime } from '../utils'
-import { definitionVersions } from '../versionHistory'
+import { definitionVersions, type ComparedVersion } from '../versionHistory'
 import FieldHint from './FieldHint'
 import Icon from './Icon'
 import VersionCompare, { CompareButton, openFromRow } from './VersionCompare'
@@ -328,6 +328,10 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
           const toggleMsg = defToggleMsg[def.name] ?? ''
 
           const currentDef = detail?.definition ?? ''
+          // Each version with the date, author and reason of the write that made it: what the
+          // history rows print and what the comparison's header prints, from the one reading.
+          const described = isOpen && detail ? definitionVersions(detail) : []
+          const describedAs = (version: number) => described.find(v => v.number === version)
 
           const validatedContent = validatedEdits[def.name] ?? editContent
           const validationErrors = validatedContent ? validateDefinition(validatedContent) : []
@@ -454,9 +458,7 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                               <span className="instr-current-badge">current</span>
                               <CompareButton version={detail.version} onOpen={() => onSelectVersion(def.name, detail.version)} />
                             </div>
-                            <div className="instr-version-meta">
-                              <span>{relativeTime(detail.updatedAt)}</span>
-                            </div>
+                            <VersionFacts version={describedAs(detail.version)} />
                           </div>
                           {detail.versions.map(v => {
                             const isRbConfirming = rbKey === `${def.name}:${v.version}`
@@ -480,11 +482,7 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                                       : 'rollback'}
                                   </button>
                                 </div>
-                                <div className="instr-version-meta">
-                                  <span>{v.createdAt ? relativeTime(v.createdAt) : ''}</span>
-                                  {v.createdBy && <span>{v.createdBy}</span>}
-                                </div>
-                                {v.reason && <div className="instr-version-reason">{v.reason}</div>}
+                                <VersionFacts version={describedAs(v.version)} />
                               </div>
                             )
                           })}
@@ -493,7 +491,7 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                         {selVer !== null && (
                           <VersionCompare
                             name={def.name}
-                            versions={definitionVersions(detail).map(v => ({ ...v, when: v.when ? formatWhen(v.when) : null }))}
+                            versions={described.map(v => ({ ...v, when: v.when ? formatWhen(v.when) : null }))}
                             current={detail.version}
                             chosen={selVer}
                             format="json"
@@ -510,6 +508,26 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
         })}
       </div>
     </div>
+  )
+}
+
+/**
+ * Under a history row's number: when that version was written, by whom and why. The age is shown
+ * and the date itself is its tooltip, the same date the comparison's header prints. What is not
+ * known of a version is left out, not filled in.
+ */
+function VersionFacts({ version }: { version: ComparedVersion | undefined }) {
+  if (!version) return null
+  return (
+    <>
+      {(version.when || version.by) && (
+        <div className="instr-version-meta">
+          {version.when && <span title={formatWhen(version.when)}>{relativeTime(version.when)}</span>}
+          {version.by && <span>{version.by}</span>}
+        </div>
+      )}
+      {version.reason && <div className="instr-version-reason">{version.reason}</div>}
+    </>
   )
 }
 

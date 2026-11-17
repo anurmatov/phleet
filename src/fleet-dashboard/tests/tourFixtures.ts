@@ -377,6 +377,7 @@ export const scenes = [
   { name: 'instruction-open', hash: 'instructions' },
   { name: 'new-instruction', hash: 'instructions' },
   { name: 'version-compare', hash: 'instructions', override: { '/api/instructions/base': handbookDetail } },
+  { name: 'definition-open', hash: 'wf-definitions', override: { '/api/workflow-definitions/UwePrImplementationWorkflow': releaseDetail } },
   { name: 'definition-compare', hash: 'wf-definitions', override: { '/api/workflow-definitions/UwePrImplementationWorkflow': releaseDetail } },
   { name: 'start-workflow', hash: 'workflows' },
   { name: 'workflow-history', hash: 'workflows' },

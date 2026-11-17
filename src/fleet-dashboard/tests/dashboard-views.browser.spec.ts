@@ -688,6 +688,10 @@ test('wf-definitions: open, edit, save the next version', async ({ page }) => {
     .toEqual([{ definition: EDITED_DEFINITION, reason: 'wait longer' }])
   await expect(row.locator('.instr-header .instr-version')).toHaveText('v4')
   await expect(row.getByRole('button', { name: 'Save v5' })).toBeDisabled()
+  // A reason stands on the version it was given for: the one this save made, not the one it replaced.
+  await expect(versionRow(row, 4).locator('.instr-version-reason')).toHaveText('wait longer')
+  await expect(versionRow(row, 3).locator('.instr-version-reason')).toHaveText('shorter wait')
+  await expect(versionRow(row, 2).locator('.instr-version-reason')).toHaveCount(0)
 })
 
 test('wf-definitions: invalid JSON blocks the save', async ({ page }) => {
@@ -864,10 +868,14 @@ function releaseDefinition(fleet: FakeFleet, versions: string[]) {
   const [current, ...history] = versions.map((definition, i) => ({ version: i + 1, definition })).reverse()
   fleet.definitions[0] = {
     ...fleet.definitions[0], version: current.version, definition: current.definition,
+    createdAt: RELEASE_CREATED, createdBy: 'creator',
     // A history row is stamped with the write that replaced its version.
-    versions: history.map(v => ({ ...v, reason: `reason for v${v.version + 1}`, createdAt: '2026-11-12T12:00:00Z', createdBy: `author-of-v${v.version + 1}` })),
+    versions: history.map(v => ({ ...v, reason: `reason for v${v.version + 1}`, createdAt: releaseWritten(v.version + 1), createdBy: `author-of-v${v.version + 1}` })),
   }
 }
+const RELEASE_CREATED = '2026-11-01T08:30:00Z'
+/** When the write that made `version` happened: a different day for each. */
+const releaseWritten = (version: number) => `2026-11-${10 + version}T12:00:00Z`
 
 test('wf-definitions: a one-line definition is laid out and compared line by line', async ({ page }) => {
   const fleet = await open(page, 'wf-definitions', f => releaseDefinition(f, RELEASE_VERSIONS))
@@ -926,6 +934,38 @@ test('wf-definitions: a one-line definition is laid out and compared line by lin
   await comparison.getByRole('button', { name: 'Close' }).click()
   await expect(versionRow(row, 2).getByRole('button', { name: 'Compare v2' })).toBeFocused()
   expect(fleet.calls).toHaveLength(0)
+})
+
+test('wf-definitions: a history row and the comparison’s header say the same of a version', async ({ page }) => {
+  await open(page, 'wf-definitions', f => releaseDefinition(f, RELEASE_VERSIONS))
+  const row = rowByName(page, 'ReviewWorkflow')
+  await row.locator('.instr-header').click()
+  const comparison = page.getByRole('dialog', { name: 'Compare versions of ReviewWorkflow' })
+  // The date as this browser prints it, whatever its time zone.
+  const printed = (iso: string) => page.evaluate(d => new Date(d).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }), iso)
+
+  // Each version is described by the write that made it; the first, by the definition's own creation, and it has no reason.
+  const versions = [
+    { version: 3, written: releaseWritten(3), author: 'author-of-v3', reasons: ['reason for v3'] },
+    { version: 2, written: releaseWritten(2), author: 'author-of-v2', reasons: ['reason for v2'] },
+    { version: 1, written: RELEASE_CREATED, author: 'creator', reasons: [] },
+  ]
+  for (const { version, written, author, reasons } of versions) {
+    const item = versionRow(row, version)
+    const date = await item.locator('.instr-version-meta span').first().getAttribute('title')
+    expect(date).toBe(await printed(written))
+    await expect(item.locator('.instr-version-meta span')).toHaveText([/ago$/, author])
+    await expect(item.locator('.instr-version-reason')).toHaveText(reasons)
+
+    // The comparison opens with that version as its newer side, and says of it what the row says.
+    await item.getByRole('button', { name: `Compare v${version}` }).click()
+    await expect(comparison.getByLabel('Newer version')).toHaveValue(String(version))
+    const side = comparison.locator('.vc-side').last()
+    await expect(side.locator('.vc-side-facts')).toHaveText(`${date} · ${author}`)
+    await expect(side.locator('.vc-side-reason')).toHaveText(reasons)
+    await page.keyboard.press('Escape')
+    await expect(comparison).toHaveCount(0)
+  }
 })
 
 test('wf-definitions: a version that is not JSON is compared as plain text, and the comparison says so', async ({ page }) => {

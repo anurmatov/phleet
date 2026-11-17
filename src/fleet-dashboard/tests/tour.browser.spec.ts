@@ -120,6 +120,11 @@ const reach: Record<(typeof scenes)[number]['name'], (page: Page, phone: boolean
     await expect(page.getByRole('dialog')).toBeVisible()
     await page.getByRole('button', { name: 'Next change' }).click()
   },
+  // A definition's editor and its history: each version with the date, author and reason of its own write.
+  'definition-open': async page => {
+    await page.locator('.instr-header').first().click()
+    await expect(page.locator('textarea.instr-editor')).toBeVisible()
+  },
   // JSON: two steps moved into a new loop, so only the loop's own lines are changes.
   'definition-compare': async page => {
     await page.locator('.instr-header').first().click()

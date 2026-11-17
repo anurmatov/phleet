@@ -32,7 +32,8 @@ function workflow(workflowId: string, workflowType: string, phase: string | null
   }
 }
 
-function versioned(name: string, contents: string[], agents: string[] = [], isActive = true): Versioned {
+/** A versioned text whose versions are `contents`, oldest first; the last one is current. */
+export function versioned(name: string, contents: string[], agents: string[] = [], isActive = true): Versioned {
   return {
     name, isActive, agents, currentVersion: contents.length,
     versions: contents.map((content, i) => ({

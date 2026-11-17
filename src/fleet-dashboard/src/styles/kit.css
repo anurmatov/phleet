@@ -48,7 +48,7 @@
 
 /* An action on a row: smaller and quieter than the page's own. These keep their lower-case
    labels in the markup; the first letter is raised here. */
-.wfd-toggle-btn, .instr-rollback-btn, .instr-deploy-btn, .wfd-diff-btn, .alert-dismiss-btn,
+.wfd-toggle-btn, .instr-rollback-btn, .instr-deploy-btn, .instr-compare-btn, .alert-dismiss-btn,
 .agent-delete-btn, .config-remove-btn, .cred-action-btn, .config-add-btn, .swf-toggle-raw, .memory-cv-btn {
   display: inline-block;
   height: var(--control-s);
@@ -64,17 +64,17 @@
   transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
 .wfd-toggle-btn::first-letter, .instr-rollback-btn::first-letter, .instr-deploy-btn::first-letter,
-.wfd-diff-btn::first-letter, .alert-dismiss-btn::first-letter, .agent-delete-btn::first-letter,
+.instr-compare-btn::first-letter, .alert-dismiss-btn::first-letter, .agent-delete-btn::first-letter,
 .config-remove-btn::first-letter, .cred-action-btn::first-letter, .config-add-btn::first-letter,
 .wfd-cancel-btn::first-letter, .config-save-reprovision-btn::first-letter { text-transform: uppercase; }
 .wfd-toggle-btn:hover:not(:disabled), .instr-rollback-btn:hover:not(:disabled), .instr-deploy-btn:hover:not(:disabled),
-.wfd-diff-btn:hover:not(:disabled), .alert-dismiss-btn:hover:not(:disabled), .cred-action-btn:hover:not(:disabled),
+.instr-compare-btn:hover:not(:disabled), .alert-dismiss-btn:hover:not(:disabled), .cred-action-btn:hover:not(:disabled),
 .config-add-btn:hover:not(:disabled), .swf-toggle-raw:hover:not(:disabled), .memory-cv-btn:hover:not(:disabled) {
   border-color: var(--text-3);
   background: var(--surface-2);
   color: var(--text);
 }
-.wfd-toggle-btn:disabled, .instr-rollback-btn:disabled, .instr-deploy-btn:disabled, .wfd-diff-btn:disabled,
+.wfd-toggle-btn:disabled, .instr-rollback-btn:disabled, .instr-deploy-btn:disabled, .instr-compare-btn:disabled,
 .agent-delete-btn:disabled, .config-remove-btn:disabled, .cred-action-btn:disabled, .config-add-btn:disabled,
 .memory-cv-btn:disabled { opacity: 0.5; }
 
@@ -558,35 +558,15 @@ textarea { resize: vertical; }
 }
 .instr-version-item:hover { border-color: var(--text-3); }
 .instr-version-item.current { border-color: var(--accent-line); }
-.instr-version-item.selected { border-color: var(--info); box-shadow: 0 0 0 1px var(--info); }
-.instr-version-header { display: flex; align-items: center; gap: 8px; min-height: var(--control-s); }
+.instr-version-header { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-height: var(--control-s); }
+/* The row's actions sit together at its right edge. */
 .instr-version-header > button { margin-left: auto; }
+.instr-version-header > button ~ button { margin-left: 0; }
 .instr-version-num { font-family: var(--mono); font-weight: 600; }
 .instr-version-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-3); font-size: var(--fs-xs); }
 .instr-version-reason { margin-top: 4px; overflow: hidden; color: var(--text-2); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
 .instr-deploy-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .wfd-no-versions { padding: 8px 4px; color: var(--text-3); font-size: var(--fs-s); }
-
-.instr-diff { padding-top: 10px; border-top: 1px solid var(--border); }
-.instr-diff-body {
-  max-height: 300px;
-  padding: 8px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--r-m);
-  background: var(--surface);
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  line-height: 1.5;
-}
-.diff-line { display: flex; gap: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.diff-line.diff-add { background: var(--accent-soft); color: var(--accent); }
-.diff-line.diff-remove { background: var(--danger-soft); color: var(--danger); }
-.diff-line.diff-same { color: var(--text-2); }
-.diff-prefix { flex-shrink: 0; font-weight: 700; user-select: none; }
-.diff-text { flex: 1; min-width: 0; }
-.diff-line.diff-add .diff-highlight { border-radius: 2px; background: color-mix(in srgb, var(--accent) 28%, transparent); }
-.diff-line.diff-remove .diff-highlight { border-radius: 2px; background: color-mix(in srgb, var(--danger) 28%, transparent); }
 
 /* The form a "New …" button opens above its list. */
 .wfd-new-form {

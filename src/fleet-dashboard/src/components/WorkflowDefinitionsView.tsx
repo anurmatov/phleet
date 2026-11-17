@@ -1,9 +1,11 @@
 import { useState, useRef } from 'react'
 import type { WorkflowDefinitionsState } from '../hooks/useWorkflowDefinitions'
 import { useTick } from '../hooks/useTick'
-import { computeDiff, relativeTime } from '../utils'
+import { relativeTime } from '../utils'
+import { definitionVersions } from '../versionHistory'
 import FieldHint from './FieldHint'
 import Icon from './Icon'
+import VersionCompare, { CompareButton, openFromRow } from './VersionCompare'
 
 const VALID_STEP_TYPES = new Set([
   'sequence', 'parallel', 'loop', 'branch', 'break', 'continue', 'noop',
@@ -19,6 +21,12 @@ function nsColor(namespace: string, namespaces: string[]): string {
   const idx = namespaces.indexOf(namespace)
   if (idx === -1) return 'var(--text-3)'
   return NS_COLOR_PALETTE[idx % NS_COLOR_PALETTE.length]
+}
+
+/** A version's date in the comparison: the day and the minute, in the reader's own time. */
+function formatWhen(iso: string): string {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 interface ValidationError { message: string; blocking: boolean }
@@ -320,12 +328,6 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
           const toggleMsg = defToggleMsg[def.name] ?? ''
 
           const currentDef = detail?.definition ?? ''
-          const selVerDef = selVer !== null
-            ? (detail?.versions.find(v => v.version === selVer)?.definition ?? '')
-            : ''
-          const diffLines = selVer !== null && selVerDef ? computeDiff(selVerDef, currentDef) : null
-          const addCount = diffLines?.filter(l => l.type === 'add').length ?? 0
-          const removeCount = diffLines?.filter(l => l.type === 'remove').length ?? 0
 
           const validatedContent = validatedEdits[def.name] ?? editContent
           const validationErrors = validatedContent ? validateDefinition(validatedContent) : []
@@ -443,10 +445,14 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                             <div className="wfd-no-versions">No previous versions.</div>
                           )}
                           {/* Current version entry */}
-                          <div className="instr-version-item current">
+                          <div
+                            className="instr-version-item current"
+                            onClick={e => openFromRow(e, () => onSelectVersion(def.name, detail.version))}
+                          >
                             <div className="instr-version-header">
                               <span className="instr-version-num">v{detail.version}</span>
                               <span className="instr-current-badge">current</span>
+                              <CompareButton version={detail.version} onOpen={() => onSelectVersion(def.name, detail.version)} />
                             </div>
                             <div className="instr-version-meta">
                               <span>{relativeTime(detail.updatedAt)}</span>
@@ -454,21 +460,15 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                           </div>
                           {detail.versions.map(v => {
                             const isRbConfirming = rbKey === `${def.name}:${v.version}`
-                            const isSelected = selVer === v.version
                             return (
                               <div
                                 key={v.version}
-                                className={`instr-version-item${isSelected ? ' selected' : ''}`}
-                                onClick={() => onSelectVersion(def.name, isSelected ? null : v.version)}
+                                className="instr-version-item"
+                                onClick={e => openFromRow(e, () => onSelectVersion(def.name, v.version))}
                               >
                                 <div className="instr-version-header">
                                   <span className="instr-version-num">v{v.version}</span>
-                                  <button
-                                    className="wfd-diff-btn"
-                                    onClick={e => { e.stopPropagation(); onSelectVersion(def.name, isSelected ? null : v.version) }}
-                                  >
-                                    {isSelected ? 'hide diff' : 'view diff'}
-                                  </button>
+                                  <CompareButton version={v.version} onOpen={() => onSelectVersion(def.name, v.version)} />
                                   <button
                                     className={`instr-rollback-btn${isRbConfirming ? ' confirming' : ''}`}
                                     disabled={saveState === 'saving'}
@@ -490,28 +490,15 @@ export default function WorkflowDefinitionsView({ state, namespaces }: WorkflowD
                           })}
                         </div>
 
-                        {diffLines && selVer !== null && (
-                          <div className="instr-diff">
-                            <div className="config-label" style={{ marginBottom: 4 }}>
-                              v{selVer} → current · +{addCount} / -{removeCount}
-                            </div>
-                            <div className="instr-diff-body">
-                              {diffLines.map((line, i) => (
-                                <div key={i} className={`diff-line diff-${line.type}`}>
-                                  <span className="diff-prefix">
-                                    {line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '}
-                                  </span>
-                                  <span className="diff-text">
-                                    {line.segments
-                                      ? line.segments.map((seg, j) => (
-                                          <span key={j} className={seg.changed ? 'diff-highlight' : ''}>{seg.text}</span>
-                                        ))
-                                      : line.text}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
+                        {selVer !== null && (
+                          <VersionCompare
+                            name={def.name}
+                            versions={definitionVersions(detail).map(v => ({ ...v, when: v.when ? formatWhen(v.when) : null }))}
+                            current={detail.version}
+                            chosen={selVer}
+                            format="json"
+                            onClose={() => onSelectVersion(def.name, null)}
+                          />
                         )}
                       </div>
                     </div>

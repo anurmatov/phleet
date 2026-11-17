@@ -51,10 +51,16 @@ reprovisioned after them, and the coordinating agent is not reprovisioned automa
 
 1. Upgrade the orchestrator and the other services (`./upgrade.sh` adds the key and
    `FLEET_AGENT_IDENTITY_ENFORCE=false`).
-2. Reprovision **every** agent, the coordinating agent included. Each gets its token.
-3. Watch the logs of each server for `agent_identity_unverified_call`. A name that still appears is
+2. **Before any reprovision**, find each agent whose `fleet-orchestrator` endpoint maps
+   `Authorization` to `ORCHESTRATOR_CONFIG_TOKEN` (an agent that calls `set_config_values`), and
+   remap that mapping to the header `X-Fleet-Config-Token`. The first reprovision with the key
+   replaces a mapped `Authorization` on that endpoint with the agent's identity, and
+   `set_config_values` would then answer `unauthorized`. The two stay separate: the identity says
+   who the agent is and which tools it is granted, the config token says it may write `.env`.
+3. Reprovision **every** agent, the coordinating agent included. Each gets its token.
+4. Watch the logs of each server for `agent_identity_unverified_call`. A name that still appears is
    an agent that has not been reprovisioned, or a caller that is not an agent.
-4. Set `FLEET_AGENT_IDENTITY_ENFORCE=true` in `.env` and recreate the services.
+5. Set `FLEET_AGENT_IDENTITY_ENFORCE=true` in `.env` and recreate the services.
 
 To go back, set it to `false` and recreate the services. No agent needs reprovisioning for that.
 

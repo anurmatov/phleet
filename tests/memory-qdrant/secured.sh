@@ -44,13 +44,22 @@ WORK="$(mktemp -d)"
 fail_assert() { echo "FAIL $*" >&2; exit 1; }
 fail_infra() { echo "INFRA $*" >&2; exit 2; }
 
+# The IDs `docker create` returned for this run, and nothing else, are what cleanup removes: a name
+# another container already holds makes the create fail, and that container is never touched.
+TESTS_ID="" HTTP_ID="" RUN_ID=""
 cleanup() {
   local rc=$?
-  docker rm -f "$TESTS" >/dev/null 2>&1 || true
-  docker rm -f "$HTTP_SERVER" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $HTTP_SERVER"
-  docker rm -f "$RUN" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $RUN"
+  [ -z "$TESTS_ID" ] || docker rm -f "$TESTS_ID" >/dev/null 2>&1 || true
+  [ -z "$HTTP_ID" ] || docker rm -f "$HTTP_ID" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $HTTP_SERVER ($HTTP_ID)"
+  [ -z "$RUN_ID" ] || docker rm -f "$RUN_ID" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $RUN ($RUN_ID)"
   rm -rf "$WORK"
   exit "$rc"
+}
+# create_owned <var> <docker create args…>: the new container's full ID into <var>, or exit 2.
+create_owned() {
+  local var=$1 id; shift
+  id="$(docker create "$@")" && [[ $id =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf -v "$var" '%s' "$id"
 }
 trap cleanup EXIT
 
@@ -84,22 +93,22 @@ chmod 755 "$SERVER"
 chmod 644 "$SERVER/cert.pem" "$SERVER/key.pem"
 
 # ── Qdrant: TLS on, a key required, no published port ─────────────────────────
-docker create --name "$RUN" \
+create_owned RUN_ID --name "$RUN" \
   -e QDRANT__SERVICE__API_KEY="$API_KEY" \
   -e QDRANT__SERVICE__ENABLE_TLS=true \
   -e QDRANT__TLS__CERT=/qdrant/tls/cert.pem \
   -e QDRANT__TLS__KEY=/qdrant/tls/key.pem \
-  "qdrant/qdrant:$VERSION" >/dev/null || fail_infra "could not create qdrant/qdrant:$VERSION"
-docker cp "$SERVER" "$RUN:/qdrant/tls" >/dev/null || fail_infra "could not give $RUN its certificate"
-docker start "$RUN" >/dev/null || fail_infra "could not start $RUN"
+  "qdrant/qdrant:$VERSION" || fail_infra "could not create $RUN from qdrant/qdrant:$VERSION"
+docker cp "$SERVER" "$RUN_ID:/qdrant/tls" >/dev/null || fail_infra "could not give $RUN its certificate"
+docker start "$RUN_ID" >/dev/null || fail_infra "could not start $RUN"
 
 # ── Qdrant: a key required, no TLS, beside the first (same localhost, other ports) ──
-docker create --name "$HTTP_SERVER" --network "container:$RUN" \
+create_owned HTTP_ID --name "$HTTP_SERVER" --network "container:$RUN_ID" \
   -e QDRANT__SERVICE__API_KEY="$HTTP_API_KEY" \
   -e QDRANT__SERVICE__HTTP_PORT=6343 \
   -e QDRANT__SERVICE__GRPC_PORT=6344 \
-  "qdrant/qdrant:$VERSION" >/dev/null || fail_infra "could not create the http qdrant/qdrant:$VERSION"
-docker start "$HTTP_SERVER" >/dev/null || fail_infra "could not start $HTTP_SERVER"
+  "qdrant/qdrant:$VERSION" || fail_infra "could not create $HTTP_SERVER from qdrant/qdrant:$VERSION"
+docker start "$HTTP_ID" >/dev/null || fail_infra "could not start $HTTP_SERVER"
 
 # ── The sources the tests are built from, without build output ────────────────
 STAGE="$WORK/fleet"
@@ -175,21 +184,21 @@ FLEET_MEMORY_TEST_SECURED_HTTP_API_KEY="$HTTP_API_KEY" \
 echo "$?" > /tmp/results/dotnet-test-exit-code
 INSIDE
 
-docker create --name "$TESTS" --network "container:$RUN" \
+create_owned TESTS_ID --name "$TESTS" --network "container:$RUN_ID" \
   -e API_KEY="$API_KEY" -e HTTP_API_KEY="$HTTP_API_KEY" -e EXPECTED_VERSION="$VERSION" -e CONFIGURATION="$CONFIGURATION" \
   -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 \
-  "$SDK_IMAGE" bash /tmp/fleet/run-secured-tests.sh >/dev/null || fail_infra "could not create the test container from $SDK_IMAGE"
-docker cp "$STAGE" "$TESTS:/tmp/fleet" >/dev/null || fail_infra "could not copy the sources into $TESTS"
+  "$SDK_IMAGE" bash /tmp/fleet/run-secured-tests.sh || fail_infra "could not create $TESTS from $SDK_IMAGE"
+docker cp "$STAGE" "$TESTS_ID:/tmp/fleet" >/dev/null || fail_infra "could not copy the sources into $TESTS"
 
 set +e
-docker start -a "$TESTS"
+docker start -a "$TESTS_ID"
 INSIDE_RC=$?
 set -e
 [ "$INSIDE_RC" -ne 2 ] || exit 2
 
 # Evidence only when every test ran against the server and passed: a skipped test is a green
 # summary that proves nothing.
-docker cp "$TESTS:/tmp/results" "$WORK/results" >/dev/null 2>&1 || fail_assert "no test results: the tests did not run (exit $INSIDE_RC)"
+docker cp "$TESTS_ID:/tmp/results" "$WORK/results" >/dev/null 2>&1 || fail_assert "no test results: the tests did not run (exit $INSIDE_RC)"
 TRX="$WORK/results/secured.trx"
 [ -f "$TRX" ] || fail_assert "no test result file: the tests did not run (exit $INSIDE_RC)"
 TEST_RC="$(cat "$WORK/results/dotnet-test-exit-code" 2>/dev/null || echo "")"

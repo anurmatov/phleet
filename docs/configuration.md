@@ -107,8 +107,8 @@ are unset by default, and with them unset nothing changes.
 
 | `.env` | Read by | Default | Meaning |
 |---|---|---|---|
-| `FLEET_QDRANT_URL` | fleet-memory (`Qdrant__Url`) | `http://qdrant:6334` | Qdrant's gRPC address. |
-| `FLEET_QDRANT_API_KEY` | fleet-memory (`Qdrant__ApiKey`) | empty | Qdrant's API key. With a key the address must be an explicit `https` URL, or an `http` one on a trusted private network (the key is then not encrypted); any other address makes fleet-memory exit 1 at startup. |
+| `FLEET_QDRANT_URL` | fleet-memory (`Qdrant__Url`) | unset | Qdrant's gRPC address. Unset, a keyless fleet-memory uses the compose file's `Qdrant__DefaultUrl` (`http://qdrant:6334`). |
+| `FLEET_QDRANT_API_KEY` | fleet-memory (`Qdrant__ApiKey`) | empty | Qdrant's API key. With a key, `FLEET_QDRANT_URL` must be set to an explicit `https` URL, or an `http` one on a trusted private network (the key is then not encrypted); no address, or any other, makes fleet-memory exit 1 at startup. The default address is never used with a key. |
 | `FLEET_TEMPORAL_BEARER_TOKEN` | orchestrator (`Temporal__BearerToken`) and Temporal bridge (`TemporalBridge__BearerToken`) | empty | Sent to Temporal as `Authorization: Bearer <token>` on every call, over the same plaintext connection. The token alone, without `Bearer `; a value that cannot be sent as it is makes both exit 1 at startup. |
 
 Each is read at startup, so a replaced value takes a restart. No agent gets one unless an operator

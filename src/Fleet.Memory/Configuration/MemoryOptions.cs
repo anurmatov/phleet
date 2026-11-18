@@ -47,13 +47,25 @@ public sealed class QdrantOptions
 {
     public const string Section = "Qdrant";
 
-    public required string Url { get; set; }
+    /// <summary>
+    /// The address the operator gave (<c>Qdrant:Url</c>). Empty: none was given, and a keyless start
+    /// uses <see cref="DefaultUrl"/>. A key needs this, never the default.
+    /// </summary>
+    public string Url { get; set; } = "";
+
+    /// <summary>
+    /// The shipped address (<c>Qdrant:DefaultUrl</c>: <c>appsettings.json</c>, and the example
+    /// compose file for its own <c>qdrant</c>), used only when <see cref="Url"/> is empty and no key
+    /// is set.
+    /// </summary>
+    public string DefaultUrl { get; set; } = "";
 
     /// <summary>
     /// Optional API key for a Qdrant that requires one (<c>Qdrant:ApiKey</c>). Empty (the default):
     /// no key is sent, as before. A key needs an explicit <c>https</c> <see cref="Url"/>, or an
-    /// <c>http</c> one on a trusted private network (the key is then not encrypted); see
-    /// <c>QdrantConnection</c>, the one place the client is constructed.
+    /// <c>http</c> one on a trusted private network (the key is then not encrypted), given by the
+    /// operator: <see cref="DefaultUrl"/> is never used with a key. See <c>QdrantConnection</c>,
+    /// the one place the client is constructed.
     /// </summary>
     public string ApiKey { get; set; } = "";
 

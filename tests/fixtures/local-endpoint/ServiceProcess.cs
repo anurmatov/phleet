@@ -17,11 +17,17 @@ internal static class ServiceProcess
     /// <param name="assembly">The service's assembly file name, e.g. <c>Fleet.Memory.dll</c>.</param>
     /// <param name="environment">Settings, as environment variables (<c>Section__Key</c>).</param>
     /// <param name="limit">How long the service may run. One that refuses to start is gone in a second or two.</param>
-    public static async Task<ServiceRun> RunAsync(string assembly, IReadOnlyDictionary<string, string> environment, TimeSpan limit)
+    /// <param name="appSettings">
+    /// An <c>appsettings.json</c> to start with, as the service's image has it beside the service;
+    /// the variables still win. Null: none, so the settings are the variables given.
+    /// </param>
+    public static async Task<ServiceRun> RunAsync(string assembly, IReadOnlyDictionary<string, string> environment, TimeSpan limit,
+        string? appSettings = null)
     {
-        // An empty working directory: no appsettings.json, so the settings are the variables given.
+        // An empty working directory (the content root): no appsettings.json unless one is given.
         var workingDirectory = Path.Combine(Path.GetTempPath(), "fleet-service-start-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workingDirectory);
+        if (appSettings is not null) File.Copy(appSettings, Path.Combine(workingDirectory, "appsettings.json"));
         try
         {
             var start = new ProcessStartInfo(DotnetPath())

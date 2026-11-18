@@ -23,14 +23,15 @@ tokens. What the servers need is listed under each section as the operator's par
 
 | `.env` | fleet-memory setting | Default | Meaning |
 |---|---|---|---|
-| `FLEET_QDRANT_URL` | `Qdrant__Url` | `http://qdrant:6334` | Qdrant's gRPC address as fleet-memory reaches it. |
+| `FLEET_QDRANT_URL` | `Qdrant__Url` | unset | Qdrant's gRPC address as fleet-memory reaches it. Unset, a keyless fleet-memory uses the default address (`Qdrant__DefaultUrl`: `http://qdrant:6334` in the example compose file); a key never does. |
 | `FLEET_QDRANT_API_KEY` | `Qdrant__ApiKey` | empty | The API key. Empty: none is sent. |
 
-- **A key needs an explicit `https` or `http` URL**, and the scheme alone decides the transport.
-  With `FLEET_QDRANT_API_KEY` set and a `FLEET_QDRANT_URL` that is neither (another scheme, no
-  scheme, or not a URL), fleet-memory prints
-  `Fleet.Memory startup aborted, exiting 1: Qdrant:ApiKey is set and Qdrant:Url is not an absolute https or http URL. …`
-  and exits with code 1 before it connects to anything. A configured key is never dropped to
+- **A key needs an address you set, `https` or `http`**, and the scheme alone decides the
+  transport. With `FLEET_QDRANT_API_KEY` set and `FLEET_QDRANT_URL` unset, or set to something
+  that is neither (another scheme, no scheme, or not a URL), fleet-memory prints
+  `Fleet.Memory startup aborted, exiting 1: Qdrant:ApiKey is set and Qdrant:Url is not an explicit https or http URL. …`
+  and exits with code 1 before it connects to anything. The default address is never used with a
+  key, so setting the key alone cannot send it anywhere. A configured key is never dropped to
   connect without it.
 - **`https`: TLS.** The server's certificate is validated the normal way, by the platform, against
   the roots the fleet-memory container trusts. There is no setting that relaxes this and no

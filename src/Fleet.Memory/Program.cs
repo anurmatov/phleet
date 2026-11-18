@@ -7,10 +7,11 @@ using Fleet.Shared.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// A Qdrant API key (Qdrant:ApiKey, off by default) goes only to an explicit absolute https or http
-// URL: https is TLS, http plaintext on a trusted network. A key with any other URL ends the process
-// here, before the index or anything else connects: the key is neither sent to a URL that does not
-// say how nor dropped to connect without it. The explicit exit, as in Fleet.Orchestrator/Program.cs:
+// A Qdrant API key (Qdrant:ApiKey, off by default) goes only to an explicit https or http
+// Qdrant:Url the operator gave, never to the shipped Qdrant:DefaultUrl: https is TLS, http
+// plaintext on a trusted network. A key with no URL or any other URL ends the process here, before
+// the index or anything else connects: the key is neither sent to an address the operator did not
+// choose nor dropped to connect without it. The explicit exit, as in Fleet.Orchestrator/Program.cs:
 // this must not depend on how a throw propagates.
 if (QdrantConnection.DescribeFault(
         builder.Configuration[$"{QdrantOptions.Section}:Url"], builder.Configuration[$"{QdrantOptions.Section}:ApiKey"]) is { } qdrantFault)

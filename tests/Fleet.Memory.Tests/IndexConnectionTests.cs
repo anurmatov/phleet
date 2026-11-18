@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Configuration;
 using Fleet.LocalEndpoint;
 using Fleet.Memory.Configuration;
 using Fleet.Memory.Data;
@@ -13,8 +14,8 @@ namespace Fleet.Memory.Tests;
 /// How fleet-memory reaches Qdrant (<see cref="QdrantConnection"/>): unchanged without
 /// <c>Qdrant:ApiKey</c>; with a key, over <c>https</c> only to a server whose certificate the
 /// platform trusts and never retried in plaintext, or over an explicit <c>http</c> URL in
-/// plaintext; a key with any other URL refused before anything connects, in a message that never
-/// carries the key. The servers here are local endpoints that record requests, not
+/// plaintext; a key with no URL the operator gave (the shipped default is never used with one) or
+/// any other URL refused before anything connects, in a message that never carries the key. The servers here are local endpoints that record requests, not
 /// Qdrant: <c>bash tests/memory-qdrant/secured.sh</c> is where a real Qdrant that requires TLS and
 /// a key is used. None of these needs a Qdrant, so none is skipped anywhere; the type is named so
 /// that neither script selects it. Invented values only.
@@ -221,7 +222,7 @@ public sealed class IndexConnectionTests
         var fault = QdrantConnection.DescribeFault(url, Key);
 
         Assert.NotNull(fault);
-        Assert.StartsWith("Qdrant:ApiKey is set and Qdrant:Url is not an absolute https or http URL.", fault);
+        Assert.StartsWith("Qdrant:ApiKey is set and Qdrant:Url is not an explicit https or http URL.", fault);
         Assert.EndsWith("Nothing was connected.", fault);
         Assert.DoesNotContain(Key, fault);
         Assert.DoesNotContain(Key[..12], fault);
@@ -288,10 +289,136 @@ public sealed class IndexConnectionTests
 
         Assert.True(run.ExitCode is not null, "fleet-memory was still running after 60 s with a key and a grpc URL: it did not refuse to start.");
         Assert.Equal(1, run.ExitCode);
-        Assert.Contains("Fleet.Memory startup aborted, exiting 1: Qdrant:ApiKey is set and Qdrant:Url is not an absolute https or http URL.", run.Errors);
+        Assert.Contains(Refusal, run.Errors);
         Assert.DoesNotContain(Key, run.Errors);
         Assert.DoesNotContain(Key, run.Output);
         // Before the host is built: nothing was logged, so nothing was started.
+        Assert.Equal("", run.Output.Trim());
+    }
+
+    // ── Where the URL comes from: the operator, or the shipped default ────────
+
+    private const string Refusal =
+        "Fleet.Memory startup aborted, exiting 1: Qdrant:ApiKey is set and Qdrant:Url is not an explicit https or http URL.";
+
+    [Fact]
+    public void WithoutAKey_AndNoUrlGiven_TheDefaultAddressIsUsed()
+    {
+        var connection = QdrantConnection.From(new QdrantOptions { DefaultUrl = "http://qdrant:6334" });
+
+        Assert.Equal(("qdrant", 6334, false), (connection.Host, connection.Port, connection.Https));
+        Assert.Null(connection.ApiKey);
+    }
+
+    [Theory]
+    [InlineData("http://qdrant:6334")]
+    [InlineData("https://qdrant.example.test:6334")]
+    public void AKey_NeverUsesTheDefaultAddress(string defaultUrl)
+    {
+        var options = new QdrantOptions { DefaultUrl = defaultUrl, ApiKey = Key };
+
+        var error = Assert.Throws<QdrantConfigurationException>(() => QdrantConnection.From(options));
+
+        Assert.Equal(QdrantConnection.DescribeFault("", Key), error.Message);
+        Assert.DoesNotContain(Key, error.Message);
+    }
+
+    [Fact]
+    public void AGivenUrl_WinsOverTheDefault()
+    {
+        var connection = QdrantConnection.From(new QdrantOptions { Url = "http://qdrant.example.test:6334", DefaultUrl = "http://qdrant:6334", ApiKey = Key });
+
+        Assert.Equal(("qdrant.example.test", false, Key), (connection.Host, connection.Https, connection.ApiKey));
+    }
+
+    private static string RepositoryRoot()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "Fleet.sln"))) root = root.Parent;
+        Assert.NotNull(root);
+        return root.FullName;
+    }
+
+    /// <summary>The service's own <c>appsettings.json</c>, the one its image ships beside it.</summary>
+    private static string AppSettings() => Path.Combine(RepositoryRoot(), "src/Fleet.Memory/appsettings.json");
+
+    /// <summary>
+    /// fleet-memory's <c>Qdrant__*</c> lines of <c>docker-compose.example.yml</c>, as Compose gives
+    /// them to the container for this <c>.env</c>: <c>${NAME:-default}</c> is the value when set and
+    /// not empty, else the default; <c>${NAME}</c> is the value or empty.
+    /// </summary>
+    private static Dictionary<string, string> ComposeQdrantEnvironment(IReadOnlyDictionary<string, string> dotEnv)
+    {
+        var compose = File.ReadAllText(Path.Combine(RepositoryRoot(), "docker-compose.example.yml"));
+        var service = Regex.Match(compose, @"^  fleet-memory:\r?\n(?<body>(?:^(?:    .*)?\r?\n)+)", RegexOptions.Multiline);
+        Assert.True(service.Success, "docker-compose.example.yml has no fleet-memory service");
+        var lines = Regex.Matches(service.Groups["body"].Value, @"^      - (?<name>Qdrant__\w+)=(?<value>.*?)\r?$", RegexOptions.Multiline);
+        Assert.True(lines.Count >= 3, "the fleet-memory service gives no Qdrant settings");
+        return lines.ToDictionary(
+            line => line.Groups["name"].Value,
+            line => Regex.Replace(line.Groups["value"].Value, @"\$\{(?<var>[A-Z0-9_]+)(?::-(?<default>[^}]*))?\}",
+                m => dotEnv.TryGetValue(m.Groups["var"].Value, out var set) && set.Length > 0 ? set : m.Groups["default"].Value));
+    }
+
+    /// <summary>The options the service binds: its <c>appsettings.json</c>, then the variables.</summary>
+    private static QdrantOptions Bound(IReadOnlyDictionary<string, string> environment) =>
+        new ConfigurationBuilder()
+            .AddJsonFile(AppSettings())
+            .AddInMemoryCollection(environment.ToDictionary(e => e.Key.Replace("__", ":"), e => (string?)e.Value))
+            .Build()
+            .GetSection(QdrantOptions.Section).Get<QdrantOptions>()!;
+
+    [Fact]
+    public void Keyless_TheShippedDefaults_AreWhatTheyWere()
+    {
+        var direct = QdrantConnection.From(Bound(new Dictionary<string, string>()));
+        var compose = QdrantConnection.From(Bound(ComposeQdrantEnvironment(new Dictionary<string, string>())));
+
+        Assert.Equal("http://localhost:6334, no API key", direct.ToString());
+        Assert.Equal("http://qdrant:6334, no API key", compose.ToString());
+    }
+
+    [Theory]
+    [InlineData("https://qdrant.example.internal:6334", "https://qdrant.example.internal:6334, with an API key")]
+    [InlineData("http://qdrant:6334", "http://qdrant:6334, with an API key")]
+    public void ThroughCompose_AKeyWithTheAddressSet_IsCarried_OverTheSchemeGiven(string url, string expected)
+    {
+        var environment = ComposeQdrantEnvironment(new Dictionary<string, string>
+        {
+            ["FLEET_QDRANT_URL"] = url,
+            ["FLEET_QDRANT_API_KEY"] = Key,
+        });
+
+        Assert.Equal(expected, QdrantConnection.From(Bound(environment)).ToString());
+    }
+
+    /// <summary>
+    /// The key alone, with no address, through each way fleet-memory is started: its own
+    /// <c>appsettings.json</c>, and the example compose file's lines on top of it (the image ships
+    /// that file). Each has a default address; neither may be what a key goes to. The process ends
+    /// with exit code 1 before anything connects, and neither stream carries the key.
+    /// </summary>
+    [Theory]
+    [InlineData("appsettings.json")]
+    [InlineData("docker-compose.example.yml")]
+    public async Task TheService_StartedWithAKeyAndNoAddress_ExitsWithCode1_WithoutTheKey(string through)
+    {
+        var environment = through == "appsettings.json"
+            ? new Dictionary<string, string> { ["Qdrant__ApiKey"] = Key }
+            : ComposeQdrantEnvironment(new Dictionary<string, string> { ["FLEET_QDRANT_API_KEY"] = Key });
+        Assert.Equal(Key, environment["Qdrant__ApiKey"]);
+        Assert.False(environment.TryGetValue("Qdrant__Url", out var given) && given.Length > 0);
+        // The default is there to be used, and still refused.
+        Assert.False(string.IsNullOrEmpty(Bound(environment).DefaultUrl));
+        environment["Storage__Path"] = Path.Combine(Path.GetTempPath(), "fleet-memory-never-created-" + Guid.NewGuid().ToString("N"));
+
+        var run = await ServiceProcess.RunAsync("Fleet.Memory.dll", environment, TimeSpan.FromSeconds(60), appSettings: AppSettings());
+
+        Assert.True(run.ExitCode is not null, $"fleet-memory was still running after 60 s with a key and no address ({through}): it did not refuse to start.");
+        Assert.Equal(1, run.ExitCode);
+        Assert.Contains(Refusal, run.Errors);
+        Assert.DoesNotContain(Key, run.Errors);
+        Assert.DoesNotContain(Key, run.Output);
         Assert.Equal("", run.Output.Trim());
     }
 

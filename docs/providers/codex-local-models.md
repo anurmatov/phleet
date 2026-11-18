@@ -223,7 +223,7 @@ reply lookup requires an explicitly granted journal tool and a read-token header
 Codex `McpHeaderSupport=true` was verified on CLI `0.159.2`, where the actual
 [CLI transcript](../evidence/journal-provider-probes.md) proved `tools/list`,
 bound and unbound `get_message`, and the read bearer on every request. It has
-not been re-checked on the current `0.164.0` pin. The flag
+not been re-checked on the current `0.170.0` pin. The flag
 changes no grants; journal endpoints and tools still require explicit per-agent
 authorization and reprovisioning. Entrypoint translation tests alone are not proof.
 

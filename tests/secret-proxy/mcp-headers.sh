@@ -29,8 +29,8 @@ UPSTREAM_IP="$EGRESS.10"; PROXY_IP="$SECRETS.2"; AGENT_IP="$SECRETS.20"
 MCP_HOST=mcp.example.test
 KEY_SECRET="synthetic-mcp-key-4a1f7c"
 SECRET_SECRET="synthetic-mcp-secret-9e03b2"
-CLAUDE_PIN=2.1.280
-CODEX_PIN=0.164.0
+CLAUDE_PIN=2.1.327
+CODEX_PIN=0.170.0
 WORK="$(mktemp -d)"
 chmod 755 "$WORK"
 mkdir -p "$WORK/state" "$WORK/ca" "$WORK/fixture" "$WORK/log" "$WORK/client"

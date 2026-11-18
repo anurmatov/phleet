@@ -96,14 +96,14 @@ only local mode's `--disallowedTools WebSearch` removes one.
 The dashboard's cloud model picker offers families, not dated versions, which go stale. **Claude:**
 `opus`, `sonnet`, `haiku`, passed to `--model` unchanged; Claude Code resolves them to its current model
 (a Claude CLI bump can move them, see `CLAUDE.md` "Provider CLI Pins"). **Codex:** `sol`, `terra`,
-`luna`. The pinned Codex 0.164.0 does not resolve these. `thread/start` accepts `sol` and sends it to
+`luna`. Codex 0.170.0 still does not resolve these (rechecked for #625). `thread/start` accepts `sol` and sends it to
 `/v1/responses` unchanged, its bundled catalog has no bare family names, and a ChatGPT-account login
 refuses a model outside that catalog. So `HarnessDefaults.CodexModelAliases` maps them, the only place
 they are mapped:
 
 | alias | model id sent |
 |---|---|
-| `sol` | `gpt-6.1-sol` |
+| `sol` | `gpt-6.2-sol` |
 | `terra` | `gpt-5.6-terra` |
 | `luna` | `gpt-6-luna` |
 

@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
-# fleet-memory's Qdrant client against a real Qdrant that requires TLS and an API key.
+# fleet-memory's Qdrant client against real Qdrants that require an API key: one over TLS, one over
+# plaintext reached by an explicit http URL.
 #
 # run.sh beside this is the store against a Qdrant that takes no credential, as the example
-# deployment's does. This is the other configuration fleet-memory supports: Qdrant__Url with an
-# https scheme and Qdrant__ApiKey. The tests it runs (tests/Fleet.Memory.Tests, the class
-# SecuredIndexTests) are the real VectorStore built from those two settings, against a server that
-# answers only over TLS and only to its key.
+# deployment's does. These are the other configurations fleet-memory supports: Qdrant__ApiKey with
+# an https Qdrant__Url, and with an explicit http one for an operator-trusted private network (the
+# key is then not encrypted). The tests it runs (tests/Fleet.Memory.Tests, the classes
+# SecuredIndexTests and SecuredIndexOverHttpTests) are the real VectorStore built from those two
+# settings, against servers that answer only to their key, the first only over TLS.
 #
 # What it sets up, all of it made for the run and removed after it:
 #   - a certificate authority and a server certificate for "localhost" (openssl; nothing committed);
 #   - one Qdrant container of the release docker-compose.example.yml pins, or QDRANT_VERSION, with
 #     that certificate and a random API key, publishing no port;
+#   - a second Qdrant of the same release in the first one's network namespace, on ports 6343/6344,
+#     with another random API key and no TLS;
 #   - one .NET SDK container in the Qdrant container's network namespace, where the tests run. It is
 #     given the authority as a trusted root through SSL_CERT_FILE, which .NET reads on Linux. That is
 #     the platform's normal certificate validation with one more root; nothing in the client or in
 #     the tests relaxes validation. (A container, not this machine's dotnet, because macOS and
 #     Windows have no such variable: there the authority would have to go into the user's keychain.)
 #
-# Before the tests it checks that the server is what it claims to be: it answers with the key over
-# TLS, refuses without the key, and does not answer in plaintext. It refuses a run in which a test
-# was skipped or none ran. Nothing is bind-mounted; files go in and out with docker cp.
+# Before the tests it checks that each server is what it claims to be: the TLS one answers with the
+# key over TLS, refuses without the key, and does not answer in plaintext; the http one answers with
+# its key and refuses without it and with another. It refuses a run in which a test was skipped or
+# none ran. Nothing is bind-mounted; files go in and out with docker cp.
 #
 #   bash tests/memory-qdrant/secured.sh
 #   QDRANT_VERSION=v1.19.1 bash tests/memory-qdrant/secured.sh
@@ -32,6 +37,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONFIGURATION="${CONFIGURATION:-Release}"
 SDK_IMAGE="${DOTNET_SDK_IMAGE:-mcr.microsoft.com/dotnet/sdk:10.0}"
 RUN="memqdrant-secured-$(date +%s)-$$"
+HTTP_SERVER="$RUN-http"
 TESTS="$RUN-tests"
 WORK="$(mktemp -d)"
 
@@ -41,6 +47,7 @@ fail_infra() { echo "INFRA $*" >&2; exit 2; }
 cleanup() {
   local rc=$?
   docker rm -f "$TESTS" >/dev/null 2>&1 || true
+  docker rm -f "$HTTP_SERVER" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $HTTP_SERVER"
   docker rm -f "$RUN" >/dev/null 2>&1 || echo "WARN: cleanup could not remove $RUN"
   rm -rf "$WORK"
   exit "$rc"
@@ -58,6 +65,7 @@ echo "Qdrant $VERSION with TLS and an API key (docker-compose.example.yml pins $
 TLS="$WORK/tls"
 mkdir -p "$TLS"
 API_KEY="memqdrant-$(openssl rand -hex 24)"
+HTTP_API_KEY="memqdrant-http-$(openssl rand -hex 24)"
 {
   openssl ecparam -name prime256v1 -genkey -noout -out "$TLS/ca-key.pem"
   printf '[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\nCN=memory-qdrant test authority\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nsubjectKeyIdentifier=hash\n' > "$TLS/ca.cnf"
@@ -84,6 +92,14 @@ docker create --name "$RUN" \
   "qdrant/qdrant:$VERSION" >/dev/null || fail_infra "could not create qdrant/qdrant:$VERSION"
 docker cp "$SERVER" "$RUN:/qdrant/tls" >/dev/null || fail_infra "could not give $RUN its certificate"
 docker start "$RUN" >/dev/null || fail_infra "could not start $RUN"
+
+# ── Qdrant: a key required, no TLS, beside the first (same localhost, other ports) ──
+docker create --name "$HTTP_SERVER" --network "container:$RUN" \
+  -e QDRANT__SERVICE__API_KEY="$HTTP_API_KEY" \
+  -e QDRANT__SERVICE__HTTP_PORT=6343 \
+  -e QDRANT__SERVICE__GRPC_PORT=6344 \
+  "qdrant/qdrant:$VERSION" >/dev/null || fail_infra "could not create the http qdrant/qdrant:$VERSION"
+docker start "$HTTP_SERVER" >/dev/null || fail_infra "could not start $HTTP_SERVER"
 
 # ── The sources the tests are built from, without build output ────────────────
 STAGE="$WORK/fleet"
@@ -124,6 +140,22 @@ if curl -fsS -m 5 -o /dev/null -H "api-key: $API_KEY" https://localhost:6333/col
 fi
 echo "Qdrant v$reported: answers over TLS with the key; refuses without it ($without_key); no plaintext; its authority is not a system root."
 
+reported_http=""
+for _ in $(seq 1 60); do
+  reported_http="$(curl -fsS -m 2 -H "api-key: $HTTP_API_KEY" http://localhost:6343/ 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)"
+  [ -n "$reported_http" ] && break
+  sleep 1
+done
+[ -n "$reported_http" ] || fail_infra "the http Qdrant did not answer with its key on localhost:6343"
+[ "v$reported_http" = "$EXPECTED_VERSION" ] || fail_infra "asked for $EXPECTED_VERSION, the http server says v$reported_http"
+http_without="$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://localhost:6343/collections || true)"
+case "$http_without" in 401|403) ;; *) fail_infra "the http Qdrant answered $http_without without the key (expected 401 or 403)" ;; esac
+http_wrong="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "api-key: $API_KEY" http://localhost:6343/collections || true)"
+case "$http_wrong" in 401|403) ;; *) fail_infra "the http Qdrant answered $http_wrong to another server's key (expected 401 or 403)" ;; esac
+http_with="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "api-key: $HTTP_API_KEY" http://localhost:6343/collections || true)"
+[ "$http_with" = 200 ] || fail_infra "the http Qdrant answered $http_with with its key (expected 200)"
+echo "Qdrant v$reported_http over http: answers with its key; refuses without it ($http_without) and with another ($http_wrong)."
+
 cd /tmp/fleet
 # Built before the authority is given, so the package feed is checked against the system roots alone.
 dotnet build tests/Fleet.Memory.Tests --configuration "$CONFIGURATION" --nologo -v quiet \
@@ -133,6 +165,8 @@ set +e
 SSL_CERT_FILE="$CA" \
 FLEET_MEMORY_TEST_SECURED_URL="https://localhost:6334" \
 FLEET_MEMORY_TEST_SECURED_API_KEY="$API_KEY" \
+FLEET_MEMORY_TEST_SECURED_HTTP_URL="http://localhost:6344" \
+FLEET_MEMORY_TEST_SECURED_HTTP_API_KEY="$HTTP_API_KEY" \
   dotnet test tests/Fleet.Memory.Tests --no-build --configuration "$CONFIGURATION" \
     --filter "FullyQualifiedName~SecuredIndex" \
     --logger "console;verbosity=normal" \
@@ -142,7 +176,7 @@ echo "$?" > /tmp/results/dotnet-test-exit-code
 INSIDE
 
 docker create --name "$TESTS" --network "container:$RUN" \
-  -e API_KEY="$API_KEY" -e EXPECTED_VERSION="$VERSION" -e CONFIGURATION="$CONFIGURATION" \
+  -e API_KEY="$API_KEY" -e HTTP_API_KEY="$HTTP_API_KEY" -e EXPECTED_VERSION="$VERSION" -e CONFIGURATION="$CONFIGURATION" \
   -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 \
   "$SDK_IMAGE" bash /tmp/fleet/run-secured-tests.sh >/dev/null || fail_infra "could not create the test container from $SDK_IMAGE"
 docker cp "$STAGE" "$TESTS:/tmp/fleet" >/dev/null || fail_infra "could not copy the sources into $TESTS"
@@ -163,6 +197,6 @@ COUNTERS="$(grep -o '<Counters[^>]*>' "$TRX" | head -1)"
 read_count() { echo "$COUNTERS" | grep -o "$1=\"[0-9]*\"" | grep -o '[0-9]*' || echo ""; }
 EXECUTED="$(read_count executed)"; NOT_EXECUTED="$(read_count notExecuted)"; PASSED="$(read_count passed)"; TOTAL="$(read_count total)"
 if [ "$TEST_RC" != 0 ] || [ -z "$EXECUTED" ] || [ "$EXECUTED" -eq 0 ] || [ "$PASSED" -ne "$EXECUTED" ] || [ "$EXECUTED" -ne "$TOTAL" ] || [ "${NOT_EXECUTED:-0}" != "0" ]; then
-  fail_assert "Qdrant $VERSION with TLS and a key: total=$TOTAL executed=$EXECUTED passed=$PASSED notExecuted=$NOT_EXECUTED (dotnet test exit $TEST_RC)"
+  fail_assert "Qdrant $VERSION with a key, over TLS and over http: total=$TOTAL executed=$EXECUTED passed=$PASSED notExecuted=$NOT_EXECUTED (dotnet test exit $TEST_RC)"
 fi
-echo "PASS Qdrant $VERSION with TLS and an API key: $PASSED test(s) executed against the server, 0 skipped."
+echo "PASS Qdrant $VERSION with an API key, over TLS and over http: $PASSED test(s) executed against the servers, 0 skipped."

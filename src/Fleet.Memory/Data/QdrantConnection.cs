@@ -13,10 +13,16 @@ public sealed class QdrantConfigurationException(string message) : Exception(mes
 /// (<c>IndexConnectionTests</c> fails on a Qdrant client constructed anywhere else in this service).
 ///
 /// Without <c>Qdrant:ApiKey</c> the client is built as it always was: the URL's host and port, TLS
-/// exactly when the scheme is <c>https</c>. With a key the URL must be <c>https</c>, and the server's
-/// certificate is validated the platform's normal way: there is no setting that relaxes it. A key
-/// with any other URL is refused; the key is never sent over a connection that is not encrypted,
-/// and never dropped to connect without it.
+/// exactly when the scheme is <c>https</c>. With a key the URL must be an explicit absolute
+/// <c>https</c> or <c>http</c> URL, and the scheme alone decides the transport:
+/// <list type="bullet">
+/// <item><c>https</c>: TLS, the server's certificate validated the platform's normal way. There is
+/// no setting that relaxes it, and a failed TLS connection is never retried in plaintext.</item>
+/// <item><c>http</c>: plaintext, for an operator-trusted private network. The key is sent
+/// unencrypted, which is why only a URL that says <c>http</c> gets this.</item>
+/// </list>
+/// A key with any other URL is refused before anything connects, and a configured key is never
+/// dropped to connect without it.
 /// </summary>
 public sealed class QdrantConnection
 {
@@ -35,7 +41,7 @@ public sealed class QdrantConnection
     /// <summary>The key sent with every call, or null when none is configured.</summary>
     public string? ApiKey { get; }
 
-    /// <exception cref="QdrantConfigurationException">A key is configured and the URL is not <c>https</c>.</exception>
+    /// <exception cref="QdrantConfigurationException">A key is configured and the URL is not an absolute <c>https</c> or <c>http</c> URL.</exception>
     public static QdrantConnection From(QdrantOptions options)
     {
         if (DescribeFault(options.Url, options.ApiKey) is { } fault)
@@ -53,20 +59,23 @@ public sealed class QdrantConnection
     public static string? DescribeFault(string? url, string? apiKey)
     {
         if (KeyOrNull(apiKey) is null) return null;
-        if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https") return null;
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http") return null;
 
-        return $"{QdrantOptions.Section}:ApiKey is set and {QdrantOptions.Section}:Url is not an https URL. "
-             + "The API key is sent only over TLS: use an https URL for a Qdrant that requires a key, or remove the key. "
-             + "Nothing was connected.";
+        return $"{QdrantOptions.Section}:ApiKey is set and {QdrantOptions.Section}:Url is not an absolute https or http URL. "
+             + "With a key, use an https URL, or an http URL only on a trusted private network (http does not encrypt the key), "
+             + "or remove the key. Nothing was connected.";
     }
 
     private static string? KeyOrNull(string? apiKey) => string.IsNullOrWhiteSpace(apiKey) ? null : apiKey.Trim();
 
-    /// <summary>The client. No custom certificate validation in either branch.</summary>
+    /// <summary>
+    /// The client, over the transport the URL names and no other. No custom certificate validation
+    /// in either branch.
+    /// </summary>
     public QdrantClient CreateClient() =>
         ApiKey is null
             ? new QdrantClient(Host, Port, https: Https)
-            : new QdrantClient(Host, Port, https: true, apiKey: ApiKey);
+            : new QdrantClient(Host, Port, https: Https, apiKey: ApiKey);
 
     /// <summary>For a log line: whether a key is in use, never the key.</summary>
     public override string ToString() =>

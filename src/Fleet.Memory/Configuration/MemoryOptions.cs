@@ -51,7 +51,8 @@ public sealed class QdrantOptions
 
     /// <summary>
     /// Optional API key for a Qdrant that requires one (<c>Qdrant:ApiKey</c>). Empty (the default):
-    /// no key is sent, as before. A key needs an <c>https</c> <see cref="Url"/>; see
+    /// no key is sent, as before. A key needs an explicit <c>https</c> <see cref="Url"/>, or an
+    /// <c>http</c> one on a trusted private network (the key is then not encrypted); see
     /// <c>QdrantConnection</c>, the one place the client is constructed.
     /// </summary>
     public string ApiKey { get; set; } = "";

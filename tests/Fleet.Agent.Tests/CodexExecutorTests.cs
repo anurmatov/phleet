@@ -1484,7 +1484,7 @@ public partial class CodexExecutorTests
 
     /// <summary>#460 owner direction: a family alias runs its mapped id; a dated id is sent as stored.</summary>
     [Theory]
-    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("sol", "gpt-6.2-sol")]
     [InlineData("terra", "gpt-5.6-terra")]
     [InlineData("luna", "gpt-6-luna")]
     [InlineData("gpt-5.6-sol", "gpt-5.6-sol")]

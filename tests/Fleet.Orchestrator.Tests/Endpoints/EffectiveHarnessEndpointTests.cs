@@ -238,7 +238,7 @@ public sealed class EffectiveHarnessEndpointTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("sol", "gpt-6.2-sol")]
     [InlineData("luna", "gpt-6-luna")]
     [InlineData("gpt-5.6-sol", null)]
     public async Task CodexModel_ShowsTheIdAnAliasResolvesTo(string stored, string? resolved)

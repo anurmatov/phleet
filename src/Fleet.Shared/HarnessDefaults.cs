@@ -138,18 +138,15 @@ public static class HarnessDefaults
     /// <c>gpt-5.6-sol</c>, a local or a hosted model — is never rewritten.
     /// </summary>
     /// <remarks>
-    /// Mapped because the pinned Codex CLI 0.164.0 does not resolve them: <c>thread/start</c> accepts
-    /// <c>sol</c> and sends it to <c>/v1/responses</c> unchanged, and its bundled catalog has no bare
-    /// family names (only <c>gpt-6.1-sol</c>, <c>gpt-6-sol</c>, <c>gpt-5.6-sol</c>, <c>gpt-5.6-terra</c>,
-    /// <c>gpt-6-luna</c>, <c>gpt-5.6-luna</c>, …), and a ChatGPT-account login refuses a model outside
-    /// that catalog. Each alias maps to the newest id of its family in that catalog; move them together
-    /// with a Codex CLI bump. Claude aliases need no map: Claude Code resolves <c>opus</c>,
-    /// <c>sonnet</c> and <c>haiku</c> itself.
+    /// Codex 0.170.0 still sends a bare family alias unchanged. The credential-free harness-key
+    /// check verifies that every mapped id is in its bundled catalog. Only the sol mapping moves
+    /// in #625; other aliases and explicitly stored ids are preserved. Claude Code resolves its
+    /// own aliases, so they are passed through unchanged.
     /// </remarks>
     public static IReadOnlyDictionary<string, string> CodexModelAliases { get; } =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["sol"] = "gpt-6.1-sol",
+            ["sol"] = "gpt-6.2-sol",
             ["terra"] = "gpt-5.6-terra",
             ["luna"] = "gpt-6-luna",
         };

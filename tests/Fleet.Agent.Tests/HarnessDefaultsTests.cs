@@ -367,7 +367,7 @@ public sealed class HarnessDefaultsTests
         HarnessDefaults.Build(new HarnessInput { Provider = "codex", Local = local, Model = model });
 
     [Theory]
-    [InlineData("sol", "gpt-6.1-sol")]
+    [InlineData("sol", "gpt-6.2-sol")]
     [InlineData("terra", "gpt-5.6-terra")]
     [InlineData("luna", "gpt-6-luna")]
     public void CodexAlias_ResolvesToTheCurrentId_InThePlan(string alias, string id)
@@ -382,6 +382,8 @@ public sealed class HarnessDefaultsTests
     [Theory]
     [InlineData("gpt-5.6-sol")]      // a stored dated id
     [InlineData("gpt-6.1-sol")]
+    [InlineData("gpt-6.2-sol")]
+    [InlineData("gpt-6.2-astra")]
     [InlineData("zai/glm-5.3")]      // hosted
     [InlineData("Sol")]              // aliases are exact
     public void CodexNonAlias_IsSentAsStored_AndKeepsItsPlan(string model)

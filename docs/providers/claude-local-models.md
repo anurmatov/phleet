@@ -75,7 +75,7 @@ In local mode `Effort` picks the thinking level (#349). The vocabulary is pinned
 Ollama; there is no discovery, because `/api/show` is Ollama-only and would put an
 inference-server call on the write or startup path.
 
-| `Effort` | Claude Code child | wire (CLI 2.1.280) | Ollama ≤ 0.34.2 → Qwen3.8 | Ollama ≥ 0.34.3 → Qwen3.8 |
+| `Effort` | Claude Code child | wire (CLI 2.1.327) | Ollama ≤ 0.34.2 → Qwen3.8 | Ollama ≥ 0.34.3 → Qwen3.8 |
 |---|---|---|---|---|
 | *before #349:* empty | no `--effort` | `adaptive`, `effort: high` | xhigh | **medium** |
 | empty (default) | `--effort xhigh` | `adaptive`, `effort: xhigh` | xhigh (`xhigh`→`high`→xhigh instructions) | xhigh |
@@ -108,7 +108,7 @@ Ollama interpret `output_config.effort` themselves. The vocabulary is validated 
 
 | dependency | version | what depends on it |
 |---|---|---|
-| Claude Code | 2.1.280 (`Dockerfile` pin) | the wire column. A CLI bump must re-run `tests/claude-local-wire/run.sh` |
+| Claude Code | 2.1.327 (`Dockerfile` pin) | the wire column. A CLI bump must re-run `tests/claude-local-wire/run.sh` |
 | Ollama | v0.34.2, v0.34.3, v0.34.4 (source-verified) | the two server columns; v0.34.4 leaves the three code paths below unchanged |
 | Qwen3.8 | Ollama ≥ 0.32.12 (model manifest `requires`) | served descriptor `[false, low, medium, xhigh]`, default `medium` |
 

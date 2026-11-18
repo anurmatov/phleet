@@ -2,14 +2,15 @@
 
 Read the note that applies before upgrading an existing installation. Day-to-day upgrading is `./upgrade.sh`, described in the [setup guide](../setup.md#upgrade-after-pulling-new-code).
 
-## Agent identity: the config token moves to its own header
+## Mandatory signed MCP identity
 
-Before the first reprovision after upgrading to agent identity, remap every `fleet-orchestrator`
-endpoint mapping of `Authorization` to `ORCHESTRATOR_CONFIG_TOKEN` (agents that call
-`set_config_values`) to the header `X-Fleet-Config-Token`. A reprovision with the identity key
-replaces that endpoint's `Authorization` with the agent's identity, and `set_config_values` would
-then refuse. Enforcement stays off (`FLEET_AGENT_IDENTITY_ENFORCE=false`) until the operator turns
-it on. See [docs/agent-identity.md](../agent-identity.md#turning-it-on).
+Before strict binaries, migrate on `2a338668893527017fbaf77781906e9a9bb141ab` (PR610) or a later
+pre-hardening descendant, preserve the shared key and collect signed native read receipts for
+all eligible active/external callers. Remap config-token Authorization to `X-Fleet-Config-Token`
+before reprovisioning. Migrate or stop running unsupported-provider callers, preserve stopped
+callers and capture compatible images/config/key together. Upgrade refuses a missing/invalid key
+before changes and does not reprovision agents. There is no unsigned mode; rolling back to old
+binaries restores unsigned exposure. Follow the full [migration and undo procedure](../agent-identity.md#existing-install-migration).
 
 ## Temporal and Qdrant leave the agents' network
 

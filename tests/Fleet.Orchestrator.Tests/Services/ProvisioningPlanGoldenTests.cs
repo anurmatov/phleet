@@ -44,6 +44,8 @@ public partial class ProvisioningPlanGoldenTests
         ["Provisioning:AgentImage"] = "fleet:agent-golden",
         ["Chat:SouthUrl"] = "http://fleet-comms:8082/",
         ["SecretProxy:Enabled"] = "true",
+        // This historical fixture deliberately uses a nondefault Telegram port.
+        ["AgentIdentity:TrustedOrigins"] = "http://fleet-telegram:3200,http://fleet-orchestrator:3600,http://fleet-temporal-bridge:3001",
     };
 
     public static TheoryData<string> Agents => new()
@@ -84,7 +86,7 @@ public partial class ProvisioningPlanGoldenTests
 
         document.AppendLine().AppendLine("## generated files");
         var generated = harness.GeneratedDir(preview.ContainerName);
-        foreach (var file in Directory.EnumerateFiles(generated, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
+        foreach (var file in (Directory.Exists(generated) ? Directory.EnumerateFiles(generated, "*", SearchOption.AllDirectories) : []).OrderBy(f => f, StringComparer.Ordinal))
         {
             document.AppendLine($"--- {Path.GetRelativePath(generated, file).Replace('\\', '/')}");
             document.AppendLine(await File.ReadAllTextAsync(file));

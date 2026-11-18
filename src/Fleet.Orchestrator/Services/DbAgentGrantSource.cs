@@ -38,12 +38,17 @@ public sealed class DbAgentGrantSource(IServiceScopeFactory scopes, IConfigurati
     /// <summary>Every agent's grants, by name. Null when there is no database to read them from.</summary>
     public async Task<Dictionary<string, List<string>>?> AllAsync(CancellationToken ct)
     {
-        await using var scope = scopes.CreateAsyncScope();
-        if (scope.ServiceProvider.GetService<OrchestratorDbContext>() is not { } db)
-            return null;
+        try
+        {
+            await using var scope = scopes.CreateAsyncScope();
+            if (scope.ServiceProvider.GetService<OrchestratorDbContext>() is not { } db)
+                return null;
 
-        var cto = CtoAgentSetting.Resolve(config);
-        var agents = await db.Agents.Include(a => a.Tools).AsNoTracking().ToListAsync(ct);
-        return agents.ToDictionary(a => a.Name, a => AgentConfigFiles.EffectiveMcpGrants(a, cto), StringComparer.Ordinal);
+            var cto = CtoAgentSetting.Resolve(config);
+            var agents = await db.Agents.Include(a => a.Tools).AsNoTracking().ToListAsync(ct);
+            return agents.ToDictionary(a => a.Name, a => AgentConfigFiles.EffectiveMcpGrants(a, cto), StringComparer.Ordinal);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception) { return null; }
     }
 }

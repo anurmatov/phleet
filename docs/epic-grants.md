@@ -16,10 +16,9 @@ Trusted, as before, and not hardened by this feature: who an MCP caller is, the 
 admin bearer (the dashboard and agent containers hold it), and host access. Whoever holds them is
 trusted. Epic grants are not a defence against a malicious operator or agent.
 
-Who an MCP caller is is hardened separately (`docs/agent-identity.md`). With
-`FLEET_AGENT_IDENTITY_ENFORCE=true` the bridge takes "this is the CTO" from the caller's identity
-token, which only the CTO agent holds. Until then it is the name in the caller's URL, which any
-caller on the network can type.
+MCP callers require signed identity separately ([agent identity](agent-identity.md)). The bridge
+takes the privileged caller from the verified agent subject, never a URL name or tool argument.
+Identity does not widen any human-decision authority.
 
 What the feature does guarantee:
 

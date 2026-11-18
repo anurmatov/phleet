@@ -39,6 +39,13 @@ public class ProjectContextProvisioningTests
         }
 
         var result = await h.Service.ProvisionAsync(AgentName);
+        if (provider == "gemini")
+        {
+            Assert.False(result.Success);
+            Assert.Contains("mcp_headers_unsupported", result.Message);
+            Assert.Empty(h.CreateBodies);
+            return;
+        }
         Assert.True(result.Success, result.Message);
 
         Assert.False(Exists(h, "projects", "project-a", "full.md"));
@@ -66,6 +73,13 @@ public class ProjectContextProvisioningTests
         await h.SeedAsync(db => ProjectContextGoldenTests.SeedScenario(db, provider));
 
         var result = await h.Service.ProvisionAsync(AgentName);
+        if (provider == "gemini")
+        {
+            Assert.False(result.Success);
+            Assert.Contains("mcp_headers_unsupported", result.Message);
+            Assert.Empty(h.CreateBodies);
+            return;
+        }
         Assert.True(result.Success, result.Message);
 
         foreach (var file in new[] { ".mcp.json", "settings.json", "appsettings.json" })

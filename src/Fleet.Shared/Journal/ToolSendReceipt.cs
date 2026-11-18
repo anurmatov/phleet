@@ -18,7 +18,7 @@ public sealed record ToolSendReceipt
     [JsonPropertyName("v")]
     public int Version { get; init; } = ToolSendReceipts.Version;
 
-    /// <summary>The calling agent's name, lower-cased (the <c>?agent=</c> attribution).</summary>
+    /// <summary>The calling agent's name, lower-cased (the signed caller).</summary>
     public required string Agent { get; init; }
 
     /// <summary>The MCP tool that sent (<c>send_message</c>, <c>send_to_ceo</c>).</summary>

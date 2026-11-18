@@ -581,42 +581,31 @@ south token act on another agent's conversation; put a credential in a URL.
 
 ## Agent identity
 
-How a fleet MCP server knows which agent is calling (`docs/agent-identity.md`). The orchestrator
-signs each agent's name with `FLEET_AGENT_IDENTITY_KEY` (`AgentIdentityTokens` in `Fleet.Shared`:
-`fa1.<purpose>.<subject>.<mac>`, purposes `agent` and `service`) and provisioning writes the token
-as an `Authorization` header on the fleet's own endpoints the agent reaches
-(`AgentConfigFiles.IdentityServerNames`: `fleet-memory`, `fleet-orchestrator`, `fleet-telegram`,
-`fleet-temporal`) at a trusted origin (`AgentConfigFiles.IdentityOrigins`, `AgentIdentity:TrustedOrigins`),
-beside any operator-mapped headers, for a provider that sends MCP headers. `set_config_values` takes
-its config token in `X-Fleet-Config-Token` (`SetConfigValuesTool.ConfigTokenHeader`), which is kept.
-`Fleet.Shared.Mcp` is the one implementation for the servers: `UseAgentIdentity` resolves the caller
-by `AgentIdentityRules.Resolve` (three states: no key, key, key + `FLEET_AGENT_IDENTITY_ENFORCE`)
-and `AddAgentToolAuthorization(serverName)` holds a verified agent to its grants on `tools/call`
-and `tools/list`. fleet-memory, fleet-telegram and the Temporal bridge use
-`AddAgentIdentityFromOrchestrator` (grants from `OrchestratorGrantCache`: read every 30 s, unknown
-after 10 min without a read) and their tools ask `AgentCallerHttp` who called; fleet-memory's
-`/internal/*` is `UseServiceIdentity` (a service token only, under enforcement; the orchestrator's
-`MemoryProxyService` sends one). The orchestrator's `/mcp` is wired by `UseMcpAgentIdentity` after
-`UseFleetAccess` (service bearer or signed-in browser = operator; a phone is not), with grants
-read from the stored tools (`DbAgentGrantSource`, `AgentConfigFiles.EffectiveMcpGrants`, also served
-at `GET /internal/agent-mcp-grants`). `setup.sh`/`upgrade.sh` generate the key when missing and
-never replace it. Operator tool: `scripts/mint-identity-token.sh`.
+All four MCP servers require valid `AgentIdentity:Key` at startup and signed `fa1` identity on
+selected MCP requests (`docs/agent-identity.md`). There is no enforcement flag or unsigned caller.
+`Fleet.Shared.Mcp` owns middleware, per-request caller resolution and tool-grant filtering.
+`UseServiceIdentity` protects memory internal routes and the orchestrator's exact two authorization
+bootstrap maps before database access. Bootstrap consumers use their own service-purpose bearer,
+validated fixed HTTP(S) destinations, no redirects/cookies and a 5-second bound. Grant snapshots
+expire after 10 minutes, polling every 30 seconds with a 5-second miss throttle; populated project
+ACL snapshots retain their existing no-outage-expiry policy. Missing grants fail closed.
 
-Temporal (server, UI, database) and Qdrant take no credential, so the example compose keeps them
-off `fleet-net`, the network agents are on: `fleet-temporal-net` (also the orchestrator and the
-bridge) and `fleet-memory-net` (internal; also fleet-memory). MUST NOT put a service that takes no
-credential on `fleet-net`, or an agent goes around the server that checks who it is.
+Provisioning refuses unsupported headers, invalid subjects or untrusted built-in destinations
+before files/container removal, and preview reports the fault. Claude/Codex receive only their own
+agent bearer, never signing keys/service tokens. Built-in recognition is case-insensitive; remove
+only the obsolete caller query option, preserving unrelated options and `formatting_mode`.
+`X-Fleet-Config-Token` remains alongside identity Authorization. Operator/browser and independent
+peer config authentication, journal endpoints and human decision gates retain separate checks.
 
-MUST NOT: read `Query["agent"]` in a fleet MCP server or attribute anything to a name a model typed
-when the call is made as an agent (`AgentCallerHttp.AgentNameOr`; a source test guards the three
-servers); take a caller's identity from `?agent=` or a tool argument when a token was sent; treat a
-wrong token as no token (with a key it is refused, enforced or not); send an agent or service token
-to an address that is not a trusted origin, whatever the endpoint is called; log, return or echo a token or the key
-(`upgrade.sh` writes the key without `add_missing_env_var`, which prints values); deliver the key to
-an agent (`ContainerSpecBuilder.IsNeverDelivered`, `env_ref_reserved`); give a Gemini agent the
-header (its CLI would skip the server); apply grants to an unverified name (it proves nothing) or
-skip them for a verified agent while enforcement is off; make identity depend on the journal key;
-change the token format without `TheFormat_IsPinned…` and the script.
+Fresh setup generates a missing durable key once. Upgrade requires an existing valid key before
+changes and never replaces it. Migrate active/external callers on the documented stepping stone,
+collect real signed native receipts, migrate/stop unsupported callers and preserve stopped ones.
+No automatic agent reprovision occurs. Old binary rollback restores unsigned exposure.
+
+MUST NOT derive caller identity from URLs, tool arguments or prior sessions; trust a failed bearer
+through cookies; skip current grants; send tokens to untrusted destinations; log keys/tokens; deliver
+a signing key/service token to agents; silently provision unsupported callers; or claim deployed
+acceptance from source tests. Temporal and Qdrant remain on their existing isolated networks.
 
 ## Credentials for Qdrant and Temporal (#621)
 

@@ -86,6 +86,13 @@ public class ProjectContextGoldenTests
         await harness.SeedAsync(db => SeedScenario(db, provider));
 
         var result = await harness.Service.ProvisionAsync(AgentName);
+        if (provider == "gemini")
+        {
+            Assert.False(result.Success);
+            Assert.Contains("mcp_headers_unsupported", result.Message);
+            Assert.Empty(harness.CreateBodies);
+            return;
+        }
         Assert.True(result.Success, result.Message);
 
         var generated = harness.GeneratedDir(ContainerName);

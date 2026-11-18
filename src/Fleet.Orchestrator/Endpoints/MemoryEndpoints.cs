@@ -15,17 +15,22 @@ public static class MemoryEndpoints
     {
         var callerAuthenticator = app.ServiceProvider.GetRequiredService<CallerAuthenticator>();
 
-        // GET /internal/agent-project-access — Docker-network-only, no auth (mirrors /internal/* pattern from PR #83).
+        // GET /internal/agent-project-access — service identity required before lookup.
         // Returns the full ACL map consumed by fleet-memory's AclCacheService.
         app.MapGet("/internal/agent-project-access", async (IServiceScopeFactory scopeFactory, CancellationToken ct) =>
         {
-            await using var scope = scopeFactory.CreateAsyncScope();
-            var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();
-            var rows = await db.AgentProjectAccess.AsNoTracking().ToListAsync(ct);
-            var acl = rows
-                .GroupBy(r => r.AgentName)
-                .ToDictionary(g => g.Key, g => g.Select(r => r.Project).ToList());
-            return Results.Ok(new { acl });
+            try
+            {
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetService<OrchestratorDbContext>();
+                if (db is null) return Results.StatusCode(503);
+                var rows = await db.AgentProjectAccess.AsNoTracking().ToListAsync(ct);
+                var acl = rows.GroupBy(r => r.AgentName)
+                    .ToDictionary(g => g.Key, g => g.Select(r => r.Project).ToList());
+                return Results.Ok(new { acl });
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception) { return Results.StatusCode(503); }
         });
 
         // ── Memory API (proxied from fleet-memory /internal/*) ───────────────────────

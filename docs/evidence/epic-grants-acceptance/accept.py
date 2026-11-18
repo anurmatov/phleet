@@ -142,6 +142,11 @@ def human(wf, wf_type, signal, payload):
     return code
 
 
+# The stack registers exactly the tool exercised below, not a wildcard server grant.
+seeded = subprocess.run(["mysql", "-uaccept", "-paccept-only", "-h127.0.0.1", "-N", "orch_accept436", "-e",
+    "SELECT ToolName FROM agent_tools JOIN agents ON agents.Id=agent_tools.AgentId "
+    "WHERE agents.Name='cto-agent' AND agent_tools.IsEnabled=1"], capture_output=True, text=True, check=True)
+assert seeded.stdout.strip().splitlines() == ["mcp__fleet-temporal__temporal_signal_workflow"], "synthetic caller grant mismatch"
 cto = mcp.Mcp("cto-agent")
 cto.init()
 

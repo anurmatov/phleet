@@ -57,8 +57,8 @@ public sealed class McpToolPlanTests
 
         var plan = Build(agent);
 
-        Assert.Equal("?agent=agent1&formatting_mode=0", Only(plan, "fleet-telegram").Target!.Url.Query);
-        Assert.Equal("?agent=agent1", Only(plan, "fleet-temporal").Target!.Url.Query);
+        Assert.Equal("?formatting_mode=0", Only(plan, "fleet-telegram").Target!.Url.Query);
+        Assert.Equal("", Only(plan, "fleet-temporal").Target!.Url.Query);
     }
 
     [Fact]
@@ -68,7 +68,7 @@ public sealed class McpToolPlanTests
 
         var memory = Assert.Single(plan);
         Assert.Equal("fleet-memory", memory.Name);
-        Assert.Equal("?agent=agent1", memory.Target!.Url.Query);
+        Assert.Equal("", memory.Target!.Url.Query);
 
         var withRow = NewAgent();
         withRow.McpEndpoints.Add(Endpoint("fleet-memory", "http://fleet-memory:3100/mcp"));

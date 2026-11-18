@@ -8,6 +8,18 @@ exposed harness bugs (a null-result check, then result decoding), not product de
 recorded run started from an empty Temporal database and an empty orchestrator database and used
 the committed harness in [`epic-grants-acceptance/`](epic-grants-acceptance/).
 
+## Current helper contract
+
+The executable helpers now require mandatory signed identity. `stack.sh` supplies one explicit
+synthetic shared key to both servers, registers the synthetic `cto-agent` with exactly
+`mcp__fleet-temporal__temporal_signal_workflow`, and writes only its agent-purpose token to an
+owner-only local client file. `mcp.py` sends that bearer on every request, never a caller query.
+The bridge authenticates its grants bootstrap with its own service token on loopback. `accept.py`
+checks the exact synthetic grant before calling. Missing key/token files or bootstrap failures
+are failures, not permission to use unsigned calls. These helpers must run only on the disposable
+stack described below. Their source migration is not a new acceptance receipt; the historical
+results below describe their original commits unchanged.
+
 ## What was real and what was simulated
 
 | piece | in this run |

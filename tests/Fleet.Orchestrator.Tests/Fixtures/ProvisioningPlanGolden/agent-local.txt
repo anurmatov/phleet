@@ -96,7 +96,10 @@ POST /v1.41/containers/fleet-agent-local/start
   "mcpServers": {
     "fleet-memory": {
       "type": "http",
-      "url": "http://fleet-memory:3100?agent=agent-local"
+      "url": "http://fleet-memory:3100",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-local.oOs9G34mtA0fkZDlsROFYUVbkc07WvZt8fDr6xGhgX0"
+      }
     }
   }
 }
@@ -134,7 +137,8 @@ POST /v1.41/containers/fleet-agent-local/start
     "InstructionOrder": [
       "_base"
     ],
-    "OutputStyleBody": "Answer in one short paragraph."
+    "OutputStyleBody": "Answer in one short paragraph.",
+    "McpHeaderSupport": true
   },
   "Telegram": {
     "AllowedUserIds": [],

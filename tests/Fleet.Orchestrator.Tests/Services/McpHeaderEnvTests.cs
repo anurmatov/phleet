@@ -296,7 +296,7 @@ public class McpHeaderEnvTests
     // ── A7: the fixture the native acceptance script runs a real client against ─
 
     /// <summary>
-    /// Renders the synthetic two-header fixture through the production planner and renderer. When
+    /// Renders mapped headers, mandatory agent identity and the config header through production helpers. When
     /// <see cref="FixtureDirectoryVariable"/> is set (by <c>tests/secret-proxy/mcp-headers.sh</c>), it
     /// also writes the files that script starts the real clients from.
     /// </summary>
@@ -318,22 +318,41 @@ public class McpHeaderEnvTests
             agent.Id = 1;
             agent.EnvRefs.RemoveAll(r => r.EnvKeyName == PlainRef);
             agent.McpEndpoints.RemoveAll(e => e.McpName == "plain");
+            agent.McpEndpoints[0].McpName = "fleet-orchestrator";
+            agent.McpEndpoints[0].HeaderEnvRefsJson = Mappings(
+                ("X-Example-Key", KeyRef), ("X-Example-Secret", SecretRef),
+                ("X-Fleet-Config-Token", "ORCHESTRATOR_CONFIG_TOKEN"));
+            agent.EnvRefs.Add(new() { EnvKeyName = "ORCHESTRATOR_CONFIG_TOKEN" });
+            agent.Tools = [new() { ToolName = "mcp__fleet-orchestrator__ping" }];
             var next = 0;
             var (plan, planFault) = SecretGrantPlanner.Plan(agent, bindings, SecretProxySettings.ForTests(), caPresent: true, () => minted[next++]);
             Assert.Null(planFault);
             foreach (var grant in plan!.Grants) placeholders[grant.EnvKeyName] = grant.Placeholder;
 
-            var (headers, fault) = AgentConfigFiles.ResolveMcpHeaders(agent, new Dictionary<string, string>(), bindings, plan!);
+            var (headers, fault) = AgentConfigFiles.ResolveMcpHeaders(agent, new Dictionary<string, string> { ["ORCHESTRATOR_CONFIG_TOKEN"] = "synthetic-config-token" }, bindings, plan!);
             Assert.Null(fault);
-            files[$"{provider}.mcp.json"] = AgentConfigFiles.GenerateMcpJson(agent, "http://fleet-memory:3100", mappedHeaders: headers);
+            var identity = AgentConfigFiles.IdentityTokenFor(agent, [new byte[32]]);
+            var identityHeaders = AgentConfigFiles.WithIdentityHeaders(agent, headers, identity,
+                ["https://mcp.example.test", "http://fleet-memory:3100"], "http://fleet-memory:3100");
+            files[$"{provider}.mcp.json"] = AgentConfigFiles.GenerateMcpJson(agent, "http://fleet-memory:3100", mappedHeaders: identityHeaders);
             files[$"{provider}.appsettings.json"] = AgentConfigFiles.GenerateAppsettingsJson(agent, "cto-agent", mappedMcpHeaders: headers.Count > 0);
         }
 
-        var server = JsonDocument.Parse(files["claude.mcp.json"]).RootElement.GetProperty("mcpServers").GetProperty("example");
+        var server = JsonDocument.Parse(files["claude.mcp.json"]).RootElement.GetProperty("mcpServers").GetProperty("fleet-orchestrator");
         Assert.Equal(Url, server.GetProperty("url").GetString());
         Assert.Equal(placeholders[KeyRef], server.GetProperty("headers").GetProperty("X-Example-Key").GetString());
         Assert.Equal(placeholders[SecretRef], server.GetProperty("headers").GetProperty("X-Example-Secret").GetString());
         Assert.Equal(files["claude.mcp.json"], files["codex.mcp.json"]);
+        var authorization = server.GetProperty("headers").GetProperty("Authorization").GetString()!;
+        Assert.True(AgentIdentityTokens.TryVerify(AgentIdentityTokens.BearerOf(authorization),
+            [new byte[32]], out var purpose, out var subject));
+        Assert.Equal("agent", purpose);
+        Assert.Equal("agent1", subject);
+        Assert.Equal("synthetic-config-token", server.GetProperty("headers").GetProperty("X-Fleet-Config-Token").GetString());
+        Assert.DoesNotContain(new string('A', 43), string.Join("", files.Values));
+        Assert.DoesNotContain("fa1.service.", string.Join("", files.Values));
+        files["native-identity.json"] = JsonSerializer.Serialize(new
+            { authorization, configToken = "synthetic-config-token" });
 
         if (Environment.GetEnvironmentVariable(FixtureDirectoryVariable) is not { Length: > 0 } directory)
             return;

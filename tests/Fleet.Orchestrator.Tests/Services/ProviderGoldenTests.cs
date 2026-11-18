@@ -136,6 +136,13 @@ public class ProviderGoldenTests
 
         var preview = await h.Service.PreviewAsync(AgentName);
         var result = await h.Service.ProvisionAsync(AgentName);
+        if (provider == "gemini")
+        {
+            Assert.False(result.Success);
+            Assert.Contains("mcp_headers_unsupported", result.Message);
+            Assert.False(Directory.Exists(h.GeneratedDir(ContainerName)));
+            return (new Dictionary<string, string>(), h.Logs.Entries);
+        }
         Assert.True(result.Success, result.Message);
 
         var dir = h.GeneratedDir(ContainerName);
@@ -154,6 +161,8 @@ public class ProviderGoldenTests
     public async Task GeneratedOutput_EqualsTheMergeBase(string config)
     {
         var generated = await GenerateAsync(config);
+
+        if (config == "gemini") { Assert.Empty(generated); return; }
 
         Assert.Equal(Files.Order(), generated.Keys.Order());
         foreach (var file in Files)

@@ -43,3 +43,9 @@ printf '\n' | bash "$DIR/run.sh" "$DIR/helpers.sh" "$DIR/env" n n fixture-defaul
 grep -qx CONTINUED "$DIR/output"
 grep -qx 'SYNTHETIC_FIELD=fixture-default' "$DIR/env"
 echo 'PASS optional empty input still writes an explicit default'
+
+# These are credential choices, not supported mandatory-MCP agent providers.
+grep -q 'gemini (credential preparation only; mandatory native MCP headers unsupported)' "$ROOT/setup.sh"
+grep -q 'claude + gemini (Gemini credentials only)' "$ROOT/setup.sh"
+grep -q 'docs/providers/gemini.md' "$ROOT/setup.sh"
+echo 'PASS Gemini choices warn about mandatory MCP header support'

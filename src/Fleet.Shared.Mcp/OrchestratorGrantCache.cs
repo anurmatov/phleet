@@ -19,11 +19,11 @@ namespace Fleet.Shared.Mcp;
 /// </para>
 /// <para>
 /// What is held goes stale: after <see cref="StaleAfter"/> without a successful read the answer is
-/// "unknown", which a server refuses under enforcement. A server that cannot reach the orchestrator
+/// "unknown", which a server refuses. A server that cannot reach the orchestrator
 /// for that long must not go on serving agents from a list nobody can vouch for.
 /// </para>
 /// <para>
-/// Without an identity key no caller is ever a verified agent, so nothing is read at all.
+/// The required server key authenticates bootstrap without consulting the grants being read.
 /// MUST read from the configured orchestrator address only: the answer is what this server
 /// believes every agent may do.
 /// </para>
@@ -43,6 +43,7 @@ public sealed class OrchestratorGrantCache : BackgroundService, IAgentGrantSourc
     private readonly ILogger<OrchestratorGrantCache> _logger;
     private readonly TimeProvider _time;
     private readonly Uri _url;
+    private readonly string _serviceName;
     private readonly SemaphoreSlim _reading = new(1, 1);
 
     private volatile Snapshot? _snapshot;
@@ -53,15 +54,16 @@ public sealed class OrchestratorGrantCache : BackgroundService, IAgentGrantSourc
 
     public OrchestratorGrantCache(
         IHttpClientFactory clients, AgentIdentitySettings settings, IConfiguration configuration,
-        ILogger<OrchestratorGrantCache> logger, TimeProvider? time = null)
+        ILogger<OrchestratorGrantCache> logger, TimeProvider? time = null, IHostEnvironment? environment = null)
     {
         _clients = clients;
         _settings = settings;
         _logger = logger;
         _time = time ?? TimeProvider.System;
+        _serviceName = (environment?.ApplicationName ?? "fleet-service").Replace('.', '-').ToLowerInvariant();
         var orchestrator = configuration[$"{AgentIdentitySettings.Section}:OrchestratorUrl"];
         if (string.IsNullOrWhiteSpace(orchestrator)) orchestrator = DefaultOrchestratorUrl;
-        _url = new Uri(orchestrator.TrimEnd('/') + "/internal/agent-mcp-grants");
+        _url = AgentIdentitySettings.BootstrapUrl(orchestrator, "/internal/agent-mcp-grants");
     }
 
     public async ValueTask<AgentGrantAnswer> GrantsOfAsync(string agent, CancellationToken ct)
@@ -84,7 +86,6 @@ public sealed class OrchestratorGrantCache : BackgroundService, IAgentGrantSourc
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!_settings.HasKey) return;
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -97,7 +98,6 @@ public sealed class OrchestratorGrantCache : BackgroundService, IAgentGrantSourc
     /// <summary>Reads the grants now. A read asked for by a call (not forced) waits its turn and is rate-limited.</summary>
     public async Task RefreshAsync(bool force, CancellationToken ct)
     {
-        if (!_settings.HasKey) return;
 
         var now = _time.GetTimestamp();
         if (!force)
@@ -113,6 +113,7 @@ public sealed class OrchestratorGrantCache : BackgroundService, IAgentGrantSourc
             using var bound = CancellationTokenSource.CreateLinkedTokenSource(ct);
             bound.CancelAfter(ReadBound);
             using var http = _clients.CreateClient(HttpClientName);
+            http.DefaultRequestHeaders.Authorization = new("Bearer", _settings.ServiceToken(_serviceName));
             var body = await http.GetFromJsonAsync<JsonElement>(_url, bound.Token);
             _snapshot = new Snapshot(Read(body), _time.GetUtcNow());
             if (_saidUnavailable)
@@ -149,9 +150,9 @@ public sealed class OrchestratorGrantCache : BackgroundService, IAgentGrantSourc
         {
             if (agent.Value.ValueKind != JsonValueKind.Array)
                 throw new JsonException("an agent's grants are not a list");
-            read[agent.Name] = [.. agent.Value.EnumerateArray()
-                .Where(g => g.ValueKind == JsonValueKind.String)
-                .Select(g => g.GetString()!)];
+            if (agent.Value.EnumerateArray().Any(g => g.ValueKind != JsonValueKind.String))
+                throw new JsonException("an agent's grants contain a non-string value");
+            read[agent.Name] = [.. agent.Value.EnumerateArray().Select(g => g.GetString()!)];
         }
         return read;
     }

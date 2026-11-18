@@ -56,6 +56,7 @@ public sealed class AgentMcpToolsEndpointsTests : IAsyncLifetime
         builder.Logging.ClearProviders();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
+                ["AgentIdentity:Key"] = new string('A', 43),
             ["Provisioning:EnvFilePath"] = _envFile,
             ["FleetMemory:McpUrl"] = "http://fleet-memory:3100/mcp",
         });
@@ -158,7 +159,7 @@ public sealed class AgentMcpToolsEndpointsTests : IAsyncLifetime
         Assert.Equal(JsonValueKind.Null, tools[1].GetProperty("description").ValueKind);
 
         var telegram = Assert.Single(_lister.Asked, t => t.Name == "fleet-telegram");
-        Assert.Equal("?agent=agent1&formatting_mode=0", telegram.Url.Query);
+        Assert.Equal("?formatting_mode=0", telegram.Url.Query);
     }
 
     [Fact]

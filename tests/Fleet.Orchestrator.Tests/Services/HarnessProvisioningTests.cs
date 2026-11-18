@@ -24,7 +24,13 @@ public sealed class HarnessProvisioningTests
             ContextWindow = url is null ? null : 131_072, HarnessExtra = extra,
         }));
         var result = await h.Service.ProvisionAsync("agent1");
-        Assert.True(result.Success, result.Message);
+        if (provider == "gemini")
+        {
+            Assert.False(result.Success);
+            Assert.Contains("mcp_headers_unsupported", result.Message);
+            Assert.Empty(h.CreateBodies);
+        }
+        else Assert.True(result.Success, result.Message);
         return h;
     }
 

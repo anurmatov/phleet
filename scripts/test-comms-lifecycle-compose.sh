@@ -8,6 +8,7 @@ trap 'rm -rf "$DIR"' EXIT
 mkdir -p "$DIR/repo/scripts/lib" "$DIR/repo/fleet" "$DIR/bin"
 cp "$ROOT/setup.sh" "$ROOT/upgrade.sh" "$ROOT/docker-compose.example.yml" "$DIR/repo/"
 cp "$ROOT"/scripts/lib/*.sh "$DIR/repo/scripts/lib/"
+cp "$ROOT/scripts/mint-identity-token.sh" "$DIR/repo/scripts/"
 REAL_DOCKER=$(command -v docker)
 export REAL_DOCKER CALLS="$DIR/calls" CONFIG="$DIR/config.json"
 cat > "$DIR/bin/docker" <<'WRAPPER'
@@ -64,7 +65,7 @@ FLEET_BASE_DIR=$DIR/repo/fleet
 FLEET_COMMS_ENABLED=$([[ "$mode" == disabled ]] && echo false || echo true)
 FLEET_COMMS_MEDIA_ENDPOINT=http://comms-seaweedfs:8333
 FLEET_COMMS_MEDIA_STORE=seaweedfs
-FLEET_AGENT_IDENTITY_KEY=synthetic-identity-key-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+FLEET_AGENT_IDENTITY_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ENV
   cp "$DIR/repo/fleet/.env" "$DIR/before"
   # Old generated definitions must not determine the new pin/services.

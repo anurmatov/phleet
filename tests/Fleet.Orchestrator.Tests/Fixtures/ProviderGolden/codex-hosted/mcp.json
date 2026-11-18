@@ -6,15 +6,24 @@
     },
     "fleet-telegram": {
       "type": "http",
-      "url": "http://fleet-telegram:3800/mcp?agent=agent-golden\u0026formatting_mode=0"
+      "url": "http://fleet-telegram:3800/mcp?formatting_mode=0",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-golden.eYslz5a4PWrtlH0sZ7mCyutFHtulMyiT0ZOYGNSilBE"
+      }
     },
     "fleet-temporal": {
       "type": "http",
-      "url": "http://fleet-temporal-bridge:3001/mcp?agent=agent-golden"
+      "url": "http://fleet-temporal-bridge:3001/mcp",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-golden.eYslz5a4PWrtlH0sZ7mCyutFHtulMyiT0ZOYGNSilBE"
+      }
     },
     "fleet-memory": {
       "type": "http",
-      "url": "http://fleet-memory:3100?agent=agent-golden"
+      "url": "http://fleet-memory:3100",
+      "headers": {
+        "Authorization": "Bearer fa1.agent.agent-golden.eYslz5a4PWrtlH0sZ7mCyutFHtulMyiT0ZOYGNSilBE"
+      }
     }
   }
 }

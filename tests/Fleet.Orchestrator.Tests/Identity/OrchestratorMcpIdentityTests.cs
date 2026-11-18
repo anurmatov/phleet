@@ -75,6 +75,8 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
         builder.Services.AddSingleton<ISecretHasher>(new Argon2idSecretHasher(memoryKib: 64, iterations: 1));
         builder.Services.AddFleetSignIn(durable: true);
         builder.Services.AddAgentIdentity(builder.Configuration);
+        builder.Services.AddSingleton<MemoryProxyService>();
+        builder.Services.AddHttpClient();
         builder.Services.AddSingleton<DbAgentGrantSource>();
         builder.Services.AddSingleton<IAgentGrantSource>(sp => sp.GetRequiredService<DbAgentGrantSource>());
         builder.Services.Configure<Fleet.Orchestrator.Configuration.RabbitMqOptions>(o => { o.Host = ""; o.Exchange = ""; });
@@ -98,8 +100,10 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
         // The production order: sign-in first, then who the MCP caller is.
         _app.UseFleetAccess();
         _app.UseMcpAgentIdentity();
+        _app.UseServiceIdentity(AgentIdentityEndpoints.IsAuthorizationBootstrap);
         _app.MapMcp(OrchestratorMcp.Path);
         _app.MapAgentIdentityEndpoints();
+        _app.MapMemoryEndpoints();
         await _app.StartAsync();
     }
 
@@ -190,22 +194,37 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
 
     /// <summary>A configuration from before the header still works while tokens are not required, and is refused once they are.</summary>
     [Theory]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    public async Task SetConfigValues_ByTheConfigTokenAsBearer_WorksOnlyWhileTokensAreNotRequired(bool enforce, bool served)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SetConfigValues_ConfigTokenAloneIsNeverIdentity(bool enforce)
     {
         await StartAsync(enforce);
+        Assert.Equal(HttpStatusCode.Unauthorized, await ListStatusAsync(ConfigToken));
+    }
 
-        if (served)
+    [Theory]
+    [InlineData("/internal/agent-mcp-grants")]
+    [InlineData("/internal/agent-project-access")]
+    [InlineData("/internal/agent-mcp-grants/")]
+    [InlineData("/internal/agent-project-access/")]
+    public async Task Bootstrap_ServiceOnly_ThenDatabase(string path)
+    {
+        await StartAsync(enforce: false);
+        using var http = _app.GetTestClient();
+        async Task<HttpStatusCode> Read(string? token)
         {
-            await using var legacy = await ConnectAsync(ConfigToken);
-            Assert.Contains("EXAMPLE_SETTING", await CallAsync(legacy, "set_config_values", ConfigWrite("legacy")));
-            Assert.Contains("EXAMPLE_SETTING=legacy", await File.ReadAllTextAsync(_envFile));
+            using var request = new HttpRequestMessage(HttpMethod.Get, path);
+            if (token is not null) request.Headers.Authorization = new("Bearer", token);
+            using var response = await http.SendAsync(request);
+            return response.StatusCode;
         }
-        else
-        {
-            Assert.Equal(HttpStatusCode.Unauthorized, await ListStatusAsync(ConfigToken));
-        }
+        Assert.Equal(HttpStatusCode.Unauthorized, await Read(null));
+        Assert.Equal(HttpStatusCode.Unauthorized, await Read("fa1.service.operator.invalid"));
+        Assert.Equal(HttpStatusCode.Forbidden, await Read(AgentToken("worker")));
+        var service = AgentIdentityTokens.Mint(Key, "service", "operator");
+        Assert.Equal(HttpStatusCode.OK, await Read(service));
+        await _connection.CloseAsync();
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, await Read(service));
     }
 
     [Fact]
@@ -295,13 +314,10 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task WhileTokensAreNotRequired_ACallerWithoutOneIsServedAsBefore_AndAnAgentWithOneIsHeldToItsGrants()
+    public async Task RetiredFalse_DoesNotAllowUnsignedCalls()
     {
         await StartAsync(enforce: false);
-
-        await using (var legacy = await ConnectAsync(bearer: null))
-            Assert.Equal("updated", await CallAsync(legacy, "update_agent_config"));
-
+        Assert.Equal(HttpStatusCode.Unauthorized, await ListStatusAsync(null));
         await using var worker = await ConnectAsync(AgentToken("worker"));
         Assert.StartsWith("ERROR " + AgentToolAuthorization.NotGrantedCode, await CallAsync(worker, "update_agent_config"));
     }
@@ -312,6 +328,7 @@ public sealed class OrchestratorMcpIdentityTests : IAsyncLifetime
         await StartAsync();
         using var http = _app.GetTestClient();
 
+        http.DefaultRequestHeaders.Authorization = new("Bearer", AgentIdentityTokens.Mint(Key, "service", "operator"));
         var body = await http.GetFromJsonAsync<JsonElement>("/internal/agent-mcp-grants");
 
         var worker = body.GetProperty("agents").GetProperty("worker").EnumerateArray().Select(g => g.GetString()).ToList();

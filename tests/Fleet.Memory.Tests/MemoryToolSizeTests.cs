@@ -48,7 +48,7 @@ public sealed class MemoryToolSizeTests : IDisposable
 
     private static AclCacheService DisabledAcl()
     {
-        var acl = new AclCacheService(Options.Create(new AclOptions()), Options.Create(new OrchestratorOptions()), NullLogger<AclCacheService>.Instance);
+        var acl = new AclCacheService(Options.Create(new AclOptions()), Options.Create(new OrchestratorOptions()), NullLogger<AclCacheService>.Instance, new Fleet.Shared.Mcp.AgentIdentitySettings([new byte[32]]));
         acl.InjectAclForTesting([]);
         return acl;
     }

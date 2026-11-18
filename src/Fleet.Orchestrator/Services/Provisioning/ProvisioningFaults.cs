@@ -9,6 +9,27 @@ namespace Fleet.Orchestrator.Services;
 /// </summary>
 internal static class ProvisioningFaults
 {
+    internal static string? DescribeIdentityFault(Agent agent, IConfiguration config)
+    {
+        if (!AgentConfigFiles.SupportsMcpHeaders(agent.Provider))
+            return "mcp_headers_unsupported: this provider cannot send required native MCP identity headers";
+        if (!AgentIdentityTokens.IsValidSubject(agent.Name))
+            return "agent_identity_subject_invalid: the agent name cannot be signed";
+        var origins = AgentConfigFiles.IdentityOrigins(config);
+        var endpoints = agent.McpEndpoints.Where(e => AgentConfigFiles.IsIdentityServer(e.McpName)).Select(e => e.Url);
+        if (!agent.McpEndpoints.Any(e => e.McpName.Equals("fleet-memory", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Validate the configured implicit origin before normalization can hide an invalid URI.
+            var raw = config["FleetMemory:McpUrl"];
+            if (raw is not null && (!Uri.TryCreate(raw, UriKind.Absolute, out var uri)
+                || uri.UserInfo.Length != 0 || (uri.Scheme != "http" && uri.Scheme != "https")))
+                return "agent_identity_origin_untrusted: implicit memory requires a trusted HTTP(S) destination";
+            endpoints = endpoints.Append(AgentConfigFiles.NormalizeFleetMemoryMcpUrl(raw));
+        }
+        return endpoints.Any(url => !AgentConfigFiles.IsIdentityDestination(url, origins))
+            ? "agent_identity_origin_untrusted: a built-in MCP endpoint has an untrusted destination" : null;
+    }
+
     internal static IEnumerable<string> SendWarnings(Agent agent)
     {
         if (JournalGrants.HasSendGrant(agent) && !JournalGrants.SendEffective(agent))

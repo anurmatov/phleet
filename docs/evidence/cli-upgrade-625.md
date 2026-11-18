@@ -1,6 +1,6 @@
 # CLI upgrade #625 — 2026-11-18
 
-Source-only qualification remains incomplete until the native checks below and exact-head CI pass.
+Native CLI checks below now pass; acceptance still requires green exact-head CI, including the Docker fixture and full test suite.
 No deployment, stored-model rewrite, credential change or reprovision was performed.
 
 ## Pins and upstream review
@@ -47,13 +47,28 @@ Both npm versions generated their own `app-server generate-json-schema` output, 
 | Codex real 0.170.0 harness | 10 config-key discriminators, negative control, tool-removal request capture and catalog/alias checks pass |
 | Claude real 2.1.327 local wire | all seven rows pass, including pre-fix negative control and inherited-effort override |
 | Claude alias init over synthetic endpoint | old/new `opus`: `claude-opus-5-5`; `sonnet`: `claude-sonnet-5` → `claude-sonnet-5-5`; `haiku`: `claude-haiku-4-5-20251001` → `claude-haiku-5-5`; initialization is not API model-acceptance proof |
-| Claude real stream-json | two synthetic turns through the existing local wire stub return parsed final `result=ok`; file prompt and executor input/output/model/turn-limit flags accepted |
+| Claude real stream-json | two synthetic turns return parsed final `result=ok`; a delayed version of the existing wire stub accepts a second stdin message while the first request is active, then emits two non-error final results; a process-restarted `--resume` retains the session and returns `ok` |
 | GPT-6.2 actual inference | both `gpt-6.2-sol` and `gpt-6.2-astra` complete fresh and process-restarted resumed app-server turns using an isolated temporary home; `turn/steer` accepts the matching active turn ID on both |
 | agent focused tests | 742 pass, including the two new explicit-ID regression rows |
 | effective-harness endpoint | 18 pass |
 | agent build | zero errors |
 | full agent suite | 2,778 pass, eight listener tests fail because their fixed loopback listener cannot bind; no tests disabled |
+| native signed reads, Codex 0.170.0 | one successful `memory_search` call on each actual GPT-6.2 model with the existing caller header/grant; both tool items and turns complete without errors; no response contents published |
+| native signed read, Claude 2.1.327 | actual CLI discovers and calls the existing read-only tool through its native HTTP MCP client; one read returns a non-error tool result, then the synthetic model returns a successful final result; no hosted Claude inference claimed |
 | production-rendered signed native MCP fixture | local prerequisite exit 2: Docker daemon unavailable; existing image CI invokes this fixture with the new pins |
-| remaining | signed native MCP success/negative controls, GPT-6.2 native read-only MCP calls, Claude live mid-turn/resume acceptance and green exact-head CI |
+| remaining | Docker forwarding/negative-control fixture and full-suite result in [CI at the source head](https://github.com/anurmatov/phleet/actions/runs/44245019539), then fresh exact-head CI after this evidence-only update |
 
 Historical fixtures and dated provider receipts retain their original versions rather than being relabelled.
+
+## Follow-up probe boundaries
+
+| observation | disposition |
+|---|---|
+| initial Codex read-only sandbox probe | native tool items fail even though the turn completes; not counted as passing |
+| production Codex sandbox setting | `danger-full-access`, matching the executor; both models then complete one native read each with non-error tool items |
+| initial Claude synthetic responder | did not load the deferred MCP tool, then repeated requests until the turn cap; not a CLI failure or passing evidence |
+| corrected responder | requests `ToolSearch` first, then exactly one read and a final answer; validates the final native tool result is non-error |
+| local listener failures | existing workspace listener occupies fixed loopback port 8091; no listener stopped, test skipped or production code changed |
+| remote CI at this update | schema drift and MySQL migration jobs passed; image/native fixture and Build and Test still running when checked, not counted as passes |
+
+The follow-up probes reuse the existing local wire stub with temporary delay/tool-response handling and isolated CLI homes, rather than adding a runtime integration framework.

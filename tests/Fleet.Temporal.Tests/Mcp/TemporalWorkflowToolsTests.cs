@@ -39,8 +39,8 @@ public sealed class TemporalWorkflowToolsTests
 
     /// <summary>
     /// Stands in for the Temporal describe. Defaults to a workflow parked at the design gate, and
-    /// counts calls so a test can prove the lookup never happens for merge-approval or for a call
-    /// that an earlier identity, config or payload check already blocked.
+    /// counts calls so a test can prove the lookup never happens for a call that an earlier
+    /// identity, config or payload check already blocked.
     /// </summary>
     private sealed class FakeGateStateReader : IWorkflowGateStateReader
     {
@@ -68,6 +68,14 @@ public sealed class TemporalWorkflowToolsTests
         public required FakeGateStateReader GateReader { get; init; }
         public string? SentSignal { get; set; }
         public IReadOnlyCollection<object?>? SentArgs { get; set; }
+    }
+
+    /// <summary>The same tool with the run reporting that it is parked at its merge gate.</summary>
+    private static ToolContext BuildToolAtMergeGate(string ctoAgent = "cto-agent", string? caller = "cto-agent")
+    {
+        var context = BuildTool(ctoAgent, caller);
+        context.GateReader.Phase = "merge-approval";
+        return context;
     }
 
     private static ToolContext BuildTool(string ctoAgent = "cto-agent", string? caller = "cto-agent")
@@ -124,7 +132,7 @@ public sealed class TemporalWorkflowToolsTests
     [Fact]
     public async Task SignalWorkflowAsync_CtoChangesRequestedWithComment_SendsCanonicalSignalAndPayload()
     {
-        var context = BuildTool(ctoAgent: "cto-agent", caller: "CTO-AGENT");
+        var context = BuildToolAtMergeGate(ctoAgent: "cto-agent", caller: "CTO-AGENT");
         const string payload = "{\"Decision\":\"changes_requested\",\"Comment\":\"needs a runtime fix\"}";
 
         var result = await context.Tool.SignalWorkflowAsync(
@@ -325,7 +333,7 @@ public sealed class TemporalWorkflowToolsTests
     [InlineData("Merge-Approval")]
     public async Task SignalWorkflowAsync_NonCanonicalMergeApprovalName_SendsCanonicalName(string signalName)
     {
-        var context = BuildTool();
+        var context = BuildToolAtMergeGate();
 
         var result = await context.Tool.SignalWorkflowAsync(
             "workflow-1",
@@ -589,26 +597,174 @@ public sealed class TemporalWorkflowToolsTests
         AssertNonceNeverLogged(context);
     }
 
-    /// <summary>AC2b. merge-approval never describes the workflow, whatever its state would say.</summary>
-    [Fact]
-    public async Task SignalWorkflowAsync_MergeFeedback_NeverReadsGateState()
+    // ── CTO merge-approval feedback: only where the run reads it ─────────────
+
+    private const string ExactMergeFeedback = "{\"Decision\":\"changes_requested\",\"Comment\":\"" + FeedbackNonce + "\"}";
+
+    private static void AssertBlockedMergeWarning(ToolContext context) =>
+        Assert.Single(context.Logger.Entries, entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.StartsWith("Blocked merge-approval signal for workflow workflow-1;", StringComparison.Ordinal));
+
+    /// <summary>
+    /// Sent while the run is parked at its merge gate, and while it holds an approved merge: the
+    /// hold reads the feedback and sends the PR back. One describe, then the signal.
+    /// </summary>
+    [Theory]
+    [InlineData("merge-approval")]
+    [InlineData("merge-hold")]
+    public async Task SignalWorkflowAsync_MergeFeedbackWhereTheRunReadsIt_IsSent(string phase)
     {
         var context = BuildTool();
-        context.GateReader.Throws = new InvalidOperationException("must not be called");
+        context.GateReader.Phase = phase;
 
-        var result = await context.Tool.SignalWorkflowAsync(
-            "workflow-1",
-            "merge-approval",
-            "{\"Decision\":\"changes_requested\",\"Comment\":\"fix it\"}");
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", ExactMergeFeedback);
 
         Assert.Equal("merge-approval", context.SentSignal);
+        var arg = Assert.IsType<JsonElement>(Assert.Single(context.SentArgs!));
+        Assert.Equal("changes_requested", arg.GetProperty("Decision").GetString());
+        Assert.Equal(FeedbackNonce, arg.GetProperty("Comment").GetString());
         Assert.Equal("signalled", JsonDocument.Parse(result).RootElement.GetProperty("status").GetString());
+        Assert.Equal(1, context.GateReader.Calls);
+        AssertNonceNeverLogged(context);
+    }
+
+    /// <summary>
+    /// Running, in any other phase: nothing reads merge-approval there, so the engine would buffer
+    /// the feedback for a later gate or for nobody. Refused with the status and phase, nothing sent.
+    /// <c>merging</c> is the run saying the merge command is being issued: too late.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "phase=missing")]
+    [InlineData("", "phase=missing")]
+    [InlineData("implementing", "phase=implementing")]
+    [InlineData("consensus-review", "phase=consensus-review")]
+    [InlineData("revision", "phase=revision")]
+    [InlineData("merging", "phase=merging")]
+    [InlineData("technical-stalled", "phase=technical-stalled")]
+    [InlineData("human-review", "phase=human-review")]
+    [InlineData("design-approval", "phase=design-approval")]
+    [InlineData("Merge-Approval", "phase=Merge-Approval")]
+    [InlineData("merge-hold ", "phase=merge-hold ")]
+    public async Task SignalWorkflowAsync_MergeFeedbackWhereTheRunDoesNotReadIt_IsRefused(string? phase, string expectedPhase)
+    {
+        var context = BuildTool();
+        context.GateReader.Phase = phase;
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", ExactMergeFeedback);
+
+        Assert.Equal(
+            "Error: 'merge-approval' remains a CEO-only gate because the workflow is not at the merge-approval gate or in its merge hold " +
+            $"(status=Running, {expectedPhase}). " +
+            "Only the configured CTO agent may send Decision 'changes_requested' with a nonblank Comment via this tool.",
+            result);
+        Assert.Null(context.SentSignal);
+        await context.Handle.DidNotReceiveWithAnyArgs().SignalAsync(default!, default!, default);
+        Assert.Equal(1, context.GateReader.Calls);
+        AssertBlockedMergeWarning(context);
+        AssertNonceNeverLogged(context);
+    }
+
+    /// <summary>A run that is not Running reads nothing, whatever phase it last reported.</summary>
+    [Theory]
+    [InlineData(WorkflowExecutionStatus.Completed, "merge-approval")]
+    [InlineData(WorkflowExecutionStatus.Failed, "merge-hold")]
+    [InlineData(WorkflowExecutionStatus.Canceled, "merge-hold")]
+    [InlineData(WorkflowExecutionStatus.Terminated, "merge-approval")]
+    [InlineData(WorkflowExecutionStatus.TimedOut, "merge-approval")]
+    [InlineData(WorkflowExecutionStatus.ContinuedAsNew, "merge-approval")]
+    [InlineData(WorkflowExecutionStatus.Paused, "merge-hold")]
+    public async Task SignalWorkflowAsync_MergeFeedbackToARunThatIsNotRunning_IsRefused(WorkflowExecutionStatus status, string phase)
+    {
+        var context = BuildTool();
+        context.GateReader.Status = status;
+        context.GateReader.Phase = phase;
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", ExactMergeFeedback);
+
+        Assert.Contains(
+            $"the workflow is not at the merge-approval gate or in its merge hold (status={status}, phase={phase})",
+            result);
+        Assert.Null(context.SentSignal);
+        AssertBlockedMergeWarning(context);
+        AssertNonceNeverLogged(context);
+    }
+
+    /// <summary>A describe that fails or times out refuses, and only the exception's type is echoed.</summary>
+    [Theory]
+    [MemberData(nameof(DescribeTimeouts))]
+    public async Task SignalWorkflowAsync_MergeGateLookupFailsOrTimesOut_IsRefusedWithZeroSignals(Exception failure, string expectedType)
+    {
+        var context = BuildToolAtMergeGate();
+        context.GateReader.Throws = failure;
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", ExactMergeFeedback);
+
+        Assert.Contains($"'merge-approval' remains a CEO-only gate because the workflow gate could not be verified ({expectedType})", result);
+        Assert.DoesNotContain("timeout-detail-must-not-be-echoed", result);
+        Assert.DoesNotContain(FeedbackNonce, result);
+        Assert.Null(context.SentSignal);
+        await context.Handle.DidNotReceiveWithAnyArgs().SignalAsync(default!, default!, default);
+        AssertBlockedMergeWarning(context);
+        Assert.DoesNotContain(context.Logger.Entries, entry => entry.Message.Contains("timeout-detail-must-not-be-echoed"));
+        AssertNonceNeverLogged(context);
+    }
+
+    [Fact]
+    public async Task SignalWorkflowAsync_MergeGateLookupInvalidOperation_IsRefused()
+    {
+        var context = BuildToolAtMergeGate();
+        context.GateReader.Throws = new InvalidOperationException("lookup-detail-must-not-be-echoed");
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", ExactMergeFeedback);
+
+        Assert.Contains("the workflow gate could not be verified (InvalidOperationException)", result);
+        Assert.DoesNotContain("lookup-detail-must-not-be-echoed", result);
+        Assert.Null(context.SentSignal);
+        AssertBlockedMergeWarning(context);
+    }
+
+    /// <summary>The identity, config and payload checks come first and never reach Temporal.</summary>
+    [Theory]
+    [InlineData("cto-agent", "other-agent", ExactMergeFeedback)]
+    [InlineData("cto-agent", null, ExactMergeFeedback)]
+    [InlineData("", "cto-agent", ExactMergeFeedback)]
+    [InlineData("cto-agent", "cto-agent", "{\"Decision\":\"approved\",\"Comment\":\"x\"}")]
+    [InlineData("cto-agent", "cto-agent", "{\"Decision\":\"changes_requested\"}")]
+    public async Task SignalWorkflowAsync_MergeFeedbackBlockedEarlier_NeverDescribesTheRun(string ctoAgent, string? caller, string payload)
+    {
+        var context = BuildToolAtMergeGate(ctoAgent, caller);
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", payload);
+
+        Assert.StartsWith("Error: 'merge-approval' remains a CEO-only gate because ", result);
+        Assert.Null(context.SentSignal);
         Assert.Equal(0, context.GateReader.Calls);
     }
 
     /// <summary>
+    /// The design gate is as it was: its feedback is read at <c>design-approval</c> only, and the
+    /// merge hold's phase does not open it.
+    /// </summary>
+    [Theory]
+    [InlineData("merge-approval")]
+    [InlineData("merge-hold")]
+    public async Task SignalWorkflowAsync_DesignFeedback_IsNotOpenedByAMergePhase(string phase)
+    {
+        var context = BuildTool();
+        context.GateReader.Phase = phase;
+
+        var result = await context.Tool.SignalWorkflowAsync("workflow-1", "design-approval", ExactDesignFeedback);
+
+        Assert.Contains($"the workflow is not waiting at the design-approval gate (status=Running, phase={phase})", result);
+        Assert.Null(context.SentSignal);
+        AssertBlockedDesignWarning(context);
+    }
+
+    /// <summary>
     /// AC6. The merge-approval strings are pinned to their pre-#430 text, rendered and template
-    /// alike, so a gate-parametrised refactor cannot drift them.
+    /// alike, so a gate-parametrised refactor cannot drift them. The allowed line is that of a run
+    /// at its merge gate.
     /// </summary>
     [Fact]
     public async Task SignalWorkflowAsync_MergeFeedbackStrings_AreUnchanged()
@@ -618,7 +774,7 @@ public sealed class TemporalWorkflowToolsTests
         const string blockedTemplate =
             "Blocked merge-approval signal for workflow {WorkflowId}; signal={Signal}; decision={Decision}; caller={Caller}";
 
-        var allowed = BuildTool();
+        var allowed = BuildToolAtMergeGate();
         await allowed.Tool.SignalWorkflowAsync(
             "workflow-1",
             "merge-approval",

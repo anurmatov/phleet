@@ -285,7 +285,9 @@ public sealed partial class PrReadinessHoldTests
             {
                 if (node is System.Text.Json.Nodes.JsonObject o)
                 {
-                    if (o["type"]?.ToString() == "wait_for_signal" && o["signalName"]?.ToString() is "human-review" or "merge-approval")
+                    // A human wait has a phase. The merge hold's reads of late feedback have none
+                    // and no reminders: they are not waits for a person and keep their own length.
+                    if (o["type"]?.ToString() == "wait_for_signal" && o["phase"] is not null && o["signalName"]?.ToString() is "human-review" or "merge-approval")
                     {
                         var interval = (int)o["reminderIntervalMinutes"]!;
                         var count = (int)o["maxReminders"]!;

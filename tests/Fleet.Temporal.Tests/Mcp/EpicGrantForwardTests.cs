@@ -49,12 +49,13 @@ public sealed class EpicGrantForwardTests
     private sealed class FakeGateStateReader : IWorkflowGateStateReader
     {
         public int Calls { get; private set; }
+        public string? Phase { get; set; } = "design-approval";
 
         public Task<(WorkflowExecutionStatus Status, string? Phase)> ReadAsync(
             WorkflowHandle handle, CancellationToken cancellationToken = default)
         {
             Calls++;
-            return Task.FromResult((WorkflowExecutionStatus.Running, (string?)"design-approval"));
+            return Task.FromResult((WorkflowExecutionStatus.Running, Phase));
         }
     }
 
@@ -416,6 +417,7 @@ public sealed class EpicGrantForwardTests
     {
         var forwarder = new FakeForwarder();
         var context = BuildTool(forwarder);
+        context.GateReader.Phase = "merge-approval";   // the feedback path now asks where the run is
         const string payload = "{\"Decision\":\"changes_requested\",\"Comment\":\"fix it\"}";
 
         var result = await context.Tool.SignalWorkflowAsync("workflow-1", "merge-approval", payload);

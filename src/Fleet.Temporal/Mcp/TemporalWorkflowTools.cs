@@ -49,6 +49,13 @@ public sealed class TemporalWorkflowTools(
     private static readonly string[] FeedbackEligibleGates = [MergeApprovalSignal, DesignApprovalSignal];
 
     /// <summary>
+    /// The phases in which a run reads <c>merge-approval</c> feedback: parked at the merge gate, and
+    /// in the merge hold, where the hold takes it, voids an approval already given and sends the PR
+    /// back. In any other phase the engine would buffer it, unread, for a later gate.
+    /// </summary>
+    private static readonly string[] MergeFeedbackPhases = [MergeApprovalSignal, "merge-hold"];
+
+    /// <summary>
     /// Signals that are exclusively for CEO approval, apart from the narrow CTO changes-requested exception.
     /// All other uses of these gates must go through the fleet dashboard (orchestrator REST API), which is auth-gated.
     ///
@@ -229,7 +236,10 @@ public sealed class TemporalWorkflowTools(
         "'merge-approval', 'doc-review', 'design-approval', 'advisory-review', 'acceptance-decision', 'request-approval', 'request-input'. " +
         "There are two exceptions, both only for the currently configured CTO agent resolved from the MCP request. " +
         "(a) Feedback: 'merge-approval' or 'design-approval' with Decision exactly 'changes_requested' and a nonblank Comment. " +
-        "'design-approval' feedback is accepted only while the workflow is Running and waiting at its design-approval gate (Phase 'design-approval'); otherwise it is refused and nothing is sent. " +
+        "Feedback is accepted only where the workflow reads it, and is otherwise refused with nothing sent: " +
+        "'design-approval' while the workflow is Running and waiting at its design-approval gate (Phase 'design-approval'); " +
+        "'merge-approval' while it is Running at its merge gate (Phase 'merge-approval') or in its merge hold (Phase 'merge-hold'), where it voids an approval already given and sends the PR back for changes. " +
+        "Once the merge command is being issued (Phase 'merging') it is too late and is refused. " +
         "(b) Delegated approval under an epic grant: 'merge-approval', 'design-approval' or 'doc-review' with {\"Decision\":\"approved\",\"GrantId\":\"<grant id>\",\"VisitId\":\"<GateVisit>\",\"ArtifactRef\":\"<ReviewRef>\",\"Evidence\":\"<https url>\"}. " +
         "This tool does not signal it: it is forwarded to the orchestrator, which decides it under an active epic grant and sends nothing on refusal. The tool returns status 'delegated' with the orchestrator's result and reason. " +
         "Approval without a GrantId, and every rejection, remain CEO-only; 'advisory-review' has no exception. All other CEO-only gate decisions must be sent from the fleet dashboard by the CEO.")]
@@ -316,15 +326,12 @@ public sealed class TemporalWorkflowTools(
                 var client = await clientFactory.GetClientAsync(@namespace);
                 var handle = client.GetWorkflowHandle(workflow_id);
 
-                // design-approval only. merge-approval gets no describe and stays byte-identical.
-                if (feedbackGate == DesignApprovalSignal)
+                // Both gates: one describe, and feedback goes only to a run that will read it.
+                var gateBlockReason = await GetFeedbackGateBlockReasonAsync(handle, feedbackGate);
+                if (gateBlockReason is not null)
                 {
-                    var gateBlockReason = await GetDesignGateBlockReasonAsync(handle);
-                    if (gateBlockReason is not null)
-                    {
-                        LogBlockedFeedback(feedbackGate, workflow_id, signal_name, decision, caller);
-                        return FeedbackBlockedError(feedbackGate, gateBlockReason);
-                    }
+                    LogBlockedFeedback(feedbackGate, workflow_id, signal_name, decision, caller);
+                    return FeedbackBlockedError(feedbackGate, gateBlockReason);
                 }
 
                 LogAllowedFeedback(feedbackGate, workflow_id, signal_name, decision, caller);
@@ -400,12 +407,17 @@ public sealed class TemporalWorkflowTools(
         $"Only the configured CTO agent may send Decision '{ChangesRequestedDecision}' with a nonblank Comment via this tool.";
 
     /// <summary>
-    /// Returns null only when the workflow is Running and reports <c>Phase == "design-approval"</c>.
-    /// Any lookup failure blocks: a feedback sent while the workflow is not parked at the gate is
-    /// buffered by the engine and consumed at the next gate entry, before the CEO is notified (#430).
+    /// Returns null only when the workflow is Running and reports a <c>Phase</c> in which it reads
+    /// feedback on <paramref name="gate"/>: <c>design-approval</c> for the design gate (#430);
+    /// <c>merge-approval</c> or <c>merge-hold</c> for the merge gate (<see cref="MergeFeedbackPhases"/>).
+    /// Any lookup failure blocks: a feedback sent while the workflow is not reading it is buffered
+    /// by the engine and consumed at the next gate entry, before the CEO is notified, or never.
     /// The exception message is never echoed, only its type name.
+    ///
+    /// The describe and the signal are two calls. A run can leave the phase between them, so this
+    /// narrows the window in which feedback is accepted and not read; it does not close it.
     /// </summary>
-    private async Task<string?> GetDesignGateBlockReasonAsync(WorkflowHandle handle)
+    private async Task<string?> GetFeedbackGateBlockReasonAsync(WorkflowHandle handle, string gate)
     {
         WorkflowExecutionStatus status;
         string? phase;
@@ -418,14 +430,18 @@ public sealed class TemporalWorkflowTools(
             return $"the workflow gate could not be verified ({ex.GetType().Name})";
         }
 
+        var readPhases = gate == MergeApprovalSignal ? MergeFeedbackPhases : [DesignApprovalSignal];
+
         if (status == WorkflowExecutionStatus.Running &&
-            string.Equals(phase, DesignApprovalSignal, StringComparison.Ordinal))
+            readPhases.Contains(phase, StringComparer.Ordinal))
         {
             return null;
         }
 
-        return $"the workflow is not waiting at the design-approval gate " +
-               $"(status={status}, phase={(string.IsNullOrEmpty(phase) ? "missing" : phase)})";
+        var where = gate == MergeApprovalSignal
+            ? "the workflow is not at the merge-approval gate or in its merge hold"
+            : "the workflow is not waiting at the design-approval gate";
+        return $"{where} (status={status}, phase={(string.IsNullOrEmpty(phase) ? "missing" : phase)})";
     }
 
     // Two literal templates per log line, selected by gate, so both the rendered text and the

@@ -506,8 +506,13 @@ Opt-in (`FLEET_EPIC_GRANTS_ENABLED`, default false) run-scoped delegation of `de
 `review_ref`/`ReviewRef`. The bridge forwards the CTO's `approved` + `GrantId` to the orchestrator
 (`EpicGrantService`, D1–D11, unique visit key, one send, no retry); no MCP tool creates or revokes
 grants. A payload without `GrantId`, a wait without `visitVar` and a run outside an active grant
-behave exactly as before. See `docs/epic-grants.md` (threat model, scope, checks, deploy rule:
-no bridge restart during consensus).
+behave exactly as before. A gate is delegable only when every `wait_for_signal` on its signal is
+its fully guarded gate or a refusing wait (`EpicJson.GuardedGates`): a wait that reads a gate's
+signal without being a visit of it (the PR definition's reads of late merge feedback) carries
+`"delegatedGuard": {"marker": "GrantId", "refuse": true}`, no `visitVar`, no `require`, and the
+engine discards every delegated payload there. MUST NOT add any other wait on a delegable gate's
+signal: it switches that gate's delegation off. See `docs/epic-grants.md` (threat model, scope,
+checks, deploy rule: no bridge restart during consensus).
 
 ## Push notifications
 

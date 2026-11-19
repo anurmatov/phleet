@@ -170,7 +170,9 @@ public sealed class GetUweReferenceTool
         - `phase`: sets Phase search attribute while waiting (dashboard visibility)
         - `reminderIntervalMinutes`: how often to fire `notifyStep` while waiting
         - `maxReminders`: max reminder notifications (default 3)
-        - `autoCompleteOnTimeout`: if true, returns `{"Decision":"timeout"}` instead of throwing
+        - `autoCompleteOnTimeout`: if true, returns `{"Decision":"timeout"}` instead of throwing.
+          With `timeoutMinutes: 0` it is a read without waiting: a signal already buffered is
+          returned, otherwise the timeout is, at once and with no timer
         - `notifyStep`: a delegate step executed before waiting and on each reminder tick
         - `bindTo`: correlation value this wait expects in the resolving payload, resolved ONCE at wait
           entry. Three-state, and OMITTED is not the same as empty:
@@ -206,6 +208,15 @@ public sealed class GetUweReferenceTool
           the warning `delegated signal discarded: stale visit or artifact` and the wait keeps
           waiting — same slice end, same reminder count, same total timeout. `require` must
           contain `VisitId`; `marker` must be non-blank.
+        - `delegatedGuard` with `refuse` — `{"marker":"GrantId","refuse":true}` — is for a wait that
+          reads a gate's signal WITHOUT being a visit of that gate (feedback that arrives after the
+          gate was decided, say). Every payload carrying the marker is discarded there, with the
+          warning `delegated signal discarded: this wait accepts no delegated decision`, wherever
+          the wait meets it; a payload without the marker is consumed as on any wait. Such a wait
+          has no `visitVar` and no `require` entries (a definition-LOAD error otherwise): it mints
+          no visit and publishes no `GateVisit`. A gate stays delegable under an epic grant only
+          if every wait on its signal is either its fully guarded gate or a refusing wait like
+          this, so a second, unguarded wait on a gate's signal switches the gate's delegation off.
 
         ### 11. child_workflow
         Starts a child workflow and waits for it to complete.

@@ -41,9 +41,11 @@ public sealed partial class ServiceCredentialWiringTests
     {
         Assert.Equal(["fleet-memory"], ServicesThatAreGiven("FLEET_QDRANT_API_KEY"));
         Assert.Contains("      - Qdrant__ApiKey=${FLEET_QDRANT_API_KEY:-}\n", Services()["fleet-memory"]);
-        // Its address, with what it always was as the default.
+        // Its address: only what .env gives, and beside it the default a keyless start uses (a key
+        // never uses it: IndexConnectionTests starts fleet-memory with these lines).
         Assert.Equal(["fleet-memory"], ServicesThatAreGiven("FLEET_QDRANT_URL"));
-        Assert.Contains("      - Qdrant__Url=${FLEET_QDRANT_URL:-http://qdrant:6334}\n", Services()["fleet-memory"]);
+        Assert.Contains("      - Qdrant__Url=${FLEET_QDRANT_URL:-}\n", Services()["fleet-memory"]);
+        Assert.Contains("      - Qdrant__DefaultUrl=http://qdrant:6334\n", Services()["fleet-memory"]);
     }
 
     [Fact]
@@ -77,7 +79,7 @@ public sealed partial class ServiceCredentialWiringTests
     {
         var example = Read(".env.example");
 
-        Assert.Contains("\n#FLEET_QDRANT_URL=http://qdrant:6334\n", example);
+        Assert.Contains("\n#FLEET_QDRANT_URL=https://qdrant.example.internal:6334\n", example);
         Assert.Contains("\n#FLEET_QDRANT_API_KEY=\n", example);
         Assert.Contains("\n#FLEET_TEMPORAL_BEARER_TOKEN=\n", example);
         Assert.DoesNotMatch(@"(?m)^\s*FLEET_(QDRANT_API_KEY|QDRANT_URL|TEMPORAL_BEARER_TOKEN)=", example);

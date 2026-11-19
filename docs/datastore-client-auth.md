@@ -8,7 +8,8 @@ fleet-memory and runs workflows through the Temporal bridge, which know who it i
 A deployment that puts a credential in front of either server can give Fleet's own services that
 credential to present:
 
-- fleet-memory can send Qdrant an **API key**, over TLS only;
+- fleet-memory can send Qdrant an **API key**, over TLS, or over plaintext on a trusted private
+  network when the URL explicitly says `http`;
 - the orchestrator and the Temporal bridge can send Temporal a **bearer token**.
 
 Both are off by default. With nothing set, every connection is made exactly as before these
@@ -22,22 +23,31 @@ tokens. What the servers need is listed under each section as the operator's par
 
 | `.env` | fleet-memory setting | Default | Meaning |
 |---|---|---|---|
-| `FLEET_QDRANT_URL` | `Qdrant__Url` | `http://qdrant:6334` | Qdrant's gRPC address as fleet-memory reaches it. |
+| `FLEET_QDRANT_URL` | `Qdrant__Url` | unset | Qdrant's gRPC address as fleet-memory reaches it. Unset, a keyless fleet-memory uses the default address (`Qdrant__DefaultUrl`: `http://qdrant:6334` in the example compose file); a key never does. |
 | `FLEET_QDRANT_API_KEY` | `Qdrant__ApiKey` | empty | The API key. Empty: none is sent. |
 
-- **A key needs `https`.** With `FLEET_QDRANT_API_KEY` set and a `FLEET_QDRANT_URL` that is not an
-  `https` URL, fleet-memory prints
-  `Fleet.Memory startup aborted, exiting 1: Qdrant:ApiKey is set and Qdrant:Url is not an https URL. …`
-  and exits with code 1 before it connects to anything. The key is never sent in the clear and is
-  never dropped to connect without it.
-- **The server's certificate is validated the normal way**, by the platform, against the roots the
-  fleet-memory container trusts. There is no setting that relaxes this and no fingerprint pinning.
-  A server whose certificate is not trusted is not sent the key: the connection fails first.
+- **A key needs an address you set, `https` or `http`**, and the scheme alone decides the
+  transport. With `FLEET_QDRANT_API_KEY` set and `FLEET_QDRANT_URL` unset, or set to something
+  that is neither (another scheme, no scheme, or not a URL), fleet-memory prints
+  `Fleet.Memory startup aborted, exiting 1: Qdrant:ApiKey is set and Qdrant:Url is not an explicit https or http URL. …`
+  and exits with code 1 before it connects to anything. The default address is never used with a
+  key, so setting the key alone cannot send it anywhere. A configured key is never dropped to
+  connect without it.
+- **`https`: TLS.** The server's certificate is validated the normal way, by the platform, against
+  the roots the fleet-memory container trusts. There is no setting that relaxes this and no
+  fingerprint pinning. A server whose certificate is not trusted is not sent the key: the
+  connection fails first. A TLS connection that fails is never retried in plaintext.
+- **`http`: plaintext, for a trusted private network only.** ⚠️ HTTP does not encrypt the key:
+  anyone who can read the traffic between fleet-memory and Qdrant can read the key and use it.
+  Use an `http` URL with a key only on a network you trust, such as an internal network that only
+  fleet-memory and Qdrant join, and prefer `https` everywhere else. fleet-memory never chooses
+  `http` for you: it is used only when the URL says so.
 - **Without a key nothing changes.** The URL is used as it always was: `https` means TLS, anything
   else a plaintext connection.
 - The key is read when fleet-memory starts. Restart it after replacing the key.
 - When a key is in use, fleet-memory logs one line saying so
-  (`Qdrant connection: https://…, with an API key`). The key is in no log line and no error.
+  (`Qdrant connection: https://…, with an API key`). Over `http` that line is a warning and adds
+  that the key is sent unencrypted. The key is in no log line and no error.
 
 A deployment with a secured Qdrant, in `.env`:
 
@@ -46,14 +56,21 @@ FLEET_QDRANT_URL=https://qdrant.example.internal:6334
 FLEET_QDRANT_API_KEY=<the key>
 ```
 
+The same key on a trusted private network, without TLS (the key is not encrypted):
+
+```bash
+FLEET_QDRANT_URL=http://qdrant:6334
+FLEET_QDRANT_API_KEY=<the key>
+```
+
 ### The operator's part
 
-- **Qdrant itself.** It requires a key and serves TLS when it is started with
-  `QDRANT__SERVICE__API_KEY`, `QDRANT__SERVICE__ENABLE_TLS=true`, `QDRANT__TLS__CERT` and
-  `QDRANT__TLS__KEY` (this is how `tests/memory-qdrant/secured.sh` starts the one it tests
-  against; Qdrant's own documentation is the reference). The example compose file's `qdrant`
-  service sets none of these and mounts no certificate.
-- **Trust.** The certificate must be valid for the host name in `FLEET_QDRANT_URL` and issued by an
+- **Qdrant itself.** It requires a key when it is started with `QDRANT__SERVICE__API_KEY`, and
+  serves TLS when it is also started with `QDRANT__SERVICE__ENABLE_TLS=true`, `QDRANT__TLS__CERT`
+  and `QDRANT__TLS__KEY` (this is how `tests/memory-qdrant/secured.sh` starts the two it tests
+  against, one with TLS and one without; Qdrant's own documentation is the reference). The
+  example compose file's `qdrant` service sets none of these and mounts no certificate.
+- **Trust (https).** The certificate must be valid for the host name in `FLEET_QDRANT_URL` and issued by an
   authority the fleet-memory container trusts. For a private authority that means adding it to the
   container's trusted roots. .NET on Linux also reads the `SSL_CERT_FILE` and `SSL_CERT_DIR`
   variables; that is how the test script gives its test process the authority it made. Giving the

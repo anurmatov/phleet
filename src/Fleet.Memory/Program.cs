@@ -7,10 +7,12 @@ using Fleet.Shared.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// A Qdrant API key (Qdrant:ApiKey, off by default) is sent only over TLS. A key with a URL that is
-// not https ends the process here, before the index or anything else connects: the key is neither
-// sent in the clear nor dropped to connect without it. The explicit exit, as in
-// Fleet.Orchestrator/Program.cs: this must not depend on how a throw propagates.
+// A Qdrant API key (Qdrant:ApiKey, off by default) goes only to an explicit https or http
+// Qdrant:Url the operator gave, never to the shipped Qdrant:DefaultUrl: https is TLS, http
+// plaintext on a trusted network. A key with no URL or any other URL ends the process here, before
+// the index or anything else connects: the key is neither sent to an address the operator did not
+// choose nor dropped to connect without it. The explicit exit, as in Fleet.Orchestrator/Program.cs:
+// this must not depend on how a throw propagates.
 if (QdrantConnection.DescribeFault(
         builder.Configuration[$"{QdrantOptions.Section}:Url"], builder.Configuration[$"{QdrantOptions.Section}:ApiKey"]) is { } qdrantFault)
 {
@@ -90,10 +92,19 @@ app.Services.GetRequiredService<MemorySizeGuidance>().LogStartup(
         ? embeddingConfig.Ollama.Model
         : Path.GetFileNameWithoutExtension(embeddingConfig.Onnx.ModelPath));
 
-// Said only when a key is in use (nothing new is logged or read otherwise), and never the key.
+// Said only when a key is in use (nothing new is logged or read otherwise), and never the key. Over
+// http the key is not encrypted, so that is a warning.
 var qdrantOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<QdrantOptions>>().Value;
 if (!string.IsNullOrWhiteSpace(qdrantOptions.ApiKey))
-    app.Logger.LogInformation("Qdrant connection: {Connection}", QdrantConnection.From(qdrantOptions));
+{
+    var qdrantConnection = QdrantConnection.From(qdrantOptions);
+    if (qdrantConnection.Https)
+        app.Logger.LogInformation("Qdrant connection: {Connection}", qdrantConnection);
+    else
+        app.Logger.LogWarning(
+            "Qdrant connection: {Connection}. The API key is sent unencrypted over http: use this only on a trusted private network",
+            qdrantConnection);
+}
 
 // The MCP endpoint is at the root, so everything but the health check and the service routes is it.
 app.UseAgentIdentity(context => MemoryIdentity.IsMcp(context.Request.Path));

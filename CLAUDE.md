@@ -611,8 +611,11 @@ acceptance from source tests. Temporal and Qdrant remain on their existing isola
 
 Off by default; with nothing set every connection is made as before. fleet-memory can send Qdrant an
 API key (`FLEET_QDRANT_API_KEY` → `Qdrant__ApiKey`, beside `FLEET_QDRANT_URL` → `Qdrant__Url`): a key
-needs an `https` URL, the platform validates the certificate, and a key with any other URL is exit 1
-at startup. `QdrantConnection` is the only place a Qdrant client is constructed. The orchestrator and
+needs a `Qdrant:Url` the operator gave, an explicit absolute `https` URL (TLS, the platform validates
+the certificate) or `http` URL (plaintext, for an operator-trusted private network; startup logs a
+warning), the scheme alone picks the transport, and a key with no URL or any other is exit 1 at
+startup. The shipped address is `Qdrant:DefaultUrl` (`appsettings.json`, the example compose file),
+used only keyless. `QdrantConnection` is the only place a Qdrant client is constructed. The orchestrator and
 the Temporal bridge can send Temporal a bearer token (`FLEET_TEMPORAL_BEARER_TOKEN` →
 `Temporal__BearerToken`, `TemporalBridge__BearerToken`) as `authorization` connection metadata on
 every call, over the same plaintext connection as before; a token of blanks, one that starts with
@@ -627,7 +630,9 @@ once: a replaced one takes a restart. See `docs/datastore-client-auth.md`.
 MUST NOT: construct a Temporal or Qdrant client outside those seams; give the token to the SDK's
 `ApiKey` (in Temporalio 1.11.1 it turns TLS on when `Tls` is unset, pinned by
 `ThePinnedSdk_TurnsTlsOn_ForAnApiKeyWithNoTlsOptions`) or change Temporal's transport as a side effect;
-send the Qdrant key without TLS, add a switch that relaxes certificate validation, or connect
+send the Qdrant key to a URL that is not an explicit `https` or `http` one the operator gave (never
+`Qdrant:DefaultUrl`), choose or fall back to
+plaintext for an `https` URL, add a switch that relaxes certificate validation, or connect
 without a configured credential that cannot be used; log, return or put in a message either value or
 any part of a token (the expiry instant only); read a claim other than `exp`, or refuse to start over
 it; hand either to an agent by any automatic path (the compose file gives each to its own services

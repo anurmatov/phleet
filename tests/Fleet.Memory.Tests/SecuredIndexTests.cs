@@ -108,3 +108,88 @@ public sealed class SecuredIndexTests
         Assert.False(error is RpcException { StatusCode: StatusCode.OK or StatusCode.Unimplemented });
     }
 }
+
+/// <summary>
+/// For the tests that talk to a Qdrant that requires an API key over plaintext gRPC, reached by an
+/// explicit <c>http</c> URL: the configuration for an operator-trusted private network. Set and
+/// skipped like <see cref="SecuredIndex"/>; <c>bash tests/memory-qdrant/secured.sh</c> starts that
+/// Qdrant beside the TLS one, with a key of its own, and refuses a run that skipped any.
+/// </summary>
+internal static class SecuredIndexOverHttp
+{
+    public const string UrlVariable = "FLEET_MEMORY_TEST_SECURED_HTTP_URL";
+    public const string KeyVariable = "FLEET_MEMORY_TEST_SECURED_HTTP_API_KEY";
+
+    public const string Reason =
+        "needs a Qdrant that requires an API key over http: run it with one, bash tests/memory-qdrant/secured.sh";
+
+    public static string? Url => Environment.GetEnvironmentVariable(UrlVariable) is { Length: > 0 } url ? url : null;
+    public static string Key => Environment.GetEnvironmentVariable(KeyVariable) ?? "";
+}
+
+public sealed class SecuredIndexOverHttpFactAttribute : FactAttribute
+{
+    public SecuredIndexOverHttpFactAttribute() { if (SecuredIndexOverHttp.Url is null) Skip = SecuredIndexOverHttp.Reason; }
+}
+
+/// <summary>
+/// The real <see cref="VectorStore"/> with <c>Qdrant:ApiKey</c> and an explicit <c>http</c>
+/// <c>Qdrant:Url</c>, against a real Qdrant that answers only to its key: the configured key is
+/// what the server receives, in plaintext, and the server refuses a call without it or with another.
+/// </summary>
+public sealed class SecuredIndexOverHttpTests
+{
+    private const int Dimensions = 8;
+
+    private static VectorStore Store(string apiKey, string collection) =>
+        new(Options.Create(new QdrantOptions { Url = SecuredIndexOverHttp.Url!, ApiKey = apiKey, Collection = collection }),
+            Options.Create(new EmbeddingOptions { Dimensions = Dimensions }),
+            NullLogger<VectorStore>.Instance);
+
+    private static string NewCollection() => $"fleet_memtest_secured_http_{Guid.NewGuid():N}";
+
+    [SecuredIndexOverHttpFact]
+    public async Task WithTheConfiguredKey_OverExplicitHttp_TheStoreCreatesAndReadsItsCollection()
+    {
+        var url = SecuredIndexOverHttp.Url!;
+        Assert.StartsWith("http://", url);
+        var collection = NewCollection();
+        var store = Store(SecuredIndexOverHttp.Key, collection);
+        var connection = QdrantConnection.From(new QdrantOptions { Url = url, ApiKey = SecuredIndexOverHttp.Key });
+        Assert.False(connection.Https);
+        using var client = connection.CreateClient();
+        try
+        {
+            await store.EnsureCollectionAsync();
+
+            Assert.Contains(collection, await client.ListCollectionsAsync());
+            // A second start finds what the first made: a read with the key, not only a write.
+            await store.EnsureCollectionAsync();
+            Assert.Equal(0UL, await client.CountAsync(collection));
+        }
+        finally
+        {
+            try { await client.DeleteCollectionAsync(collection); } catch { /* best effort */ }
+        }
+    }
+
+    [SecuredIndexOverHttpFact]
+    public async Task WithoutAKey_TheServerRefuses()
+    {
+        var store = Store("", NewCollection());
+
+        var error = await Assert.ThrowsAsync<RpcException>(() => store.EnsureCollectionAsync());
+
+        Assert.Contains(error.StatusCode, new[] { StatusCode.Unauthenticated, StatusCode.PermissionDenied });
+    }
+
+    [SecuredIndexOverHttpFact]
+    public async Task WithAnotherKey_TheServerRefuses()
+    {
+        var store = Store("synthetic-wrong-key-0123456789abcdef", NewCollection());
+
+        var error = await Assert.ThrowsAsync<RpcException>(() => store.EnsureCollectionAsync());
+
+        Assert.Contains(error.StatusCode, new[] { StatusCode.Unauthenticated, StatusCode.PermissionDenied });
+    }
+}

@@ -6,8 +6,10 @@ the commit that added it, 45 checks, all passing.
 
 **What it is.** The real pinned binary: `agy` 1.5.14, Linux arm64, release archive
 `agy_cli_linux_arm64.tar.gz` with sha256
-`e5f69a3123fac66974b303d9a201f381a0fb32b3ef869d9139da85d5caf67a2a` (the x64 archive is pinned as
-`d58386322d2073e96b33f7cc32b4e9ae2db6228f58440369725967b2de48c7b5` and was not run by hand). It ran
+`e5f69a3123fac66974b303d9a201f381a0fb32b3ef869d9139da85d5caf67a2a`. The x64 archive, pinned as
+`d58386322d2073e96b33f7cc32b4e9ae2db6228f58440369725967b2de48c7b5`, passed the same 45 checks
+under emulation on the same arm64 machine (`PLATFORM=linux/amd64`); it has not run on x86-64
+hardware outside CI. It ran
 in a container started with `--network none`, driven the way `GeminiExecutor` drives it, with the
 MCP file written by the agent's own `prepare config`.
 
@@ -99,35 +101,34 @@ PASS no settings file is needed
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --model gemini-4-argon-medium   # a turn in a new conversation
   stdin (after init): {"event": "user", "message": {"content": "First question."}}
-  {"event": "init", "conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "init": {"model": "gemini-4-argon-medium", "cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 1, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "Scripted rep"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "ly 1.\n", "duration_seconds": 0.020405, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.051103791, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  exit: 0   (0.8 s)
+  {"event": "init", "conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "init": {"model": "gemini-4-argon-medium", "cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.020209959, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.067727459, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  exit: 0   (0.7 s)
 PASS a turn completes: init, then the message, then a SUCCESS result, exit 0
 PASS init is printed before the CLI has read any input, and before any model request
 PASS one request to the Gemini API's streamGenerateContent, model taken from the slug
 PASS the result carries token counts
 PASS the instructions are in the system instruction, inside the CLI's own prompt
 
-$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation 372d8b97-07e2-497c-a244-1d2182113e06   # slash commands are off
+$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation ba8dc616-6182-41cb-9818-1abb1af7cbb4   # slash commands are off
   stdin (after init): {"event": "user", "message": {"content": "/help"}}
-  {"event": "init", "conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 2, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 3, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.000226}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 4, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 3.\n", "duration_seconds": 0.018334416, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "status": "SUCCESS", "response": "Scripted reply 3.\n", "duration_seconds": 0.797870208, "num_turns": 2, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens": 800, "total_tokens": 1674}}}
-  exit: 0   (0.6 s)
+  {"event": "init", "conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 2, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 3, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.000188208}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 4, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 3.\n", "duration_seconds": 0.024250833, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "status": "SUCCESS", "response": "Scripted reply 3.\n", "duration_seconds": 0.741204834, "num_turns": 2, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens": 800, "total_tokens": 1674}}}
+  exit: 0   (0.7 s)
 PASS a message that starts with a slash is a message
 
-$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation 372d8b97-07e2-497c-a244-1d2182113e06   # a new process continues the conversation
+$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation ba8dc616-6182-41cb-9818-1abb1af7cbb4   # a new process continues the conversation
   stdin (after init): {"event": "user", "message": {"content": "Second question."}}
-  {"event": "init", "conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 5, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 6, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.000140167}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 7, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 5.\n", "duration_seconds": 0.017443459, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "status": "SUCCESS", "response": "Scripted reply 5.\n", "duration_seconds": 1.421279084, "num_turns": 3, "usage": {"input_tokens": 2400, "output_tokens": 111, "thinking_tokens": 21, "cache_read_tokens": 1200, "total_tokens": 2511}}}
+  {"event": "init", "conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 5, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 6, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.000351792}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 7, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 5.\n", "duration_seconds": 0.029647583, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "status": "SUCCESS", "response": "Scripted reply 5.\n", "duration_seconds": 1.373525709, "num_turns": 3, "usage": {"input_tokens": 2400, "output_tokens": 111, "thinking_tokens": 21, "cache_read_tokens": 1200, "total_tokens": 2511}}}
   exit: 0   (0.6 s)
 PASS --conversation <id> continues that conversation in a new process
 PASS the earlier turns are sent again
@@ -136,72 +137,72 @@ PASS the result counts the whole conversation
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation 00000000-0000-4000-8000-000000000000   # a conversation the CLI does not have
   stdin (after init): {"event": "user", "message": {"content": "Lost question."}}
-  {"event": "init", "conversation_id": "9ec0cb82-6ffd-43bf-95be-356fccfc7af8", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "9ec0cb82-6ffd-43bf-95be-356fccfc7af8", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "9ec0cb82-6ffd-43bf-95be-356fccfc7af8", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.016386666, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "9ec0cb82-6ffd-43bf-95be-356fccfc7af8", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.042015458, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "init", "conversation_id": "9cfb31af-ef6a-4519-bd74-063548c9f40e", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "9cfb31af-ef6a-4519-bd74-063548c9f40e", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "9cfb31af-ef6a-4519-bd74-063548c9f40e", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.017797917, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "9cfb31af-ef6a-4519-bd74-063548c9f40e", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.050516334, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
   stderr: warning: conversation "00000000-0000-4000-8000-000000000000" not found
   exit: 0   (0.6 s)
 PASS an unknown conversation id does not fail: init names another conversation, before any input
 PASS and the CLI says so on stderr
 PASS the message then written is the first of that new conversation
 
-$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation 372d8b97-07e2-497c-a244-1d2182113e06   # killed with SIGKILL after 4 s
+$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation ba8dc616-6182-41cb-9818-1abb1af7cbb4   # killed with SIGKILL after 4 s
   stdin (after init): {"event": "user", "message": {"content": "SLOW answer, killed half way."}}
-  {"event": "init", "conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 8, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 9, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.000284375}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 10, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "slow 0 "}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 10, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "slow 1 "}}
+  {"event": "init", "conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 8, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 9, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.00017675}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 10, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "slow 0 "}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 10, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "slow 1 "}}
   … 6 more text deltas of the same shape, then the process was killed
-  exit: -9   (4.5 s)
+  exit: -9   (4.6 s)
 PASS a process killed mid-answer was mid-answer
 
-$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation 372d8b97-07e2-497c-a244-1d2182113e06   # after the kill
+$ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}' --conversation ba8dc616-6182-41cb-9818-1abb1af7cbb4   # after the kill
   stdin (after init): {"event": "user", "message": {"content": "Third question."}}
-  {"event": "init", "conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 11, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 12, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.000344125}}
-  {"event": "step_update", "step_update": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "step_index": 13, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 9.\n", "duration_seconds": 0.018860833, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "372d8b97-07e2-497c-a244-1d2182113e06", "status": "SUCCESS", "response": "Scripted reply 9.\n", "duration_seconds": 7.237934405, "num_turns": 5, "usage": {"input_tokens": 3200, "output_tokens": 148, "thinking_tokens": 28, "cache_read_tokens": 1600, "total_tokens": 3348}}}
-  exit: 0   (0.6 s)
+  {"event": "init", "conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 11, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 12, "state": "DONE", "step_type": "system_message", "duration_seconds": 0.000302791}}
+  {"event": "step_update", "step_update": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "step_index": 13, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 9.\n", "duration_seconds": 0.021079542, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "ba8dc616-6182-41cb-9818-1abb1af7cbb4", "status": "SUCCESS", "response": "Scripted reply 9.\n", "duration_seconds": 7.315349254, "num_turns": 5, "usage": {"input_tokens": 3200, "output_tokens": 148, "thinking_tokens": 28, "cache_read_tokens": 1600, "total_tokens": 3348}}}
+  exit: 0   (0.7 s)
 PASS the conversation continues after a kill
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # the model's shell tool
   stdin (after init): {"event": "user", "message": {"content": "CALL run_command {\"CommandLine\":\"id -un > /workspace/shell-proof.txt; echo outside > /tmp/outside-proof.txt; echo SHELL-RAN-$((6*7))\",\"toolSummary\":\"Shell proof\",\"WaitMsBeforeAsync\":5000}"}}
-  {"event": "init", "conversation_id": "5bc27cd2-68bf-43a8-b8f3-ec6a8a6ffacd", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "5bc27cd2-68bf-43a8-b8f3-ec6a8a6ffacd", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "5bc27cd2-68bf-43a8-b8f3-ec6a8a6ffacd", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.018214, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "step_update", "step_update": {"conversation_id": "5bc27cd2-68bf-43a8-b8f3-ec6a8a6ffacd", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "run_command", "tool_info": {"name": "run_command", "parameters": {"CommandLine": "id -un > /workspace/shell-proof.txt; echo outside > /tmp/outside-proof.txt; echo SHELL-RAN-$((6*7))"}}}}
-  {"event": "step_update", "step_update": {"conversation_id": "5bc27cd2-68bf-43a8-b8f3-ec6a8a6ffacd", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "run_command", "duration_seconds": 0.012767333, "tool_info": {"name": "run_command", "parameters": {"CommandLine": "id -un > /workspace/shell-proof.txt; echo outside > /tmp/outside-proof.txt; echo SHELL-RAN-$((6*7))"}, "output": "Created At: 2026-11-22…
-  {"event": "step_update", "step_update": {"conversation_id": "5bc27cd2-68bf-43a8-b8f3-ec6a8a6ffacd", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:09Z\\nCompleted At: 2026-11-22T14:38:09Z\\nCommand exited with code 0.\\n\\nCommand output:\\nSHELL-RAN-42\\r\\n\"}\n", "duration_seconds": 0.019020875, "usage": {"input_tokens": 800, "…
-  {"event": "result", "result": {"conversation_id": "5bc27cd2-68bf-43a8-b8f3-ec6a8a6ffacd", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:09Z\\nCompleted At: 2026-11-22T14:38:09Z\\nCommand exited with code 0.\\n\\nCommand output:\\nSHELL-RAN-42\\r\\n\"}\n", "duration_seconds": 0.079827708, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": …
+  {"event": "init", "conversation_id": "50ed1e3c-b8f8-473a-8366-fc06500ef663", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "50ed1e3c-b8f8-473a-8366-fc06500ef663", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "50ed1e3c-b8f8-473a-8366-fc06500ef663", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.018174917, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "step_update", "step_update": {"conversation_id": "50ed1e3c-b8f8-473a-8366-fc06500ef663", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "run_command", "tool_info": {"name": "run_command", "parameters": {"CommandLine": "id -un > /workspace/shell-proof.txt; echo outside > /tmp/outside-proof.txt; echo SHELL-RAN-$((6*7))"}}}}
+  {"event": "step_update", "step_update": {"conversation_id": "50ed1e3c-b8f8-473a-8366-fc06500ef663", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "run_command", "duration_seconds": 0.019090042, "tool_info": {"name": "run_command", "parameters": {"CommandLine": "id -un > /workspace/shell-proof.txt; echo outside > /tmp/outside-proof.txt; echo SHELL-RAN-$((6*7))"}, "output": "Created At: 2026-11-22…
+  {"event": "step_update", "step_update": {"conversation_id": "50ed1e3c-b8f8-473a-8366-fc06500ef663", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:31Z\\nCompleted At: 2026-11-22T14:58:31Z\\nCommand exited with code 0.\\n\\nCommand output:\\nSHELL-RAN-42\\r\\n\"}\n", "duration_seconds": 0.023099083, "usage": {"input_tokens": 800, "…
+  {"event": "result", "result": {"conversation_id": "50ed1e3c-b8f8-473a-8366-fc06500ef663", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:31Z\\nCompleted At: 2026-11-22T14:58:31Z\\nCommand exited with code 0.\\n\\nCommand output:\\nSHELL-RAN-42\\r\\n\"}\n", "duration_seconds": 0.09003725, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 1…
   exit: 0   (0.6 s)
 PASS run_command runs in the container, with no approval and no sandbox refusal
 PASS a tool step is ACTIVE with its name and parameters, then DONE with its output
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # the model's write tool
   stdin (after init): {"event": "user", "message": {"content": "CALL write_file {\"Path\":\"/workspace/write-proof.txt\",\"Content\":\"WRITE-RAN\\n\"}"}}
-  {"event": "init", "conversation_id": "f2523b56-cb88-4ad7-9a82-10a317a7dffc", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "f2523b56-cb88-4ad7-9a82-10a317a7dffc", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "f2523b56-cb88-4ad7-9a82-10a317a7dffc", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.01929725, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "step_update", "step_update": {"conversation_id": "f2523b56-cb88-4ad7-9a82-10a317a7dffc", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "write_file", "tool_info": {"name": "write_file", "parameters": {"Path": "/workspace/write-proof.txt"}}}}
-  {"event": "step_update", "step_update": {"conversation_id": "f2523b56-cb88-4ad7-9a82-10a317a7dffc", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "write_file", "duration_seconds": 0.005081083, "tool_info": {"name": "write_file", "parameters": {"Path": "/workspace/write-proof.txt"}}}}
-  {"event": "step_update", "step_update": {"conversation_id": "f2523b56-cb88-4ad7-9a82-10a317a7dffc", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:10Z\\nCompleted At: 2026-11-22T14:38:10Z\\nCreated file.\"}\n", "duration_seconds": 0.019936958, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_to…
-  {"event": "result", "result": {"conversation_id": "f2523b56-cb88-4ad7-9a82-10a317a7dffc", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:10Z\\nCompleted At: 2026-11-22T14:38:10Z\\nCreated file.\"}\n", "duration_seconds": 0.074363792, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens": 800, "total_tokens": 1674}}}
-  exit: 0   (0.6 s)
+  {"event": "init", "conversation_id": "4ab1e8c7-4c88-4cbe-b0fa-b24f38445096", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "4ab1e8c7-4c88-4cbe-b0fa-b24f38445096", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "4ab1e8c7-4c88-4cbe-b0fa-b24f38445096", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.018544375, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "step_update", "step_update": {"conversation_id": "4ab1e8c7-4c88-4cbe-b0fa-b24f38445096", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "write_file", "tool_info": {"name": "write_file", "parameters": {"Path": "/workspace/write-proof.txt"}}}}
+  {"event": "step_update", "step_update": {"conversation_id": "4ab1e8c7-4c88-4cbe-b0fa-b24f38445096", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "write_file", "duration_seconds": 0.004706625, "tool_info": {"name": "write_file", "parameters": {"Path": "/workspace/write-proof.txt"}}}}
+  {"event": "step_update", "step_update": {"conversation_id": "4ab1e8c7-4c88-4cbe-b0fa-b24f38445096", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:32Z\\nCompleted At: 2026-11-22T14:58:32Z\\nCreated file.\"}\n", "duration_seconds": 0.019581083, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_to…
+  {"event": "result", "result": {"conversation_id": "4ab1e8c7-4c88-4cbe-b0fa-b24f38445096", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:32Z\\nCompleted At: 2026-11-22T14:58:32Z\\nCreated file.\"}\n", "duration_seconds": 0.077326625, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens": 800, "total_tokens": 1674}}}
+  exit: 0   (0.7 s)
 PASS write_file writes in the workspace
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # an MCP tool over HTTP
   stdin (after init): {"event": "user", "message": {"content": "CALL call_mcp_tool {\"ServerName\":\"recorder\",\"ToolName\":\"get_message\",\"Arguments\":{\"id\":7}}"}}
-  {"event": "init", "conversation_id": "b52aa9b5-0940-4fa3-8c6f-2a1052b0045d", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "b52aa9b5-0940-4fa3-8c6f-2a1052b0045d", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "b52aa9b5-0940-4fa3-8c6f-2a1052b0045d", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.017013417, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "step_update", "step_update": {"conversation_id": "b52aa9b5-0940-4fa3-8c6f-2a1052b0045d", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {"id": 7}, "ServerName": "recorder", "ToolName": "get_message"}}}}
-  {"event": "step_update", "step_update": {"conversation_id": "b52aa9b5-0940-4fa3-8c6f-2a1052b0045d", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "call_mcp_tool", "duration_seconds": 0.009166791, "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {"id": 7}, "ServerName": "recorder", "ToolName": "get_message"}, "output": "stored message 7 says: the heron lands at dusk"}}}
-  {"event": "step_update", "step_update": {"conversation_id": "b52aa9b5-0940-4fa3-8c6f-2a1052b0045d", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:10Z\\nCompleted At: 2026-11-22T14:38:10Z\\nstored message 7 says: the heron lands at dusk\"}\n", "duration_seconds": 0.016525417, "usage": {"input_tokens": 800, "output_tokens": 37, "th…
-  {"event": "result", "result": {"conversation_id": "b52aa9b5-0940-4fa3-8c6f-2a1052b0045d", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:10Z\\nCompleted At: 2026-11-22T14:38:10Z\\nstored message 7 says: the heron lands at dusk\"}\n", "duration_seconds": 0.071502875, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens"…
-  exit: 0   (0.6 s)
+  {"event": "init", "conversation_id": "e2157db6-2cd5-4e93-90ef-95f8567fc5b5", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "e2157db6-2cd5-4e93-90ef-95f8567fc5b5", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "e2157db6-2cd5-4e93-90ef-95f8567fc5b5", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.016800708, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "step_update", "step_update": {"conversation_id": "e2157db6-2cd5-4e93-90ef-95f8567fc5b5", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {"id": 7}, "ServerName": "recorder", "ToolName": "get_message"}}}}
+  {"event": "step_update", "step_update": {"conversation_id": "e2157db6-2cd5-4e93-90ef-95f8567fc5b5", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "call_mcp_tool", "duration_seconds": 0.009263292, "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {"id": 7}, "ServerName": "recorder", "ToolName": "get_message"}, "output": "stored message 7 says: the heron lands at dusk"}}}
+  {"event": "step_update", "step_update": {"conversation_id": "e2157db6-2cd5-4e93-90ef-95f8567fc5b5", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:33Z\\nCompleted At: 2026-11-22T14:58:33Z\\nstored message 7 says: the heron lands at dusk\"}\n", "duration_seconds": 0.018473834, "usage": {"input_tokens": 800, "output_tokens": 37, "th…
+  {"event": "result", "result": {"conversation_id": "e2157db6-2cd5-4e93-90ef-95f8567fc5b5", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:33Z\\nCompleted At: 2026-11-22T14:58:33Z\\nstored message 7 says: the heron lands at dusk\"}\n", "duration_seconds": 0.077216209, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens"…
+  exit: 0   (0.7 s)
   MCP server saw:
     {"http": "POST", "path": "/mcp", "method": "server/discover", "auth": "ok"}
     {"http": "POST", "path": "/mcp", "method": "initialize", "auth": "ok"}
@@ -220,40 +221,40 @@ PASS the OAuth discovery requests carry no header, get 401, and nothing follows 
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # an MCP tool over stdio
   stdin (after init): {"event": "user", "message": {"content": "CALL call_mcp_tool {\"ServerName\":\"local\",\"ToolName\":\"ping\",\"Arguments\":{}}"}}
-  {"event": "init", "conversation_id": "4a2ed621-aefa-4424-93a2-5167416c207d", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "4a2ed621-aefa-4424-93a2-5167416c207d", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "4a2ed621-aefa-4424-93a2-5167416c207d", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.017004, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "step_update", "step_update": {"conversation_id": "4a2ed621-aefa-4424-93a2-5167416c207d", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {}, "ServerName": "local", "ToolName": "ping"}}}}
-  {"event": "step_update", "step_update": {"conversation_id": "4a2ed621-aefa-4424-93a2-5167416c207d", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "call_mcp_tool", "duration_seconds": 0.005035667, "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {}, "ServerName": "local", "ToolName": "ping"}, "output": "pong from the stdio server"}}}
-  {"event": "step_update", "step_update": {"conversation_id": "4a2ed621-aefa-4424-93a2-5167416c207d", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:11Z\\nCompleted At: 2026-11-22T14:38:11Z\\npong from the stdio server\"}\n", "duration_seconds": 0.019086083, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "…
-  {"event": "result", "result": {"conversation_id": "4a2ed621-aefa-4424-93a2-5167416c207d", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:38:11Z\\nCompleted At: 2026-11-22T14:38:11Z\\npong from the stdio server\"}\n", "duration_seconds": 0.070444208, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens": 800, "total_tokens…
+  {"event": "init", "conversation_id": "91f04393-bbae-4949-b377-d17ea0a722a6", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "91f04393-bbae-4949-b377-d17ea0a722a6", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "91f04393-bbae-4949-b377-d17ea0a722a6", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.017743916, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "step_update", "step_update": {"conversation_id": "91f04393-bbae-4949-b377-d17ea0a722a6", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {}, "ServerName": "local", "ToolName": "ping"}}}}
+  {"event": "step_update", "step_update": {"conversation_id": "91f04393-bbae-4949-b377-d17ea0a722a6", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "call_mcp_tool", "duration_seconds": 0.005429625, "tool_info": {"name": "call_mcp_tool", "parameters": {"Arguments": {}, "ServerName": "local", "ToolName": "ping"}, "output": "pong from the stdio server"}}}
+  {"event": "step_update", "step_update": {"conversation_id": "91f04393-bbae-4949-b377-d17ea0a722a6", "step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:33Z\\nCompleted At: 2026-11-22T14:58:33Z\\npong from the stdio server\"}\n", "duration_seconds": 0.020413375, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "…
+  {"event": "result", "result": {"conversation_id": "91f04393-bbae-4949-b377-d17ea0a722a6", "status": "SUCCESS", "response": "Tool said: {\"output\": \"Created At: 2026-11-22T14:58:33Z\\nCompleted At: 2026-11-22T14:58:33Z\\npong from the stdio server\"}\n", "duration_seconds": 0.074947, "num_turns": 1, "usage": {"input_tokens": 1600, "output_tokens": 74, "thinking_tokens": 14, "cache_read_tokens": 800, "total_tokens": …
   exit: 0   (0.6 s)
 PASS a stdio MCP server works beside it
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # a message of exactly MaxPromptBytes
   stdin (after init): {"event": "user", "message": {"content": "MESSAGE-HEAD\nline 000000 of a synthetic message, with кириллица and 🙂.\nline 0000… (190000 bytes)"}}
-  {"event": "init", "conversation_id": "ddbb7dfb-5b04-4c0f-b3c6-5ed12e8ddcad", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "ddbb7dfb-5b04-4c0f-b3c6-5ed12e8ddcad", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "ddbb7dfb-5b04-4c0f-b3c6-5ed12e8ddcad", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.037605875, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "ddbb7dfb-5b04-4c0f-b3c6-5ed12e8ddcad", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.075299042, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  exit: 0   (0.6 s)
+  {"event": "init", "conversation_id": "5b7e9abd-ad24-4904-ad08-32ddd232475b", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "5b7e9abd-ad24-4904-ad08-32ddd232475b", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "5b7e9abd-ad24-4904-ad08-32ddd232475b", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.039712541, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "5b7e9abd-ad24-4904-ad08-32ddd232475b", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.076204166, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  exit: 0   (0.7 s)
 PASS a message of 190000 bytes arrives whole
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # a message over the CLI's own limit
   stdin (after init): {"event": "user", "message": {"content": "MESSAGE-HEAD\nline 000000 of a synthetic message.\nline 000001 of a synthetic mess… (192100 bytes)"}}
-  {"event": "init", "conversation_id": "65fc23ac-23cb-4382-a019-76abf4402ff4", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "65fc23ac-23cb-4382-a019-76abf4402ff4", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "65fc23ac-23cb-4382-a019-76abf4402ff4", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.030399291, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "65fc23ac-23cb-4382-a019-76abf4402ff4", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.071256625, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "init", "conversation_id": "fed64e78-e8c6-43bd-82d9-c258cef1ecb9", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "fed64e78-e8c6-43bd-82d9-c258cef1ecb9", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "fed64e78-e8c6-43bd-82d9-c258cef1ecb9", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.030556167, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "fed64e78-e8c6-43bd-82d9-c258cef1ecb9", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.068237708, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
   exit: 0   (0.6 s)
 PASS the CLI cuts a message over its limit without failing (why the fleet refuses one over 190000)
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # instructions of exactly BudgetBytes, in 3 files
   stdin (after init): {"event": "user", "message": {"content": "hello"}}
-  {"event": "init", "conversation_id": "93ba9ed9-2f21-4d3b-a10e-1eab5f292283", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "93ba9ed9-2f21-4d3b-a10e-1eab5f292283", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "93ba9ed9-2f21-4d3b-a10e-1eab5f292283", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.021002375, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "93ba9ed9-2f21-4d3b-a10e-1eab5f292283", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.052848708, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "init", "conversation_id": "896c584b-84e9-4e93-aaa3-c226ef5fa9a9", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "896c584b-84e9-4e93-aaa3-c226ef5fa9a9", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "896c584b-84e9-4e93-aaa3-c226ef5fa9a9", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.021290708, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "896c584b-84e9-4e93-aaa3-c226ef5fa9a9", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.052396, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
   exit: 0   (0.6 s)
 PASS instructions of 56000 bytes in 3 files arrive whole: the files' text, joined as it appears, is the original
 PASS and in order
@@ -261,19 +262,20 @@ PASS no piece is over 20000 bytes
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # one rule file of 24,100 bytes
   stdin (after init): {"event": "user", "message": {"content": "hello"}}
-  {"event": "init", "conversation_id": "122ee8ee-4cdc-4df9-9f3f-7d7f14d1993d", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "122ee8ee-4cdc-4df9-9f3f-7d7f14d1993d", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "122ee8ee-4cdc-4df9-9f3f-7d7f14d1993d", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.018365458, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "122ee8ee-4cdc-4df9-9f3f-7d7f14d1993d", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.046217166, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "init", "conversation_id": "f5142285-9541-43f3-86bf-b252d1ae0c8f", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "f5142285-9541-43f3-86bf-b252d1ae0c8f", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "f5142285-9541-43f3-86bf-b252d1ae0c8f", "step_index": 1, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "Scripted rep"}}
+  {"event": "step_update", "step_update": {"conversation_id": "f5142285-9541-43f3-86bf-b252d1ae0c8f", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "ly 1.\n", "duration_seconds": 0.018993, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "f5142285-9541-43f3-86bf-b252d1ae0c8f", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.052423792, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
   exit: 0   (0.6 s)
 PASS the CLI cuts one rule file over 24,000 bytes (why a piece is at most 20000)
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # rule files of 60,100 bytes together
   stdin (after init): {"event": "user", "message": {"content": "hello"}}
-  {"event": "init", "conversation_id": "a1424038-8133-4424-aaeb-f62cdb9a0d45", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "a1424038-8133-4424-aaeb-f62cdb9a0d45", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "a1424038-8133-4424-aaeb-f62cdb9a0d45", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.018208042, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "a1424038-8133-4424-aaeb-f62cdb9a0d45", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.049100167, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "init", "conversation_id": "f80a3c57-3f77-456a-b1b5-9119dc4912d4", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "f80a3c57-3f77-456a-b1b5-9119dc4912d4", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "f80a3c57-3f77-456a-b1b5-9119dc4912d4", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.020050334, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "f80a3c57-3f77-456a-b1b5-9119dc4912d4", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.049148459, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
   exit: 0   (0.6 s)
 PASS the CLI leaves a rule file out when all of them pass 60,000 bytes (why the budget is 56000)
 PASS `agy models` lists the 25 slugs the dashboard offers
@@ -292,12 +294,12 @@ PASS an unknown model is an ERROR result before any conversation
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # the Gemini API answers 500
   stdin (after init): {"event": "user", "message": {"content": "FAIL 500 please."}}
-  {"event": "init", "conversation_id": "9e4ff8cd-7ac4-45c2-915e-52cf8811df8b", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "9e4ff8cd-7ac4-45c2-915e-52cf8811df8b", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "9e4ff8cd-7ac4-45c2-915e-52cf8811df8b", "step_index": 1, "state": "DONE", "step_type": "error_message"}}
-  {"event": "result", "result": {"conversation_id": "9e4ff8cd-7ac4-45c2-915e-52cf8811df8b", "status": "ERROR", "response": "", "error": "agent executor error: generating and executing: Error 500, Message: scripted failure, Status: INTERNAL, Details: []", "duration_seconds": 0, "num_turns": 1, "usage": {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cache_read_tokens": 0, "total_tokens": 0}, "finished_rea…
+  {"event": "init", "conversation_id": "db3f7f36-bfdc-48ed-bfbb-f219dd818961", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "db3f7f36-bfdc-48ed-bfbb-f219dd818961", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "db3f7f36-bfdc-48ed-bfbb-f219dd818961", "step_index": 1, "state": "DONE", "step_type": "error_message"}}
+  {"event": "result", "result": {"conversation_id": "db3f7f36-bfdc-48ed-bfbb-f219dd818961", "status": "ERROR", "response": "", "error": "agent executor error: generating and executing: Error 500, Message: scripted failure, Status: INTERNAL, Details: []", "duration_seconds": 0, "num_turns": 1, "usage": {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cache_read_tokens": 0, "total_tokens": 0}, "finished_rea…
   stderr: error: agent executor error: generating and executing: Error 500, Message: scripted failure, Status: INTERNAL, Details: []
-  stderr: AGY_ERROR: {"short_error":"agent executor error: generating and executing: Error 500, Message: scripted failure, Status: INTERNAL, Details: []","status":"INTERNAL","error_code":500,"code_kind":"http","retryable":false,"error_id":"d1dbf269-d803-4ca6-a7c6-683cef4d5d5c-1"}
+  stderr: AGY_ERROR: {"short_error":"agent executor error: generating and executing: Error 500, Message: scripted failure, Status: INTERNAL, Details: []","status":"INTERNAL","error_code":500,"code_kind":"http","retryable":false,"error_id":"6dbd4466-96cf-44a0-b8e6-ad7ab17a42b5-1"}
   exit: 3   (0.6 s)
 PASS a model error is an ERROR result with the API's message, exit non-zero
 PASS the key is in X-Goog-Api-Key on every model request (20) and nowhere else in them
@@ -316,11 +318,11 @@ PASS the binary is unchanged after every run above
 
 $ agy --output-format stream-json --input-format stream-json --disable-slash-commands --dangerously-skip-permissions --settings '{"modelProvider":"gemini","enableTerminalSandbox":false}'   # control: without the switch
   stdin (after init): {"event": "user", "message": {"content": "hello"}}
-  {"event": "init", "conversation_id": "4a3a7412-ba21-451d-862b-a85b35577da8", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
-  {"event": "step_update", "step_update": {"conversation_id": "4a3a7412-ba21-451d-862b-a85b35577da8", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
-  {"event": "step_update", "step_update": {"conversation_id": "4a3a7412-ba21-451d-862b-a85b35577da8", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.02585475, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  {"event": "result", "result": {"conversation_id": "4a3a7412-ba21-451d-862b-a85b35577da8", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.073077417, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
-  exit: 0   (0.7 s)
+  {"event": "init", "conversation_id": "fb618c40-f18c-4c2c-a28c-970324284ac6", "init": {"cwd": "/workspace", "tools": […], "permission_mode": "always-proceed"}}
+  {"event": "step_update", "step_update": {"conversation_id": "fb618c40-f18c-4c2c-a28c-970324284ac6", "step_index": 0, "state": "DONE", "step_type": "user_input"}}
+  {"event": "step_update", "step_update": {"conversation_id": "fb618c40-f18c-4c2c-a28c-970324284ac6", "step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": "Scripted reply 1.\n", "duration_seconds": 0.024924833, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  {"event": "result", "result": {"conversation_id": "fb618c40-f18c-4c2c-a28c-970324284ac6", "status": "SUCCESS", "response": "Scripted reply 1.\n", "duration_seconds": 0.058563958, "num_turns": 1, "usage": {"input_tokens": 800, "output_tokens": 37, "thinking_tokens": 7, "cache_read_tokens": 400, "total_tokens": 837}}}
+  exit: 0   (0.6 s)
 PASS control: without the switch the CLI goes to its updater host
 PASS the binary is unchanged after the control (the container has no network)
 ```

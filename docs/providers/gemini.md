@@ -213,8 +213,8 @@ Whether a real model looks at an image this way was not tested.
 - No effort setting, no `harnessExtra`, no local model mode.
 - Instructions at most 56,000 bytes, a message at most 190,000 bytes (above).
 - `AllowedTools` is not enforced by the CLI (above).
-- Not run against a real model, and not on x86-64 by hand: the measurements were made on arm64; CI
-  runs the harness on x86-64.
+- Not run against a real model. The measurements were made on arm64; the x64 release passed the
+  same harness under emulation, and the CI job is where it runs on x86-64 hardware.
 
 ## Upgrading the pin
 

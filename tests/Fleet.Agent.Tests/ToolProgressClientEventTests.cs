@@ -35,7 +35,7 @@ public class ToolProgressClientEventTests
             ("read_file", Codex("""{"type":"mcpToolCall","id":"i7","server":"files","tool":"read_file","arguments":{"path":"/workspace/example/synthetic-marker.txt"}}""")),
             ("Bash", Claude("Bash", """{"command":"grep -rn synthetic-marker /workspace/example"}""")),
             ("Read", Claude("Read", """{"file_path":"/workspace/example/synthetic-marker.txt"}""")),
-            ("run_shell_command", Gemini("""{"type":"tool_call","name":"run_shell_command","args":{"command":"grep -rn synthetic-marker ."}}""")),
+            ("run_command", Gemini("""{"event":"step_update","step_update":{"conversation_id":"c_1","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"grep -rn synthetic-marker ."}}}}""")),
         };
         // The arguments are really there (an image generation has none), so their absence from
         // the client event means something.
@@ -83,8 +83,6 @@ public class ToolProgressClientEventTests
 
     private static AgentProgress Gemini(string eventJson)
     {
-        var options = Microsoft.Extensions.Options.Options.Create(Options("gemini"));
-        var executor = new GeminiExecutor(options, new PromptBuilder(options, NullLogger<PromptBuilder>.Instance), NullLogger<GeminiExecutor>.Instance);
-        return executor.MapEvent(JsonDocument.Parse(eventJson).RootElement, new StringBuilder())!;
+        return GeminiExecutor.MapStep(JsonDocument.Parse(eventJson).RootElement, new GeminiExecutor.TurnState())[0];
     }
 }

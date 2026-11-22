@@ -4,64 +4,101 @@ using System.Text;
 using System.Text.Json;
 using Fleet.Agent.Configuration;
 using Fleet.Agent.Models;
+using Fleet.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Agent.Services;
 
 /// <summary>
-/// Spawns a fresh `gemini` CLI process per task.
-/// System prompt is delivered via a temp file pointed to by GEMINI_SYSTEM_MD.
-/// Task text is written to process stdin; responses stream from stdout as NDJSON
-/// (--output-format stream-json).
-///
-/// Fresh process per task = cross-turn history bleed is structurally impossible.
-/// No module-level chat state; no session objects; no process reuse between ExecuteAsync calls.
-/// Matches the subprocess-per-task isolation of ClaudeExecutor and CodexExecutor.
-///
-/// Auth: OAuth credentials at ~/.gemini/oauth_creds.json (writable bind mount).
-/// Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
-/// (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min.
-///
-/// Images / PDFs / Audio: native multimodal via gemini-cli's @-reference resolver.
-/// Each attachment is staged to a per-task temp directory; the working directory is
-/// set to that dir and "@./filename.ext" refs are passed via -p. The CLI's
-/// handleAtCommand pipeline reads the binary, MIME-detects it, and emits inlineData
-/// parts to the model. Mechanism verified against gemini-cli v0.40.1 (issue #15532).
-/// Video is not supported by the CLI; hint-only fallback for unknown extensions.
-/// MCP: HTTP/SSE transport only. stdio servers are skipped by entrypoint.sh when writing
-/// ~/.gemini/settings.json. Agents must use MCP tools for all filesystem/shell operations.
+/// Runs Google's Antigravity CLI (<c>agy</c>) for a gemini agent: one process per turn, in one kept
+/// conversation, with a paid Gemini API key (<c>GEMINI_API_KEY</c>, inherited from the container).
 /// </summary>
+/// <remarks>
+/// <para>Each turn starts
+/// <c>agy --output-format stream-json --input-format stream-json --disable-slash-commands
+/// --dangerously-skip-permissions --settings {…} [--model M] [--conversation ID]</c>, reads the
+/// <c>init</c> event (the CLI prints it before it reads its input), writes the one user message
+/// and closes the input. What was measured on the pinned CLI, and what
+/// <c>tests/antigravity-cli/run.sh</c> keeps true, is in <c>docs/providers/gemini.md</c>.</para>
+/// <para>The session rule is the one of CLAUDE.md "Provider sessions": the conversation id is kept
+/// in <see cref="ProviderSessionFile"/> with the hash of the exact instructions, and a start
+/// resumes only when everything matches. The CLI does not fail on a conversation it cannot find:
+/// it starts another one and says so in <c>init</c>. That is a failed resume here, known before
+/// the message is written, so the message is then a first turn of a new session.</para>
+/// <para>Nothing is ever cut. A message over <see cref="MaxPromptBytes"/> and instructions the CLI
+/// would not deliver whole (<see cref="GeminiInstructionFiles"/>) end the turn with an error before
+/// a process is started.</para>
+/// </remarks>
 public sealed class GeminiExecutor : IAgentExecutor
 {
+    /// <summary>The Antigravity CLI as installed in the agent image.</summary>
+    internal const string CliBin = "agy";
+
+    /// <summary>The variable the CLI takes the Gemini API key from.</summary>
+    internal const string ApiKeyVariable = "GEMINI_API_KEY";
+
+    /// <summary>
+    /// The CLI's own switch for its background self-update; only the value <c>true</c> works. The
+    /// image sets it too. Without it a start replaces the pinned binary when a newer one is out.
+    /// </summary>
+    internal const string DisableAutoUpdateVariable = "AGY_CLI_DISABLE_AUTO_UPDATE";
+
+    /// <summary>
+    /// The largest message, in UTF-8 bytes, that is sent. The CLI cuts one user message at 192,000
+    /// bytes including a wrapper of its own (413 bytes measured): 191,500 arrived whole and 191,600
+    /// did not. A larger message is refused, never cut.
+    /// </summary>
+    internal const int MaxPromptBytes = 190_000;
+
+    /// <summary>
+    /// Settings for this process only; nothing is saved. <c>modelProvider</c> selects the API key
+    /// instead of a Google sign-in, and the terminal sandbox is off because the container is the
+    /// sandbox (with it on, every shell command fails there).
+    /// </summary>
+    internal const string SessionSettings = """{"modelProvider":"gemini","enableTerminalSandbox":false}""";
+
+    /// <summary>How long a kill waits for the exit before the process is handed to a watcher.</summary>
+    internal static readonly TimeSpan KillExitWait = TimeSpan.FromSeconds(10);
+
     private readonly AgentOptions _config;
     private readonly UsageReporter? _usage;
     private readonly PromptBuilder _promptBuilder;
     private readonly ILogger<GeminiExecutor> _logger;
-
-    private string? _lastSessionId;
-    private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
-
-    // Gemini CLI per-task spawn: no persistent process, no restart state.
-    // IsProcessWarm is always false — there is no process to warm up.
-    public string? LastSessionId => _lastSessionId;
-    public DateTimeOffset LastActivity => _lastActivity;
-    public bool IsProcessWarm => false;
-
-    // GeminiExecutor has no background subagent task tracking (no persistent process).
-    public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() =>
-        Array.Empty<BackgroundTaskInfo>();
-
-    public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) =>
-        Task.FromResult(false);
-
+    private readonly ProviderSessionFile _sessionFile;
+    private readonly string _geminiHome;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
     // Kills a CLI that is still running and reports whether its exit is confirmed (#394).
     private readonly Func<Process, Task<bool>> _terminate;
 
-    /// <summary>How long a kill waits for the exit before the process is handed to a watcher.</summary>
-    internal static readonly TimeSpan KillExitWait = TimeSpan.FromSeconds(10);
+    // The conversation this executor is in, with the instructions it began with. Null before the
+    // first start, after /reset and /stop, and after a resume that failed.
+    private HeldSession? _session;
+    private string? _sessionOrigin;
+    private string? _lastSessionId;
+
+    // A new conversation has started and no message has been written into it yet.
+    private bool _newSessionLinePending;
+
+    // Raised by /reset and /stop, so a turn that was running then does not put its session back.
+    private int _sessionEpoch;
+
+    private DateTimeOffset _lastActivity = DateTimeOffset.MinValue;
+
+    public string? LastSessionId => _lastSessionId;
+    public DateTimeOffset LastActivity => _lastActivity;
+
+    // One process per turn: nothing stays warm. The conversation is kept by the CLI on disk.
+    public bool IsProcessWarm => false;
+    public bool KeepsConversation => true;
+    public string? SessionOrigin => _sessionOrigin;
+
+    public IReadOnlyCollection<BackgroundTaskInfo> GetActiveBackgroundTasks() =>
+        Array.Empty<BackgroundTaskInfo>();
+
+    public Task<bool> CancelBackgroundTaskAsync(string taskId, CancellationToken ct = default) =>
+        Task.FromResult(false);
 
     public GeminiExecutor(
         IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
@@ -74,7 +111,8 @@ public sealed class GeminiExecutor : IAgentExecutor
         IOptions<AgentOptions> config, PromptBuilder promptBuilder, ILogger<GeminiExecutor> logger,
         Func<ProcessStartInfo, Process?> processStarter,
         Func<Process, Task<bool>>? terminate = null,
-        UsageReporter? usage = null)
+        UsageReporter? usage = null,
+        string? geminiHome = null)
     {
         _config = config.Value;
         _promptBuilder = promptBuilder;
@@ -82,11 +120,9 @@ public sealed class GeminiExecutor : IAgentExecutor
         _logger = logger;
         _processStarter = processStarter;
         _terminate = terminate ?? (process => ProviderChildProcess.KillAndConfirmExitAsync(process, KillExitWait));
-
-        _logger.LogInformation(
-            "GeminiExecutor: CLI-per-task mode. " +
-            "Multimodal (image/PDF/audio) attachments are passed natively via gemini-cli's @-reference resolver. " +
-            "MCP tools require HTTP/SSE transport — stdio servers are skipped.");
+        _geminiHome = geminiHome
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini");
+        _sessionFile = new ProviderSessionFile(_config.WorkDir, AgentProviders.Gemini, ProviderSessionFile.Cloud, logger);
     }
 
     public async IAsyncEnumerable<AgentProgress> ExecuteAsync(
@@ -95,10 +131,10 @@ public sealed class GeminiExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        _lastActivity = DateTimeOffset.UtcNow;
-        _lastSessionId = null; // no session resumption for CLI-per-task
-
-        await foreach (var progress in RunToResultAsync(task, images, documents, command: false, ct))
+        // Attachments reach the model as the path hints the intake already put in the text
+        // ([image attachment: …]); the CLI's print mode takes text only, and its read_file tool
+        // opens images, PDFs, audio and video by path.
+        await foreach (var progress in RunToResultAsync(task, ct))
             yield return progress;
     }
 
@@ -106,11 +142,9 @@ public sealed class GeminiExecutor : IAgentExecutor
         string command,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        // Commands like /compact have no meaningful effect with a per-task fresh process.
-        // Run the command as a regular task so the agent at least sees the input and can respond.
-        _lastActivity = DateTimeOffset.UtcNow;
-
-        await foreach (var progress in RunToResultAsync(command, images: null, documents: null, command: true, ct))
+        // The CLI's slash commands are off in this mode, so a command is a message like any other
+        // and the model answers it.
+        await foreach (var progress in RunToResultAsync(command, ct))
             yield return progress;
     }
 
@@ -119,13 +153,10 @@ public sealed class GeminiExecutor : IAgentExecutor
     /// every event and stops after the terminal result.
     /// </summary>
     private async IAsyncEnumerable<AgentProgress> RunToResultAsync(
-        string input,
-        IReadOnlyList<MessageImage>? images,
-        IReadOnlyList<MessageDocument>? documents,
-        bool command,
-        [EnumeratorCancellation] CancellationToken ct)
+        string input, [EnumeratorCancellation] CancellationToken ct)
     {
-        await foreach (var progress in RunCliAsync(input, images, documents, command, ct))
+        _lastActivity = DateTimeOffset.UtcNow;
+        await foreach (var progress in RunCliAsync(input, ct))
         {
             _lastActivity = DateTimeOffset.UtcNow;
             yield return progress;
@@ -133,203 +164,166 @@ public sealed class GeminiExecutor : IAgentExecutor
         }
     }
 
-    // No-ops: per-task spawn means there is no persistent process to stop or restart.
     public void RequestRestart() { }
-    public Task StopProcessAsync() => Task.CompletedTask;
+
+    /// <summary>
+    /// /reset and /stop: the session is forgotten and its file removed, so the next turn starts a
+    /// new conversation, in this container or the next. A running turn is stopped by its own
+    /// cancellation, which kills its process.
+    /// </summary>
+    public Task StopProcessAsync()
+    {
+        Interlocked.Increment(ref _sessionEpoch);
+        _session = null;
+        _sessionOrigin = null;
+        _lastSessionId = null;
+        _newSessionLinePending = false;
+        _sessionFile.Remove();
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A credential change needs nothing here: every turn starts a process, which reads the key
+    /// from the environment the container was started with. The session is kept.
+    /// </summary>
     public Task<bool> TryStopProcessAsync() => Task.FromResult(false);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    // ── Core per-task runner ──────────────────────────────────────────────────
+    // ── One turn ──────────────────────────────────────────────────────────────
 
     private async IAsyncEnumerable<AgentProgress> RunCliAsync(
-        string input,
-        IReadOnlyList<MessageImage>? images,
-        IReadOnlyList<MessageDocument>? documents,
-        bool command,
-        [EnumeratorCancellation] CancellationToken ct)
+        string input, [EnumeratorCancellation] CancellationToken ct)
     {
-        // Write system prompt to a temp file. GEMINI_SYSTEM_MD env var points the CLI at it.
-        // The file is deleted in the finally block regardless of outcome.
-        var systemPromptPath = Path.Combine(Path.GetTempPath(), $"gemini-system-{Guid.NewGuid():N}.md");
+        var instructions = _promptBuilder.BuildSystemPrompt();
+        var instructionsHash = ProviderSessionFile.HashInstructions(instructions);
+        var epoch = Volatile.Read(ref _sessionEpoch);
 
-        // Per-task attachment staging dir. Each accepted image/PDF/audio is copied here so the
-        // gemini CLI's @-resolver can read it relative to the working directory. The dir is
-        // deleted in finally regardless of outcome (no leftover binary content).
-        var attachmentDir = Path.Combine(Path.GetTempPath(), $"gemini-attach-{Guid.NewGuid():N}");
+        // The size is checked with the new-session line on it, so a resume that turns into a new
+        // session at init cannot push the message over the limit after the process has started.
+        var promptBytes = Encoding.UTF8.GetByteCount(PromptAssembler.WithNewSessionLine(input));
+        if (promptBytes > MaxPromptBytes)
+        {
+            yield return Refusal(
+                $"The message is {promptBytes} bytes; the Antigravity CLI takes at most {MaxPromptBytes} bytes in one message. Nothing was sent.");
+            yield break;
+        }
 
-        Process? process = null;
+        if (GeminiInstructionFiles.Prepare(_geminiHome, _config.WorkDir, instructions) is { } instructionsFault)
+        {
+            _logger.LogError("Gemini turn refused: {Fault}", instructionsFault);
+            yield return Refusal($"The turn was not started: {instructionsFault}. Nothing was sent.");
+            yield break;
+        }
 
-        // Capture wall-clock start time before the process starts so DurationMs measures
-        // the full task duration. (_lastActivity is updated on every yielded event, so
-        // using it would measure near-zero — last-event-to-exit gap, not task duration.)
         var startTime = DateTimeOffset.UtcNow;
         var usageTurn = _usage?.BeginTurn();
-
-        var accumulator = new StringBuilder();
+        var turn = new TurnState();
+        Process? process = null;
         var stderrLines = new StringBuilder();
-        var turnStarted = false;
+        string? failedResume = null;
 
         try
         {
-            await File.WriteAllTextAsync(systemPromptPath, _promptBuilder.BuildSystemPrompt(), ct);
-
-            // Stage attachments and build the @-reference prompt fragment. CWD is set to
-            // attachmentDir so "@./<file>" resolves correctly inside gemini-cli's
-            // handleAtCommand. Files are copied (not symlinked) for portability.
-            Directory.CreateDirectory(attachmentDir);
-            var atRefs = StageAttachments(images, documents, attachmentDir);
-
-            var model = string.IsNullOrWhiteSpace(_config.Model) ? "gemini-2.5-flash" : _config.Model;
-
-            // Prompt assembly:
-            //   - The user's task text goes on stdin (avoids ARG_MAX for long prompts).
-            //   - The @-references go in the -p argument. handleAtCommand only resolves @-syntax
-            //     present in the -p value (verified empirically on v0.40.1). The CLI combines
-            //     stdin + -p before sending to the model, so the model sees both: task text
-            //     plus the inlineData from each attachment.
-            //   - When there are no attachments, omit -p entirely; the CLI reads stdin normally.
-            var argList = new List<string>
+            // At most two starts: a resume whose process ends before its init is a failed resume,
+            // and the turn goes on as a new session inside this same start. Never a third.
+            for (var attempt = 0; ; attempt++)
             {
-                "--output-format", "stream-json",
-                "-m", model,
-                "--yolo",
-            };
-            if (atRefs.Count > 0)
-            {
-                argList.Add("-p");
-                argList.Add("Attachments to consider: " + string.Join(" ", atRefs));
-            }
+                var resumeId = DecideSession(instructionsHash, failedResume);
+                failedResume = null;
+                stderrLines.Clear();
 
-            // --output-format stream-json: emit NDJSON events on stdout for incremental parsing.
-            // -m <model>: specify model; defaults to gemini-2.5-flash if omitted.
-            // --yolo (-y): suppress interactive MCP tool-call approval prompts.
-            //   Without this, the CLI blocks waiting for user confirmation on every tool call
-            //   — the agent hangs indefinitely in headless mode.
-            // -p (optional): when attachments are present, carries the @-reference fragment
-            //   that triggers handleAtCommand's binary inlineData path.
-            var psi = ProviderChildProcess.CreateStartInfo("gemini", attachmentDir, createNoWindow: false);
-            foreach (var a in argList) psi.ArgumentList.Add(a);
+                var psi = BuildStartInfo(resumeId);
+                process = ProviderChildProcess.Start(_processStarter, psi, "Failed to start the Antigravity CLI (agy)");
 
-            // GEMINI_SYSTEM_MD: CLI reads this env var at startup and treats the file content
-            // as the system instruction. --system-prompt-file does NOT exist in v0.40.1 (verified).
-            psi.Environment["GEMINI_SYSTEM_MD"] = systemPromptPath;
-
-            // GEMINI_CLI_TRUST_WORKSPACE: prevents the CLI from downgrading --yolo to "default"
-            // approval mode when the working directory is not in its trusted-directory list.
-            // Without this, every tool call blocks waiting for interactive approval, which hangs
-            // indefinitely in headless mode (no human present to approve).
-            psi.Environment["GEMINI_CLI_TRUST_WORKSPACE"] = "true";
-
-            // Enforce OAuth-only auth (issue #132 MUST NOT #2). The gemini CLI auto-detects
-            // GEMINI_API_KEY and prefers it over ~/.gemini/oauth_creds.json when both are
-            // present. A leftover GEMINI_API_KEY in the cluster .env (e.g. from PR #129 era)
-            // would silently route traffic through the API-key billing tier instead of OAuth,
-            // surfacing as confusing 429 "prepayment credits depleted" errors mid-task. Strip
-            // the env var here so the CLI must use OAuth.
-            psi.Environment.Remove("GEMINI_API_KEY");
-            psi.Environment.Remove("GOOGLE_API_KEY");
-
-            // Force IPv4-first DNS resolution. cloudcode-pa.googleapis.com publishes both
-            // A and AAAA records; Node's default Happy-Eyeballs picks IPv6 first. Docker
-            // bridge networks have no IPv6 egress by default, so the CLI hangs with
-            // ETIMEDOUT on every loadCodeAssist call before even reaching the model.
-            // Preserves any caller-provided NODE_OPTIONS by appending.
-            var existingNodeOpts = psi.Environment.TryGetValue("NODE_OPTIONS", out var no) ? no ?? "" : "";
-            psi.Environment["NODE_OPTIONS"] = string.IsNullOrEmpty(existingNodeOpts)
-                ? "--dns-result-order=ipv4first"
-                : existingNodeOpts + " --dns-result-order=ipv4first";
-
-            process = ProviderChildProcess.Start(_processStarter, psi, "Failed to start gemini CLI process");
-
-            // Read stderr in background — non-fatal; logged at Warning level.
-            // Collected for the turn.failed error message on non-zero exit.
-            // CancellationToken.None is intentional: the outer ct cancels via process.Kill in
-            // the finally block. Passing ct here would abort the drain mid-read and lose stderr
-            // lines we need for the error message before WaitForExitAsync returns.
-            var stderrTask = ProviderChildProcess.PumpStderr(process.StandardError, line =>
-            {
-                stderrLines.AppendLine(line);
-                _logger.LogWarning("GeminiExecutor stderr: {Line}", line);
-            }, CancellationToken.None);
-
-            // Write task text to stdin; close stdin to signal EOF to the CLI.
-            // Task text is NOT passed as a -p argument to avoid ARG_MAX / E2BIG failure on long inputs.
-            await process.StandardInput.WriteAsync(input.AsMemory(), ct);
-            process.StandardInput.Close();
-
-            // Read stdout line by line and parse stream-json events.
-            string? line;
-            while ((line = await process.StandardOutput.ReadLineAsync(ct)) is not null)
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-
-                JsonElement ev;
-                try
+                // CancellationToken.None is intentional: the stream ends when the process does, and
+                // the lines are needed for the error text of a start that failed.
+                var stderrTask = ProviderChildProcess.PumpStderr(process.StandardError, line =>
                 {
-                    ev = JsonDocument.Parse(line).RootElement;
-                }
-                catch (JsonException)
-                {
-                    // Non-JSON lines (info/warning from CLI startup) — skip, log at Warning.
-                    _logger.LogWarning("GeminiExecutor: non-JSON stdout line: {Line}", line);
-                    continue;
-                }
+                    lock (stderrLines) stderrLines.AppendLine(line);
+                    _logger.LogWarning("GeminiExecutor stderr: {Line}", line);
+                }, CancellationToken.None);
 
-                // Emit turn.started on first parseable event.
-                if (!turnStarted)
+                // The CLI prints init before it reads anything. Whatever comes first decides.
+                string? conversationId = null;
+                AgentProgress? early = null;
+                string? line;
+                while ((line = await process.StandardOutput.ReadLineAsync(ct)) is not null)
                 {
-                    turnStarted = true;
-                    yield return new AgentProgress
+                    if (!TryParse(line, out var ev)) continue;
+                    if (EventName(ev) == "init")
                     {
-                        EventType = "system",
-                        Summary = "Processing...",
-                        IsSignificant = false,
-                    };
+                        conversationId = ReadString(ev, "conversation_id");
+                        break;
+                    }
+
+                    early = MapResult(ev, turn, startTime);
+                    if (early is not null) break;
                 }
 
-                // Map stream-json event to fleet protocol.
-                var mapped = MapEvent(ev, accumulator);
-                if (mapped is not null)
-                    yield return mapped;
-            }
+                if (string.IsNullOrEmpty(conversationId))
+                {
+                    await stderrTask;
+                    await process.WaitForExitAsync(ct);
+                    var why = early?.FinalResult ?? ExitText(process, stderrLines);
 
-            await stderrTask;
-            await process.WaitForExitAsync(ct);
+                    if (resumeId is not null && attempt == 0)
+                    {
+                        _logger.LogWarning("Gemini resume of {SessionId} ended before init: {Why}", resumeId, why);
+                        ForgetSession(epoch);
+                        failedResume = "the CLI ended before its init";
+                        process.Dispose();
+                        process = null;
+                        continue;
+                    }
 
-            // Both exits are this turn's own terminal; only a turn that never got here has no row.
-            CompleteUsage(usageTurn, model, startTime);
+                    CompleteUsage(usageTurn, turn, startTime);
+                    yield return early ?? ErrorResult(why);
+                    yield break;
+                }
 
-            if (process.ExitCode == 0)
-            {
-                var finalText = accumulator.ToString();
+                var newSession = OnInit(resumeId, conversationId, instructionsHash, epoch);
+
                 yield return new AgentProgress
                 {
-                    EventType = "result",
-                    Summary = finalText,
-                    FinalResult = finalText,
-                    IsSignificant = true,
-                    Stats = new ExecutionStats { DurationMs = (int)(DateTimeOffset.UtcNow - startTime).TotalMilliseconds },
+                    EventType = "system",
+                    Summary = "Processing...",
+                    IsSignificant = false,
+                    SessionId = conversationId,
                 };
-            }
-            else
-            {
-                var errorMsg = stderrLines.Length > 0
-                    ? stderrLines.ToString().Trim()
-                    : $"gemini CLI exited with code {process.ExitCode}";
-                yield return new AgentProgress
+
+                // One NDJSON line, then end of input: the CLI runs one turn and exits.
+                var text = newSession ? PromptAssembler.WithNewSessionLine(input) : input;
+                await process.StandardInput.WriteAsync(UserMessageLine(text).AsMemory(), ct);
+                await process.StandardInput.FlushAsync(ct);
+                process.StandardInput.Close();
+                if (newSession && epoch == Volatile.Read(ref _sessionEpoch))
+                    _newSessionLinePending = false;
+
+                AgentProgress? final = null;
+                while (final is null && (line = await process.StandardOutput.ReadLineAsync(ct)) is not null)
                 {
-                    EventType = "result",
-                    Summary = errorMsg,
-                    FinalResult = errorMsg,
-                    IsErrorResult = true,
-                    IsSignificant = true,
-                };
+                    if (!TryParse(line, out var ev)) continue;
+
+                    final = MapResult(ev, turn, startTime);
+                    if (final is not null) break;
+
+                    foreach (var mapped in MapStep(ev, turn))
+                        yield return mapped;
+                }
+
+                await stderrTask;
+                await process.WaitForExitAsync(ct);
+
+                // Both ends are this turn's own terminal; only a turn that never got here has no row.
+                CompleteUsage(usageTurn, turn, startTime);
+                yield return final ?? ErrorResult(ExitText(process, stderrLines));
+                yield break;
             }
         }
         finally
         {
-            // Kill any still-running process and delete the temp system-prompt file + attachment dir.
+            // Cancelling a turn is killing its process: print mode has no cancel message.
             var exited = true;
             if (process is not null)
             {
@@ -343,19 +337,9 @@ public sealed class GeminiExecutor : IAgentExecutor
             }
             else
             {
-                _logger.LogWarning("GeminiExecutor: the gemini CLI did not confirm its exit after a kill; waiting for it in the background");
+                _logger.LogWarning("GeminiExecutor: the Antigravity CLI did not confirm its exit after a kill; waiting for it in the background");
                 _ = CloseOnExitAsync(process!);
             }
-
-            try { File.Delete(systemPromptPath); }
-            catch { /* non-fatal */ }
-
-            try
-            {
-                if (Directory.Exists(attachmentDir))
-                    Directory.Delete(attachmentDir, recursive: true);
-            }
-            catch { /* non-fatal */ }
         }
     }
 
@@ -372,290 +356,386 @@ public sealed class GeminiExecutor : IAgentExecutor
         }
     }
 
-    // ── Attachment staging ────────────────────────────────────────────────────
+    // ── The process ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Copies eligible image / PDF / audio attachments into <paramref name="stageDir"/>
-    /// using stable random filenames that preserve their extension. Returns the list of
-    /// "@./filename.ext" references to inject into the gemini -p argument.
-    ///
-    /// gemini-cli's handleAtCommand (v0.40.1) routes @-paths through ReadManyFilesTool,
-    /// which detects MIME by extension and emits inlineData parts for image/pdf/audio.
-    /// Files lacking a recognized extension are skipped (the CLI would skip them anyway,
-    /// per the "asset file was not explicitly requested by name or extension" branch in
-    /// the CLI source). Video is not in the CLI's supported set; skipped with a warning.
-    ///
-    /// Files without a persisted FilePath (Telegram:PersistAttachments disabled or
-    /// size-limit exceeded) are skipped — there's nothing on disk to stage.
+    /// The CLI's arguments. <c>Agent.Model</c> goes to <c>--model</c> as it is, and no model means
+    /// no flag (the CLI's own default). There is no <c>--effort</c>: a model slug carries it
+    /// (<c>gemini-4-argon-medium</c>) and the CLI refuses the flag beside such a slug.
     /// </summary>
-    internal List<string> StageAttachments(
-        IReadOnlyList<MessageImage>? images,
-        IReadOnlyList<MessageDocument>? documents,
-        string stageDir)
+    internal static IReadOnlyList<string> BuildArgs(string? model, string? resumeId)
     {
-        var refs = new List<string>();
-
-        if (images is { Count: > 0 })
+        var args = new List<string>
         {
-            foreach (var img in images)
-            {
-                if (string.IsNullOrEmpty(img.FilePath) || !File.Exists(img.FilePath))
-                {
-                    _logger.LogWarning("GeminiExecutor: image attachment has no persisted FilePath — skipped");
-                    continue;
-                }
-                var stagedName = StageOne(img.FilePath, stageDir, img.MimeType);
-                if (stagedName is not null) refs.Add($"@./{stagedName}");
-            }
+            "--output-format", "stream-json",
+            "--input-format", "stream-json",
+            // A message that starts with a slash is a message, not a command of the CLI.
+            "--disable-slash-commands",
+            // Without it print mode denies every shell command and every write in the workspace.
+            "--dangerously-skip-permissions",
+            "--settings", SessionSettings,
+        };
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            args.Add("--model");
+            args.Add(model);
         }
 
-        if (documents is { Count: > 0 })
+        if (!string.IsNullOrEmpty(resumeId))
         {
-            foreach (var doc in documents)
-            {
-                if (string.IsNullOrEmpty(doc.FilePath) || !File.Exists(doc.FilePath))
-                {
-                    _logger.LogWarning("GeminiExecutor: document attachment has no persisted FilePath — skipped");
-                    continue;
-                }
-                var stagedName = StageOne(doc.FilePath, stageDir, doc.MimeType);
-                if (stagedName is not null) refs.Add($"@./{stagedName}");
-            }
+            args.Add("--conversation");
+            args.Add(resumeId);
         }
 
-        return refs;
+        return args;
+    }
+
+    internal ProcessStartInfo BuildStartInfo(string? resumeId)
+    {
+        var psi = ProviderChildProcess.CreateStartInfo(CliBin, _config.WorkDir, createNoWindow: false);
+        foreach (var arg in BuildArgs(_config.Model, resumeId))
+            psi.ArgumentList.Add(arg);
+
+        // GEMINI_API_KEY is inherited as the container has it. The pin must hold: no self-update.
+        psi.Environment[DisableAutoUpdateVariable] = "true";
+        return psi;
+    }
+
+    /// <summary>The one line of input: <c>{"event":"user","message":{"content":"…"}}</c>.</summary>
+    internal static string UserMessageLine(string text)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("event", "user");
+            writer.WriteStartObject("message");
+            writer.WriteString("content", text);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(buffer.ToArray()) + "\n";
+    }
+
+    private string ExitText(Process process, StringBuilder stderrLines)
+    {
+        string text;
+        lock (stderrLines) text = stderrLines.ToString().Trim();
+        if (text.Length == 0)
+            text = $"The Antigravity CLI exited with code {process.ExitCode} and no result";
+
+        // The CLI does not print the key; this keeps it so whatever a later version prints.
+        var key = Environment.GetEnvironmentVariable(ApiKeyVariable);
+        return string.IsNullOrEmpty(key) ? text : text.Replace(key, "[key]", StringComparison.Ordinal);
+    }
+
+    // ── The session ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// What this start does about the conversation: the id to resume, or null for a new one. The
+    /// rule is <see cref="ProviderSessionFile.Decide"/>'s; a conversation this executor already
+    /// holds is resumed while the instructions are the ones it began with.
+    /// </summary>
+    private string? DecideSession(string instructionsHash, string? failedResume)
+    {
+        string? resumeId = null;
+        string reason;
+        if (failedResume is not null)
+        {
+            reason = $"resume failed: {failedResume}";
+        }
+        else if (_session is { } held)
+        {
+            if (held.InstructionsHash == instructionsHash)
+                resumeId = held.Id;
+            reason = "instructions changed";
+        }
+        else
+        {
+            var decision = _sessionFile.Decide(instructionsHash);
+            resumeId = decision.ResumeId;
+            reason = decision.Reason;
+        }
+
+        if (resumeId is not null)
+            return resumeId;
+
+        _session = null;
+        _lastSessionId = null;
+        _logger.LogInformation("Gemini session new: {Reason}", reason);
+        return null;
     }
 
     /// <summary>
-    /// Copies a single attachment to the staging dir with an extension preserved from
-    /// either the source path or, as fallback, the MIME type. Returns the staged basename
-    /// (relative to stageDir), or null if the attachment type is unsupported by the CLI.
+    /// The CLI has said which conversation this process is in. Returns true when it is a new one,
+    /// so the message about to be written is its first.
     /// </summary>
-    private string? StageOne(string srcPath, string stageDir, string? mimeType)
+    private bool OnInit(string? resumeId, string conversationId, string instructionsHash, int epoch)
     {
-        var srcExt = Path.GetExtension(srcPath).ToLowerInvariant();
-        if (string.IsNullOrEmpty(srcExt)) srcExt = MimeToExtension(mimeType);
-
-        // Gemini CLI's @-resolver supports image, pdf, audio. Video and unknowns are
-        // dropped — the CLI would refuse them anyway with a "not explicitly requested"
-        // skip. Logged so the operator can see why an attachment didn't reach the model.
-        if (!IsSupportedExtension(srcExt))
+        var resumed = resumeId is not null && string.Equals(resumeId, conversationId, StringComparison.Ordinal);
+        if (resumeId is not null && !resumed)
         {
-            _logger.LogWarning(
-                "GeminiExecutor: attachment {Path} (ext={Ext}, mime={Mime}) is not a supported media type — skipped",
-                srcPath, srcExt, mimeType);
-            return null;
+            // Not an error for the CLI: it could not find (or read) the conversation and began
+            // another. For the fleet this is a resume that failed.
+            _sessionFile.Remove();
+            _session = null;
+            _logger.LogInformation(
+                "Gemini session new: resume failed: the CLI did not find conversation {SessionId} and started {NewSessionId}",
+                resumeId, conversationId);
         }
 
-        var stagedName = $"{Guid.NewGuid():N}{srcExt}";
-        var dstPath = Path.Combine(stageDir, stagedName);
-        File.Copy(srcPath, dstPath, overwrite: false);
-        return stagedName;
+        if (epoch != Volatile.Read(ref _sessionEpoch))
+            return !resumed;
+
+        if (resumed)
+        {
+            if (_session is null)
+            {
+                _sessionOrigin = "resumed";
+                _logger.LogInformation("Gemini session resumed: {SessionId}", conversationId);
+            }
+        }
+        else
+        {
+            _sessionOrigin = "new";
+            _newSessionLinePending = true;
+        }
+
+        _lastSessionId = conversationId;
+        if (_session is not { } held || held.Id != conversationId || held.InstructionsHash != instructionsHash)
+        {
+            _session = new HeldSession(conversationId, instructionsHash);
+            _sessionFile.Save(conversationId, instructionsHash);
+        }
+
+        return _newSessionLinePending;
     }
 
-    private static string MimeToExtension(string? mimeType) => (mimeType ?? "").ToLowerInvariant() switch
+    /// <summary>Drops a session whose resume failed, in memory and on disk.</summary>
+    private void ForgetSession(int epoch)
     {
-        "image/jpeg" or "image/jpg" => ".jpg",
-        "image/png" => ".png",
-        "image/webp" => ".webp",
-        "image/gif" => ".gif",
-        "application/pdf" => ".pdf",
-        "audio/mpeg" or "audio/mp3" => ".mp3",
-        "audio/wav" or "audio/x-wav" => ".wav",
-        "audio/aac" => ".aac",
-        "audio/ogg" => ".ogg",
-        _ => "",
-    };
-
-    private static bool IsSupportedExtension(string ext) => ext switch
-    {
-        ".jpg" or ".jpeg" or ".png" or ".webp" or ".gif" => true,
-        ".pdf" => true,
-        ".mp3" or ".wav" or ".aac" or ".aiff" or ".aif" or ".ogg" or ".flac" or ".m4a" => true,
-        _ => false,
-    };
-
-    // ── stream-json event mapping ─────────────────────────────────────────────
-
-    /// <summary>
-    /// Maps a stream-json event from `gemini --output-format stream-json` to a fleet AgentProgress.
-    ///
-    /// Verified against gemini CLI v0.40.1 live output (canary run 2026-05-04).
-    /// Primary event shapes emitted by the v0.40.1 stream-json formatter:
-    ///
-    ///   {"type":"init",  "session_id":"...", "model":"..."}                          — startup; skip
-    ///   {"type":"message","role":"user",      "content":"..."}                       — input echo; skip
-    ///   {"type":"message","role":"assistant", "content":"...", "delta":true}         — text chunk; accumulate
-    ///   {"type":"tool_call",  "name":"...", "args":{...}}                            — tool invocation
-    ///   {"type":"tool_result","callId":"...", "content":"..."}                       — tool response
-    ///   {"type":"result","status":"success", "stats":{...}}                          — end-of-stream; RunCliAsync handles via exit code
-    ///   {"type":"result","status":"error",   "error":{"type":"...","message":"..."}} — API/CLI error
-    ///
-    /// Legacy / defensive fallbacks retained for forward compatibility with CLI schema changes.
-    /// </summary>
-    /// <summary>The usage row of a finished CLI run: no tokens or cost, only the duration.</summary>
-    private void CompleteUsage(UsageTurn? turn, string model, DateTimeOffset startTime)
-    {
-        if (turn is null)
+        _sessionFile.Remove();
+        if (epoch != Volatile.Read(ref _sessionEpoch))
             return;
-        var durationMs = (long)(DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
-        _usage!.Complete(turn, ProviderUsageSnapshot.ForGemini(model, Math.Max(0, durationMs)));
+        _session = null;
+        _lastSessionId = null;
+        _sessionOrigin = null;
     }
 
-    internal AgentProgress? MapEvent(JsonElement ev, StringBuilder accumulator)
+    private sealed record HeldSession(string Id, string InstructionsHash);
+
+    // ── Events ────────────────────────────────────────────────────────────────
+
+    /// <summary>What one turn's events have said so far.</summary>
+    internal sealed class TurnState
     {
-        // Extract the event type (if present).
-        var evType = ev.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : null;
+        public StringBuilder Text { get; } = new();
+        public HashSet<long> AnnouncedTools { get; } = [];
+        public JsonElement? Usage { get; set; }
+        public long? NumTurns { get; set; }
+        public string? ConversationId { get; set; }
+    }
 
-        // ── message (v0.40.1 primary format) ──────────────────────────────────
-        // role=assistant: streaming text delta; role=user: input echo, skip.
-        if (evType is "message")
+    private bool TryParse(string line, out JsonElement ev)
+    {
+        ev = default;
+        if (string.IsNullOrWhiteSpace(line)) return false;
+        try
         {
-            var role = ev.TryGetProperty("role", out var rp) ? rp.GetString() : null;
-            if (role is not "assistant") return null; // skip user echo and unknown roles
+            using var document = JsonDocument.Parse(line);
+            ev = document.RootElement.Clone();
+            return ev.ValueKind == JsonValueKind.Object;
+        }
+        catch (JsonException)
+        {
+            _logger.LogWarning("GeminiExecutor: a line of the CLI's output is not JSON ({Length} characters)", line.Length);
+            return false;
+        }
+    }
 
-            var content = ev.TryGetProperty("content", out var cp) && cp.ValueKind == JsonValueKind.String
-                ? cp.GetString() : null;
-            if (string.IsNullOrEmpty(content)) return null;
+    private static string? EventName(JsonElement ev) => ReadString(ev, "event");
 
-            accumulator.Append(content);
-            return new AgentProgress
-            {
-                EventType = "assistant",
-                Summary = content,
-                // Intermediate streaming chunk — suppress routing to Telegram on every delta.
-                // Only the terminal FinalResult event is significant (PR #129 pattern).
-                IsSignificant = false,
-            };
+    private static string? ReadString(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    /// <summary>
+    /// Maps a <c>step_update</c> event of <c>agy --output-format stream-json</c> (1.5.14):
+    /// <code>
+    /// {"event":"step_update","step_update":{"conversation_id":…,"step_index":N,
+    ///   "state":"ACTIVE|DONE|ERROR","step_type":"user_input|agent_response|tool|system_message|checkpoint|error_message",
+    ///   "text_delta":…,"tool_name":…,"tool_info":{"name":…,"parameters":{…},"output":…|"error":{"type":…,"message":…}}}}
+    /// </code>
+    /// Text is not significant (the result delivers the answer); a tool step is announced once,
+    /// significant, with its name and arguments, and its end is a tool result.
+    /// </summary>
+    internal static IReadOnlyList<AgentProgress> MapStep(JsonElement ev, TurnState turn)
+    {
+        if (EventName(ev) != "step_update"
+            || !ev.TryGetProperty("step_update", out var step) || step.ValueKind != JsonValueKind.Object)
+            return [];
+
+        var state = ReadString(step, "state");
+        switch (ReadString(step, "step_type"))
+        {
+            case "agent_response":
+                var delta = ReadString(step, "text_delta");
+                if (string.IsNullOrEmpty(delta)) return [];
+                turn.Text.Append(delta);
+                return [new AgentProgress { EventType = "assistant", Summary = delta, IsSignificant = false }];
+
+            case "tool":
+                var mapped = new List<AgentProgress>(2);
+                step.TryGetProperty("tool_info", out var info);
+                var index = step.TryGetProperty("step_index", out var i) && i.TryGetInt64(out var n) ? n : -1;
+                if (turn.AnnouncedTools.Add(index))
+                {
+                    var (name, args) = ToolCall(step, info);
+                    mapped.Add(new AgentProgress
+                    {
+                        EventType = "tool_use",
+                        Summary = $"Using {name}",
+                        ToolName = name,
+                        ToolArgs = args,
+                        IsSignificant = true,
+                    });
+                }
+
+                if (state is "DONE" or "ERROR")
+                {
+                    mapped.Add(new AgentProgress
+                    {
+                        EventType = "tool_result",
+                        Summary = ToolOutcome(info),
+                        IsSignificant = false,
+                    });
+                }
+
+                return mapped;
+
+            default:
+                return [];
+        }
+    }
+
+    /// <summary>
+    /// A tool's name and arguments. An MCP tool is called through the CLI's <c>call_mcp_tool</c>
+    /// (<c>{ServerName, ToolName, Arguments}</c>); it is shown under the name the other providers
+    /// give it, <c>mcp__server__tool</c>, with its own arguments.
+    /// </summary>
+    private static (string Name, string Args) ToolCall(JsonElement step, JsonElement info)
+    {
+        var name = ReadString(step, "tool_name") ?? ReadString(info, "name") ?? "";
+        var hasParameters = info.ValueKind == JsonValueKind.Object
+            && info.TryGetProperty("parameters", out var parameters) && parameters.ValueKind == JsonValueKind.Object;
+        if (!hasParameters)
+            return (name, "{}");
+
+        parameters = info.GetProperty("parameters");
+        if (name == "call_mcp_tool"
+            && ReadString(parameters, "ServerName") is { Length: > 0 } server
+            && ReadString(parameters, "ToolName") is { Length: > 0 } tool)
+        {
+            var arguments = parameters.TryGetProperty("Arguments", out var a) && a.ValueKind == JsonValueKind.Object
+                ? a.GetRawText()
+                : "{}";
+            return ($"mcp__{server}__{tool}", arguments);
         }
 
-        // ── result (v0.40.1: end-of-stream or API error) ──────────────────────
-        // status=success: RunCliAsync emits FinalResult from the accumulated text via exit code 0.
-        // status=error:   emit an immediate error result so the turn fails fast.
-        if (evType is "result")
+        return (name, parameters.GetRawText());
+    }
+
+    private static string ToolOutcome(JsonElement info)
+    {
+        if (info.ValueKind != JsonValueKind.Object)
+            return "";
+        if (ReadString(info, "output") is { } output)
+            return output;
+        if (info.TryGetProperty("error", out var error))
+            return ReadString(error, "message") ?? (error.ValueKind == JsonValueKind.String ? error.GetString()! : "tool error");
+        return "";
+    }
+
+    /// <summary>
+    /// Maps the terminal event, or returns null for any other:
+    /// <code>
+    /// {"event":"result","result":{"conversation_id":…,"status":"SUCCESS|ERROR","response":…,"error":…,
+    ///   "num_turns":N,"usage":{"input_tokens":…,"output_tokens":…,"thinking_tokens":…,"cache_read_tokens":…,"total_tokens":…}}}
+    /// </code>
+    /// Anything but <c>SUCCESS</c> is an error result with the CLI's own error text.
+    /// </summary>
+    internal static AgentProgress? MapResult(JsonElement ev, TurnState turn, DateTimeOffset startTime)
+    {
+        if (EventName(ev) != "result"
+            || !ev.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
+            return null;
+
+        turn.ConversationId = ReadString(result, "conversation_id") is { Length: > 0 } id ? id : null;
+        if (result.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
+            turn.Usage = usage.Clone();
+        turn.NumTurns = result.TryGetProperty("num_turns", out var turns) && turns.TryGetInt64(out var count) && count >= 0 ? count : null;
+
+        var stats = new ExecutionStats
         {
-            var status = ev.TryGetProperty("status", out var sp) ? sp.GetString() : null;
-            if (status is not "error") return null; // success handled by exit code path
+            DurationMs = (int)Math.Max(0, (DateTimeOffset.UtcNow - startTime).TotalMilliseconds),
+        };
 
-            string? msg = null;
-            if (ev.TryGetProperty("error", out var errObj) && errObj.ValueKind == JsonValueKind.Object)
-                msg = ExtractText(errObj, "message", "error");
-            msg ??= ExtractText(ev, "message", "error") ?? "Unknown error from gemini CLI";
-
+        if (ReadString(result, "status") == "SUCCESS")
+        {
+            var response = ReadString(result, "response");
+            var text = string.IsNullOrEmpty(response) ? turn.Text.ToString() : response;
             return new AgentProgress
             {
                 EventType = "result",
-                Summary = msg,
-                FinalResult = msg,
-                IsErrorResult = true,
-                IsSignificant = true,
-            };
-        }
-
-        // ── Tool call ──────────────────────────────────────────────────────────
-        // Handle tool_call / toolCall / function_call event shapes.
-        if (evType is "tool_call" or "toolCall" or "function_call")
-        {
-            var toolName = ev.TryGetProperty("name", out var n) ? n.GetString()
-                : ev.TryGetProperty("toolName", out var tn) ? tn.GetString()
-                : null;
-            var toolArgs = ev.TryGetProperty("args", out var a) ? a.GetRawText()
-                : ev.TryGetProperty("input", out var inp) ? inp.GetRawText()
-                : "{}";
-            return new AgentProgress
-            {
-                EventType = "tool_use",
-                Summary = $"Using {toolName}",
-                ToolName = toolName ?? "",
-                ToolArgs = toolArgs,
-                // Tool calls ARE significant — the turn gates them via the
-                // user-side SuppressToolMessages flag and shows every one of
-                // them, a few to a message. Matches ClaudeExecutor's behavior.
-                // (Streaming text deltas remain IsSignificant=false; only the
-                // terminal FinalResult event delivers the assistant response.)
-                IsSignificant = true,
-            };
-        }
-
-        // ── Tool result ────────────────────────────────────────────────────────
-        if (evType is "tool_result" or "toolResult" or "function_result")
-        {
-            var resultText = ExtractText(ev, "content", "result", "text");
-            return new AgentProgress
-            {
-                EventType = "tool_result",
-                Summary = resultText ?? "",
-                IsSignificant = false,
-            };
-        }
-
-        // ── Legacy / defensive text extraction ────────────────────────────────
-        // Handles hypothetical schema variations: top-level text field, raw candidates format,
-        // and any future event type that carries a text payload. Belt-and-suspenders — the
-        // v0.40.1 primary format is message/role=assistant above; these fire only for unknowns.
-        var text = ExtractEventText(ev, evType);
-        if (!string.IsNullOrEmpty(text))
-        {
-            accumulator.Append(text);
-            return new AgentProgress
-            {
-                EventType = "assistant",
                 Summary = text,
-                IsSignificant = false,
+                FinalResult = text,
+                IsSignificant = true,
+                SessionId = turn.ConversationId,
+                Stats = stats,
             };
         }
 
-        // Ignore events that carry no text payload (init, usage, heartbeats, etc.).
-        return null;
+        var message = ReadString(result, "error") is { Length: > 0 } error
+            ? error
+            : "The Antigravity CLI reported an error without a message";
+        return new AgentProgress
+        {
+            EventType = "result",
+            Summary = message,
+            FinalResult = message,
+            IsErrorResult = true,
+            IsSignificant = true,
+            SessionId = turn.ConversationId,
+            Stats = stats,
+        };
     }
+
+    private static AgentProgress ErrorResult(string message) => new()
+    {
+        EventType = "result",
+        Summary = message,
+        FinalResult = message,
+        IsErrorResult = true,
+        IsSignificant = true,
+    };
+
+    /// <summary>A turn that ends before any process starts. It has no usage row: the provider saw nothing.</summary>
+    private static AgentProgress Refusal(string message) => ErrorResult(message);
 
     /// <summary>
-    /// Extracts a text payload from a stream-json event, handling multiple field naming conventions
-    /// used across gemini CLI versions and the raw Gemini API response format.
+    /// The usage row of a finished run. The CLI's result counts the whole conversation, across
+    /// processes, so the row is cumulative per conversation; a count it did not report stays null.
     /// </summary>
-    internal static string? ExtractEventText(JsonElement ev, string? evType)
+    private void CompleteUsage(UsageTurn? usageTurn, TurnState turn, DateTimeOffset startTime)
     {
-        // Type-specific fields first.
-        if (evType is "text" or "content" or "thought" or "finalText" or "model_turn_complete")
-        {
-            if (ev.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
-                return t.GetString();
-            if (ev.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String)
-                return c.GetString();
-        }
-
-        // Generic top-level text field (any event type).
-        if (ev.TryGetProperty("text", out var textProp) && textProp.ValueKind == JsonValueKind.String)
-            return textProp.GetString();
-
-        // Raw Gemini API streaming format: candidates[0].content.parts[*].text
-        if (ev.TryGetProperty("candidates", out var cands) && cands.ValueKind == JsonValueKind.Array)
-        {
-            var sb = new StringBuilder();
-            foreach (var cand in cands.EnumerateArray())
-            {
-                if (!cand.TryGetProperty("content", out var cnt)) continue;
-                if (!cnt.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array) continue;
-                foreach (var part in parts.EnumerateArray())
-                {
-                    if (part.TryGetProperty("text", out var pt) && pt.ValueKind == JsonValueKind.String)
-                        sb.Append(pt.GetString());
-                }
-            }
-            if (sb.Length > 0) return sb.ToString();
-        }
-
-        return null;
-    }
-
-    /// <summary>Tries each field name in order and returns the first non-null string value found.</summary>
-    private static string? ExtractText(JsonElement ev, params string[] fields)
-    {
-        foreach (var field in fields)
-        {
-            if (ev.TryGetProperty(field, out var prop) && prop.ValueKind == JsonValueKind.String)
-                return prop.GetString();
-        }
-        return null;
+        if (usageTurn is null)
+            return;
+        var durationMs = (long)Math.Max(0, (DateTimeOffset.UtcNow - startTime).TotalMilliseconds);
+        _usage!.Complete(usageTurn, ProviderUsageSnapshot.ForGemini(
+            _config.Model, durationMs, turn.Usage, turn.NumTurns, turn.ConversationId ?? _lastSessionId));
     }
 }

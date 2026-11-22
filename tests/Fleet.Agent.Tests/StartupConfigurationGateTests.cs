@@ -124,7 +124,24 @@ public class StartupConfigurationGateTests
     {
         using var services = BuildServices(provider, model, hostedProvider: false);
 
-        AgentHostRegistration.ValidateStartupConfiguration(services, _ => null);
+        AgentHostRegistration.ValidateStartupConfiguration(services, GeminiKeyOnly(provider));
+    }
+
+    /// <summary>The environment of an agent that holds nothing but what its provider cannot start without.</summary>
+    private static Func<string, string?> GeminiKeyOnly(string provider) =>
+        name => provider == "gemini" && name == "GEMINI_API_KEY" ? "synthetic-key-value" : null;
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("  ")]
+    public void GeminiAgentWithoutAnApiKey_ThrowsSoTheHostNeverRuns(string? value)
+    {
+        using var services = BuildServices("gemini", "gemini-4-argon-medium");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => AgentHostRegistration.ValidateStartupConfiguration(services, _ => value));
+
+        Assert.Contains("GEMINI_API_KEY is not set", ex.Message);
     }
 
     [Theory]
@@ -173,7 +190,7 @@ public class StartupConfigurationGateTests
     {
         using var services = BuildServices(provider, model);
 
-        AgentHostRegistration.ValidateStartupConfiguration(services, _ => null);
+        AgentHostRegistration.ValidateStartupConfiguration(services, GeminiKeyOnly(provider));
     }
 
     // ── #382 S1: codex local model mode from Agent:CodexOssBaseUrl ──────────

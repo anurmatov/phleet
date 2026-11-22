@@ -21,7 +21,7 @@ namespace Fleet.Agent.Tests.Harness;
 /// <c>ParseProgress</c>, so anything short of the full loop would not observe it.</item>
 /// <item><b>Codex</b> — <c>StreamTurnForTests</c> over a scripted notification channel. No process
 /// at all is required for the read path.</item>
-/// <item><b>Gemini</b> — <c>MapEvent</c> with a caller-owned accumulator. There is no process seam
+/// <item><b>Gemini</b> — <c>MapStep</c> with a caller-owned turn state. There is no process seam
 /// and no event-channel seam below <c>ExecuteAsync</c>, so the turn-start marker and the terminal
 /// are NOT observable here; they are recorded as <c>inferred</c> at L2 (D3). Opening a seam would
 /// be a <c>src/</c> change, which MUST NOT #3 and #18 forbid.</item>
@@ -237,7 +237,7 @@ internal static class ProviderFrameReplay
             .ToList();
 
     /// <summary>
-    /// Drive Gemini frames through <c>MapEvent</c> with a caller-owned accumulator.
+    /// Drive Gemini frames through <c>MapStep</c> with a caller-owned turn state.
     ///
     /// <para>The returned accumulator text is what <c>ExecuteAsync</c> would hand to its terminal
     /// <c>result</c> — so the terminal's CONTENT is observable here even though the terminal
@@ -251,16 +251,11 @@ internal static class ProviderFrameReplay
     public static (IReadOnlyList<AgentProgress> Progress, string Accumulated) ReplayGeminiFrames(
         IReadOnlyList<JsonElement> frames)
     {
-        var executor = CreateGeminiExecutor();
-        var accumulator = new StringBuilder();
+        var turn = new GeminiExecutor.TurnState();
         var progress = new List<AgentProgress>();
         foreach (var frame in frames)
-        {
-            var mapped = executor.MapEvent(frame, accumulator);
-            if (mapped is not null)
-                progress.Add(mapped);
-        }
-        return (progress, accumulator.ToString());
+            progress.AddRange(GeminiExecutor.MapStep(frame, turn));
+        return (progress, turn.Text.ToString());
     }
 
     /// <summary>A gemini executor configured for replay. Never starts a provider process.</summary>
@@ -272,7 +267,7 @@ internal static class ProviderFrameReplay
             Role = "test",
             WorkDir = "/workspace/example", // hygiene-ok: the fixture-corpus workspace root
             Provider = "gemini",
-            Model = "gemini-2.5-flash",
+            Model = "gemini-3.1-pro-low",
         });
         return new GeminiExecutor(
             options, new PromptBuilder(options, NullLogger<PromptBuilder>.Instance),
@@ -292,8 +287,9 @@ internal static class ProviderFrameReplay
     };
 
     /// <summary>
-    /// The terminal Gemini builds after <c>WaitForExitAsync</c> from the accumulated text and the
-    /// process exit code. Reproduced here, and <c>inferred</c> for the same reason.
+    /// The terminal Gemini builds in <c>ExecuteAsync</c>: from the CLI's <c>result</c> event, whose
+    /// response is the accumulated text, or, when the stream ends without one, from the process
+    /// exit. Reproduced here, and <c>inferred</c> for the same reason.
     /// </summary>
     public static AgentProgress GeminiInferredTerminal(string accumulated, int exitCode = 0) =>
         exitCode == 0
@@ -307,8 +303,8 @@ internal static class ProviderFrameReplay
             : new AgentProgress
             {
                 EventType = "result",
-                Summary = $"gemini CLI exited with code {exitCode}",
-                FinalResult = $"gemini CLI exited with code {exitCode}",
+                Summary = $"The Antigravity CLI exited with code {exitCode} and no result",
+                FinalResult = $"The Antigravity CLI exited with code {exitCode} and no result",
                 IsErrorResult = true,
                 IsSignificant = true,
             };

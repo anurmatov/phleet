@@ -100,6 +100,18 @@ public static class AgentHostRegistration
     }
 
     /// <summary>
+    /// A gemini agent runs the Antigravity CLI with a Gemini API key the CLI reads from
+    /// <c>GEMINI_API_KEY</c>. Without one no turn can make a request, so the agent does not start
+    /// (<c>entrypoint.sh</c> stops earlier with the same message). The value is never part of the text.
+    /// </summary>
+    internal static string? DescribeGeminiKeyFault(AgentOptions agent, Func<string, string?> environmentReader) =>
+        AgentProviders.Normalize(agent.Provider) == AgentProviders.Gemini
+        && string.IsNullOrWhiteSpace(environmentReader(GeminiExecutor.ApiKeyVariable))
+            ? $"{GeminiExecutor.ApiKeyVariable} is not set: a gemini agent needs a Gemini API key in its environment "
+                + $"(an Env Ref named {GeminiExecutor.ApiKeyVariable})"
+            : null;
+
+    /// <summary>
     /// Startup configuration gate, run by <c>Program.cs</c> against the built host before
     /// <c>app.Run()</c>. Throws rather than let a misconfigured agent reach the run loop.
     /// </summary>
@@ -167,6 +179,9 @@ public static class AgentHostRegistration
         if ((services.GetService<IConfiguration>()?.GetSection(JournalOptions.Section).Get<JournalOptions>()
             ?? services.GetService<IOptions<JournalOptions>>()?.Value)?.DescribeFault() is { } journalFault)
             Fail(journalFault);
+
+        if (DescribeGeminiKeyFault(agent, environmentReader ?? Environment.GetEnvironmentVariable) is { } keyFault)
+            Fail(keyFault);
 
         if (agent.Provider != "codex")
             return;

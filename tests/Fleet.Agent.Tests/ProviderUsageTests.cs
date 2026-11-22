@@ -247,31 +247,41 @@ public class ProviderUsageTests
     // ── Gemini ───────────────────────────────────────────────────────────────
 
     [Theory]
-    [InlineData(0, false)]
-    [InlineData(3, true)]
-    public async Task GeminiExecutor_EveryExit_IsOneRow_WithNoTokensOrCost(int exitCode, bool isError)
+    [InlineData(0)]
+    [InlineData(3)]
+    public async Task GeminiExecutor_ARunThatEndsWithoutAResult_IsOneRow_WithNoTokensOrCost(int exitCode)
     {
         var reporter = Reporter();
-        var options = Options.Create(new AgentOptions
+        var root = Path.Combine(Path.GetTempPath(), $"gemini-usage-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
         {
-            Name = "test", Role = "test", WorkDir = "/tmp", Provider = "gemini", Model = "model-g",
-        });
-        await using var gemini = new GeminiExecutor(
-            options, new PromptBuilder(options, NullLogger<PromptBuilder>.Instance), NullLogger<GeminiExecutor>.Instance,
-            psi => StandInShell(psi, $"cat >/dev/null; echo '{{\"type\":\"init\"}}'; exit {exitCode}"),
-            usage: reporter);
+            var options = Options.Create(new AgentOptions
+            {
+                Name = "test", Role = "test", WorkDir = root, Provider = "gemini", Model = "model-g",
+            });
+            await using var gemini = new GeminiExecutor(
+                options, new PromptBuilder(options, NullLogger<PromptBuilder>.Instance), NullLogger<GeminiExecutor>.Instance,
+                psi => StandInShell(psi, $"echo '{{\"event\":\"init\",\"conversation_id\":\"c-1\",\"init\":{{}}}}'; cat >/dev/null; exit {exitCode}"),
+                usage: reporter, geminiHome: Path.Combine(root, ".gemini"));
 
-        var progress = new List<AgentProgress>();
-        await foreach (var p in gemini.ExecuteAsync("synthetic task"))
-            progress.Add(p);
+            var progress = new List<AgentProgress>();
+            await foreach (var p in gemini.ExecuteAsync("synthetic task"))
+                progress.Add(p);
 
-        Assert.Equal(isError, Assert.Single(progress, p => p.FinalResult is not null).IsErrorResult);
-        var row = Assert.Single(Drain(reporter));
-        Assert.Equal(("gemini", "model-g"), (row.GetProperty("provider").GetString(), row.GetProperty("model").GetString()));
-        Assert.True(row.GetProperty("duration_ms").GetInt64() >= 0);
-        foreach (var measure in new[] { "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd", "cum_input_tokens" })
-            Assert.False(row.TryGetProperty(measure, out _), measure);
-        Assert.False(row.GetProperty("delta_reset").GetBoolean());
+            // The CLI printed no result: an error whatever the exit code, and a row with what is known.
+            Assert.True(Assert.Single(progress, p => p.FinalResult is not null).IsErrorResult);
+            var row = Assert.Single(Drain(reporter));
+            Assert.Equal(("gemini", "model-g"), (row.GetProperty("provider").GetString(), row.GetProperty("model").GetString()));
+            Assert.True(row.GetProperty("duration_ms").GetInt64() >= 0);
+            foreach (var measure in new[] { "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd", "cum_input_tokens" })
+                Assert.False(row.TryGetProperty(measure, out _), measure);
+            Assert.False(row.GetProperty("delta_reset").GetBoolean());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

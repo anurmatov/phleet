@@ -22,6 +22,8 @@
 #                  build on this machine (dotnet build src/Fleet.Agent -c Release, or AGENT_DLL).
 #   RUNTIME_IMAGE  image of the default run; needs python3 and bash (default python:3.12-slim)
 #   AGY_TARBALL    a release archive already on disk, instead of downloading it (still checked)
+#   PLATFORM       linux/amd64 or linux/arm64: the other architecture's release, under emulation
+#                  (slow; for checking the x64 archive from an arm64 machine)
 #   TRANSCRIPT     copy what was sent and received to this file
 #   KEEP=1         leave the work directory behind and print where
 #
@@ -64,9 +66,9 @@ if [ -n "${AGENT_IMAGE:-}" ]; then
         -v "$HERE/fixtures/appsettings.json:/app/appsettings.json:ro" -v "$HERE/fixtures/mcp.json:/workspace/.mcp.json:ro" \
         "$AGENT_IMAGE" /harness/checks.py || RC=$?
 else
-    case "$(docker version --format '{{.Server.Arch}}')" in
-        amd64 | x86_64) ARCH=amd64 ;;
-        arm64 | aarch64) ARCH=arm64 ;;
+    case "${PLATFORM:-$(docker version --format '{{.Server.Arch}}')}" in
+        amd64 | x86_64 | linux/amd64) ARCH=amd64 ;;
+        arm64 | aarch64 | linux/arm64) ARCH=arm64 ;;
         *) fail_infra "no pinned release for this architecture" ;;
     esac
     ASSET="$(pinned "$ARCH" 1)"; SHA256="$(pinned "$ARCH" 2)"
@@ -94,7 +96,7 @@ else
     chmod 644 "$WORK/in/mcp_config.json" "$WORK/in/antigravity"
 
     RC=0
-    docker run --rm --network none --name "$ID" -e HOME=/root -e AGY_EXPECTED_VERSION="$VERSION" \
+    docker run --rm --network none --name "$ID" --platform "linux/$ARCH" -e HOME=/root -e AGY_EXPECTED_VERSION="$VERSION" \
         -v "$HERE:/harness:ro" -v "$WORK/in:/in:ro" -v "$WORK/out:/out" \
         "$RUNTIME_IMAGE" bash -c 'install -m 0755 /in/antigravity /usr/local/bin/agy && exec python3 /harness/checks.py' || RC=$?
 fi

@@ -19,7 +19,7 @@ WORKDIR /app
 
 ARG CLAUDE_CODE_VERSION=2.1.327
 ARG CODEX_CLI_VERSION=0.170.0
-ARG GEMINI_CLI_VERSION=0.40.1
+ARG AGY_CLI_VERSION=1.5.14
 ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 
 # ffmpeg/ffprobe let agents look inside video attachments (#361). DejaVu and fontconfig let
@@ -81,21 +81,31 @@ ENV FLEET_BUILD_COMMIT=$GIT_COMMIT
 
 COPY --from=build /app .
 
-# Gemini CLI — headless mode. OAuth credentials mounted writable at runtime by the orchestrator.
-# Pinned to the GEMINI_CLI_VERSION arg to match the verified flag set (--output-format stream-json,
-# --yolo, GEMINI_SYSTEM_MD env var) and the stream-json event schema used by GeminiExecutor.cs.
-RUN npm install -g @google/gemini-cli@${GEMINI_CLI_VERSION}
-# Build-time guard: verify gemini CLI is on PATH and responds to --version.
-RUN gemini --version || (echo 'ERROR: gemini CLI not on PATH — npm install -g may have failed' && exit 1)
-RUN ACTUAL_GEMINI_VERSION="$(gemini --version | awk '{print $1}')" && \
-    echo "Installed gemini ${ACTUAL_GEMINI_VERSION}" && \
-    [ "$ACTUAL_GEMINI_VERSION" = "$GEMINI_CLI_VERSION" ] || \
-    (echo "ERROR: expected gemini ${GEMINI_CLI_VERSION}, got ${ACTUAL_GEMINI_VERSION}" && exit 1)
-# Build-time guard: @google/gemini-cli-core SDK must NOT be installed globally.
-# GeminiExecutor.cs uses the CLI binary (not the SDK). The SDK was used by the previous
-# bridge approach (issue #128, PR #129) and must not be re-introduced accidentally.
-RUN npm list -g @google/gemini-cli-core 2>&1 | grep -q "empty" || \
-    (echo 'ERROR: @google/gemini-cli-core SDK is installed — remove it; GeminiExecutor uses the CLI binary only' && exit 1)
+# Antigravity CLI (agy): what a gemini agent runs, with a Gemini API key. A closed binary from the
+# pinned GitHub release. The sha256 values of the two release archives live here, never fetched
+# from the same release at build time; a new AGY_CLI_VERSION needs both values replaced with it,
+# and `bash tests/antigravity-cli/run.sh` (which reads the version and the two values from here)
+# run against it: that harness is what says whether the fleet's assumptions about the CLI still hold.
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in \
+      amd64) AGY_ASSET=agy_cli_linux_x64.tar.gz; AGY_SHA256=d58386322d2073e96b33f7cc32b4e9ae2db6228f58440369725967b2de48c7b5 ;; \
+      arm64) AGY_ASSET=agy_cli_linux_arm64.tar.gz; AGY_SHA256=e5f69a3123fac66974b303d9a201f381a0fb32b3ef869d9139da85d5caf67a2a ;; \
+      *) echo "ERROR: no pinned agy sha256 for architecture ${ARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_CLI_VERSION}/${AGY_ASSET}" \
+      -o /tmp/agy.tar.gz && \
+    echo "${AGY_SHA256}  /tmp/agy.tar.gz" | sha256sum -c - && \
+    tar xzf /tmp/agy.tar.gz -C /tmp antigravity && \
+    install -m 0755 /tmp/antigravity /usr/local/bin/agy && \
+    rm -f /tmp/agy.tar.gz /tmp/antigravity
+# The CLI replaces itself in the background when a newer release is out, and root can always write
+# /usr/local/bin. This is its own switch (only the value "true" works); GeminiExecutor sets it on
+# every process too. Without it the pin above holds only until the first start.
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
+RUN ACTUAL_AGY_VERSION="$(agy --version)" && \
+    echo "Installed agy ${ACTUAL_AGY_VERSION}" && \
+    [ "$ACTUAL_AGY_VERSION" = "$AGY_CLI_VERSION" ] || \
+    (echo "ERROR: expected agy ${AGY_CLI_VERSION}, got ${ACTUAL_AGY_VERSION}" && exit 1)
 
 RUN mkdir -p /workspace /root/.claude
 

@@ -25,7 +25,7 @@ internal static class SessionFileRemoval
     /// </summary>
     internal static string? HostPath(Agent agent, string baseDir)
     {
-        if (WorkDirInsidePersistentMount(agent.WorkDir) is not { } below)
+        if (WorkDirInsidePersistentMount(agent) is not { } below)
             return null;
         return Path.Combine([WorkspaceDir(agent, baseDir), .. below, .. AgentSessionFile.RelativePath.Split('/')]);
     }
@@ -80,15 +80,21 @@ internal static class SessionFileRemoval
             : $"{FaultCode}: {Path.GetRelativePath(baseDir, path)} could not be removed ({reason}).";
     }
 
+    /// <summary>The last segment of <see cref="ContainerSpecBuilder.GeminiHome"/>.</summary>
+    private const string GeminiHomeSegment = ".gemini";
+
     private static string WorkspaceDir(Agent agent, string baseDir) =>
         Path.Combine(baseDir, "workspaces", agent.ContainerName);
 
     /// <summary>
-    /// Maps the workspace and the two persistent provider-home mounts in BuildBinds to their
-    /// paths below workspaces/{container}. Both home mounts exist for every provider.
+    /// Maps the workspace and the persistent provider-home mounts in BuildBinds to their paths
+    /// below workspaces/{container}. The claude and codex homes are mounted for every provider;
+    /// the gemini home only for a gemini agent, so for any other agent a work directory under it is
+    /// in the container's own filesystem.
     /// </summary>
-    private static string[]? WorkDirInsidePersistentMount(string? workDir)
+    private static string[]? WorkDirInsidePersistentMount(Agent agent)
     {
+        var workDir = agent.WorkDir;
         if (workDir is null || !workDir.StartsWith('/'))
             return null;
 
@@ -106,6 +112,8 @@ internal static class SessionFileRemoval
         {
             if (segments[1] == ".claude") return ["claude", .. segments.Skip(2)];
             if (segments[1] == ".codex") return ["codex", .. segments.Skip(2)];
+            if (segments[1] == GeminiHomeSegment && string.Equals(agent.Provider, AgentProviders.Gemini, StringComparison.Ordinal))
+                return [ContainerSpecBuilder.GeminiHomeHostDirectory, .. segments.Skip(2)];
         }
         return null;
     }

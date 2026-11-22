@@ -24,11 +24,18 @@ namespace Fleet.Orchestrator.Tests.Services;
 /// style, a context window, an effort, tools and MCP endpoints. The binds are listed before path
 /// expansion, with the temporary base directory written as <c>&lt;base&gt;</c>.
 /// </para>
+/// <para>
+/// The <c>gemini</c> fixtures are the one set recorded on purpose from a later change: the provider
+/// moved to the Antigravity CLI, which signs in with the <c>GEMINI_API_KEY</c> Env Ref, mounts no
+/// credential file, keeps its home in a host directory and sends MCP headers. The host's
+/// <c>.gemini-credentials.json</c> is still written by the scenario, to show nothing mounts it.
+/// </para>
 /// </remarks>
 public class ProviderGoldenTests
 {
     private const string Url = "http://inference-host:8000";
     private const string BotRef = "TELEGRAM_GOLDEN_BOT_TOKEN";
+    private const string GeminiKeyRef = "GEMINI_API_KEY";
 
     internal const string AgentName = "agent-golden";
     internal const string ContainerName = "fleet-agent-golden";
@@ -67,7 +74,7 @@ public class ProviderGoldenTests
 
         await using var h = ProvisioningHarness.Create();
         File.AppendAllText(Path.Combine(h.BaseDir, ".env"),
-            $"{BotRef}=bot-token-placeholder\nZAI_CODING_PLAN_API_KEY=zai-key-placeholder\n");
+            $"{BotRef}=bot-token-placeholder\nZAI_CODING_PLAN_API_KEY=zai-key-placeholder\n{GeminiKeyRef}=gemini-key-placeholder\n");
         foreach (var file in new[] { ".claude-credentials.json", ".codex-credentials.json", ".gemini-credentials.json" })
             File.WriteAllText(Path.Combine(h.BaseDir, file), "{}");
         var credentialPath = Path.Combine(h.BaseDir, "credentials", "creds.json");
@@ -123,6 +130,8 @@ public class ProviderGoldenTests
             agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = BotRef });
             if (config == "codex-hosted")
                 agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "ZAI_CODING_PLAN_API_KEY" });
+            if (config == "gemini")
+                agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = GeminiKeyRef });
             agent.TelegramUsers.Add(new AgentTelegramUser { UserId = 1000001 });
             agent.TelegramGroups.Add(new AgentTelegramGroup { GroupId = -100000000001 });
             agent.Instructions.Add(new AgentInstruction { Instruction = instruction, LoadOrder = 0 });
@@ -136,13 +145,6 @@ public class ProviderGoldenTests
 
         var preview = await h.Service.PreviewAsync(AgentName);
         var result = await h.Service.ProvisionAsync(AgentName);
-        if (provider == "gemini")
-        {
-            Assert.False(result.Success);
-            Assert.Contains("mcp_headers_unsupported", result.Message);
-            Assert.False(Directory.Exists(h.GeneratedDir(ContainerName)));
-            return (new Dictionary<string, string>(), h.Logs.Entries);
-        }
         Assert.True(result.Success, result.Message);
 
         var dir = h.GeneratedDir(ContainerName);
@@ -161,8 +163,6 @@ public class ProviderGoldenTests
     public async Task GeneratedOutput_EqualsTheMergeBase(string config)
     {
         var generated = await GenerateAsync(config);
-
-        if (config == "gemini") { Assert.Empty(generated); return; }
 
         Assert.Equal(Files.Order(), generated.Keys.Order());
         foreach (var file in Files)

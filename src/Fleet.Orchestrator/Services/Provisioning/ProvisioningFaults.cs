@@ -119,4 +119,46 @@ internal static class ProvisioningFaults
     }
 
     internal const string CodexOssBaseUrlEnvRef = "CODEX_OSS_BASE_URL";
+
+    /// <summary>The variable the Antigravity CLI reads its Gemini API key from, and so the Env Ref a gemini agent must hold.</summary>
+    internal const string GeminiApiKeyEnvRef = "GEMINI_API_KEY";
+
+    /// <summary>The name every fault of <see cref="DescribeGeminiApiKeyFault"/> starts with.</summary>
+    internal const string GeminiApiKeyMissing = "gemini_api_key_missing";
+
+    /// <summary>
+    /// A gemini agent signs in with a Gemini API key in <see cref="GeminiApiKeyEnvRef"/> and nothing
+    /// else: no credential file is mounted for it. So it must hold an Env Ref of exactly that name
+    /// which puts a value into its container: a bound secret whose placeholder is exposed under the
+    /// name, or an unbound key with a non-blank value in <c>.env</c>. Returns the fault, or null; it
+    /// names names, never a value. Null for every other provider.
+    /// </summary>
+    /// <remarks>
+    /// The blank-value case follows <see cref="DescribeCodexServerUrlFault"/>: the Env Ref loop would
+    /// inject the literal <c>&lt;secret&gt;</c> for a key <c>.env</c> does not hold, and the agent
+    /// would start and fail every turn. Found in <c>PrepareAsync</c>, so a provision writes nothing
+    /// and a reprovision keeps the old container, and reported by a preview.
+    /// </remarks>
+    internal static string? DescribeGeminiApiKeyFault(
+        Agent agent, IReadOnlyDictionary<string, string> envValues, IReadOnlyCollection<SecretBinding> bindings)
+    {
+        if (!string.Equals(agent.Provider, AgentProviders.Gemini, StringComparison.Ordinal))
+            return null;
+
+        if (!agent.EnvRefs.Any(e => e.EnvKeyName == GeminiApiKeyEnvRef))
+            return $"{GeminiApiKeyMissing}: a gemini agent signs in with a Gemini API key, and this agent has no "
+                 + $"{GeminiApiKeyEnvRef} Env Ref. Put the key in .env under that name and attach it to the agent as an Env Ref.";
+
+        if (bindings.FirstOrDefault(b => string.Equals(b.EnvKeyName, GeminiApiKeyEnvRef, StringComparison.Ordinal)) is { } binding)
+            return binding.ExposeAsList.Contains(GeminiApiKeyEnvRef, StringComparer.Ordinal)
+                ? null
+                : $"{GeminiApiKeyMissing}: {GeminiApiKeyEnvRef} is a bound secret that is not exposed under its own name, "
+                + "so the agent's CLI would find no key. Expose the binding's placeholder as "
+                + $"{GeminiApiKeyEnvRef}, or remove the binding.";
+
+        return envValues.TryGetValue(GeminiApiKeyEnvRef, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? null
+            : $"{GeminiApiKeyMissing}: this agent's {GeminiApiKeyEnvRef} Env Ref has no non-blank value in the "
+            + "orchestrator's .env. Put the key in .env under that name.";
+    }
 }

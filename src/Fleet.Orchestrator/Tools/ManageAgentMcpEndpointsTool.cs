@@ -17,7 +17,7 @@ public sealed class ManageAgentMcpEndpointsTool(IServiceScopeFactory scopeFactor
         [Description("MCP server name (e.g. fleet-memory, fleet-playwright)")] string mcp_name,
         [Description("URL of the MCP server. Required for add/update.")] string? url = null,
         [Description("Transport type (e.g. sse, http). Required for add; optional for update.")] string? transport_type = null,
-        [Description("Optional headers sent to this endpoint, each { \"headerName\": \"X-Example-Key\", \"envRefName\": \"EXAMPLE_KEY\" }: the header carries the value of that Env Ref, which the agent must already hold. Names only, never a value. Transport http on claude and codex only. Omit to keep the current mappings; [] clears them.")] McpHeaderEnvRef?[]? header_env_refs = null)
+        [Description("Optional headers sent to this endpoint, each { \"headerName\": \"X-Example-Key\", \"envRefName\": \"EXAMPLE_KEY\" }: the header carries the value of that Env Ref, which the agent must already hold. Names only, never a value. Transport http only. Omit to keep the current mappings; [] clears them.")] McpHeaderEnvRef?[]? header_env_refs = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<OrchestratorDbContext>();

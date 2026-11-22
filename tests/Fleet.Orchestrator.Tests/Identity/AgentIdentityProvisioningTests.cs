@@ -43,11 +43,14 @@ public sealed class AgentIdentityProvisioningTests
             new() { McpName = "fleet-orchestrator", Url = "http://fleet-orchestrator:3600/mcp", TransportType = "http" },
             new() { McpName = "example", Url = "https://mcp.example.test/mcp", TransportType = "http" },
         ],
+        // A gemini agent signs in with its API key, an Env Ref like any other.
+        EnvRefs = provider == "gemini" ? [new() { EnvKeyName = ProvisioningFaults.GeminiApiKeyEnvRef }] : [],
     };
 
     private static async Task<ProvisioningHarness> StartAsync(Agent agent, bool withKey = true)
     {
         var harness = ProvisioningHarness.Create(withKey ? WithKey : new Dictionary<string,string?> { ["AgentIdentity:Key"] = "" });
+        File.AppendAllText(harness.EnvFile, $"{ProvisioningFaults.GeminiApiKeyEnvRef}=synthetic-gemini-api-key\n");
         await harness.SeedAsync(db => db.Agents.Add(agent));
         return harness;
     }
@@ -63,6 +66,7 @@ public sealed class AgentIdentityProvisioningTests
     [Theory]
     [InlineData("claude")]
     [InlineData("codex")]
+    [InlineData("gemini")]
     public async Task AnAgent_IsGivenItsToken_OnEachOfTheFleetsOwnServers(string provider)
     {
         await using var harness = await StartAsync(NewAgent(provider));
@@ -91,11 +95,13 @@ public sealed class AgentIdentityProvisioningTests
         Assert.False(example.TryGetProperty("headers", out _));
     }
 
-    [Fact]
-    public async Task AnAgentThatSendsHeaders_IsToldSo_OrItWouldSkipTheServers()
+    [Theory]
+    [InlineData("codex")]
+    [InlineData("gemini")]
+    public async Task AnAgentThatSendsHeaders_IsToldSo_OrItWouldSkipTheServers(string provider)
     {
         // The agent leaves out a server that has headers unless Agent.McpHeaderSupport is set.
-        await using var harness = await StartAsync(NewAgent("codex"));
+        await using var harness = await StartAsync(NewAgent(provider));
 
         Assert.True((await harness.Service.ProvisionAsync("agent1")).Success);
 
@@ -103,14 +109,26 @@ public sealed class AgentIdentityProvisioningTests
         Assert.True(appsettings.RootElement.GetProperty("Agent").GetProperty("McpHeaderSupport").GetBoolean());
     }
 
+    /// <summary>
+    /// Every known provider's pinned CLI sends headers now, so the refusal is reached only for a
+    /// provider outside the table. A provision refuses such a provider earlier, by name (PV1); the
+    /// rule itself still stands for whatever is added to the list of providers without a transcript.
+    /// </summary>
     [Fact]
-    public async Task AGeminiAgent_IsRefusedBeforeFilesAreWritten()
+    public async Task AProviderThatSendsNoHeaders_CannotProveWhoItIs_AndIsRefusedBeforeFilesAreWritten()
     {
-        await using var harness = await StartAsync(NewAgent("gemini"));
+        var agent = NewAgent("other-harness");
+        var config = new ConfigurationBuilder().AddInMemoryCollection(WithKey).Build();
+
+        Assert.StartsWith("mcp_headers_unsupported", ProvisioningFaults.DescribeIdentityFault(agent, config));
+        foreach (var known in AgentProviders.All)
+            Assert.Null(ProvisioningFaults.DescribeIdentityFault(NewAgent(known), config));
+
+        await using var harness = await StartAsync(agent);
         var result = await harness.Service.ProvisionAsync("agent1");
         Assert.False(result.Success);
-        Assert.Contains("mcp_headers_unsupported", result.Message);
         Assert.False(Directory.Exists(harness.GeneratedDir("fleet-agent1")));
+        Assert.Empty(harness.CreateBodies);
     }
 
     [Fact]
@@ -252,7 +270,7 @@ public sealed class AgentIdentityProvisioningTests
     }
 
     [Theory]
-    [InlineData("gemini", "agent1", "mcp_headers_unsupported")]
+    [InlineData("gemini", "agent.with.dots", "agent_identity_subject_invalid")]
     [InlineData("claude", "agent.with.dots", "agent_identity_subject_invalid")]
     public async Task MandatoryIdentity_UnsignableCallerKeepsOldContainer(string provider, string name, string fault)
     {

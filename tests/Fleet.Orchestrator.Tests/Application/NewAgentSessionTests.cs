@@ -128,21 +128,45 @@ public sealed class NewAgentSessionTests : IAsyncLifetime
         return seen;
     }
 
+    /// <summary>
+    /// A gemini agent signs in with an API key it holds as the <c>GEMINI_API_KEY</c> Env Ref. A
+    /// record created without it is stored like any other and can be edited, but it gets no
+    /// container, and the preview says why.
+    /// </summary>
     [Theory]
     [InlineData(false, HttpStatusCode.Created)]
     [InlineData(true, HttpStatusCode.MultiStatus)]
-    public async Task MandatoryIdentity_GeminiRecordsCanBeSavedButNotProvisioned(bool provision, HttpStatusCode expected)
+    public async Task AGeminiRecordWithoutItsApiKey_CanBeSavedButNotProvisioned(bool provision, HttpStatusCode expected)
     {
-        var response = await PostAsync(new { name = "agent1", role = "developer", model = "gemini-2.5-pro", provider = "gemini", provision });
+        var response = await PostAsync(new { name = "agent1", role = "developer", model = "gemini-4-argon-medium", provider = "gemini", provision });
         Assert.Equal(expected, response.StatusCode);
         Assert.True(await IsStoredAsync("agent1"));
-        if (provision) Assert.Contains("mcp_headers_unsupported", await response.Content.ReadAsStringAsync());
-        var update = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { model = "gemini-2.5-flash" });
+        if (provision) Assert.Contains("gemini_api_key_missing", await response.Content.ReadAsStringAsync());
+        var update = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { model = "gemini-4-argon-low" });
         Assert.Equal(HttpStatusCode.OK, update.StatusCode);
         Assert.Empty(_harness.CreateBodies);
         Assert.False(Directory.Exists(_harness.GeneratedDir("fleet-agent1")));
         var preview = await _harness.Service.PreviewAsync("agent1");
-        Assert.Contains(preview.Diffs, d => d.StartsWith("mcp_headers_unsupported"));
+        Assert.Contains(preview.Diffs, d => d.StartsWith("gemini_api_key_missing"));
+        Assert.DoesNotContain(preview.Diffs, d => d.StartsWith("mcp_headers_unsupported"));
+    }
+
+    [Fact]
+    public async Task AGeminiAgentCreatedWithItsApiKey_IsProvisioned_WithTheKeyAndItsCliHome()
+    {
+        File.AppendAllText(_harness.EnvFile, "GEMINI_API_KEY=synthetic-gemini-api-key\n");
+
+        var response = await PostAsync(new
+        {
+            name = "agent1", role = "developer", model = "gemini-4-argon-medium", provider = "gemini",
+            envRefs = new[] { "GEMINI_API_KEY" }, provision = true,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var body = JsonDocument.Parse(_harness.CreateBodies.Single()).RootElement;
+        Assert.Contains("GEMINI_API_KEY=synthetic-gemini-api-key", body.GetProperty("Env").EnumerateArray().Select(e => e.GetString()));
+        Assert.Contains($"{_harness.BaseDir}/workspaces/fleet-agent1/gemini:/root/.gemini",
+            body.GetProperty("HostConfig").GetProperty("Binds").EnumerateArray().Select(e => e.GetString()));
     }
 
     // ── REST ─────────────────────────────────────────────────────────────────────────────────────
@@ -195,6 +219,33 @@ public sealed class NewAgentSessionTests : IAsyncLifetime
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         Assert.False(File.Exists(file));
+    }
+
+    /// <summary>
+    /// A gemini agent's CLI home is a host directory too (<c>workspaces/{container}/gemini</c>), so a
+    /// work directory under it holds a session file that outlives the container. For any other
+    /// provider nothing is mounted there, and a file at that host path is not the agent's.
+    /// </summary>
+    [Theory]
+    [InlineData("gemini", "/root/.gemini", "gemini", true)]
+    [InlineData("gemini", "/root/.gemini/work", "gemini/work", true)]
+    [InlineData("claude", "/root/.gemini", "gemini", false)]
+    [InlineData("codex", "/root/.gemini/work", "gemini/work", false)]
+    public async Task Rest_ACreatedAgent_WithAWorkDirectoryInTheGeminiHome_HasThatFileRemoved_OnlyWhenItIsAGeminiAgent(
+        string provider, string workDir, string hostSubdir, bool removed)
+    {
+        var file = Path.Combine(_harness.BaseDir, "workspaces", "custom-box", hostSubdir, AgentSessionFile.RelativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllTextAsync(file, "{}");
+
+        var response = await PostAsync(new
+        {
+            name = "dev1", role = "developer", model = provider == "codex" ? "gpt-5.5" : "sonnet", provider, provision = false,
+            containerName = "custom-box", workDir,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(!removed, File.Exists(file));
     }
 
     [Fact]

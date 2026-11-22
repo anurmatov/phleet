@@ -7,20 +7,44 @@ namespace Fleet.Orchestrator.Tests.Services;
 public sealed class ReplyLookupStateTests
 {
     [Theory]
-    [InlineData(false, false, false, false, "journal_capture_off")]
-    [InlineData(true, false, false, false, "provider_headers_unsupported")]
-    [InlineData(true, true, false, true, "tool_not_granted")]
-    [InlineData(true, true, true, false, "tool_not_granted")]
-    [InlineData(true, true, true, true, "available")]
-    public void Generate_BotAgent_UsesPinnedPrecedence(bool capture, bool supported, bool endpoint, bool grant, string expected)
+    [InlineData("claude", false, false, false, "journal_capture_off")]
+    [InlineData("claude", true, false, true, "tool_not_granted")]
+    [InlineData("claude", true, true, false, "tool_not_granted")]
+    [InlineData("claude", true, true, true, "available")]
+    [InlineData("codex", true, true, true, "available")]
+    // The Antigravity CLI sends headers, so a gemini bot is held to the same rules as the others.
+    [InlineData("gemini", false, true, true, "journal_capture_off")]
+    [InlineData("gemini", true, false, true, "tool_not_granted")]
+    [InlineData("gemini", true, true, true, "available")]
+    public void Generate_BotAgent_UsesPinnedPrecedence(string provider, bool capture, bool endpoint, bool grant, string expected)
     {
-        var agent = Build(supported ? "claude" : "gemini", bot: true);
+        var agent = Build(provider, bot: true);
         agent.JournalEnabled = capture;
         if (endpoint) agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", TransportType = "http", Url = "http://journal.test/journal/v1/mcp" });
         if (grant) agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-comms-journal__get_message", IsEnabled = true });
         var journal = new JournalProvisioning(capture ? "ingest" : null, [], null);
         var generated = JsonNode.Parse(ContainerProvisioningService.GenerateAppsettingsJson(agent, "", journal: journal))!;
         Assert.Equal(expected, generated["Agent"]!["ReplyLookup"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// <c>provider_headers_unsupported</c> keeps its place in the precedence, after capture and
+    /// before the grant. Every known provider sends headers, so it is reached only for one outside
+    /// the table, which the generator refuses by name before it gets here (PV1): the rule is read
+    /// off the state function itself.
+    /// </summary>
+    [Theory]
+    [InlineData(false, "journal_capture_off")]
+    [InlineData(true, "provider_headers_unsupported")]
+    public void State_AProviderThatSendsNoHeaders_ComesAfterCaptureAndBeforeTheGrant(bool capture, string expected)
+    {
+        var agent = Build("other-harness", bot: true);
+        agent.JournalEnabled = capture;
+        agent.McpEndpoints.Add(new AgentMcpEndpoint { McpName = "fleet-comms-journal", TransportType = "http", Url = "http://journal.test/journal/v1/mcp" });
+        agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-comms-journal__get_message", IsEnabled = true });
+
+        Assert.Equal(expected, ContainerProvisioningService.ReplyLookupState(agent, new JournalProvisioning(capture ? "ingest" : null, [], null)));
+        Assert.Throws<InvalidOperationException>(() => ContainerProvisioningService.GenerateAppsettingsJson(agent, ""));
     }
 
     [Theory]

@@ -162,6 +162,7 @@ public partial class ProvisioningPlanGoldenTests
             "GITHUB_APP_PEM=c3ludGhldGljLXBlbQ==",
             "TELEGRAM_CLOUD_BOT_TOKEN=synthetic-cloud-bot-token",
             "TELEGRAM_GEMINI_BOT_TOKEN=synthetic-gemini-bot-token",
+            "GEMINI_API_KEY=synthetic-gemini-api-key",
             "TELEGRAM_USER_ID=4242",
             "PLAIN_SETTING=synthetic-plain-value",
             "QUOTED_SETTING='synthetic quoted value'",
@@ -287,7 +288,7 @@ public partial class ProvisioningPlanGoldenTests
                 OutputStyle = StyleName, JournalEnabled = true, TelegramSendOnly = true,
                 Tools = [Tool("mcp__fleet-journal-files__fetch_attachment")],
                 Instructions = [new AgentInstruction { Instruction = developer, LoadOrder = 5 }],
-                EnvRefs = [Env("TELEGRAM_GEMINI_BOT_TOKEN")],
+                EnvRefs = [Env("TELEGRAM_GEMINI_BOT_TOKEN"), Env("GEMINI_API_KEY")],
                 TelegramUsers = [new AgentTelegramUser { UserId = 4242 }],
             });
 

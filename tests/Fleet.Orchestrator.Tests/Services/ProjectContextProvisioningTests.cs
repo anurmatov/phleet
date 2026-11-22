@@ -27,6 +27,7 @@ public class ProjectContextProvisioningTests
     public async Task PreExistingFullMd_IsDeleted_AndOutputEqualsGolden(string provider)
     {
         await using var h = ProvisioningHarness.Create();
+        ProjectContextGoldenTests.GiveGeminiItsKey(h);
         await h.SeedAsync(db => ProjectContextGoldenTests.SeedScenario(db, provider));
 
         // What a card-mode provision before #346 left behind, including under a project the agent
@@ -39,13 +40,6 @@ public class ProjectContextProvisioningTests
         }
 
         var result = await h.Service.ProvisionAsync(AgentName);
-        if (provider == "gemini")
-        {
-            Assert.False(result.Success);
-            Assert.Contains("mcp_headers_unsupported", result.Message);
-            Assert.Empty(h.CreateBodies);
-            return;
-        }
         Assert.True(result.Success, result.Message);
 
         Assert.False(Exists(h, "projects", "project-a", "full.md"));
@@ -70,16 +64,10 @@ public class ProjectContextProvisioningTests
             // A leftover setting from the card build is ignored.
             ["Provisioning:ContextMcpUrl"] = "http://fleet-orchestrator:3600/mcp/context",
         });
+        ProjectContextGoldenTests.GiveGeminiItsKey(h);
         await h.SeedAsync(db => ProjectContextGoldenTests.SeedScenario(db, provider));
 
         var result = await h.Service.ProvisionAsync(AgentName);
-        if (provider == "gemini")
-        {
-            Assert.False(result.Success);
-            Assert.Contains("mcp_headers_unsupported", result.Message);
-            Assert.Empty(h.CreateBodies);
-            return;
-        }
         Assert.True(result.Success, result.Message);
 
         foreach (var file in new[] { ".mcp.json", "settings.json", "appsettings.json" })

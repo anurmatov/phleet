@@ -6,16 +6,21 @@ namespace Fleet.Orchestrator.Tests.Services;
 
 public sealed class JournalFilesProvisioningTests
 {
+    /// <summary>
+    /// Provisions the agent. Every known provider is one whose CLI sends MCP headers; a gemini
+    /// agent also needs its API key, which <see cref="Agent"/> attaches and this puts in <c>.env</c>.
+    /// </summary>
     private static async Task<bool> ProvisionSupportedAsync(ProvisioningHarness harness, string provider)
     {
+        if (provider == "gemini" && !File.ReadAllText(harness.EnvFile).Contains(GeminiKeyRef + "=", StringComparison.Ordinal))
+            File.AppendAllText(harness.EnvFile, $"{GeminiKeyRef}=synthetic-gemini-api-key\n");
         var result = await harness.Service.ProvisionAsync("agent1");
-        if (provider != "gemini") { Assert.True(result.Success, result.Message); return true; }
-        Assert.False(result.Success);
-        Assert.Contains("mcp_headers_unsupported", result.Message);
-        Assert.Empty(harness.CreateBodies);
-        Assert.False(Directory.Exists(harness.GeneratedDir("fleet-agent1")));
-        return false;
+        Assert.True(result.Success, result.Message);
+        return true;
     }
+
+    private const string GeminiKeyRef = "GEMINI_API_KEY";
+    private static AgentEnvRef[] ProviderRefs(string provider) => provider == "gemini" ? [new() { EnvKeyName = GeminiKeyRef }] : [];
 
     private const string Grant = "mcp__fleet-journal-files__fetch_attachment";
     private static readonly Dictionary<string, string?> Config = new() { ["Journal:TokenKey"] = Convert.ToBase64String(Enumerable.Repeat((byte)42, 32).ToArray()) };
@@ -23,7 +28,7 @@ public sealed class JournalFilesProvisioningTests
     {
         Name = "agent1", DisplayName = "Agent1", Role = "test", ContainerName = "fleet-agent1", WorkDir = "/workspace",
         Provider = provider, Model = "model", JournalEnabled = capture,
-        EnvRefs = [new() { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" }],
+        EnvRefs = [new() { EnvKeyName = "TELEGRAM_AGENT1_BOT_TOKEN" }, .. ProviderRefs(provider)],
         Networks = [new() { NetworkName = "fleet-net" }],
         Tools = [new() { ToolName = Grant, IsEnabled = enabledGrant }],
     };
@@ -72,7 +77,7 @@ public sealed class JournalFilesProvisioningTests
     public async Task DisabledGrantKeepsEveryGeneratedFileByteIdentical(string provider, bool bot)
     {
         await using var harness = ProvisioningHarness.Create(Config);
-        await harness.SeedAsync(db => { var agent = Agent(provider); agent.Tools.Clear(); if (!bot) agent.EnvRefs.Clear(); db.Agents.Add(agent); });
+        await harness.SeedAsync(db => { var agent = Agent(provider); agent.Tools.Clear(); if (!bot) agent.EnvRefs = [.. ProviderRefs(provider)]; db.Agents.Add(agent); });
         if (!await ProvisionSupportedAsync(harness, provider)) return;
         var dir = harness.GeneratedDir("fleet-agent1");
         var names = new[] { "appsettings.json", ".mcp.json", "settings.json" };

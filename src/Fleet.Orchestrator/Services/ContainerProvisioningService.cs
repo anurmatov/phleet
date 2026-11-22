@@ -70,6 +70,7 @@ public sealed class ContainerProvisioningService(
             ? ["container not found — not running"]
             : ContainerSpecDiff.ComputeDiff(desired, actual);
         if (ProvisioningFaults.DescribeIdentityFault(agent, config) is { } identityFault) diffs = [.. diffs, identityFault];
+        if (ProvisioningFaults.DescribeGeminiApiKeyFault(agent, envValues, bindings) is { } geminiKeyFault) diffs = [.. diffs, geminiKeyFault];
         if (secretFault is not null) diffs = [.. diffs, secretFault];
         // #593: the fault only; resolved header values never leave provisioning.
         else if (AgentConfigFiles.ResolveMcpHeaders(agent, envValues, bindings, secretPlan!).Fault is { } headerFault)
@@ -210,6 +211,11 @@ public sealed class ContainerProvisioningService(
 
         if (ProvisioningFaults.DescribeCodexServerUrlFault(agent, envValues) is { } serverUrlFault)
             return Refuse(serverUrlFault);
+
+        // A gemini agent without its API key would start and fail every turn. Like everything
+        // here, found before a file is written, and by a reprovision before the old container goes.
+        if (ProvisioningFaults.DescribeGeminiApiKeyFault(agent, envValues, secretBindings) is { } geminiKeyFault)
+            return Refuse(geminiKeyFault);
 
         // #593: mapped MCP headers, from the env-file values and the secret plan captured above, so
         // what is checked here is what is written. A fault refuses before any file or container changes.

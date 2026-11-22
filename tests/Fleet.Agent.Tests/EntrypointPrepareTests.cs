@@ -59,7 +59,7 @@ public sealed class EntrypointPrepareTests : IDisposable
         Assert.Equal(HostedModelProviders.KeyFilePath, new PreparePaths(root: null, home: "/root").HostedKeyFile);
         Assert.Equal("/app/appsettings.json", new PreparePaths(root: null, home: "/root").Appsettings);
         Assert.Equal("/root/.codex/config.toml", new PreparePaths(root: null, home: "/root").CodexConfig);
-        Assert.Equal("/root/.gemini/settings.json", new PreparePaths(root: null, home: "/root").GeminiSettings);
+        Assert.Equal("/root/.gemini/config/mcp_config.json", new PreparePaths(root: null, home: "/root").AntigravityMcpConfig);
         Assert.Equal("/workspace/.mcp.json", new PreparePaths(root: null, home: "/root").McpJson);
     }
 
@@ -262,63 +262,105 @@ public sealed class EntrypointPrepareTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_root, "root/.codex/config.toml")));
     }
 
+    private const string AntigravityMcpFile = "root/.gemini/config/mcp_config.json";
+
     [Fact]
-    public void Config_Gemini_TranslatesMcpJsonAndKeepsWhatTheFileHeld()
+    public void Config_Gemini_WritesTheAntigravityMcpFile_HttpWithHeadersAndStdio_ForItsOwnerOnly()
     {
-        Appsettings("""{"Agent":{"Provider":"gemini"}}""");
-        Write("workspace/.mcp.json", """{"mcpServers":{"alpha":{"type":"http","url":"http://alpha:3100"},"local":{"command":"node"}}}""");
-        Write("root/.gemini/settings.json", """{"theme":"Dracula","mcpServers":{"old":{"url":"http://old"}}}""");
+        Appsettings("""{"Agent":{"Provider":"gemini","McpHeaderSupport":true}}""");
+        Write("workspace/.mcp.json", """
+            {"mcpServers":{
+              "alpha":{"type":"http","url":"http://alpha:3100/mcp","headers":{"Authorization":"Bearer example-token"}},
+              "beta":{"type":"http","url":"http://beta:3001"},
+              "local":{"command":"node","args":["server.js","--flag"],"env":{"MODE":"x"},"cwd":"/ignored"},
+              "empty":{"type":"http"}}}
+            """);
+        // A file from an earlier start, readable by everyone: replaced, and closed.
+        Write(AntigravityMcpFile, """{"mcpServers":{"old":{"url":"http://old"}}}""");
 
         var run = Prepare("config");
 
         Assert.Equal(0, run.ExitCode);
-        Assert.Equal("WARN: skipping MCP server 'local' (no URL — stdio transport not supported by gemini CLI)", run.Error.TrimEnd());
-        Assert.Equal($"Gemini MCP: wrote 1 server(s) to {Path.Combine(_root, "root/.gemini/settings.json")}", run.Output.TrimEnd());
+        Assert.Equal("WARN: skipping MCP server 'empty' (neither a url nor a command)", run.Error.TrimEnd());
+        Assert.Equal($"Gemini MCP: wrote 3 server(s) to {Path.Combine(_root, AntigravityMcpFile)}", run.Output.TrimEnd());
+        // The shape the pinned CLI reads: url + headers, or command + args + env. No "type", no "cwd".
         Assert.Equal(
             """
             {
-              "theme": "Dracula",
               "mcpServers": {
                 "alpha": {
-                  "url": "http://alpha:3100"
-                }
-              },
-              "security": {
-                "auth": {
-                  "selectedType": "oauth-personal"
+                  "url": "http://alpha:3100/mcp",
+                  "headers": {
+                    "Authorization": "Bearer example-token"
+                  }
+                },
+                "beta": {
+                  "url": "http://beta:3001"
+                },
+                "local": {
+                  "command": "node",
+                  "args": [
+                    "server.js",
+                    "--flag"
+                  ],
+                  "env": {
+                    "MODE": "x"
+                  }
                 }
               }
             }
+
             """.ReplaceLineEndings("\n"),
-            Read("root/.gemini/settings.json"));
+            Read(AntigravityMcpFile));
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(_root, AntigravityMcpFile)));
+        // The Gemini CLI's settings file is not written any more: the agent passes the settings per process.
+        Assert.False(File.Exists(Path.Combine(_root, "root/.gemini/settings.json")));
+        Assert.False(File.Exists(Path.Combine(_root, "root/.gemini/antigravity-cli/settings.json")));
     }
 
     [Fact]
-    public void Config_Gemini_WithoutMcpJson_SeedsOnlyTheAuthSelector()
+    public void Config_Gemini_LeavesOutAServerWithHeaders_WhenTheOrchestratorDidNotSayHeadersAreSent()
     {
         Appsettings("""{"Agent":{"Provider":"gemini"}}""");
+        Write("workspace/.mcp.json", """{"mcpServers":{"alpha":{"url":"http://alpha:3100","headers":{"Authorization":"Bearer example-token"}},"beta":{"url":"http://beta:3001"}}}""");
+
+        var run = Prepare("config");
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Equal("WARN: skipping MCP server 'alpha' (it has headers and Agent.McpHeaderSupport is not set)", run.Error.TrimEnd());
+        var text = Read(AntigravityMcpFile);
+        Assert.DoesNotContain("alpha", text);
+        Assert.DoesNotContain("example-token", text);
+        Assert.Contains("\"beta\"", text);
+    }
+
+    [Fact]
+    public void Config_Gemini_WithoutMcpJson_WritesAFileWithNoServers()
+    {
+        Appsettings("""{"Agent":{"Provider":"gemini"}}""");
+        Write(AntigravityMcpFile, """{"mcpServers":{"old":{"url":"http://old"}}}""");
 
         var run = Prepare("config");
 
         Assert.Equal(0, run.ExitCode);
         Assert.Contains("not found; gemini agent will start without MCP tools", run.Error);
-        Assert.Equal(
-            "{\n  \"security\": {\n    \"auth\": {\n      \"selectedType\": \"oauth-personal\"\n    }\n  }\n}",
-            Read("root/.gemini/settings.json"));
+        Assert.Equal("{\n  \"mcpServers\": {}\n}\n", Read(AntigravityMcpFile));
     }
 
     [Fact]
-    public void Config_Gemini_WhenTheExistingFileCannotTakeTheResult_WarnsAndLeavesIt()
+    public void Config_Gemini_WhenMcpJsonCannotBeRead_WarnsAndWritesNoServersOverTheOldFile()
     {
-        Appsettings("""{"Agent":{"Provider":"gemini"}}""");
-        Write("workspace/.mcp.json", """{"mcpServers":{}}""");
-        Write("root/.gemini/settings.json", "[1, 2]\n");
+        Appsettings("""{"Agent":{"Provider":"gemini","McpHeaderSupport":true}}""");
+        Write("workspace/.mcp.json", "{not json");
+        Write(AntigravityMcpFile, """{"mcpServers":{"old":{"url":"http://old","headers":{"Authorization":"Bearer stale"}}}}""");
 
         var run = Prepare("config");
 
         Assert.Equal(0, run.ExitCode);
         Assert.Contains("gemini agent will start without MCP tools", run.Error);
-        Assert.Equal("[1, 2]\n", Read("root/.gemini/settings.json"));
+        Assert.DoesNotContain("not json", run.Error);
+        Assert.Equal("{\n  \"mcpServers\": {}\n}\n", Read(AntigravityMcpFile));
     }
 
     [Fact]
@@ -389,80 +431,25 @@ public sealed class EntrypointPrepareTests : IDisposable
         Assert.Equal(expected, toml);
     }
 
-    [Fact]
-    public void Gemini_ExistingValues_AreWrittenAsPythonWroteThem()
-    {
-        var existing = File.ReadAllBytes(RepoPaths.Resolve("tests/entrypoint-prepare/fixtures/settings/theme.json"));
-
-        var text = GeminiSettingsJson.WithAuthSelectorOnly(existing);
-
-        // Integers of any size unchanged, floats as repr(), non-ASCII and DEL escaped, empty
-        // containers on one line, existing keys in place and the selector replaced where it was.
-        var expected = """
-            {
-              "theme": "Dracula",
-              "ui": {
-                "scale": 1.5,
-                "count": 3,
-                "big": 12345678901234567890123,
-                "tiny": 1e-05,
-                "negzero": -0.0,
-                "intnegzero": 0,
-                "exp": 1e+22,
-                "frac": 123456789.0,
-                "edge16": 1e+16,
-                "edge15": 1000000000000000.0,
-                "small": 0.0001,
-                "third": 0.1,
-                "list": [
-                  1,
-                  [],
-                  {},
-                  "x",
-                  null,
-                  true
-                ],
-                "unicode": "h\u00e9llo \u2713 \ud83d\ude00",
-                "ctl": "a\tb\u0001\u007f\"\\/"
-              },
-              "mcpServers": {
-                "old": {
-                  "url": "http://old"
-                }
-              },
-              "security": {
-                "auth": {
-                  "selectedType": "oauth-personal",
-                  "other": true
-                },
-                "keep": 1
-              },
-              "tail": "kept"
-            }
-            """.ReplaceLineEndings("\n");
-        Assert.Equal(expected, text);
-    }
-
     [Theory]
-    [InlineData(1.0, "1", "1.0")]
-    [InlineData(-1.5, "-1.5", "-1.5")]
-    [InlineData(0.1, "0.1", "0.1")]
-    [InlineData(100.0, "100", "100.0")]
-    [InlineData(123456789012345680000.0, "123456789012345680000", "1.2345678901234568e+20")]
-    [InlineData(1e21, "1e+21", "1e+21")]
-    [InlineData(1e16, "10000000000000000", "1e+16")]
-    [InlineData(1e15, "1000000000000000", "1000000000000000.0")]
-    [InlineData(0.0001, "0.0001", "0.0001")]
-    [InlineData(0.00001, "0.00001", "1e-05")]
-    [InlineData(0.000001, "0.000001", "1e-06")]
-    [InlineData(0.0000001, "1e-7", "1e-07")]
-    [InlineData(1.5e-10, "1.5e-10", "1.5e-10")]
-    [InlineData(5e-324, "5e-324", "5e-324")]
-    [InlineData(1.7976931348623157e308, "1.7976931348623157e+308", "1.7976931348623157e+308")]
-    public void Numbers_AreSpelledAsEachLanguageSpellsThem(double value, string javascript, string python)
+    [InlineData(1.0, "1")]
+    [InlineData(-1.5, "-1.5")]
+    [InlineData(0.1, "0.1")]
+    [InlineData(100.0, "100")]
+    [InlineData(123456789012345680000.0, "123456789012345680000")]
+    [InlineData(1e21, "1e+21")]
+    [InlineData(1e16, "10000000000000000")]
+    [InlineData(1e15, "1000000000000000")]
+    [InlineData(0.0001, "0.0001")]
+    [InlineData(0.00001, "0.00001")]
+    [InlineData(0.000001, "0.000001")]
+    [InlineData(0.0000001, "1e-7")]
+    [InlineData(1.5e-10, "1.5e-10")]
+    [InlineData(5e-324, "5e-324")]
+    [InlineData(1.7976931348623157e308, "1.7976931348623157e+308")]
+    public void Numbers_AreSpelledAsJavaScriptSpellsThem(double value, string javascript)
     {
         Assert.Equal(javascript, ScriptCompat.JsNumber(value));
-        Assert.Equal(python, ScriptCompat.PyFloatRepr(value));
     }
 
     [Fact]

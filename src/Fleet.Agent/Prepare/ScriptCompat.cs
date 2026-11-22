@@ -5,16 +5,16 @@ using System.Text.Json;
 namespace Fleet.Agent.Prepare;
 
 /// <summary>
-/// The exact text conventions of the two programs <c>entrypoint.sh</c> used to embed: Node for the
-/// Codex <c>config.toml</c> and Python for the Gemini <c>settings.json</c>.
+/// The exact text conventions of the Node program <c>entrypoint.sh</c> used to embed for the Codex
+/// <c>config.toml</c>.
 /// </summary>
 /// <remarks>
-/// These files persist in the agent's home across reprovisions and are read by pinned provider CLIs,
-/// so the C# that replaced the embedded programs writes the same bytes they did. That is why this
-/// file reproduces <c>JSON.stringify</c>, <c>String(value)</c> and <c>Object.entries</c> order on one
-/// side and <c>json.dump(indent=2)</c> on the other instead of using <c>System.Text.Json</c>'s own
-/// writer, whose escaping and number formatting differ from both.
-/// <c>tests/entrypoint-prepare/run.sh</c> runs the original programs beside this code and compares.
+/// That file persists in the agent's home across reprovisions and is read by the pinned Codex CLI,
+/// so the C# that replaced the embedded program writes the same bytes it did. That is why this file
+/// reproduces <c>JSON.stringify</c>, <c>String(value)</c> and <c>Object.entries</c> order instead of
+/// using <c>System.Text.Json</c>'s own writer, whose escaping and number formatting differ.
+/// <c>tests/entrypoint-prepare/run.sh</c> runs the original program beside this code and compares.
+/// The Python half that wrote the Gemini CLI's <c>settings.json</c> went with that CLI.
 /// </remarks>
 internal static class ScriptCompat
 {
@@ -155,189 +155,6 @@ internal static class ScriptCompat
             }
         }
         return sb.Append('"').ToString();
-    }
-
-    // ── Python ───────────────────────────────────────────────────────────────
-
-    /// <summary>A JSON object as Python's <c>dict</c>: insertion-ordered, a repeated key keeps its first position.</summary>
-    public sealed class PyDict
-    {
-        private readonly List<string> _order = [];
-        private readonly Dictionary<string, object?> _values = new(StringComparer.Ordinal);
-
-        public int Count => _order.Count;
-
-        public IEnumerable<KeyValuePair<string, object?>> Items => _order.Select(k => new KeyValuePair<string, object?>(k, _values[k]));
-
-        public bool TryGet(string key, out object? value) => _values.TryGetValue(key, out value);
-
-        public void Set(string key, object? value)
-        {
-            if (!_values.ContainsKey(key)) _order.Add(key);
-            _values[key] = value;
-        }
-    }
-
-    /// <summary>A JSON number kept as its token, so an integer of any size survives unchanged.</summary>
-    public sealed record PyNumber(string Token)
-    {
-        public bool IsFloat => Token.AsSpan().IndexOfAny('.', 'e', 'E') >= 0;
-
-        public bool IsZero => IsFloat
-            ? double.Parse(Token, NumberStyles.Float, CultureInfo.InvariantCulture) == 0
-            : Token.TrimStart('-').All(c => c == '0');
-    }
-
-    /// <summary>
-    /// <c>json.loads</c> of a file's bytes: strict UTF-8, no byte-order mark, standard JSON. Returns
-    /// <c>dict</c> as <see cref="PyDict"/>, <c>list</c> as <c>List&lt;object?&gt;</c>, and
-    /// <c>str</c>/<c>bool</c>/<c>None</c>/number as string, bool, null and <see cref="PyNumber"/>.
-    /// Throws on anything Python would refuse. (Python also accepts the non-standard literals
-    /// <c>NaN</c> and <c>Infinity</c>; here they are refused like any other malformed file.)
-    /// </summary>
-    public static object? PyLoad(byte[] bytes)
-    {
-        var text = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(bytes);
-        if (text.StartsWith('﻿'))
-            throw new JsonException("unexpected UTF-8 byte-order mark");
-        using var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 512 });
-        return PyValue(document.RootElement);
-    }
-
-    private static object? PyValue(JsonElement element)
-    {
-        switch (element.ValueKind)
-        {
-            case JsonValueKind.Object:
-                var dict = new PyDict();
-                foreach (var property in element.EnumerateObject())
-                    dict.Set(property.Name, PyValue(property.Value));
-                return dict;
-            case JsonValueKind.Array:
-                return element.EnumerateArray().Select(PyValue).ToList();
-            case JsonValueKind.String: return element.GetString()!;
-            case JsonValueKind.True: return true;
-            case JsonValueKind.False: return false;
-            case JsonValueKind.Number: return new PyNumber(element.GetRawText());
-            default: return null;
-        }
-    }
-
-    /// <summary>Python truthiness of a loaded JSON value.</summary>
-    public static bool PyTruthy(object? value) => value switch
-    {
-        null => false,
-        bool b => b,
-        string s => s.Length > 0,
-        PyNumber n => !n.IsZero,
-        PyDict d => d.Count > 0,
-        List<object?> l => l.Count > 0,
-        _ => true,
-    };
-
-    /// <summary><c>json.dumps(value, indent=2)</c>: ASCII only, two-space indent, no trailing newline.</summary>
-    public static string PyDump(object? value)
-    {
-        var sb = new StringBuilder();
-        PyDump(sb, value, 0);
-        return sb.ToString();
-    }
-
-    private static void PyDump(StringBuilder sb, object? value, int depth)
-    {
-        switch (value)
-        {
-            case null: sb.Append("null"); break;
-            case bool b: sb.Append(b ? "true" : "false"); break;
-            case string s: PyString(sb, s); break;
-            case PyNumber n: sb.Append(PyNumberText(n)); break;
-            case PyDict { Count: 0 }: sb.Append("{}"); break;
-            case List<object?> { Count: 0 }: sb.Append("[]"); break;
-            case PyDict dict:
-                sb.Append('{');
-                var firstItem = true;
-                foreach (var (key, item) in dict.Items)
-                {
-                    sb.Append(firstItem ? "\n" : ",\n").Append(' ', 2 * (depth + 1));
-                    firstItem = false;
-                    PyString(sb, key);
-                    sb.Append(": ");
-                    PyDump(sb, item, depth + 1);
-                }
-                sb.Append('\n').Append(' ', 2 * depth).Append('}');
-                break;
-            case List<object?> list:
-                sb.Append('[');
-                for (var i = 0; i < list.Count; i++)
-                {
-                    sb.Append(i == 0 ? "\n" : ",\n").Append(' ', 2 * (depth + 1));
-                    PyDump(sb, list[i], depth + 1);
-                }
-                sb.Append('\n').Append(' ', 2 * depth).Append(']');
-                break;
-            default:
-                throw new InvalidOperationException($"not a JSON value: {value.GetType().Name}");
-        }
-    }
-
-    private static void PyString(StringBuilder sb, string text)
-    {
-        sb.Append('"');
-        foreach (var c in text)
-        {
-            switch (c)
-            {
-                case '"': sb.Append("\\\""); break;
-                case '\\': sb.Append("\\\\"); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\t': sb.Append("\\t"); break;
-                case '\b': sb.Append("\\b"); break;
-                case '\f': sb.Append("\\f"); break;
-                default:
-                    // ensure_ascii: everything outside space..~ is escaped, one \uXXXX per UTF-16 unit.
-                    if (c is < ' ' or > '~')
-                        sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
-                    else
-                        sb.Append(c);
-                    break;
-            }
-        }
-        sb.Append('"');
-    }
-
-    private static string PyNumberText(PyNumber number)
-    {
-        if (!number.IsFloat)
-            return number.IsZero ? "0" : number.Token;
-        return PyFloatRepr(double.Parse(number.Token, NumberStyles.Float, CultureInfo.InvariantCulture));
-    }
-
-    /// <summary>Python's <c>repr(float)</c>, with <c>json</c>'s spellings for the non-finite values.</summary>
-    public static string PyFloatRepr(double value)
-    {
-        if (double.IsNaN(value)) return "NaN";
-        if (double.IsPositiveInfinity(value)) return "Infinity";
-        if (double.IsNegativeInfinity(value)) return "-Infinity";
-        if (value == 0) return double.IsNegative(value) ? "-0.0" : "0.0";
-
-        var (negative, digits, point) = ShortestDigits(value);
-        var k = digits.Length;
-        var sb = new StringBuilder(negative ? "-" : "");
-        if (point is <= -4 or > 16)
-        {
-            var exponent = point - 1;
-            sb.Append(digits[0]);
-            if (k > 1) sb.Append('.').Append(digits, 1, k - 1);
-            sb.Append('e').Append(exponent < 0 ? '-' : '+').Append(Math.Abs(exponent).ToString("00", CultureInfo.InvariantCulture));
-        }
-        else if (point <= 0)
-            sb.Append("0.").Append('0', -point).Append(digits);
-        else if (point >= k)
-            sb.Append(digits).Append('0', point - k).Append(".0");
-        else
-            sb.Append(digits, 0, point).Append('.').Append(digits, point, k - point);
-        return sb.ToString();
     }
 
     /// <summary>

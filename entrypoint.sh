@@ -124,42 +124,22 @@ if [ -d "$FLEET_SECRETS_SSH" ]; then
 fi
 
 if [ "$PROVIDER" = "gemini" ]; then
-    # Gemini auth — OAuth credentials mounted writable directly as ~/.gemini/oauth_creds.json.
-    # Two-level refresh: (1) the CLI's google-auth-library refreshes tokens in-place on expiry;
-    # (2) AuthTokenRefreshWorkflow provides a host-side safety net every 30 min, propagating
-    # refreshed tokens back to the host to prevent stale-token failures on container restart.
-    if [ ! -f "${HOME}/.gemini/oauth_creds.json" ]; then
-        echo "ERROR: ~/.gemini/oauth_creds.json not mounted." >&2
-        echo "Run setup.sh on the host to complete Gemini OAuth setup, then reprovision the agent." >&2
-        exit 1
-    fi
-    chmod 0600 "${HOME}/.gemini/oauth_creds.json"
-
-    # Enforce OAuth-only auth (issue #132 MUST NOT #2). The gemini CLI auto-detects
-    # GEMINI_API_KEY / GOOGLE_API_KEY and prefers them over oauth_creds.json. A leftover
-    # API key in the cluster .env (e.g. from the PR #129 SDK era) would silently route
-    # traffic through the API-key billing tier instead of OAuth, surfacing as confusing
-    # 429 "prepayment credits depleted" errors mid-task. Fail fast with a clear message
-    # so the operator can clean up .env before the agent starts taking traffic.
-    if [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ]; then
-        echo "ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is set but provider=gemini uses OAuth." >&2
-        echo "Remove the API key from ./fleet/.env (and the agent's env refs), then reprovision." >&2
-        echo "OAuth credentials at ~/.gemini/oauth_creds.json are the single source of truth." >&2
+    # A gemini agent runs the Antigravity CLI (agy) with a paid Gemini API key, which the CLI reads
+    # from GEMINI_API_KEY (an Env Ref of the agent; a placeholder when the key is a bound secret).
+    # There is no Google sign-in and no credential file. Without the key the CLI cannot make one
+    # request, so the container does not start. The value is never printed.
+    if [ -z "${GEMINI_API_KEY:-}" ] || [ -z "${GEMINI_API_KEY//[[:space:]]/}" ]; then
+        echo "ERROR: GEMINI_API_KEY is not set, and provider=gemini needs a Gemini API key." >&2
+        echo "Put the key in ./fleet/.env, give the agent an Env Ref named GEMINI_API_KEY, then reprovision." >&2
         exit 1
     fi
 
-    # Trust the workspace directory so --yolo is not silently downgraded to "default"
-    # approval mode. Without this the CLI prompts for every tool call approval, which
-    # hangs indefinitely in headless mode (no human present to approve).
-    export GEMINI_CLI_TRUST_WORKSPACE=true
-
-    # ~/.gemini/settings.json: /workspace/.mcp.json translated into the CLI's mcpServers block and
-    # the OAuth auth selector, merged into whatever the file already holds. The CLI reads MCP
-    # servers only from there and does not discover .mcp.json, so without this step a gemini agent
-    # has no MCP tools (memory, temporal, orchestrator, playwright, ...). stdio servers are skipped:
-    # the CLI speaks HTTP/SSE only. Without .mcp.json only the auth selector is written. A file that
-    # cannot be written is a warning; the agent starts without MCP tools.
-    fleet_prepare config || echo "WARN: gemini settings.json not written: prepare exited non-zero" >&2
+    # ~/.gemini/config/mcp_config.json: /workspace/.mcp.json in the shape the CLI reads, headers
+    # included, for its owner only. The CLI reads MCP servers only from there and does not discover
+    # .mcp.json, so without this step a gemini agent has no MCP tools. Without .mcp.json the file is
+    # written with no servers. A file that cannot be written is a warning; the agent starts without
+    # MCP tools. The CLI's settings are not a file: the agent passes them to every process.
+    fleet_prepare config || echo "WARN: gemini mcp_config.json not written: prepare exited non-zero" >&2
 
 elif [ "$PROVIDER" = "codex" ]; then
     if [ "$HOSTED_PROVIDER" = "true" ]; then

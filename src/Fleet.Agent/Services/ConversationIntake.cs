@@ -250,7 +250,7 @@ public sealed class ConversationIntake
         // and a Telegram /cancel can never reach it. See CancelAsync for the other direction.
         // `images` reaches the executor through the parameter the Telegram photo path already uses,
         // so Claude gets native content blocks, Codex gets `local_image` blocks from the persisted
-        // path, and Gemini gets an `@<path>` reference — with no executor change at all (#308 D7).
+        // path, and Gemini gets a path hint in the text — with no executor change at all (#308 D7).
         //
         // The primary human's chat message is first-class (#530 D11): the priority lane, and
         // eligibility to steer a running workflow turn — exactly what their Telegram message gets.

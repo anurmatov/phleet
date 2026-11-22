@@ -131,11 +131,25 @@ public sealed class GeminiExecutor : IAgentExecutor
         IReadOnlyList<MessageDocument>? documents = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        // Attachments reach the model as the path hints the intake already put in the text
-        // ([image attachment: …]); the CLI's print mode takes text only, and its read_file tool
-        // opens images, PDFs, audio and video by path.
-        await foreach (var progress in RunToResultAsync(task, ct))
+        await foreach (var progress in RunToResultAsync(WithAttachmentHints(task, images, documents), ct))
             yield return progress;
+    }
+
+    /// <summary>
+    /// The CLI's print mode takes text only, so an attachment reaches the model as a path hint in
+    /// the text (<c>[image attachment: …]</c>), which the model opens with the CLI's own
+    /// <c>read_file</c> tool (images, PDFs, audio and video by path). The Telegram intake has put
+    /// the hints in already; a chat image arrives without one, so any hint the text does not hold
+    /// is added here. An attachment that was not persisted has no path and gets none.
+    /// </summary>
+    internal static string WithAttachmentHints(
+        string task, IReadOnlyList<MessageImage>? images, IReadOnlyList<MessageDocument>? documents)
+    {
+        var missing = AttachmentSweeper.BuildHints(images ?? [], documents)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(hint => !task.Contains(hint, StringComparison.Ordinal))
+            .ToList();
+        return missing.Count == 0 ? task : $"{task}\n{string.Join('\n', missing)}";
     }
 
     public async IAsyncEnumerable<AgentProgress> SendCommandAsync(

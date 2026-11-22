@@ -81,8 +81,9 @@ public sealed class AgentOptions
     /// <summary>
     /// True when the orchestrator established that this agent's pinned provider CLI sends MCP
     /// request headers. The running agent does not read it; <see cref="Prepare.EntrypointPrepare"/>
-    /// does, to decide whether a header-carrying MCP server may be written into the Codex or Gemini
-    /// CLI configuration. False leaves such a server out instead of writing it without its headers.
+    /// does, to decide whether a header-carrying MCP server may be written into the Codex
+    /// configuration or the Antigravity CLI's MCP file (gemini). False leaves such a server out
+    /// instead of writing it without its headers.
     /// </summary>
     public bool McpHeaderSupport { get; set; }
 

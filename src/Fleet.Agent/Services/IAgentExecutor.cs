@@ -90,9 +90,8 @@ public interface IAgentExecutor : IAsyncDisposable
 
     /// <summary>
     /// True when the provider keeps the conversation between turns, in a session that outlives the
-    /// process (Claude, Codex). Prompts for such a provider never carry recent chat history: the
-    /// session already holds it. False for a provider that starts from nothing on every task
-    /// (Gemini), and for an executor that does not say.
+    /// process (Claude, Codex, Gemini). Prompts for such a provider never carry recent chat
+    /// history: the session already holds it. False for an executor that does not say.
     /// </summary>
     bool KeepsConversation => false;
 

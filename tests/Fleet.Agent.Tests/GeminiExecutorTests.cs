@@ -114,6 +114,27 @@ public sealed class GeminiExecutorTests : IDisposable
         Assert.Equal(text, parsed.GetProperty("message").GetProperty("content").GetString());
     }
 
+    // ── attachments ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public void AnAttachment_IsAPathHintInTheText_AddedOnce_AndOnlyWhenItWasPersisted()
+    {
+        var images = new[]
+        {
+            new MessageImage([1], "image/png") { FilePath = "/attachments/a.png" },
+            new MessageImage([2], "image/png"),
+        };
+        var documents = new[] { new MessageDocument("file-1", "application/pdf", 3, "b.pdf") { FilePath = "/attachments/b.pdf" } };
+
+        // A chat image arrives without a hint; the Telegram intake has put its own in already.
+        Assert.Equal(
+            "look at this\n[image attachment: /attachments/a.png]\n[document attachment: /attachments/b.pdf]",
+            GeminiExecutor.WithAttachmentHints("look at this", images, documents));
+        const string hinted = "look at this\n[image attachment: /attachments/a.png]\n[document attachment: /attachments/b.pdf]";
+        Assert.Equal(hinted, GeminiExecutor.WithAttachmentHints(hinted, images, documents));
+        Assert.Equal("no attachments", GeminiExecutor.WithAttachmentHints("no attachments", null, null));
+    }
+
     // ── events ───────────────────────────────────────────────────────────────
 
     [Fact]

@@ -21,12 +21,52 @@ test('Claude and Codex list the family aliases and take free text, like Gemini',
   }
 })
 
+// What `agy models` prints (Antigravity CLI 1.5.14), in its order: the slug goes to `agy --model` as
+// is and carries the reasoning effort, the name is the pill's label.
+const GEMINI: [slug: string, name: string][] = [
+  ['gemini-4-neon-high', 'Gemini 4 Neon (High)'],
+  ['gemini-4-neon-xhigh', 'Gemini 4 Neon (XHigh)'],
+  ['gemini-4-neon-medium', 'Gemini 4 Neon (Medium)'],
+  ['gemini-4-neon-low', 'Gemini 4 Neon (Low)'],
+  ['gemini-4-carbon-high', 'Gemini 4 Carbon (High)'],
+  ['gemini-4-carbon-medium', 'Gemini 4 Carbon (Medium)'],
+  ['gemini-4-carbon-low', 'Gemini 4 Carbon (Low)'],
+  ['gemini-4-hydrogen-high', 'Gemini 4 Hydrogen (High)'],
+  ['gemini-4-hydrogen-xhigh', 'Gemini 4 Hydrogen (XHigh)'],
+  ['gemini-4-hydrogen-medium', 'Gemini 4 Hydrogen (Medium)'],
+  ['gemini-4-hydrogen-low', 'Gemini 4 Hydrogen (Low)'],
+  ['gemini-4-argon-high', 'Gemini 4 Argon (High)'],
+  ['gemini-4-argon-medium', 'Gemini 4 Argon (Medium)'],
+  ['gemini-4-argon-low', 'Gemini 4 Argon (Low)'],
+  ['gemini-3.8-flash-high', 'Gemini 3.8 Flash (High)'],
+  ['gemini-3.8-flash-medium', 'Gemini 3.8 Flash (Medium)'],
+  ['gemini-3.8-flash-low', 'Gemini 3.8 Flash (Low)'],
+  ['gemini-3.7-flash-high', 'Gemini 3.7 Flash (High)'],
+  ['gemini-3.7-flash-medium', 'Gemini 3.7 Flash (Medium)'],
+  ['gemini-3.7-flash-low', 'Gemini 3.7 Flash (Low)'],
+  ['gemini-3.6-flash-high', 'Gemini 3.6 Flash (High)'],
+  ['gemini-3.6-flash-medium', 'Gemini 3.6 Flash (Medium)'],
+  ['gemini-3.6-flash-low', 'Gemini 3.6 Flash (Low)'],
+  ['gemini-3.1-pro-high', 'Gemini 3.1 Pro (High)'],
+  ['gemini-3.1-pro-low', 'Gemini 3.1 Pro (Low)'],
+]
+
+test('Gemini lists exactly the Antigravity CLI slugs, in its order; the default is one of them', () => {
+  assert.deepEqual(PROVIDER_MODELS.gemini, GEMINI.map(([slug]) => slug))
+  assert.equal(PROVIDER_DEFAULT_MODEL.gemini, 'gemini-3.1-pro-low')
+  assert.deepEqual(modelChoices('gemini', PROVIDER_DEFAULT_MODEL.gemini),
+    { options: PROVIDER_MODELS.gemini, current: null, freeText: true })
+})
+
 test('a stored dated or hosted id is kept as the current value, never rewritten', () => {
   assert.deepEqual(modelChoices('claude', 'claude-opus-4-7'), { options: ['opus', 'sonnet', 'haiku'], current: 'claude-opus-4-7', freeText: true })
   assert.equal(modelChoices('codex', 'gpt-5.6-sol').current, 'gpt-5.6-sol')
   assert.equal(modelChoices('codex', 'zai/glm-5.3').current, 'zai/glm-5.3')
   assert.equal(modelChoices('codex', '').current, null)
   assert.equal(modelChoices('gemini', 'gemini-custom').current, 'gemini-custom')
+  // A model of the former Gemini CLI list is a stored id like any other.
+  assert.equal(modelChoices('gemini', 'gemini-2.5-pro').current, 'gemini-2.5-pro')
+  assert.equal(customModeFor('gemini-2.5-pro', PROVIDER_MODELS.gemini), true)
 })
 
 test('custom mode follows the value: listed → select, other id → custom input, empty → unchanged', () => {
@@ -80,7 +120,18 @@ test('rendered picker: aliases plus a custom entry; a stored non-alias id opens 
       for (const alias of PROVIDER_MODELS[provider]) assert.match(html, new RegExp(`class="model-pill"[^>]*>${alias}<`), value)
     }
 
-    assert.ok(render('gemini', 'gemini-2.5-pro').includes('custom…'))
+    // Gemini: the select carries the slugs and the custom entry, each pill the name `agy models` prints.
+    const gemini = render('gemini', 'gemini-3.1-pro-low')
+    assert.ok(gemini.includes(GEMINI.map(([slug]) =>
+      `<option value="${slug}"${slug === 'gemini-3.1-pro-low' ? ' selected=""' : ''}>${slug}</option>`).join('') + '<option value="">custom…</option>'))
+    for (const [slug, name] of GEMINI)
+      assert.ok(gemini.includes(`class="model-pill${slug === 'gemini-3.1-pro-low' ? ' active' : ''}">${name}</button>`), slug)
+    assert.equal(gemini.includes('<input'), false)
+    // A stored id of the former list opens in the custom input, unchanged, beside the same pills.
+    const stored = render('gemini', 'gemini-2.5-pro')
+    assert.ok(stored.includes('<input class="config-input " placeholder="custom model name" value="gemini-2.5-pro"/>'))
+    assert.equal(stored.includes('<select'), false)
+    for (const [, name] of GEMINI) assert.ok(stored.includes(`class="model-pill">${name}</button>`), name)
 
     // Typed text reaches onChange exactly; an alias pill hands over the alias.
     const seen: string[] = []

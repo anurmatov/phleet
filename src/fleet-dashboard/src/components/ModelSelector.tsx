@@ -1,13 +1,33 @@
 import { useState, useEffect } from 'react'
 import { customModeFor, modelChoices } from '../modelChoices'
 
+// The names `agy models` prints beside the Gemini slugs.
 const PILL_LABELS: Record<string, string> = {
-  'gemini-3-pro-preview': '3 pro preview',
-  'gemini-3-flash-preview': '3 flash preview',
-  'gemini-2.5-pro': '2.5 pro',
-  'gemini-2.5-flash': '2.5 flash',
-  'gemini-2.5-flash-lite': '2.5 flash-lite',
-  'gemini-2.0-flash': '2.0 flash',
+  'gemini-4-neon-high': 'Gemini 4 Neon (High)',
+  'gemini-4-neon-xhigh': 'Gemini 4 Neon (XHigh)',
+  'gemini-4-neon-medium': 'Gemini 4 Neon (Medium)',
+  'gemini-4-neon-low': 'Gemini 4 Neon (Low)',
+  'gemini-4-carbon-high': 'Gemini 4 Carbon (High)',
+  'gemini-4-carbon-medium': 'Gemini 4 Carbon (Medium)',
+  'gemini-4-carbon-low': 'Gemini 4 Carbon (Low)',
+  'gemini-4-hydrogen-high': 'Gemini 4 Hydrogen (High)',
+  'gemini-4-hydrogen-xhigh': 'Gemini 4 Hydrogen (XHigh)',
+  'gemini-4-hydrogen-medium': 'Gemini 4 Hydrogen (Medium)',
+  'gemini-4-hydrogen-low': 'Gemini 4 Hydrogen (Low)',
+  'gemini-4-argon-high': 'Gemini 4 Argon (High)',
+  'gemini-4-argon-medium': 'Gemini 4 Argon (Medium)',
+  'gemini-4-argon-low': 'Gemini 4 Argon (Low)',
+  'gemini-3.8-flash-high': 'Gemini 3.8 Flash (High)',
+  'gemini-3.8-flash-medium': 'Gemini 3.8 Flash (Medium)',
+  'gemini-3.8-flash-low': 'Gemini 3.8 Flash (Low)',
+  'gemini-3.7-flash-high': 'Gemini 3.7 Flash (High)',
+  'gemini-3.7-flash-medium': 'Gemini 3.7 Flash (Medium)',
+  'gemini-3.7-flash-low': 'Gemini 3.7 Flash (Low)',
+  'gemini-3.6-flash-high': 'Gemini 3.6 Flash (High)',
+  'gemini-3.6-flash-medium': 'Gemini 3.6 Flash (Medium)',
+  'gemini-3.6-flash-low': 'Gemini 3.6 Flash (Low)',
+  'gemini-3.1-pro-high': 'Gemini 3.1 Pro (High)',
+  'gemini-3.1-pro-low': 'Gemini 3.1 Pro (Low)',
 }
 
 interface ModelSelectorProps {

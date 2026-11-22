@@ -19,20 +19,41 @@ export const PROVIDER_OPTIONS: { value: string; label: string }[] = [
 export const PROVIDER_MODELS: Record<string, string[]> = {
   claude: ['opus', 'sonnet', 'haiku'],
   codex: ['sol', 'terra', 'luna'],
+  // Exactly what `agy models` prints (Antigravity CLI 1.5.14), in its order. The slug is passed to
+  // `agy --model` as is and carries the reasoning effort; Gemini has no separate effort.
   gemini: [
-    'gemini-3-pro-preview',
-    'gemini-3-flash-preview',
-    'gemini-2.5-pro',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-2.0-flash',
+    'gemini-4-neon-high',
+    'gemini-4-neon-xhigh',
+    'gemini-4-neon-medium',
+    'gemini-4-neon-low',
+    'gemini-4-carbon-high',
+    'gemini-4-carbon-medium',
+    'gemini-4-carbon-low',
+    'gemini-4-hydrogen-high',
+    'gemini-4-hydrogen-xhigh',
+    'gemini-4-hydrogen-medium',
+    'gemini-4-hydrogen-low',
+    'gemini-4-argon-high',
+    'gemini-4-argon-medium',
+    'gemini-4-argon-low',
+    'gemini-3.8-flash-high',
+    'gemini-3.8-flash-medium',
+    'gemini-3.8-flash-low',
+    'gemini-3.7-flash-high',
+    'gemini-3.7-flash-medium',
+    'gemini-3.7-flash-low',
+    'gemini-3.6-flash-high',
+    'gemini-3.6-flash-medium',
+    'gemini-3.6-flash-low',
+    'gemini-3.1-pro-high',
+    'gemini-3.1-pro-low',
   ],
 }
 
 export const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
   claude: 'sonnet',
   codex: 'sol',
-  gemini: 'gemini-2.5-flash',
+  gemini: 'gemini-3.1-pro-low',
 }
 // Local-mode suggestion chips never fill the server URL or context window.
 const QWEN_CODEX_EFFORT = { value: 'none', note: 'Effort set to none — recommended for Qwen3.8 on Codex' }

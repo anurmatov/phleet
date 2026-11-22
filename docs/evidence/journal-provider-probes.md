@@ -51,6 +51,10 @@ header-support flag to true.
 
 ## Gemini 0.40.1 — failing proof, flag remains false
 
+> Superseded 2026-11-22: gemini agents no longer run the Gemini CLI. The Antigravity CLI's
+> headers are proved in [antigravity-cli-1.5.14.md](antigravity-cli-1.5.14.md), and the flag is
+> true. The record below is kept as it was.
+
 `gemini --version` → `0.40.1`.
 The isolated config used the existing journal translator’s `url` and
 `headers.Authorization` shape, with `oauth-personal` selected. No Gemini OAuth

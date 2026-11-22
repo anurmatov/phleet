@@ -56,7 +56,7 @@ public sealed class ChatBufferMemoryTests : IDisposable
     [Theory]
     [InlineData("claude", true)]
     [InlineData("codex", true)]
-    [InlineData("gemini", false)]
+    [InlineData("gemini", true)]
     public void AnAgentOfAnyProvider_DeletesAnExistingHistoryFile_WhenItStarts_AndLogsThat(string provider, bool keepsConversation)
     {
         WriteOldHistoryFile();
@@ -85,7 +85,7 @@ public sealed class ChatBufferMemoryTests : IDisposable
     [Theory]
     [InlineData("claude", true)]
     [InlineData("codex", true)]
-    [InlineData("gemini", false)]
+    [InlineData("gemini", true)]
     public async Task NoProvider_WritesTheHistoryFile(string provider, bool keepsConversation)
     {
         var rig = Build(provider, keepsConversation);
@@ -114,7 +114,7 @@ public sealed class ChatBufferMemoryTests : IDisposable
     [Theory]
     [InlineData("claude", true)]
     [InlineData("codex", true)]
-    [InlineData("gemini", false)]
+    [InlineData("gemini", true)]
     public async Task ATurnThatCallsTools_BuffersItsAnswerAndNoToolCall(string provider, bool keepsConversation)
     {
         var rig = Build(provider, keepsConversation);
@@ -200,6 +200,8 @@ public sealed class ChatBufferMemoryTests : IDisposable
     public void AProviderThatKeepsNoConversation_GetsItsHistoryBlock_FromMemory_AndNothingFromTheOldFile()
     {
         WriteOldHistoryFile();
+        // No provider is like this any more (gemini keeps its conversation too); the path is the
+        // one of an executor that does not say it keeps one.
         var rig = Build("gemini", keepsConversation: false);
         rig.Behavior.BufferMessage(Dm, "@u", "said in this container", replyTo: null, telegramMessageId: 7);
 

@@ -150,7 +150,7 @@ public static class McpHeaderMappings
                 + $"header mappings are supported only on transport '{HttpTransport}'");
         if (!AgentConfigFiles.SupportsMcpHeaders(AgentProviders.Normalize(provider)))
             return (Unsupported, $"{Unsupported}: provider '{AgentProviders.Normalize(provider)}' does not send MCP headers; "
-                + "header mappings are supported on claude and codex only");
+                + "header mappings are supported on claude, codex and gemini only");
         return null;
     }
 

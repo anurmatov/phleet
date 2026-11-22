@@ -236,16 +236,33 @@ public sealed class McpToolPlanTests
         Assert.Equal(McpServerTools.Misconfigured, Only(Build(agent), "example").NotAsked!.Status);
     }
 
+    /// <summary>A provider outside the header table: every known one, gemini included, sends headers.</summary>
     [Fact]
     public void MappedHeadersOnAProviderThatSendsNone_AreNotAsked()
     {
-        var agent = NewAgent("gemini");
+        var agent = NewAgent("other-harness");
         agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "EXAMPLE_API_KEY" });
         agent.McpEndpoints.Add(Endpoint("example", "https://mcp.example.test/mcp", headers: Mapping("X-Example-Key", "EXAMPLE_API_KEY")));
 
         Assert.Equal(
             McpServerTools.Misconfigured,
             Only(Build(agent, new() { ["EXAMPLE_API_KEY"] = Secret }), "example").NotAsked!.Status);
+    }
+
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    [InlineData("gemini")]
+    public void MappedHeadersOnAKnownProvider_AreAskedWithTheHeaderTheAgentWouldSend(string provider)
+    {
+        var agent = NewAgent(provider);
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "EXAMPLE_API_KEY" });
+        agent.McpEndpoints.Add(Endpoint("example", "https://mcp.example.test/mcp", headers: Mapping("X-Example-Key", "EXAMPLE_API_KEY")));
+
+        var entry = Only(Build(agent, new() { ["EXAMPLE_API_KEY"] = Secret }), "example");
+
+        Assert.Null(entry.NotAsked);
+        Assert.Equal(Secret, entry.Target!.Headers["X-Example-Key"]);
     }
 
     [Fact]

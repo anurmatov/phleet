@@ -61,7 +61,9 @@ public sealed class JournalProvisioningTests
     [Theory]
     [InlineData("claude", true)]
     [InlineData("codex", true)]
-    [InlineData("gemini", false)]
+    [InlineData("gemini", true)]
+    [InlineData("", true)]              // an empty provider is claude
+    [InlineData("other-harness", false)] // not in the table: no transcript, no headers
     public void Header_support_is_compiled_per_provider(string provider, bool expected) =>
         Assert.Equal(expected, ContainerProvisioningService.SupportsMcpHeaders(provider));
 
@@ -145,14 +147,50 @@ public sealed class JournalProvisioningTests
         Assert.Equal(0, harness.DockerRequestCount);
     }
 
+    /// <summary>
+    /// The journal token is a header, so a provider whose CLI sends none cannot have the endpoint.
+    /// Every known provider sends headers now; the rule stands for one outside the table, which a
+    /// provision refuses even earlier, by name (PV1), before Docker is asked anything.
+    /// </summary>
+    [Fact]
+    public async Task A_provider_that_sends_no_headers_cannot_have_the_journal_endpoint_and_is_refused_before_docker()
+    {
+        var settings = new Dictionary<string, string?> { ["Journal:TokenKey"] = Key };
+        var agent = Agent("other-harness");
+        agent.McpEndpoints.Add(new AgentMcpEndpoint
+        {
+            McpName = ContainerProvisioningService.JournalMcpServerName,
+            TransportType = "http",
+            Url = "http://fleet-comms:8082/mcp",
+        });
+
+        var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        var policy = new ProvisioningPolicy(config, new JournalTokenService(config));
+        Assert.Equal("journal_headers_unsupported", policy.DescribeJournalProvisioningFault(agent));
+        Assert.Equal("journal_headers_unsupported", Assert.Throws<InvalidOperationException>(
+            () => ContainerProvisioningService.GenerateMcpJson(agent, "http://fleet-memory:3100", "cj1.read.agent-1.signature")).Message);
+
+        await using var harness = ProvisioningHarness.Create(settings);
+        await harness.SeedAsync(db => db.Agents.Add(agent));
+
+        var result = await harness.Service.ReprovisionAsync("agent-1");
+
+        Assert.False(result.Success);
+        Assert.Equal(0, harness.DockerRequestCount);
+    }
+
+    /// <summary>A gemini agent's CLI sends headers, so it reads the journal with its own token like the others.</summary>
     [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
     [InlineData("gemini")]
-    public async Task Unsupported_header_provider_refuses_before_docker(string provider)
+    public async Task Every_known_provider_gets_the_journal_endpoint_with_its_read_token(string provider)
     {
         await using var harness = ProvisioningHarness.Create(new Dictionary<string, string?>
         {
             ["Journal:TokenKey"] = Key,
         });
+        File.AppendAllText(harness.EnvFile, $"{ProvisioningFaults.GeminiApiKeyEnvRef}=synthetic-gemini-api-key\n");
         await harness.SeedAsync(db =>
         {
             var agent = Agent(provider);
@@ -162,14 +200,21 @@ public sealed class JournalProvisioningTests
                 TransportType = "http",
                 Url = "http://fleet-comms:8082/mcp",
             });
+            if (provider == "gemini")
+                agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = ProvisioningFaults.GeminiApiKeyEnvRef });
             db.Agents.Add(agent);
         });
 
-        var result = await harness.Service.ReprovisionAsync("agent-1");
+        var result = await harness.Service.ProvisionAsync("agent-1");
 
-        Assert.False(result.Success);
-        Assert.Equal("journal_headers_unsupported", result.Message);
-        Assert.Equal(0, harness.DockerRequestCount);
+        Assert.True(result.Success, result.Message);
+        var generated = harness.GeneratedDir("fleet-agent-1");
+        using var mcp = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(generated, ".mcp.json")));
+        Assert.StartsWith("Bearer cj1.read.agent-1.", mcp.RootElement.GetProperty("mcpServers")
+            .GetProperty(ContainerProvisioningService.JournalMcpServerName)
+            .GetProperty("headers").GetProperty("Authorization").GetString());
+        using var appsettings = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(generated, "appsettings.json")));
+        Assert.True(appsettings.RootElement.GetProperty("Agent").GetProperty("McpHeaderSupport").GetBoolean());
     }
 
     private static JournalTokenService Tokens(params (string Key, string Value)[] values) =>

@@ -160,12 +160,14 @@ internal static class ContainerSpecBuilder
         {
             case AgentProviders.Gemini:
             {
-                // Mount gemini OAuth credentials writable — the CLI's google-auth-library refreshes
-                // the file in-place on token expiry, so the mount must be read-write. The refreshed
-                // token propagates back to the host, preventing stale-token failures on container restart.
-                var geminiTokenStorePath = Path.Combine(baseDir, ".gemini-credentials.json");
-                if (File.Exists(geminiTokenStorePath))
-                    binds.Add("./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw");
+                // The Antigravity CLI's home: its conversations, and what the agent writes there at
+                // start (the MCP configuration and the instruction rules). A host directory beside
+                // the claude and codex homes above, so it survives a reprovision. Gemini agents
+                // only: every other agent keeps the binds it had.
+                //
+                // No credential file is mounted, whatever is on the host: the CLI authenticates
+                // with the GEMINI_API_KEY Env Ref (ProvisioningFaults.DescribeGeminiApiKeyFault).
+                binds.Add(GeminiHomeBind(containerName));
                 break;
             }
             case AgentProviders.Codex:
@@ -206,6 +208,16 @@ internal static class ContainerSpecBuilder
 
         return AppendCredentialMounts(agent, binds);
     }
+
+    /// <summary>Where the Antigravity CLI keeps its state in a gemini agent's container.</summary>
+    internal const string GeminiHome = "/root/.gemini";
+
+    /// <summary>The directory below <c>workspaces/{container}</c> mounted as <see cref="GeminiHome"/>.</summary>
+    internal const string GeminiHomeHostDirectory = "gemini";
+
+    /// <summary>The writable bind of a gemini agent's CLI home, gemini agents only.</summary>
+    internal static string GeminiHomeBind(string containerName) =>
+        $"./workspaces/{containerName}/{GeminiHomeHostDirectory}:{GeminiHome}";
 
     /// <summary>The read-only bind of <c>.generated/codex-root.toml</c> (#460), codex agents only.</summary>
     internal static string CodexRootTomlBind(string containerName) =>

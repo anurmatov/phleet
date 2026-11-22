@@ -23,7 +23,7 @@ namespace Fleet.Agent.Prepare;
 /// (exit 1) a configuration it cannot read, an unknown provider (PV1) and a hosted provider without a
 /// usable key name; the script then exits 1 as well, where it used to fall back to <c>claude</c>.
 /// <see cref="ConfigVerb"/> writes the provider CLI's own configuration file: the Codex
-/// <c>config.toml</c> or the Gemini <c>settings.json</c>. A file it cannot build is a warning and
+/// <c>config.toml</c> or the Antigravity CLI's <c>mcp_config.json</c> (gemini). A file it cannot build is a warning and
 /// exit 0, as it always was: the agent starts without those MCP tools.
 /// </para>
 /// <para>
@@ -177,7 +177,7 @@ public static partial class EntrypointPrepare
                 WriteCodexConfig(agent, paths, stderr);
                 return 0;
             case AgentProviders.Gemini:
-                WriteGeminiSettings(agent, paths, stdout, stderr);
+                WriteAntigravityMcpConfig(agent, paths, stdout, stderr);
                 return 0;
             default:
                 stderr.WriteLine($"ERROR: {AgentProviders.UnknownProviderText(agent.Provider)}");
@@ -236,44 +236,38 @@ public static partial class EntrypointPrepare
         writer.Write(text);
     }
 
-    private static void WriteGeminiSettings(AgentOptions agent, PreparePaths paths, TextWriter stdout, TextWriter stderr)
+    /// <summary>
+    /// The Antigravity CLI's MCP file, for its owner only (it can carry header values). Written on
+    /// every start, with no servers when <c>.mcp.json</c> is missing or cannot be read, so a file
+    /// from an earlier start never survives. The CLI's settings are not a file: the executor passes
+    /// them for each process (<c>--settings</c>).
+    /// </summary>
+    private static void WriteAntigravityMcpConfig(AgentOptions agent, PreparePaths paths, TextWriter stdout, TextWriter stderr)
     {
-        if (File.Exists(paths.McpJson))
-        {
-            try
-            {
-                Directory.CreateDirectory(paths.GeminiHome);
-                var result = GeminiSettingsJson.WithMcpServers(
-                    File.ReadAllBytes(paths.McpJson), ReadExisting(paths.GeminiSettings), agent.McpHeaderSupport, stderr.WriteLine);
-                File.WriteAllText(paths.GeminiSettings, result.Text, new UTF8Encoding(false));
-                stdout.WriteLine($"Gemini MCP: wrote {result.ServerCount} server(s) to {paths.GeminiSettings}");
-            }
-            catch (Exception ex)
-            {
-                stderr.WriteLine($"WARN: Failed to write {paths.GeminiSettings} — gemini agent will start without MCP tools ({ex.Message})");
-            }
-            return;
-        }
-
-        stderr.WriteLine($"WARN: {paths.McpJson} not found; gemini agent will start without MCP tools");
+        AntigravityMcpConfig.Result result;
         try
         {
-            Directory.CreateDirectory(paths.GeminiHome);
-            File.WriteAllText(paths.GeminiSettings, GeminiSettingsJson.WithAuthSelectorOnly(ReadExisting(paths.GeminiSettings)), new UTF8Encoding(false));
+            var present = File.Exists(paths.McpJson) || Directory.Exists(paths.McpJson);
+            if (!present)
+                stderr.WriteLine($"WARN: {paths.McpJson} not found; gemini agent will start without MCP tools");
+            result = AntigravityMcpConfig.Build(present ? File.ReadAllBytes(paths.McpJson) : null, agent.McpHeaderSupport, stderr.WriteLine);
         }
         catch (Exception ex)
         {
-            stderr.WriteLine($"WARN: Failed to write {paths.GeminiSettings} ({ex.Message})");
+            stderr.WriteLine($"WARN: {paths.McpJson} could not be used — gemini agent will start without MCP tools ({ex.GetType().Name})");
+            result = AntigravityMcpConfig.Build(null, agent.McpHeaderSupport, stderr.WriteLine);
         }
-    }
 
-    /// <summary>The current file's bytes; null when there is none; unparseable bytes when it cannot be read.</summary>
-    private static byte[]? ReadExisting(string path)
-    {
-        if (!File.Exists(path) && !Directory.Exists(path))
-            return null;
-        try { return File.ReadAllBytes(path); }
-        catch (Exception) { return []; }
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(paths.AntigravityMcpConfig)!);
+            WriteOwnerOnly(paths.AntigravityMcpConfig, result.Text);
+            stdout.WriteLine($"Gemini MCP: wrote {result.ServerCount} server(s) to {paths.AntigravityMcpConfig}");
+        }
+        catch (Exception ex)
+        {
+            stderr.WriteLine($"WARN: Failed to write {paths.AntigravityMcpConfig} — gemini agent will start without MCP tools ({ex.GetType().Name})");
+        }
     }
 
     private static string Reason(Exception ex) => ex switch
@@ -306,7 +300,8 @@ public sealed class PreparePaths(string? root, string home)
 
     public string GeminiHome { get; } = Resolve(root, home + "/.gemini");
 
-    public string GeminiSettings => Path.Combine(GeminiHome, "settings.json");
+    /// <summary>The Antigravity CLI's MCP server list.</summary>
+    public string AntigravityMcpConfig => Path.Combine(GeminiHome, "config", "mcp_config.json");
 
     /// <summary>Where the script puts a hosted-provider key for the agent to read once and delete.</summary>
     public string HostedKeyFile { get; } = Resolve(root, HostedModelProviders.KeyFilePath);

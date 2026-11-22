@@ -20,13 +20,15 @@ internal static class AgentConfigFiles
     /// <summary>
     /// Header support is a property of the pinned provider CLI, not something provisioning probes
     /// at runtime. Flip a false value only with a pinned-CLI tools/list transcript in the PR.
+    /// A provider that is not listed sends none. Gemini is the Antigravity CLI (<c>agy</c>), which
+    /// sends an endpoint's configured headers on every MCP request.
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, bool> McpHeaderSupport =
         new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
             ["claude"] = true,
             ["codex"] = true,
-            ["gemini"] = false,
+            ["gemini"] = true,
         };
 
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };

@@ -685,7 +685,7 @@ look in either place:
   (`mcp__fleet-comms-journal__search_chat_messages`, `mcp__fleet-comms-journal__get_chat_message`)
   on an agent that has the `fleet-comms-journal` endpoint. No template carries them and nothing
   grants them automatically. They need the journal listener, so `FLEET_COMMS_JOURNAL_ENABLED=true`,
-  and a provider that sends MCP headers (Claude and Codex; not Gemini).
+  and a provider that sends MCP headers (Claude, Codex and Gemini).
 - **Not bound to a turn.** Like `search_messages`, they answer from any turn the agent runs,
   including a Telegram group turn. Today there is one principal, the owner, so the chat an agent
   can read is the owner's with that agent; treat the grant as "this agent may quote that chat
@@ -908,8 +908,10 @@ contain only `result`, `kind`, `bytes` and `waitedMs`, never locators or content
 
 Pinned transport evidence is in
 [`journal-provider-probes.md`](evidence/journal-provider-probes.md).
-Codex's journal headers are proved; Gemini remains false because the actual
-headless probe could not authenticate. These probes do not establish exact-head
+Codex's journal headers are proved there. Gemini's are proved for the Antigravity CLI that
+gemini agents now run ([`antigravity-cli-1.5.14.md`](evidence/antigravity-cli-1.5.14.md): the
+configured header on every MCP request, against a recording server, no real model); the earlier
+Gemini CLI probe in that file could not authenticate and proves nothing either way. These probes do not establish exact-head
 AC13/XAC9 stack acceptance, including each provider's native file reads and MCP
 timeout; they do not replace operator acceptance.
 

@@ -62,7 +62,11 @@ internal sealed class ProviderTokenUpdater(AgentOptions agentConfig, IAgentExecu
         }
         else if (provider == "gemini")
         {
-            await ApplyGeminiTokenUpdateAsync(newAccessToken, newExpiresAt.Value);
+            // A gemini agent runs the Antigravity CLI with an API key from its environment. It holds
+            // no Google sign-in, and this broadcast would create one in the persisted /root/.gemini.
+            // Nothing to restart either: every turn starts its own process.
+            _logger.LogInformation("Gemini token update ignored — the agent uses an API key");
+            return;
         }
         else
         {

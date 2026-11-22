@@ -18,9 +18,10 @@ The signing key cannot be attached as an Env Ref, mapped to a header or delivere
 Server-side discovery and memory proxy calls use service-purpose tokens, never agent files.
 A Docker socket or host access is outside this boundary.
 
-Claude and Codex have native header support. Gemini currently does not: records and credentials
-may be saved, but provisioning refuses with `mcp_headers_unsupported` before writing files or
-removing a working container. Invalid subjects receive `agent_identity_subject_invalid`.
+Claude, Codex and Gemini have native header support (Gemini through the Antigravity CLI, see
+[the transcript](evidence/antigravity-cli-1.5.14.md)). A provider that is not known to send headers
+is refused with `mcp_headers_unsupported` before files are written or a working container is
+removed. Invalid subjects receive `agent_identity_subject_invalid`.
 Subjects are 1–128 ASCII letters, digits, underscores or hyphens. Preview reports the same fault.
 
 Built-in names (`fleet-memory`, `fleet-orchestrator`, `fleet-telegram`, `fleet-temporal`) are

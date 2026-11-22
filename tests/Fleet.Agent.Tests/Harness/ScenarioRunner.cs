@@ -142,12 +142,12 @@ internal static class ScenarioRunner
 
     private static string GeminiDiscriminator(JsonElement frame)
     {
-        var type = frame.TryGetProperty("type", out var t) ? t.GetString() ?? "unknown" : "unknown";
-        if (type == "message" && frame.TryGetProperty("role", out var role))
-            return $"message/{role.GetString()}";
-        if (type == "result" && frame.TryGetProperty("status", out var status))
+        var name = frame.TryGetProperty("event", out var e) ? e.GetString() ?? "unknown" : "unknown";
+        if (name == "step_update" && frame.TryGetProperty("step_update", out var step) && step.TryGetProperty("step_type", out var type))
+            return $"step/{type.GetString()}";
+        if (name == "result" && frame.TryGetProperty("result", out var result) && result.TryGetProperty("status", out var status))
             return $"result/{status.GetString()}";
-        return type;
+        return name;
     }
 
     // ── L2: runtime projection ───────────────────────────────────────────────

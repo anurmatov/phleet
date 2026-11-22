@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # entrypoint.sh no longer reads appsettings.json itself: `dotnet Fleet.Agent.dll prepare` does, and
 # writes the provider CLI configuration the script's inline Node and Python used to write. This
-# harness proves three things about that move.
+# harness proves three things about that move, and a fourth about what changed since.
 #
 #   bash tests/entrypoint-prepare/run.sh        (needs a built agent: dotnet build src/Fleet.Agent -c Release)
 #
@@ -12,12 +12,17 @@
 #    scratch tree on the same inputs: the original's four config reads and its provider branch, and
 #    the current script's facts block and provider branch. Both must report the same provider and
 #    flags, exit the same way, skip the same MCP servers, and leave byte-identical files behind
-#    (~/.codex/config.toml, ~/.gemini/settings.json, the copied or removed credential files).
+#    (~/.codex/config.toml, the copied or removed credential files). Claude and Codex only: see 4.
 # 2. FAIL CLOSED. A configuration the original read as "claude" (unreadable JSON, a provider that is
 #    not a single value) now stops the script with exit 1 before any credential is touched.
 # 3. KEY ISOLATION. The head of the current script, run unmodified with a hosted key in its
 #    environment and a `dotnet` shim that records what each call can see: no call sees the key's
 #    name or value, the key file gets the value at mode 0400, and nothing carries it afterwards.
+# 4. GEMINI. Changed on purpose, so there is no original to compare with: the original prepared the
+#    Gemini CLI (a Google sign-in file, ~/.gemini/settings.json from inline Python) and refused an
+#    API key; a gemini agent now runs the Antigravity CLI with GEMINI_API_KEY. The current branch
+#    must exit 1 without the key before anything is written, and with it leave exactly the files in
+#    fixtures/expected/ as ~/.gemini/config/mcp_config.json, for its owner only, and no settings file.
 #
 # Every /root/, /app/, /workspace/ and /run/ literal is rewritten into the scratch tree, and the
 # agent binary is given the same tree through `prepare --root`, so nothing outside it is touched.
@@ -120,7 +125,7 @@ write_current_script() {
 }
 
 # $1 = tree, $2 = appsettings fixture, $3 = mcp fixture or -, $4 = codex-root kind
-# (file, missing, directory, raw), $5 = existing gemini settings fixture or -.
+# (file, missing, directory, raw).
 seed_tree() {
     mkdir -p "$1/app" "$1/workspace" "$1/root/.gemini" "$1/root/.codex" "$1/root/.codex-host" "$1/run"
     cp "$FIXTURES/appsettings/$2" "$1/app/appsettings.json"
@@ -133,29 +138,29 @@ seed_tree() {
         raw) printf '\357\273\277model = "x"\r\n[history]\r\npersistence = "none"' > "$1/app/codex-root.toml" ;;
         *) fail_infra "unknown codex-root kind $4" ;;
     esac
-    [ "$5" = - ] || cp "$FIXTURES/settings/$5" "$1/root/.gemini/settings.json"
     # What the branches' credential handling needs, and something stale for them to deal with.
-    printf '{}' > "$1/root/.gemini/oauth_creds.json"
     printf '{"from":"host"}' > "$1/root/.codex-host/auth.json"
     printf '{"from":"an earlier model"}' > "$1/root/.codex/auth.json"
     printf 'stale = true\n' > "$1/root/.codex/config.toml"
 }
 
-# $1 = tree; runs its script with the container's HOME. Sets RC.
+# $1 = tree, then NAME=value pairs for its environment; runs its script with the container's HOME.
+# Sets RC.
 run_tree() {
+    local tree="$1"; shift
     RC=0
-    env -i PATH="$PATH" HOME="$1/root" bash "$1/run.sh" > "$1/out" 2> "$1/err" || RC=$?
+    env -i PATH="$PATH" HOME="$tree/root" "$@" bash "$tree/run.sh" > "$tree/out" 2> "$tree/err" || RC=$?
 }
 
 # ── 1. golden ────────────────────────────────────────────────────────────────
 
 GOLDEN=0
-# $1 = case name, $2..$5 as seed_tree, $6 = a file under root/ that must exist afterwards, or -,
-# $7 = text that file must contain, or -.
+# $1 = case name, $2..$4 as seed_tree, $5 = a file under root/ that must exist afterwards, or -,
+# $6 = text that file must contain, or -.
 golden() {
     local name="$1" old="$WORK/$1/legacy" new="$WORK/$1/current"
-    seed_tree "$old" "$2" "$3" "$4" "$5"
-    seed_tree "$new" "$2" "$3" "$4" "$5"
+    seed_tree "$old" "$2" "$3" "$4"
+    seed_tree "$new" "$2" "$3" "$4"
     write_legacy_script "$old"
     write_current_script "$new"
     run_tree "$old"; local old_rc=$RC
@@ -170,47 +175,36 @@ golden() {
         || { cat "$WORK/diff" >&2; fail_assert "$name: the files written differ"; }
     diff <(grep '^WARN: skipping MCP server' "$old/err" || true) <(grep '^WARN: skipping MCP server' "$new/err" || true) > "$WORK/diff" \
         || { cat "$WORK/diff" >&2; fail_assert "$name: the skipped MCP servers differ"; }
-    if [ "$6" != - ]; then
-        [ -f "$new/root/$6" ] || fail_assert "$name: $6 was not written"
-        [ "$7" = - ] || grep -qF -- "$7" "$new/root/$6" || fail_assert "$name: $6 does not contain '$7'"
+    if [ "$5" != - ]; then
+        [ -f "$new/root/$5" ] || fail_assert "$name: $5 was not written"
+        [ "$6" = - ] || grep -qF -- "$6" "$new/root/$5" || fail_assert "$name: $5 does not contain '$6'"
     fi
     GOLDEN=$((GOLDEN + 1))
     echo "PASS golden $name: $(sed -n 's/^PROVIDER=//p' "$new/facts"), identical files"
 }
 
-CODEX=.codex/config.toml GEMINI=.gemini/settings.json
+CODEX=.codex/config.toml
 
 # claude writes no CLI configuration; the credential files are the same.
-golden claude-cloud          claude-cloud.json         basic.json      file      -                    - -
-golden claude-local          claude-local.json         basic.json      file      -                    - -
-golden claude-no-provider    claude-default.json       -               missing   -                    - -
+golden claude-cloud          claude-cloud.json         basic.json      file      - -
+golden claude-local          claude-local.json         basic.json      file      - -
+golden claude-no-provider    claude-default.json       -               missing   - -
 
-golden codex-cloud           codex-cloud.json          basic.json      file      -                    "$CODEX" 'enabled_tools = ["memory_get", "memory_search"]'
-golden codex-headers         codex-cloud-headers.json  basic.json      file      -                    "$CODEX" 'http_headers = { "Authorization" = "Bearer example-read-token" }'
-golden codex-odd-values      codex-cloud.json          odd.json        file      -                    "$CODEX" '[mcp_servers.10]'
-golden codex-odd-headers     codex-cloud-headers.json  odd.json        file      -                    "$CODEX" '"X-List" = "a,,2"'
-golden codex-no-mcp          codex-cloud.json          -               file      -                    "$CODEX" 'check_for_update_on_startup = false'
-golden codex-no-servers      codex-cloud.json          no-servers.json file      -                    "$CODEX" 'persistence = "none"'
-golden codex-root-missing    codex-cloud.json          basic.json      missing   -                    "$CODEX" '[mcp_servers.alpha]'
-golden codex-root-directory  codex-cloud.json          basic.json      directory -                    "$CODEX" '[mcp_servers.alpha]'
-golden codex-root-raw-bytes  codex-cloud.json          basic.json      raw       -                    "$CODEX" '[mcp_servers.alpha]'
-golden codex-nothing         codex-cloud.json          -               missing   -                    "$CODEX" -
-golden codex-mcp-unreadable  codex-cloud.json          broken.json     file      -                    "$CODEX" 'stale = true'
-golden codex-local-ollama    codex-local-ollama.json   basic.json      file      -                    "$CODEX" 'enabled_tools = ["memory_get"]'
-golden codex-local-lmstudio  codex-local-lmstudio.json basic.json      file      -                    "$CODEX" 'enabled_tools = ["memory_search"]'
-golden codex-hosted-zai      codex-hosted-zai.json     basic.json      file      -                    "$CODEX" 'enabled_tools = ["memory_get"]'
+golden codex-cloud           codex-cloud.json          basic.json      file      "$CODEX" 'enabled_tools = ["memory_get", "memory_search"]'
+golden codex-headers         codex-cloud-headers.json  basic.json      file      "$CODEX" 'http_headers = { "Authorization" = "Bearer example-read-token" }'
+golden codex-odd-values      codex-cloud.json          odd.json        file      "$CODEX" '[mcp_servers.10]'
+golden codex-odd-headers     codex-cloud-headers.json  odd.json        file      "$CODEX" '"X-List" = "a,,2"'
+golden codex-no-mcp          codex-cloud.json          -               file      "$CODEX" 'check_for_update_on_startup = false'
+golden codex-no-servers      codex-cloud.json          no-servers.json file      "$CODEX" 'persistence = "none"'
+golden codex-root-missing    codex-cloud.json          basic.json      missing   "$CODEX" '[mcp_servers.alpha]'
+golden codex-root-directory  codex-cloud.json          basic.json      directory "$CODEX" '[mcp_servers.alpha]'
+golden codex-root-raw-bytes  codex-cloud.json          basic.json      raw       "$CODEX" '[mcp_servers.alpha]'
+golden codex-nothing         codex-cloud.json          -               missing   "$CODEX" -
+golden codex-mcp-unreadable  codex-cloud.json          broken.json     file      "$CODEX" 'stale = true'
+golden codex-local-ollama    codex-local-ollama.json   basic.json      file      "$CODEX" 'enabled_tools = ["memory_get"]'
+golden codex-local-lmstudio  codex-local-lmstudio.json basic.json      file      "$CODEX" 'enabled_tools = ["memory_search"]'
+golden codex-hosted-zai      codex-hosted-zai.json     basic.json      file      "$CODEX" 'enabled_tools = ["memory_get"]'
 
-golden gemini-mcp            gemini.json               basic.json      missing   -                    "$GEMINI" '"httpUrl": "http://127.0.0.1:8091/journal-files/v1/mcp"'
-golden gemini-headers        gemini-headers.json       basic.json      missing   theme.json           "$GEMINI" '"Authorization": "Bearer example-read-token"'
-golden gemini-odd-values     gemini.json               odd.json        missing   theme.json           "$GEMINI" '"selectedType": "oauth-personal"'
-golden gemini-odd-headers    gemini-headers.json       odd.json        missing   -                    "$GEMINI" '"X-Small": 1e-07'
-golden gemini-no-mcp         gemini.json               -               missing   -                    "$GEMINI" '"selectedType": "oauth-personal"'
-golden gemini-no-mcp-merge   gemini.json               -               missing   theme.json           "$GEMINI" '"theme": "Dracula"'
-golden gemini-no-servers     gemini.json               no-servers.json missing   theme.json           "$GEMINI" '"mcpServers": {}'
-golden gemini-settings-bad   gemini.json               basic.json      missing   invalid.json         "$GEMINI" '"selectedType": "oauth-personal"'
-golden gemini-settings-array gemini.json               basic.json      missing   array.json           "$GEMINI" '[1, 2]'
-golden gemini-security-value gemini.json               -               missing   security-scalar.json "$GEMINI" '"security": 5'
-golden gemini-mcp-unreadable gemini.json               broken.json     missing   theme.json           "$GEMINI" '"selectedType": "gemini-api-key"'
 
 # The hosted fixture must have gone through the branch that removes the OpenAI credential, and the
 # others through the one that copies it: a golden pass on the wrong branch would prove nothing.
@@ -225,7 +219,7 @@ echo "PASS golden: $GOLDEN fixtures"
 # $1 = case name, $2 = appsettings text, $3 = text the refusal must contain.
 refused() {
     local tree="$WORK/$1"
-    seed_tree "$tree" claude-cloud.json basic.json file -
+    seed_tree "$tree" claude-cloud.json basic.json file
     printf '%s' "$2" > "$tree/app/appsettings.json"
     printf 'claude host credentials' > "$tree/root/.claude-host.json"
     write_current_script "$tree"
@@ -256,7 +250,7 @@ file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 # Runs the unmodified head of entrypoint.sh. Sets TREE and RC.
 run_head() {
     TREE="$WORK/$1"
-    seed_tree "$TREE" "$2" basic.json file -
+    seed_tree "$TREE" "$2" basic.json file
     mkdir -p "$TREE/shim" "$TREE/seen"
     # `dotnet Fleet.Agent.dll prepare …` as the script calls it: record what the call can see, then
     # run the real one against the tree.
@@ -314,4 +308,66 @@ for blank in "" "   " "<secret>"; do
 done
 echo "PASS hosted agent with an unset, blank or placeholder key: exit 1, named, no key file"
 
-echo "PASS entrypoint prepare: golden $GOLDEN, fail closed, key isolation"
+# ── 4. gemini: the Antigravity CLI ────────────────────────────────────────────
+
+GEMINI_KEY='example-gemini-key-value 4567'
+GEMINI_MCP=.gemini/config/mcp_config.json
+GEMINI_CASES=0
+
+# $1 = case name, $2 = appsettings fixture, $3 = mcp fixture or -, $4 = a warning stderr must
+# hold, or -. Runs the current provider branch with the key and compares what it wrote with
+# fixtures/expected/$1.json.
+gemini_writes() {
+    local tree="$WORK/$1"
+    seed_tree "$tree" "$2" "$3" missing
+    # A file from an earlier start, readable by everyone and holding a header value: replaced.
+    mkdir -p "$tree/root/.gemini/config"
+    printf '{"mcpServers":{"stale":{"url":"http://stale","headers":{"Authorization":"Bearer stale-token"}}}}' > "$tree/root/$GEMINI_MCP"
+    chmod 644 "$tree/root/$GEMINI_MCP"
+    write_current_script "$tree"
+    run_tree "$tree" GEMINI_API_KEY="$GEMINI_KEY"
+    [ "$RC" -eq 0 ] || { cat "$tree/err" >&2; fail_assert "$1: the gemini branch exited $RC"; }
+    grep -qx CHAIN-COMPLETED "$tree/out" || fail_assert "$1: the gemini branch did not complete"
+    grep -qx 'PROVIDER=gemini' "$tree/facts" || fail_assert "$1: the provider was not reported as gemini"
+    cmp -s "$FIXTURES/expected/$1.json" "$tree/root/$GEMINI_MCP" \
+        || { diff "$FIXTURES/expected/$1.json" "$tree/root/$GEMINI_MCP" >&2 || true; fail_assert "$1: $GEMINI_MCP is not fixtures/expected/$1.json"; }
+    [ "$(file_mode "$tree/root/$GEMINI_MCP")" = 600 ] || fail_assert "$1: $GEMINI_MCP is not mode 0600"
+    [ "$4" = - ] || grep -qF -- "$4" "$tree/err" || { cat "$tree/err" >&2; fail_assert "$1: no warning '$4'"; }
+    [ ! -e "$tree/root/.gemini/settings.json" ] && [ ! -e "$tree/root/.gemini/antigravity-cli/settings.json" ] \
+        || fail_assert "$1: a settings file was written"
+    [ ! -e "$tree/root/.gemini/oauth_creds.json" ] || fail_assert "$1: a Google sign-in file appeared"
+    ! grep -rqF -e "$GEMINI_KEY" "$tree/out" "$tree/err" "$tree/root" || fail_assert "$1: the key was printed or written"
+    GEMINI_CASES=$((GEMINI_CASES + 1))
+    echo "PASS gemini $1: $GEMINI_MCP as expected, mode 0600"
+}
+
+gemini_writes gemini-mcp            gemini.json         basic.json      "WARN: skipping MCP server 'gamma' (it has headers and Agent.McpHeaderSupport is not set)"
+gemini_writes gemini-headers        gemini-headers.json basic.json      -
+gemini_writes gemini-no-mcp         gemini.json         -               "not found; gemini agent will start without MCP tools"
+gemini_writes gemini-no-servers     gemini.json         no-servers.json -
+gemini_writes gemini-mcp-unreadable gemini-headers.json broken.json     "gemini agent will start without MCP tools"
+# odd.json names two servers twice: a file like that is not used at all, rather than guessed at.
+gemini_writes gemini-odd-headers    gemini-headers.json odd.json        "gemini agent will start without MCP tools"
+grep -qF '"Authorization": "Bearer example-read-token"' "$WORK/gemini-headers/root/$GEMINI_MCP" || fail_assert "gemini-headers: the header was not carried over"
+grep -qF '"command": "node"' "$WORK/gemini-mcp/root/$GEMINI_MCP" || fail_assert "gemini-mcp: the stdio server was left out"
+! grep -qF 'example-read-token' "$WORK/gemini-mcp/root/$GEMINI_MCP" || fail_assert "gemini-mcp: a header value was written without header support"
+
+# Without the key the container does not start, nothing is prepared, and the value is never asked for.
+for blank in unset "" "   "; do
+    tree="$WORK/gemini-no-key-${#blank}"
+    seed_tree "$tree" gemini-headers.json basic.json missing
+    write_current_script "$tree"
+    if [ "$blank" = unset ]; then run_tree "$tree"; else run_tree "$tree" GEMINI_API_KEY="$blank"; fi
+    [ "$RC" -eq 1 ] || { cat "$tree/err" >&2; fail_assert "gemini with key '$blank': expected exit 1, got $RC"; }
+    grep -qF 'ERROR: GEMINI_API_KEY is not set' "$tree/err" || fail_assert "gemini with key '$blank': no named error"
+    ! grep -qx CHAIN-COMPLETED "$tree/out" || fail_assert "gemini with key '$blank': the branch completed"
+    [ ! -e "$tree/root/$GEMINI_MCP" ] || fail_assert "gemini with key '$blank': an MCP file was written"
+done
+echo "PASS gemini without a key (unset, empty, blank): exit 1, named, nothing written"
+
+# The original accepted only a Google sign-in and refused an API key; the current branch must not
+# carry either rule over.
+! grep -qE 'oauth_creds|GOOGLE_API_KEY|GEMINI_CLI_TRUST_WORKSPACE' "$WORK/current.chain" \
+    || fail_assert "the current gemini branch still handles the Gemini CLI's sign-in"
+
+echo "PASS entrypoint prepare: golden $GOLDEN, fail closed, key isolation, gemini $GEMINI_CASES"

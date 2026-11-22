@@ -16,6 +16,12 @@ namespace Fleet.Orchestrator.Tests.Services;
 /// change with itself.
 /// </para>
 /// <para>
+/// One exception, made on purpose: a gemini agent could not be provisioned at all while its CLI
+/// sent no MCP headers, so its <c>mcp.json</c> and <c>appsettings.json</c> fixtures stayed as they
+/// were before signed identities. Now that it sends them (the Antigravity CLI), the two files are
+/// what a claude agent's are, but for the provider name; the project files are unchanged.
+/// </para>
+/// <para>
 /// No <c>full.md</c> may be written, and nothing of the removed fallback wiring may appear.
 /// </para>
 /// </remarks>
@@ -26,6 +32,12 @@ public class ProjectContextGoldenTests
 
     internal const string FullV1 = "# project-a\n\nFirst version.\n";
     internal const string FullV2 = "# project-a\n\nBuild with care.\n\n<!-- keep:rule-one -->\nNever skip review.\n";
+
+    internal const string GeminiKeyRef = "GEMINI_API_KEY";
+
+    /// <summary>The <c>.env</c> value behind the gemini scenario's <see cref="GeminiKeyRef"/> Env Ref.</summary>
+    internal static void GiveGeminiItsKey(ProvisioningHarness harness) =>
+        File.AppendAllText(harness.EnvFile, $"{GeminiKeyRef}=synthetic-gemini-api-key\n");
 
     internal static string FixtureDir(string provider) =>
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "ProjectContextGolden", provider);
@@ -56,6 +68,9 @@ public class ProjectContextGoldenTests
         agent.Tools.Add(new AgentTool { ToolName = "Bash", IsEnabled = true });
         agent.Tools.Add(new AgentTool { ToolName = "mcp__fleet-memory__memory_search", IsEnabled = true });
         agent.Tools.Add(new AgentTool { ToolName = "Write", IsEnabled = false });
+        // A gemini agent signs in with its API key; GiveGeminiItsKey puts the value in .env.
+        if (provider == "gemini")
+            agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = GeminiKeyRef });
         agent.Projects.Add(new AgentProject { ProjectName = "project-a" });
         agent.Projects.Add(new AgentProject { ProjectName = "project-b" });
         agent.McpEndpoints.Add(new AgentMcpEndpoint
@@ -83,16 +98,10 @@ public class ProjectContextGoldenTests
     public async Task Assignments_GenerateByteIdenticalFiles(string provider)
     {
         await using var harness = ProvisioningHarness.Create();
+        GiveGeminiItsKey(harness);
         await harness.SeedAsync(db => SeedScenario(db, provider));
 
         var result = await harness.Service.ProvisionAsync(AgentName);
-        if (provider == "gemini")
-        {
-            Assert.False(result.Success);
-            Assert.Contains("mcp_headers_unsupported", result.Message);
-            Assert.Empty(harness.CreateBodies);
-            return;
-        }
         Assert.True(result.Success, result.Message);
 
         var generated = harness.GeneratedDir(ContainerName);

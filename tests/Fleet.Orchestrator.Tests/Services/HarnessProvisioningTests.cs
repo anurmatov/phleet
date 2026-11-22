@@ -17,20 +17,17 @@ public sealed class HarnessProvisioningTests
     private static async Task<ProvisioningHarness> ProvisionAsync(string provider, string model, string? extra, string? url = null)
     {
         var h = ProvisioningHarness.Create();
+        // A gemini agent signs in with its API key, an Env Ref with a value in .env.
+        File.AppendAllText(h.EnvFile, "GEMINI_API_KEY=synthetic-gemini-api-key\n");
         await h.SeedAsync(db => db.Agents.Add(new Agent
         {
             Name = "agent1", DisplayName = "agent1", Role = "developer", Model = model, Provider = provider,
             ContainerName = "fleet-agent1", MemoryLimitMb = 1024, LocalBaseUrl = url,
             ContextWindow = url is null ? null : 131_072, HarnessExtra = extra,
+            EnvRefs = provider == "gemini" ? [new AgentEnvRef { EnvKeyName = "GEMINI_API_KEY" }] : [],
         }));
         var result = await h.Service.ProvisionAsync("agent1");
-        if (provider == "gemini")
-        {
-            Assert.False(result.Success);
-            Assert.Contains("mcp_headers_unsupported", result.Message);
-            Assert.Empty(h.CreateBodies);
-        }
-        else Assert.True(result.Success, result.Message);
+        Assert.True(result.Success, result.Message);
         return h;
     }
 
@@ -56,7 +53,9 @@ public sealed class HarnessProvisioningTests
     {
         await using var h = await ProvisionAsync(provider, model, null);
 
+        Assert.True(File.Exists(Path.Combine(h.GeneratedDir("fleet-agent1"), "appsettings.json")));
         Assert.False(File.Exists(Path.Combine(h.GeneratedDir("fleet-agent1"), HarnessDefaults.CodexRootTomlFileName)));
+        Assert.DoesNotContain(h.CreateBodies, b => b.Contains(HarnessDefaults.CodexRootTomlFileName, StringComparison.Ordinal));
     }
 
     [Fact]

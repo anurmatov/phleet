@@ -6,7 +6,7 @@ namespace Fleet.Agent.Tests;
 
 /// <summary>
 /// The header translation in the provider CLI configuration <c>entrypoint.sh</c> has the agent
-/// binary write (<see cref="CodexConfigToml"/>, <see cref="GeminiSettingsJson"/>): a server that
+/// binary write (<see cref="CodexConfigToml"/>, <see cref="AntigravityMcpConfig"/>): a server that
 /// carries headers is written with them when the pinned CLI sends headers, and left out otherwise.
 /// It is never written without them.
 /// </summary>
@@ -19,7 +19,7 @@ public sealed class EntrypointMcpHeaderTests
     {
         var warnings = new List<string>();
 
-        var result = GeminiSettingsJson.WithMcpServers(Utf8(McpJson), existingSettings: null, supported, warnings.Add);
+        var result = AntigravityMcpConfig.Build(Utf8(McpJson), supported, warnings.Add);
 
         using var doc = JsonDocument.Parse(result.Text);
         var servers = doc.RootElement.GetProperty("mcpServers");
@@ -31,7 +31,7 @@ public sealed class EntrypointMcpHeaderTests
         else
         {
             Assert.False(servers.TryGetProperty("journal", out _));
-            Assert.Equal(["WARN: skipping MCP server 'journal' (headers unsupported by pinned gemini CLI)"], warnings);
+            Assert.Equal(["WARN: skipping MCP server 'journal' (it has headers and Agent.McpHeaderSupport is not set)"], warnings);
         }
     }
 
@@ -61,11 +61,12 @@ public sealed class EntrypointMcpHeaderTests
     {
         var mcp = Utf8("{\"mcpServers\":{\"fleet-journal-files\":{\"url\":\"http://127.0.0.1:8091/journal-files/v1/mcp\"}}}");
 
-        var gemini = GeminiSettingsJson.WithMcpServers(mcp, existingSettings: null, mcpHeaderSupport: false, _ => { });
+        var gemini = AntigravityMcpConfig.Build(mcp, mcpHeaderSupport: false, _ => { });
         using var json = JsonDocument.Parse(gemini.Text);
         var server = json.RootElement.GetProperty("mcpServers").GetProperty("fleet-journal-files");
-        Assert.Equal("http://127.0.0.1:8091/journal-files/v1/mcp", server.GetProperty("httpUrl").GetString());
-        Assert.False(server.TryGetProperty("url", out _));
+        // The Antigravity CLI speaks Streamable HTTP on "url"; the Gemini CLI's "httpUrl" is not read.
+        Assert.Equal("http://127.0.0.1:8091/journal-files/v1/mcp", server.GetProperty("url").GetString());
+        Assert.False(server.TryGetProperty("httpUrl", out _));
         Assert.False(server.TryGetProperty("headers", out _));
 
         var toml = CodexConfigToml.Build(

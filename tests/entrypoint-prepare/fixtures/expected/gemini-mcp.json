@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "alpha": {
+      "url": "http://alpha:3100?agent=example-dev"
+    },
+    "beta": {
+      "url": "http://beta:3001"
+    },
+    "delta": {
+      "command": "node",
+      "args": [
+        "server.js"
+      ]
+    },
+    "fleet-journal-files": {
+      "url": "http://127.0.0.1:8091/journal-files/v1/mcp"
+    }
+  }
+}

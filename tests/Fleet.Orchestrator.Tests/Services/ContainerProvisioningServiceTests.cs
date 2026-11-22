@@ -383,7 +383,6 @@ public class ContainerProvisioningServiceTests
     [Theory]
     [InlineData("claude", "./.claude-credentials.json:/root/.claude-host/.credentials.json:ro")]
     [InlineData("codex", "./.codex-credentials.json:/root/.codex-host/auth.json:ro")]
-    [InlineData("gemini", "./.gemini-credentials.json:/root/.gemini/oauth_creds.json:rw")]
     public void BuildBinds_AgentsWithoutTheField_EqualMain(string provider, string credentialBind)
     {
         var binds = BindsWithAllHostCredentialFiles(MinimalAgent("agolden", provider));
@@ -392,6 +391,24 @@ public class ContainerProvisioningServiceTests
         var codexRoot = ContainerProvisioningService.CodexRootTomlBind("fleet-agolden");
         Assert.Equal(provider == "codex" ? 1 : 0, binds.Count(b => b == codexRoot));
         Assert.Equal(MainBinds(credentialBind), binds.Where(b => b != codexRoot));
+        // The Antigravity CLI's home is a gemini agent's alone.
+        Assert.DoesNotContain(binds, b => b.Contains("/root/.gemini", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A gemini agent runs the Antigravity CLI with an API key from its environment: its binds are
+    /// the common ones plus its CLI home as a host directory, and no credential file, whatever the
+    /// host holds.
+    /// </summary>
+    [Fact]
+    public void BuildBinds_GeminiAgent_GetsItsCliHomeAsAHostDirectory_AndNoCredentialFile_EvenWhenTheHostFileExists()
+    {
+        var binds = BindsWithAllHostCredentialFiles(MinimalAgent("agolden", "gemini"));
+
+        Assert.Equal(MainBinds("./workspaces/fleet-agolden/gemini:/root/.gemini"), binds);
+        Assert.Equal("./workspaces/fleet-agolden/gemini:/root/.gemini", ContainerSpecBuilder.GeminiHomeBind("fleet-agolden"));
+        Assert.DoesNotContain(binds, b => b.Contains("credentials", StringComparison.Ordinal));
+        Assert.DoesNotContain(binds, b => b.Contains("oauth_creds", StringComparison.Ordinal));
     }
 
     // GenerateAppsettingsJson for MinimalAgent("agolden", "claude") on main at 9a2b6cc, verbatim.

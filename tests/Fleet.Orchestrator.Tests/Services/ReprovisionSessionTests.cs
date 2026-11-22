@@ -177,6 +177,77 @@ public sealed class ReprovisionSessionTests : IAsyncLifetime
         Assert.Equal(session == "auto", File.Exists(file));
     }
 
+    /// <summary>
+    /// A gemini agent's CLI home (<c>/root/.gemini</c>) is a host directory too, mounted for that
+    /// provider alone: a work directory under it has a session file that outlives the container,
+    /// and a new session removes it at the same point as under the other two homes.
+    /// </summary>
+    [Theory]
+    [InlineData("/root/.gemini", "gemini", "fresh")]
+    [InlineData("/root/.gemini/repo", "gemini/repo", "fresh")]
+    [InlineData("/root/.claude/../.gemini", "gemini", "fresh")]
+    [InlineData("/root/.gemini", "gemini", "auto")]
+    public async Task GeminiHome_Reprovision_RemovesOnlyForFreshAfterContainerRemoval(
+        string workDir, string hostSubdir, string session)
+    {
+        var agent = Claude();
+        agent.Provider = "gemini";
+        agent.Model = "gemini-4-argon-medium";
+        agent.WorkDir = workDir;
+        agent.EnvRefs.Add(new AgentEnvRef { EnvKeyName = "GEMINI_API_KEY" });
+        File.AppendAllText(_harness.EnvFile, "GEMINI_API_KEY=synthetic-gemini-api-key\n");
+        await _harness.SeedAsync(db => db.Agents.Add(agent));
+        _harness.ContainerExists = true;
+        var file = Path.Combine(WorkspaceDir(), hostSubdir, AgentSessionFile.RelativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllTextAsync(file, "saved session");
+        var fileAt = new Dictionary<string, bool>();
+        _harness.OnDockerRequest = call =>
+        {
+            if (call.StartsWith("DELETE ", StringComparison.Ordinal)) fileAt["remove"] = File.Exists(file);
+            if (call.EndsWith("/containers/create", StringComparison.Ordinal)) fileAt["create"] = File.Exists(file);
+            return Task.CompletedTask;
+        };
+
+        Assert.Contains("./workspaces/fleet-agent1/gemini:/root/.gemini",
+            ContainerProvisioningService.BuildBinds(agent, _harness.BaseDir));
+        Assert.Equal(file, SessionFileRemoval.HostPath(agent, _harness.BaseDir));
+        var result = await _harness.Service.ReprovisionAsync("agent1", session: session);
+
+        Assert.True(result.Success, result.Message);
+        Assert.True(fileAt["remove"]);
+        Assert.Equal(session == "auto", fileAt["create"]);
+        Assert.Equal(session == "auto", File.Exists(file));
+    }
+
+    /// <summary>
+    /// For an agent of another provider nothing is mounted at <c>/root/.gemini</c>: a work
+    /// directory there is in the container's own filesystem, and a file at the host path a gemini
+    /// agent would use is not this agent's to remove.
+    /// </summary>
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    public async Task GeminiHome_IsNotAMountOfAnyOtherProvider_SoFreshRemovesNothingThere(string provider)
+    {
+        var agent = Claude();
+        agent.Provider = provider;
+        if (provider == "codex") agent.Model = "gpt-5.5";
+        agent.WorkDir = "/root/.gemini";
+        await _harness.SeedAsync(db => db.Agents.Add(agent));
+        _harness.ContainerExists = true;
+        var file = Path.Combine(WorkspaceDir(), "gemini", AgentSessionFile.RelativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllTextAsync(file, "not this agent's");
+
+        Assert.DoesNotContain(ContainerProvisioningService.BuildBinds(agent, _harness.BaseDir), b => b.Contains("/root/.gemini", StringComparison.Ordinal));
+        Assert.Null(SessionFileRemoval.HostPath(agent, _harness.BaseDir));
+        var result = await _harness.Service.ReprovisionAsync("agent1", session: AgentSessionFile.Fresh);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Equal("not this agent's", await File.ReadAllTextAsync(file));
+    }
+
     [Theory]
     [InlineData("/root/.claude", "claude", false)]
     [InlineData("/root/.codex", "codex", false)]

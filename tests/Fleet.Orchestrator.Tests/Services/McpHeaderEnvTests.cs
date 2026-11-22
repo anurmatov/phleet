@@ -23,6 +23,8 @@ public class McpHeaderEnvTests
     private const string KeyValue = "synthetic-key-value-3f9e1a";
     private const string SecretValue = "synthetic-secret-value-c07d52";
     private const string PlainValue = "synthetic-plain-value-8b44e0";
+    private const string GeminiKeyRef = ProvisioningFaults.GeminiApiKeyEnvRef;
+    private const string GeminiKeyValue = "synthetic-gemini-key-51ce07";
 
     /// <summary>The variable the native acceptance script sets to receive the fixture (A7).</summary>
     public const string FixtureDirectoryVariable = "FLEET_MCP_HEADERS_FIXTURE_DIR";
@@ -37,7 +39,7 @@ public class McpHeaderEnvTests
         Name = "agent1",
         DisplayName = "agent1",
         Role = "developer",
-        Model = provider == "codex" ? "gpt-5.5" : "claude-sonnet-4-6",
+        Model = provider == "codex" ? "gpt-5.5" : provider == "gemini" ? "gemini-4-argon-medium" : "claude-sonnet-4-6",
         Provider = provider,
         ContainerName = "fleet-agent1",
         MemoryLimitMb = 512,
@@ -178,12 +180,85 @@ public class McpHeaderEnvTests
         Assert.DoesNotContain("headers", AgentConfigFiles.GenerateMcpJson(agent, "http://fleet-memory:3100"));
     }
 
+    /// <summary>
+    /// Gemini is the Antigravity CLI, which sends an endpoint's configured headers on every MCP
+    /// request, like the other two. A provider that is not in the table sends none.
+    /// </summary>
     [Fact]
-    public void Gemini_header_support_stays_false()
+    public void Every_known_provider_sends_headers_and_one_outside_the_table_does_not()
     {
-        Assert.False(AgentConfigFiles.McpHeaderSupport["gemini"]);
+        Assert.True(AgentConfigFiles.McpHeaderSupport["gemini"]);
         Assert.True(AgentConfigFiles.McpHeaderSupport["claude"]);
         Assert.True(AgentConfigFiles.McpHeaderSupport["codex"]);
+        Assert.Equal(AgentProviders.All.Order(), AgentConfigFiles.McpHeaderSupport.Keys.Order());
+
+        Assert.False(AgentConfigFiles.SupportsMcpHeaders("other-harness"));
+        var fault = McpHeaderMappings.DescribeEndpointFault("example", Url, "http", "other-harness");
+        Assert.Equal(McpHeaderMappings.Unsupported, fault?.Code);
+        foreach (var provider in AgentProviders.All)
+            Assert.Null(McpHeaderMappings.DescribeEndpointFault("example", Url, "http", provider));
+    }
+
+    /// <summary>
+    /// A stored mapping on an agent whose provider sends no headers refuses the provision by the
+    /// mapping rule, wherever the provider check that comes before it would let it through.
+    /// </summary>
+    [Fact]
+    public void A_stored_mapping_on_a_provider_that_sends_no_headers_is_a_fault_naming_no_value()
+    {
+        var agent = NewAgent();
+        agent.Provider = "other-harness";
+
+        var (headers, fault) = AgentConfigFiles.ResolveMcpHeaders(
+            agent, new Dictionary<string, string> { [KeyRef] = KeyValue, [SecretRef] = SecretValue, [PlainRef] = PlainValue }, [], SecretPlan.None);
+
+        Assert.StartsWith(McpHeaderMappings.Unsupported, fault);
+        Assert.Empty(headers);
+        foreach (var secret in new[] { KeyValue, SecretValue, PlainValue })
+            Assert.DoesNotContain(secret, fault);
+    }
+
+    /// <summary>
+    /// A gemini agent with mapped headers provisions, and its <c>.mcp.json</c> carries for each
+    /// endpoint exactly what a claude and a codex agent with the same rows get: the bound
+    /// references as that provision's placeholders, the unbound one as its captured value.
+    /// </summary>
+    [Fact]
+    public async Task A_gemini_agent_with_mapped_headers_provisions_and_gets_what_claude_and_codex_get()
+    {
+        var rendered = new Dictionary<string, string>();
+        foreach (var provider in new[] { "claude", "codex", "gemini" })
+        {
+            await using var harness = await StartAsync(db =>
+            {
+                db.SecretBindings.AddRange(Bindings());
+                var agent = NewAgent(provider);
+                if (provider == "gemini") agent.EnvRefs.Add(new() { EnvKeyName = GeminiKeyRef });
+                db.Agents.Add(agent);
+            });
+            File.AppendAllText(harness.EnvFile, $"{GeminiKeyRef}={GeminiKeyValue}\n");
+
+            var result = await harness.Service.ProvisionAsync("agent1");
+
+            Assert.True(result.Success, result.Message);
+            var body = harness.CreateBodies.Single();
+            var example = Headers(harness, "example");
+            Assert.Equal(EnvOf(body, KeyAlias), example.GetProperty("X-Example-Key").GetString());
+            Assert.Equal(EnvOf(body, SecretRef), example.GetProperty("X-Example-Secret").GetString());
+            Assert.True(SecretPlaceholders.IsPlaceholder(example.GetProperty("X-Example-Key").GetString()!));
+            Assert.Equal(PlainValue, Headers(harness, "plain").GetProperty("X-Plain-Token").GetString());
+            var appsettings = JsonDocument.Parse(File.ReadAllText(Path.Combine(harness.GeneratedDir("fleet-agent1"), "appsettings.json"))).RootElement;
+            Assert.True(appsettings.GetProperty("Agent").GetProperty("McpHeaderSupport").GetBoolean());
+
+            // Placeholders are minted per provision; with them named, the file is the same file.
+            rendered[provider] = File.ReadAllText(McpPath(harness))
+                .Replace(EnvOf(body, KeyAlias), "<key-placeholder>").Replace(EnvOf(body, SecretRef), "<secret-placeholder>");
+        }
+
+        Assert.Equal(rendered["claude"], rendered["gemini"]);
+        Assert.Equal(rendered["codex"], rendered["gemini"]);
+        Assert.Contains("\"X-Plain-Token\": \"" + PlainValue + "\"", rendered["gemini"]);
+        Assert.Contains("fa1.agent.agent1.", rendered["gemini"]);
     }
 
     [Theory]
@@ -211,7 +286,8 @@ public class McpHeaderEnvTests
         { "dangling", McpHeaderMappings.RefMissing },
         { "missing-value", McpHeaderMappings.ValueMissing },
         { "nul-value", McpHeaderMappings.ValueMissing },
-        { "gemini", McpHeaderMappings.Unsupported },
+        // A switch to gemini no longer loses the headers: what it lacks is the agent's API key.
+        { "gemini-without-its-key", ProvisioningFaults.GeminiApiKeyMissing },
         { "sse", McpHeaderMappings.Unsupported },
         { "other-host", McpHeaderMappings.BindingMismatch },
         { "other-header", McpHeaderMappings.BindingMismatch },
@@ -246,7 +322,7 @@ public class McpHeaderEnvTests
                 case "dangling": db.AgentEnvRefs.Remove(agent.EnvRefs.Single(r => r.EnvKeyName == PlainRef)); break;
                 case "missing-value": File.WriteAllText(first.EnvFile, File.ReadAllText(first.EnvFile).Replace($"{PlainRef}={PlainValue}\n", "")); break;
                 case "nul-value": File.AppendAllText(first.EnvFile, $"{PlainRef}=synthetic\0nul\n"); break;
-                case "gemini": agent.Provider = "gemini"; break;
+                case "gemini-without-its-key": agent.Provider = "gemini"; break;
                 case "sse": example.TransportType = "sse"; break;
                 case "other-host": example.Url = "https://other.example.test/mcp"; break;
                 case "other-header": example.HeaderEnvRefsJson = Mappings(("X-Example-Key", KeyRef), ("X-Other", SecretRef)); break;

@@ -20,7 +20,7 @@ Without a database connection, this provisioning preflight does not run.
 Each agent is a .NET 10 container that:
 1. Loads config from the orchestrator DB (provisioned via `seed.json` on first run)
 2. Receives tasks via Telegram DM or RabbitMQ
-3. Runs an AI process per provider: claude CLI (`-p --append-system-prompt-file`), a persistent `codex app-server --listen stdio://` (JSON-RPC 2.0, driven directly by `CodexExecutor`), gemini CLI (`--output-format stream-json --yolo`)
+3. Runs an AI process per provider: claude CLI (`-p --append-system-prompt-file`), a persistent `codex app-server --listen stdio://` (JSON-RPC 2.0, driven directly by `CodexExecutor`), and for gemini Google's Antigravity CLI (`agy`, one process per turn, stream-json in and out)
 4. Sends tasks via stdin, streams NDJSON/JSONL responses from stdout
 5. Reports heartbeats to the orchestrator
 
@@ -61,13 +61,16 @@ binary's one-shot mode, `dotnet Fleet.Agent.dll prepare` (`src/Fleet.Agent/Prepa
 same `AgentOptions` as the host: `prepare facts` prints the `NAME=value` lines the script acts on
 (`EntrypointPrepare.FactNames`) and refuses (exit 1, the container does not start) an unreadable
 configuration, an unknown provider or a hosted provider without a usable key name; `prepare config`
-writes the Codex `~/.codex/config.toml` or the Gemini `~/.gemini/settings.json`, where a file it cannot
+writes the Codex `~/.codex/config.toml` or, for gemini, the Antigravity CLI's
+`~/.gemini/config/mcp_config.json` (0600), where a file it cannot
 build is a WARN and the agent starts without those MCP tools. The script takes the reserved key names
-out of its environment before the first call, so neither call can see a hosted key. Those two files
-are byte-identical to what the script's former inline Node and Python wrote (`ScriptCompat`), and
+out of its environment before the first call, so neither call can see a hosted key. The Codex file
+is byte-identical to what the script's former inline Node wrote (`ScriptCompat`), and
 `bash tests/entrypoint-prepare/run.sh` runs the original script (`entrypoint.legacy.sh`, kept there
 only as the reference) beside the current one to prove it; change the output only on purpose, with
-that harness updated.
+that harness updated. The gemini branch changed on purpose (the original prepared the Gemini CLI
+and refused an API key), so that harness checks it against `fixtures/expected/` instead, and that
+it exits 1 without `GEMINI_API_KEY`.
 
 ### Reprovision and the session choice
 
@@ -78,7 +81,7 @@ container may resume the provider session. A request may ask for a new one inste
 `POST /api/agents/reprovision-running` (JSON body `{"session":"fresh"}` or `?session=fresh`, beside
 `?image=`) and on the MCP tool `reprovision_agent`. Any other value is a 400 (the tool's `✗` answer)
 and nothing is touched. `fresh` makes `ContainerProvisioningService.ReprovisionAsync` remove the file
-(`SessionFileRemoval`, the host side of `/workspace`, `/root/.claude` and `/root/.codex`) after the old container is removed and
+(`SessionFileRemoval`, the host side of `/workspace`, `/root/.claude`, `/root/.codex` and, for a gemini agent, `/root/.gemini`) after the old container is removed and
 before the new one is created. A missing file is success. A file that cannot be removed fails the
 reprovision with `session_file_not_removed` and no new container is started: the agent is down until
 the next reprovision, because starting it would resume the session the caller asked to end.
@@ -100,11 +103,41 @@ after `deprovision_agent` keeps the session.
 |----------|------|--------------|----------------------|---------------|
 | claude | OAuth via `~/.claude/.credentials.json` | Persistent process; the session is resumed (`--resume`) by a later process or container while the instructions are unchanged | `--append-system-prompt-file` (temp file) | HTTP/SSE + stdio |
 | codex | OAuth via `~/.codex/auth.json` | Persistent `codex app-server --listen stdio://`, JSON-RPC 2.0 over stdio; one saved thread, resumed (`thread/resume`) by a later process or container while the instructions are unchanged | `thread/start` / `thread/resume` `baseInstructions` (PromptBuilder file contents) | HTTP only, via `~/.codex/config.toml` generated at container start by `prepare config` (stdio skipped) |
-| gemini | OAuth via `~/.gemini/oauth_creds.json` (writable bind mount) | Fresh `gemini` CLI per task | `GEMINI_SYSTEM_MD` env var → temp file | HTTP/SSE only (stdio skipped by `prepare config`) |
+| gemini | A paid Gemini API key in `GEMINI_API_KEY` (an Env Ref; no sign-in, no credential file) | One `agy` process per turn; one kept conversation, resumed (`--conversation`) by a later process or container while the instructions are unchanged | Always-on rule files in `~/.gemini/config/rules/` (`GeminiInstructionFiles`), added to the CLI's own prompt | HTTP with headers and stdio, via `~/.gemini/config/mcp_config.json` written at container start by `prepare config` |
 
-For gemini setup: run `gemini auth` once on the host, then `./setup.sh` (choose option 3 or 5).
-No GEMINI_API_KEY needed — authentication is OAuth only.
-See `docs/providers/gemini.md` for a full setup guide.
+### Gemini: the Antigravity CLI
+
+A gemini agent runs Google's Antigravity CLI (`agy`), a closed binary, with an API key; the Gemini
+CLI and its Google sign-in are gone. `GeminiExecutor` starts
+`agy --output-format stream-json --input-format stream-json --disable-slash-commands
+--dangerously-skip-permissions --settings {"modelProvider":"gemini","enableTerminalSandbox":false}
+[--model M] [--conversation ID]`, reads `init` (printed before the CLI reads input), writes one
+`{"event":"user",…}` line and closes the input. `Agent.Model` goes to `--model` verbatim and there
+is no effort flag (the slug carries it). `/root/.gemini` is `workspaces/<container>/gemini` on the
+host, for gemini agents only. Provisioning refuses a gemini agent without a `GEMINI_API_KEY` Env
+Ref that puts a value in its container (`gemini_api_key_missing`, before the old container is
+touched); `entrypoint.sh` and the startup check exit 1 without the variable.
+
+The CLI cuts what is too long and does not fail, so the agent refuses first: a message over
+190,000 bytes (`GeminiExecutor.MaxPromptBytes`; the CLI cuts at 192,000), a line of the
+instructions over 20,000 bytes, and instructions over 56,000 bytes together with the other rule
+files the CLI loads (`GeminiInstructionFiles`; the CLI cuts a rule file at 24,000 bytes and leaves
+files out past 60,000). The turn ends with an error before a process starts. The CLI's own
+background self-update is off through `AGY_CLI_DISABLE_AUTO_UPDATE=true` (image `ENV` and every
+process); its calls to `play.googleapis.com` are left alone.
+
+Everything known about the binary is measured, not read: `bash tests/antigravity-cli/run.sh` runs
+the pinned release in a container with no network against a scripted stand-in for the Gemini API
+and a recording MCP server (`AGENT_IMAGE=…` for the agent image), and
+`AntigravityHarnessParityTests` keeps its flags and limits equal to the executor's. ⚠️ Never run
+against a real Gemini model. See `docs/providers/gemini.md` and
+`docs/evidence/antigravity-cli-1.5.14.md`.
+
+MUST NOT: cut a message or the instructions, or spill them into a file the model is told to read;
+kill and restart a process whose `init` names another conversation (that start is a failed resume
+and goes on as a new session); pass `--effort`, `--sandbox` or a prompt as an argument; write the
+CLI's settings to a file; raise `MaxPromptBytes`, `ChunkBytes` or `BudgetBytes` without the harness
+showing the new value arrive whole; remove the update switch; print or log the key.
 
 ### Codex local models
 
@@ -236,12 +269,12 @@ and the `harnessExtra` textarea. See `docs/providers/harness-defaults.md`.
 
 ## Provider sessions
 
-A Claude or Codex agent keeps its provider session across process and container restarts.
+A Claude, Codex or Gemini agent keeps its provider session across process and container restarts.
 `ProviderSessionFile` (`src/Fleet.Agent/Services/`) owns `<WorkDir>/.fleet/session.json`
 (`Fleet.Shared.AgentSessionFile.RelativePath`, the one spelling the orchestrator also uses): provider,
 session or thread id, `runsOn` (`cloud`, Claude `local`, or the Codex model provider id) and the SHA-256
 of the exact instructions the session began with (Claude: the `--append-system-prompt-file` content;
-Codex: the `baseInstructions` string). It is written by rename when a new session's id is first known.
+Codex: the `baseInstructions` string; Gemini: the text its rule files are written from). It is written by rename when a new session's id is first known.
 
 **The start rule.** A provider process start resumes the session only when provider, `runsOn` and the
 instructions hash all equal what this start uses; anything else (no file, unreadable file, other
@@ -249,7 +282,9 @@ provider, changed instructions, model running elsewhere) is a new session, and t
 the new id is known. The hash is not an optimisation: measured on the pinned CLIs, a resumed Claude
 session ignores a new system prompt and a resumed Codex thread keeps the old instructions beside the new
 ones. A resume that fails (Claude exits or answers with an error before its `init`; Codex `thread/resume`
-errors, the app-server dies during it, or a hosted thread comes back on another model provider) removes
+errors, the app-server dies during it, or a hosted thread comes back on another model provider; Gemini:
+`init` names another conversation than the one asked for, which is how `agy` answers one it cannot
+find, or the process ends before `init`) removes
 the file and becomes a new session inside the same start. One line says which happened:
 `Claude session resumed: …`, `Codex session new: instructions changed (thread …)`, `… new: resume failed: …`.
 
@@ -260,22 +295,22 @@ model, model provider, hosted and local `config` overrides, harness thread confi
 sandbox, base instructions) because the hosted forwarder's address and token are new with every agent
 start, and a thread a new one replaced is deleted best-effort (`thread/delete`).
 
-Because the session holds the conversation, `IAgentExecutor.KeepsConversation` is true for Claude and
-Codex and `PromptAssembler` gives them no "[Recent conversation]" or "[Recent group conversation]" block,
+Because the session holds the conversation, `IAgentExecutor.KeepsConversation` is true for Claude,
+Codex and Gemini and `PromptAssembler` gives them no "[Recent conversation]" or "[Recent group conversation]" block,
 whatever the state of the process. The first turn of a **new** session starts with the one fixed line
 `PromptAssembler.NewSessionLine` (added by the executor, which is where a new session is known; that
 turn is normally the startup ping, and the line then stays in the session); a resumed session gets
 nothing. Check-ins keep "New messages since last check-in": that is unread
-tracking. Gemini keeps no session and still gets its history block. `/status` shows
+tracking. An executor that does not say it keeps the conversation still gets its history block. `/status` shows
 `Session: active (new)` or `active (resumed)`.
 
 The chat buffers (`GroupChatBuffer`, `GroupChatBuffers`) are in memory only, for every provider: 50
-messages per chat, for unread tracking, check-ins and Gemini's history block. No agent reads or writes
+messages per chat, for unread tracking, check-ins and the history block of an executor that keeps no conversation. No agent reads or writes
 `.fleet/chat-history.json`; `GroupBehavior` deletes one left by an earlier version at startup and logs
 it. Tool calls are not buffered and `TaskManager` has no tool-use event.
 
 MUST NOT: resume on any condition weaker than the start rule; retry a failed resume or keep its file;
-log or store the instructions (hash only); put a history block in a Claude or Codex prompt; write the
+log or store the instructions (hash only; Gemini's rule files hold them as the other providers' prompt file does); put a history block in a Claude, Codex or Gemini prompt; write the
 chat buffers to disk; store a tool call in a chat buffer.
 
 ⚠️ A restart no longer gives a broken conversation a fresh start: a Codex thread stuck over its context
@@ -380,7 +415,7 @@ validation failed in the harness, cause not established. Tests: `tests/Fleet.Sec
 MCP endpoint headers (#593): `agent_mcp_endpoints.HeaderEnvRefsJson` (migration `AddMcpHeaderEnvRefs`,
 null = none) holds `[{headerName, envRefName}]`, names only. REST `mcpEndpoints[].headerEnvRefs`, MCP
 `manage_agent_mcp_endpoints header_env_refs`; omitted keeps, `[]` clears. `McpHeaderMappings` is the
-one rule set (shape, `http` + Claude/Codex only, an absolute `http(s)` URL without user info, no
+one rule set (shape, `http` + Claude/Codex/Gemini only, an absolute `http(s)` URL without user info, no
 reserved endpoint, a new pair only for an Env Ref
 the resulting agent holds; a kept pair is not re-authorized, so removing an Env Ref stays allowed).
 `AgentConfigFiles.ResolveMcpHeaders` resolves in `PrepareAsync` from the captured env values and
@@ -417,7 +452,7 @@ The agent image pins every provider CLI explicitly in `Dockerfile`:
 
 - `@anthropic-ai/claude-code@2.1.327` — see `docs/evidence/cli-upgrade-625.md` for checked wire behavior and remaining acceptance. The Docker build checks the exact version.
 - `@openai/codex@0.170.0` — stays in lockstep with CI's schema install and `protocols/codex-app-server-v2/`; `sol` now maps to `gpt-6.2-sol`, while explicit model IDs and other aliases stay unchanged.
-- `@google/gemini-cli@0.40.1` — must stay in lockstep with `docs/providers/gemini.md`, which documents the host setup command and the verified headless flag set.
+- `agy` (Antigravity CLI) `1.5.14` — a release binary from `google-antigravity/antigravity-cli`, not an npm package: `ARG AGY_CLI_VERSION` and one sha256 per architecture in `Dockerfile`, which also asserts `agy --version`. A bump changes all three and passes `bash tests/antigravity-cli/run.sh` (it reads the pin from the `Dockerfile`); a failing check there names the assumption of `GeminiExecutor` that no longer holds. Refresh `docs/evidence/` with the new transcript.
 
 Historical comparison: **the `2.1.280` pin moved the `opus` alias, so some agents change model without any config edit.** `ClaudeExecutor.BuildArgs` passes `Agent.Model` to `--model` verbatim, so an agent configured with an alias rather than an explicit ID follows whatever the CLI resolves it to. Measured on the two pins with identical flags: `--model opus` resolved to `claude-opus-5` on `2.1.259` and resolves to `claude-opus-5-5` on `2.1.280` — a different context window and different pricing, taking effect on that agent's next reprovision. `opus` is the only alias that moves; `sonnet` (`claude-sonnet-5`) and `haiku` (`claude-haiku-4-5-20251001`) resolve identically on both pins. The 2.1.327 upstream changes also move Sonnet and Haiku defaults to 5.5; see the current upgrade evidence before reprovisioning any alias-configured agent. Explicit IDs are not rewritten.
 
@@ -456,6 +491,7 @@ instruction permits sharing. See `docs/comms-journal.md` and
 - **Media groups** (multiple photos sent together): Telegram delivers each photo as a separate `Message` update sharing the same `MediaGroupId`. `TelegramMessageIntake` buffers all photos for a group via `MediaGroupBuffer`: it debounces 1500 ms after the last photo, then flushes a single `IncomingMessage` carrying all images. A hard cap of `TelegramOptions.MaxGroupBufferMs` (default: 10 s) force-flushes the group if photos keep trickling in.
 - **Size limits**: individual photos exceeding `MaxImageBytes` (default: 10 MB) are skipped with a Telegram reply warning. Groups exceeding `MaxImagesPerGroup` (default: 10) drop extra photos with a warning.
 - **ClaudeExecutor**: forwards all images as separate content blocks in the multi-modal Claude CLI JSON payload.
+- **GeminiExecutor**: the Antigravity CLI's print mode takes text only, so an image is a path hint in the text (`[image attachment: path]`, added when the intake did not write it), which the model opens with the CLI's `read_file` tool. Not tested with a real model.
 - **CodexExecutor**: forwards images that have a persisted `FilePath` as `{type:"localImage",path}` entries in the app-server v2 `UserInput[]` of `turn/start`. Images without a `FilePath` (persistence disabled, size limit exceeded, or file swept before dispatch) are skipped with a per-batch warning. PDFs remain hint-only (`[document attachment: path]`).
 
 ## Telegram Media Attachments

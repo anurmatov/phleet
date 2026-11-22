@@ -8,10 +8,10 @@ using NSubstitute;
 namespace Fleet.Agent.Tests;
 
 /// <summary>
-/// A provider that keeps the conversation (Claude, Codex) has the earlier messages in its session,
-/// in this process and after a resume. So no prompt for it carries recent chat history, whatever
-/// the state of its process: every prompt has the form a warm process gets. A provider that keeps
-/// none (Gemini) still gets the history block, from the in-memory buffer.
+/// A provider that keeps the conversation (Claude, Codex, Gemini) has the earlier messages in its
+/// session, in this process and after a resume. So no prompt for it carries recent chat history,
+/// whatever the state of its process: every prompt has the form a warm process gets. An executor
+/// that keeps none still gets the history block, from the in-memory buffer.
 /// </summary>
 public sealed class KeptConversationPromptTests
 {
@@ -153,7 +153,7 @@ public sealed class KeptConversationPromptTests
 
     /// <summary>Which provider is which. An executor that does not say keeps none.</summary>
     [Fact]
-    public void ClaudeAndCodexKeepTheConversation_GeminiDoesNot()
+    public void ClaudeCodexAndGeminiKeepTheConversation_AnExecutorThatDoesNotSayKeepsNone()
     {
         var options = Options.Create(new AgentOptions
         {
@@ -169,7 +169,7 @@ public sealed class KeptConversationPromptTests
 
         Assert.True(claude.KeepsConversation);
         Assert.True(codex.KeepsConversation);
-        Assert.False(gemini.KeepsConversation);
+        Assert.True(gemini.KeepsConversation);
         Assert.False(((IAgentExecutor)new Harness.ScriptedExecutor()).KeepsConversation);
     }
 

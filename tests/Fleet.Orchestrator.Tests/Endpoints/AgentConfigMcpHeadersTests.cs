@@ -304,7 +304,6 @@ public sealed class AgentConfigMcpHeadersTests : IAsyncLifetime
     [Theory]
     [InlineData("example", "sse", "claude", McpHeaderMappings.Unsupported)]
     [InlineData("example", "stdio", "codex", McpHeaderMappings.Unsupported)]
-    [InlineData("example", "http", "gemini", McpHeaderMappings.Unsupported)]
     [InlineData("fleet-comms-journal", "http", "claude", McpHeaderMappings.Invalid)]
     [InlineData("fleet-journal-files", "http", "claude", McpHeaderMappings.Invalid)]
     public async Task Put_refuses_unsupported_endpoints_and_providers(string name, string transport, string provider, string expected)
@@ -318,6 +317,26 @@ public sealed class AgentConfigMcpHeadersTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.StartsWith(expected, await ErrorAsync(response));
         Assert.Null(await StoredJsonAsync());
+    }
+
+    /// <summary>
+    /// Every known provider's CLI sends headers, gemini (the Antigravity CLI) included, so a mapping
+    /// on an <c>http</c> endpoint is saved for each of them.
+    /// </summary>
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    [InlineData("gemini")]
+    public async Task Put_accepts_header_mappings_on_every_known_provider(string provider)
+    {
+        var response = await _client.PutAsJsonAsync("/api/agents/agent1/config", new
+        {
+            provider,
+            mcpEndpoints = new[] { new { mcpName = "example", url = Url, transportType = "http", headerEnvRefs = TwoMappings } },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal([("X-Example-Key", "EXAMPLE_KEY"), ("X-Example-Secret", "EXAMPLE_SECRET")], await ReadAsync());
     }
 
     // M2: a mapped endpoint carries its credentials in headers, never in its URL, whatever its references.
@@ -377,16 +396,27 @@ public sealed class AgentConfigMcpHeadersTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    /// <summary>
+    /// A provider change is checked against the mappings the agent keeps. Each known provider sends
+    /// headers, so the change is saved and the mappings stay; an unknown one is refused by name
+    /// before the mapping rule is asked (the rule itself: <c>McpHeaderEnvTests</c>).
+    /// </summary>
     [Fact]
     public async Task A_provider_change_is_checked_against_the_mappings_the_agent_keeps()
     {
-        await SetStoredAsync("""[{"headerName":"X-Example-Key","envRefName":"EXAMPLE_KEY"}]""");
+        const string stored = """[{"headerName":"X-Example-Key","envRefName":"EXAMPLE_KEY"}]""";
+        await SetStoredAsync(stored);
 
-        var gemini = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { provider = "gemini" });
-        Assert.Equal(HttpStatusCode.BadRequest, gemini.StatusCode);
-        Assert.StartsWith(McpHeaderMappings.Unsupported, await ErrorAsync(gemini));
+        foreach (var provider in new[] { "gemini", "codex", "claude" })
+        {
+            Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync("/api/agents/agent1/config", new { provider })).StatusCode);
+            Assert.Equal(stored, await StoredJsonAsync());
+        }
 
-        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync("/api/agents/agent1/config", new { provider = "codex" })).StatusCode);
+        var unknown = await _client.PutAsJsonAsync("/api/agents/agent1/config", new { provider = "other-harness" });
+        Assert.Equal(HttpStatusCode.BadRequest, unknown.StatusCode);
+        Assert.StartsWith("Unknown provider", await ErrorAsync(unknown));
+        Assert.Equal(stored, await StoredJsonAsync());
     }
 
     [Fact]

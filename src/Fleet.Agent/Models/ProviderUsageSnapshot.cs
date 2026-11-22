@@ -162,11 +162,28 @@ public sealed record ProviderUsageSnapshot
         DurationMs = durationMs,
     };
 
-    /// <summary>A Gemini turn: the CLI reports no tokens or cost here, only how long the turn took.</summary>
-    public static ProviderUsageSnapshot ForGemini(string? configuredModel, long durationMs) => new()
+    /// <summary>
+    /// The Antigravity CLI's <c>result.usage</c>. It counts the whole conversation, across the
+    /// processes that continued it, so the counts are cumulative per conversation id and the
+    /// process generation is fixed. <c>input_tokens</c> excludes what was read from the cache and
+    /// <c>output_tokens</c> includes thinking. A count the CLI did not report stays null, and so
+    /// does every count when there is no usage at all (a start that never reached a result).
+    /// </summary>
+    public static ProviderUsageSnapshot ForGemini(
+        string? configuredModel,
+        long durationMs,
+        JsonElement? usage = null,
+        long? numTurns = null,
+        string? conversationId = null) => new()
     {
         Provider = "gemini",
         Model = ModelOrFallback(null, configuredModel),
+        SessionId = string.IsNullOrWhiteSpace(conversationId) ? null : conversationId,
+        IsCumulative = usage is not null,
+        InputTokens = usage is { } u ? ReadLong(u, "input_tokens") : null,
+        OutputTokens = usage is { } o ? ReadLong(o, "output_tokens") : null,
+        CacheReadTokens = usage is { } c ? ReadLong(c, "cache_read_tokens") : null,
+        NumTurns = numTurns,
         DurationMs = durationMs,
     };
 

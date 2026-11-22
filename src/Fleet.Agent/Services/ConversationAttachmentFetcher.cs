@@ -19,7 +19,7 @@ namespace Fleet.Agent.Services;
 /// <list type="table">
 ///   <item><term>Claude</term><description>a native <c>type:"image"</c> base64 content block</description></item>
 ///   <item><term>Codex</term><description>a <c>local_image</c> block built from <c>FilePath</c></description></item>
-///   <item><term>Gemini</term><description>an <c>@&lt;path&gt;</c> reference</description></item>
+///   <item><term>Gemini</term><description>an <c>[image attachment: path]</c> hint in the text, opened with the CLI's <c>read_file</c> tool</description></item>
 /// </list>
 /// <para>
 /// No executor changes. Both the native-block and the path-based providers work on day one through

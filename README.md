@@ -48,7 +48,7 @@ After setup one agent is running: the co-CTO. It is the only agent with the full
 You need:
 
 - **Docker 24+ with Compose**, about 8 GB RAM and 20 GB free disk.
-- **A provider CLI signed in on the host**: `claude` or `codex`. Setup copies its credentials for the agents. Gemini credential preparation remains available, but mandatory native MCP headers currently prevent Gemini provisioning.
+- **A provider CLI signed in on the host**: `claude` or `codex`. Setup copies its credentials for the agents. A Gemini agent needs no sign-in: it uses a paid Gemini API key in `.env` (`GEMINI_API_KEY`), see [docs/providers/gemini.md](docs/providers/gemini.md).
 - **Two Telegram bots** from [@BotFather](https://t.me/BotFather): one for the co-CTO, one shared by every other agent.
 - **A GitHub App** with access to your repos: its App ID and private key file.
 
@@ -77,7 +77,7 @@ The full walk-through, including the optional Telegram group and how to fully re
 </p>
 
 1. The orchestrator bootstraps agents from `seed.json` into MySQL on first start.
-2. Each agent container starts, authenticates via a GitHub App JWT, and launches a persistent AI process (`claude -p`, `codex app-server`; gemini runs a fresh CLI per task).
+2. Each agent container starts, authenticates via a GitHub App JWT, and launches a persistent AI process (`claude -p`, `codex app-server`; gemini runs one `agy` process per turn in a kept conversation).
 3. Agents receive tasks via Telegram DM or RabbitMQ and stream responses back.
 4. Temporal workflows orchestrate multi-step, multi-agent tasks.
 5. Fleet Memory provides shared semantic memory across all agents (search, store, retrieve).

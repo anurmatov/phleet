@@ -105,6 +105,10 @@ A binding is the trust decision, so only the operator can write one: REST behind
 `manage_agent_env_refs` refuses to attach a bound key unless its binding says `agentAttachable`.
 Removing an Env Ref is always allowed, by anyone who could remove it before.
 
+A gemini agent's `GEMINI_API_KEY` can be bound (hosts `generativelanguage.googleapis.com`,
+`headerName` `X-Goog-Api-Key`); what was and was not verified is in
+[providers/gemini.md](providers/gemini.md#with-secret-placeholders).
+
 Not bindable: a `TELEGRAM_*_BOT_TOKEN` (the agent process uses it in a URL path), a hosted-model
 key (already kept out of the agent by its own forwarder), and any name the agent process reads as
 its own configuration (`Section__Key`).
@@ -212,9 +216,9 @@ configuration only; the headers are written at the next reprovision.
 - **Who may map what.** Only an Env Ref the agent already holds. A mapping adds no Env Ref and no
   binding; MCP may map only existing references, REST create only the Env Refs that request
   supplies. A Telegram bot token or a hosted-model key is never a header.
-- **Where.** Transport `http` only, on Claude and Codex (the providers whose pinned CLI sends MCP
-  headers), at an absolute `http://` or `https://` URL with no user name or password in it, bound
-  references or not. Gemini, other transports and the built-in `fleet-comms-journal` and
+- **Where.** Transport `http` only, on Claude, Codex and Gemini (the providers whose pinned CLI
+  sends MCP headers), at an absolute `http://` or `https://` URL with no user name or password in
+  it, bound references or not. Other transports and the built-in `fleet-comms-journal` and
   `fleet-journal-files` endpoints are refused.
 - **Bound or not.** A bound Env Ref becomes its placeholder from that provision's plan, whatever
   name the binding exposes it under; the real value is never read for a header. The endpoint must be
@@ -351,7 +355,7 @@ stops being served at once.
   `ORCHESTRATOR_CONFIG_TOKEN`, is outside the boundary.** It can read `.env` by other means.
 - **Bindings are only as protected as the orchestrator's write API.** With an empty
   `ORCHESTRATOR_AUTH_TOKEN` that API is unauthenticated, for bindings as for every other write.
-- **Not covered.** Provider OAuth credentials (Claude, Codex, Gemini); tokens the agent process
+- **Not covered.** Provider OAuth credentials (Claude, Codex); tokens the agent process
   itself uses (its Telegram bot, the journal, MinIO); anything else that is neither sent in an HTTP
   header nor an SSH key.
 - **Steering can be bypassed, harmlessly.** A request that does not reach the forwarder (a proxy,

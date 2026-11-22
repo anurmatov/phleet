@@ -40,14 +40,13 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
 
 The MCP tool takes the same word: `reprovision_agent agent_name=<agent> session=fresh`. The orchestrator removes `workspaces/<container>/.fleet/session.json` after the old container is gone and before the new one starts. If it answers `session_file_not_removed`, the old container was removed and no new one was started: remove that file under the fleet base directory and reprovision again. Changed instructions start a new session without any of this. Creating an agent removes that file as well, so a new agent never resumes the conversation of a deleted agent that had the same name; `provision_agent` after `deprovision_agent` keeps it.
 
-## Gemini agents start returning "credentials not found"
+## A gemini agent does not start, or refuses its turns
 
-Gemini uses OAuth tokens stored in `~/.gemini/oauth_creds.json`. The container mounts this file writable so the Gemini CLI's `google-auth-library` can refresh tokens in-place — unlike Claude/Codex, **you should not need to manually refresh gemini credentials** as long as the container stays running. Note: all gemini agents share the same `./fleet/.gemini-credentials.json` on the host; concurrent token refreshes rely on `google-auth-library`'s atomic rename write.
+A gemini agent runs Google's Antigravity CLI with a Gemini API key; there is no Google sign-in and no credential file to refresh.
 
-If the credentials file is missing or corrupted:
-1. On the host, run: `gemini auth` (opens a browser for Google OAuth consent; writes `~/.gemini/oauth_creds.json`)
-2. Re-run `./setup.sh` (choose option 3 or 5) to copy the fresh credentials into `./fleet/.gemini-credentials.json`
-3. Reprovision the affected gemini agents from the dashboard
+- **`gemini_api_key_missing` at provision, or `GEMINI_API_KEY is not set` in the container log:** put the key in `./fleet/.env` as `GEMINI_API_KEY`, give the agent an Env Ref of that name, reprovision.
+- **A turn ends with "The turn was not started: the agent's instructions are … bytes":** the CLI would cut instructions that long, so the agent refuses. The limit is 56,000 bytes including any `GEMINI.md` / `AGENTS.md` in the work directory.
+- **A turn ends with "The message is … bytes":** one message may be at most 190,000 bytes.
 
 See `docs/providers/gemini.md` for full details.
 

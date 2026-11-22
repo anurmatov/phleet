@@ -61,12 +61,21 @@ public sealed class GeminiExecutor : IAgentExecutor
     /// <summary>How long a kill waits for the exit before the process is handed to a watcher.</summary>
     internal static readonly TimeSpan KillExitWait = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How long a CLI that has printed its result, or closed its output, is given to exit by
+    /// itself. The turn does not wait longer for it: the result is in hand, and what is still
+    /// running is killed. Whether the pinned CLI ever stays (it makes calls of its own on every
+    /// turn) was not measured with a network; without one it exits at once.
+    /// </summary>
+    internal static readonly TimeSpan DefaultExitWait = TimeSpan.FromSeconds(30);
+
     private readonly AgentOptions _config;
     private readonly UsageReporter? _usage;
     private readonly PromptBuilder _promptBuilder;
     private readonly ILogger<GeminiExecutor> _logger;
     private readonly ProviderSessionFile _sessionFile;
     private readonly string _geminiHome;
+    private readonly TimeSpan _exitWait;
     private readonly Func<ProcessStartInfo, Process?> _processStarter;
 
     // Kills a CLI that is still running and reports whether its exit is confirmed (#394).
@@ -112,8 +121,10 @@ public sealed class GeminiExecutor : IAgentExecutor
         Func<ProcessStartInfo, Process?> processStarter,
         Func<Process, Task<bool>>? terminate = null,
         UsageReporter? usage = null,
-        string? geminiHome = null)
+        string? geminiHome = null,
+        TimeSpan? exitWait = null)
     {
+        _exitWait = exitWait ?? DefaultExitWait;
         _config = config.Value;
         _promptBuilder = promptBuilder;
         _usage = usage;
@@ -277,8 +288,11 @@ public sealed class GeminiExecutor : IAgentExecutor
 
                 if (string.IsNullOrEmpty(conversationId))
                 {
-                    await stderrTask;
-                    await process.WaitForExitAsync(ct);
+                    // Nothing will be written: a CLI that waits for its input gets its end.
+                    try { process.StandardInput.Close(); }
+                    catch (Exception ex) when (ex is IOException or ObjectDisposedException) { /* already gone */ }
+
+                    var exited = await ExitedAsync(process, stderrTask, ct);
                     var why = early?.FinalResult ?? ExitText(process, stderrLines);
 
                     if (resumeId is not null && attempt == 0)
@@ -286,7 +300,10 @@ public sealed class GeminiExecutor : IAgentExecutor
                         _logger.LogWarning("Gemini resume of {SessionId} ended before init: {Why}", resumeId, why);
                         ForgetSession(epoch);
                         failedResume = "the CLI ended before its init";
-                        process.Dispose();
+                        if (exited || await _terminate(process))
+                            process.Dispose();
+                        else
+                            _ = CloseOnExitAsync(process);
                         process = null;
                         continue;
                     }
@@ -326,8 +343,8 @@ public sealed class GeminiExecutor : IAgentExecutor
                         yield return mapped;
                 }
 
-                await stderrTask;
-                await process.WaitForExitAsync(ct);
+                // A process still running after the bound is killed by the finally below.
+                await ExitedAsync(process, stderrTask, ct);
 
                 // Both ends are this turn's own terminal; only a turn that never got here has no row.
                 CompleteUsage(usageTurn, turn, startTime);
@@ -354,6 +371,30 @@ public sealed class GeminiExecutor : IAgentExecutor
                 _logger.LogWarning("GeminiExecutor: the Antigravity CLI did not confirm its exit after a kill; waiting for it in the background");
                 _ = CloseOnExitAsync(process!);
             }
+        }
+    }
+
+    /// <summary>
+    /// Waits for the exit of a CLI that has nothing more to say, and for the rest of its error
+    /// output, at most <see cref="DefaultExitWait"/>. False when it is still running then; the
+    /// turn's cancellation still ends the wait at once.
+    /// </summary>
+    private async Task<bool> ExitedAsync(Process process, Task stderrTask, CancellationToken ct)
+    {
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bound.CancelAfter(_exitWait);
+        try
+        {
+            await process.WaitForExitAsync(bound.Token);
+            await stderrTask.WaitAsync(bound.Token);
+            return true;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "GeminiExecutor: the Antigravity CLI did not exit within {Seconds} s of its last output; it is killed",
+                (int)_exitWait.TotalSeconds);
+            return false;
         }
     }
 
@@ -437,7 +478,11 @@ public sealed class GeminiExecutor : IAgentExecutor
         string text;
         lock (stderrLines) text = stderrLines.ToString().Trim();
         if (text.Length == 0)
-            text = $"The Antigravity CLI exited with code {process.ExitCode} and no result";
+        {
+            text = process.HasExited
+                ? $"The Antigravity CLI exited with code {process.ExitCode} and no result"
+                : "The Antigravity CLI closed its output with no result and did not exit";
+        }
 
         // The CLI does not print the key; this keeps it so whatever a later version prints.
         var key = Environment.GetEnvironmentVariable(ApiKeyVariable);

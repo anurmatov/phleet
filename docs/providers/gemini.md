@@ -101,6 +101,9 @@ agy --output-format stream-json --input-format stream-json --disable-slash-comma
   command of the CLI.
 - Cancelling a turn kills the process (print mode has no cancel message). The conversation stays
   usable; the killed turn's message stays in it without an answer.
+- A process that has printed its `result` (or closed its output) gets 30 seconds to exit. After
+  that the turn ends with the result it has and the process is killed. Whether the CLI ever stays
+  that long was not measured with a network; without one it exits at once.
 
 ## Sessions
 
@@ -223,6 +226,20 @@ Change `AGY_CLI_VERSION` and both sha256 values in the `Dockerfile`, then run
 `AGENT_IMAGE=<image> bash tests/antigravity-cli/run.sh`. A failing check names the assumption that
 no longer holds: the flags, `init` before input, the header on MCP requests, the two size limits, the
 updater switch, the model list. Update `docs/evidence/` with the new transcript.
+
+## An agent that ran the Gemini CLI
+
+An existing gemini agent keeps running in its old container until it is reprovisioned. The
+reprovision is refused (`gemini_api_key_missing`, the old container stays) until the agent has the
+Env Ref. Before reprovisioning it:
+
+1. put the key in `.env` as `GEMINI_API_KEY` and attach the Env Ref;
+2. change `Model` to a slug from the table above: an id of the Gemini CLI (`gemini-2.5-flash`, …)
+   is not one, and every turn would end with "invalid model selection";
+3. check the size of its instructions against the limit above.
+
+The agent then starts a new conversation. It no longer receives a "[Recent conversation]" block:
+the CLI keeps the conversation. `.gemini-credentials.json` in the fleet directory is unused.
 
 ## Troubleshooting
 

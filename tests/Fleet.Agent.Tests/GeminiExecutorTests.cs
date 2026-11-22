@@ -437,6 +437,45 @@ public sealed class GeminiExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task ACliThatStaysAfterItsResult_DoesNotHoldTheTurn_AndIsKilled()
+    {
+        var turns = new StandIn(this);
+        var pidFile = Path.Combine(_root, "stays.pid");
+        var stays = Turn("c-1", "the answer") + $"\necho $$ > '{pidFile}'\nexec sleep 600\n";
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var progress = await turns.RunAsync(turns.Executor(exitWait: TimeSpan.FromMilliseconds(300)), "task", stays);
+
+        var final = Assert.Single(progress, p => p.FinalResult is not null);
+        Assert.False(final.IsErrorResult);
+        Assert.Equal("the answer", final.FinalResult);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(60), $"the turn took {clock.Elapsed}");
+        Assert.Contains(turns.Log.Entries, e => e.Message.Contains("did not exit within"));
+
+        // The enumeration has ended, so the kill has been done and confirmed.
+        var pid = int.Parse(File.ReadAllText(pidFile).Trim());
+        Assert.ThrowsAny<Exception>(() =>
+        {
+            using var still = System.Diagnostics.Process.GetProcessById(pid);
+            if (still.HasExited) throw new InvalidOperationException("exited");
+        });
+    }
+
+    [Fact]
+    public async Task ACliThatAnswersBeforeInitAndWaitsForItsInput_GetsTheEndOfInput()
+    {
+        var turns = new StandIn(this);
+        const string waits = """printf '%s\n' '{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"synthetic early error","num_turns":0}}'; cat > /dev/null; exit 1""";
+
+        var progress = await turns.RunAsync(turns.Executor(exitWait: TimeSpan.FromSeconds(20)), "task", waits);
+
+        var final = Assert.Single(progress, p => p.FinalResult is not null);
+        Assert.True(final.IsErrorResult);
+        Assert.Equal("synthetic early error", final.FinalResult);
+        Assert.DoesNotContain(turns.Log.Entries, e => e.Message.Contains("did not exit within"));
+    }
+
+    [Fact]
     public async Task ResetAndStop_RemoveTheFile_SoTheNextTurnIsANewSession()
     {
         var turns = new StandIn(this);
@@ -673,12 +712,13 @@ public sealed class GeminiExecutorTests : IDisposable
             File.WriteAllText(path, text);
         }
 
-        public GeminiExecutor Executor(UsageReporter? usage = null)
+        public GeminiExecutor Executor(UsageReporter? usage = null, TimeSpan? exitWait = null)
         {
             if (!Directory.Exists(_contentRoot))
                 ChangeInstructions();
             var options = AgentOptions();
-            return new GeminiExecutor(options, Prompt(options), Log, StartScript, usage: usage, geminiHome: test._geminiHome);
+            return new GeminiExecutor(
+                options, Prompt(options), Log, StartScript, usage: usage, geminiHome: test._geminiHome, exitWait: exitWait);
         }
 
         public async Task<List<AgentProgress>> RunAsync(GeminiExecutor executor, string task, params string[] scripts)

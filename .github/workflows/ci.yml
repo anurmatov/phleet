@@ -624,6 +624,34 @@ jobs:
       - name: Against Qdrants that require an API key, over TLS and over http
         run: bash tests/memory-qdrant/secured.sh
 
+  antigravity-cli:
+    name: Antigravity CLI (gemini agents)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # A gemini agent runs Google's Antigravity CLI, a closed binary, and the unit tests only know
+    # its output from recordings. This is where the pinned release itself runs: in a container
+    # with no network, against a scripted stand-in for the Gemini API and a recording MCP server.
+    # It fails when the release is not the one the Dockerfile pins, when the CLI stops sending the
+    # key or an MCP header where the fleet expects it, when a message or instructions at the
+    # fleet's limits no longer arrive whole, or when the binary reaches its updater. No Google
+    # account, no key and no model are involved.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # The MCP file the CLI reads is written by the agent's own `prepare config`.
+      - name: Build the agent
+        run: dotnet build src/Fleet.Agent --configuration Release
+
+      - name: The pinned release, with no network
+        run: bash tests/antigravity-cli/run.sh
+
   whisper-tests:
     name: Whisper service tests
     runs-on: ubuntu-latest
@@ -939,6 +967,12 @@ jobs:
           docker build -t fleet:secrets-ci -f src/Fleet.SecretProxy/Dockerfile .
           PROXY_IMAGE=fleet:secrets-ci AGENT_IMAGE=fleet:agent-ci bash tests/secret-proxy/run.sh
           PROXY_IMAGE=fleet:secrets-ci bash tests/secret-proxy/run.sh
+
+      # The same checks as the antigravity-cli job, in this image: the agy it installed, the MCP
+      # file its own `prepare config` writes, and the switch that keeps the binary from updating.
+      - name: Antigravity CLI in the agent image
+        timeout-minutes: 10
+        run: AGENT_IMAGE=fleet:agent-ci bash tests/antigravity-cli/run.sh
 
       # The existing fixture needs a real daemon and the production renderer, not a local skip.
       - name: Setup .NET for native MCP fixture

@@ -106,6 +106,14 @@ public class UniversalWorkflow
         "delegated signal discarded: stale visit or artifact (signal={Signal} visit={Visit})";
 
     /// <summary>
+    /// The discard warning of a refusing guard (<c>delegatedGuard.refuse</c>): the wait accepts no
+    /// delegated payload, so there is no visit to name. Only the signal name is logged, never the
+    /// payload.
+    /// </summary>
+    internal const string DelegatedRefusalLogTemplate =
+        "delegated signal discarded: this wait accepts no delegated decision (signal={Signal})";
+
+    /// <summary>
     /// Logged when a wait registers for a signal name another wait is still parked on. The engine
     /// keeps one waiter per name, so the earlier wait is no longer reachable by a signal and ends
     /// only by its own timeout, if it has one. The usual cause is two parallel branches waiting on
@@ -122,12 +130,14 @@ public class UniversalWorkflow
     /// <summary>
     /// A wait's <c>delegatedGuard</c> with its expectations rendered (#436), resolved ONCE at wait
     /// entry like <c>bindTo</c>, so nothing that runs during the wait can move what it accepts.
+    /// <c>Refuse</c> is the definition's flag: such a guard has no expectations and no visit.
     /// </summary>
     private sealed record ConsumptionGuard(
         string? Marker,
         IReadOnlyList<KeyValuePair<string, string>> Expected,
         string SignalName,
-        string? VisitId);
+        string? VisitId,
+        bool Refuse);
 
     private readonly Dictionary<string, object?> _variables = new();
     private readonly Dictionary<string, TaskCompletionSource<JsonElement>> _signalWaiters = new();
@@ -844,7 +854,8 @@ public class UniversalWorkflow
         //
         // A guarded wait judges the entry first (#436). The entry is removed either way: a stale
         // delegated approval left in the buffer would only be judged again by the next visit. A
-        // discarded entry falls through to the normal park.
+        // discarded entry falls through to the normal park. The same holds for a refusing guard,
+        // which has no visit: with a zero timeout the park below ends at once as a timeout.
         if (TryTakeBufferedSignal(signalName, afterSeq: 0, out var bufferedPayload)
             && (guard is null || GuardAccepts(guard, bufferedPayload)))
         {
@@ -993,7 +1004,7 @@ public class UniversalWorkflow
         var expected = new List<KeyValuePair<string, string>>();
         foreach (var (field, template) in guard.Require ?? [])
             expected.Add(new(field, _template.ResolveString(template)));
-        return new ConsumptionGuard(guard.Marker, expected, signalName, visitId);
+        return new ConsumptionGuard(guard.Marker, expected, signalName, visitId, guard.Refuse);
     }
 
     /// <summary>
@@ -1061,11 +1072,22 @@ public class UniversalWorkflow
     /// <summary>
     /// The guard's verdict on one payload (#436); logs the discard. A payload that is not an
     /// object, or carries no marker property (name compared ignoring case, any value), is the human
-    /// path and is always accepted. A marked payload must match every rendered expectation.
+    /// path and is always accepted. A marked payload must match every rendered expectation; a
+    /// refusing guard accepts no marked payload at all.
+    ///
+    /// The verdict decides only which payload a wait returns. It emits no command, and for a guard
+    /// without <c>refuse</c> the flag is false and every line below runs as it did before the flag
+    /// existed.
     /// </summary>
     private static bool GuardAccepts(ConsumptionGuard guard, JsonElement payload)
     {
         if (!IsDelegated(guard.Marker, payload)) return true;
+
+        if (guard.Refuse)
+        {
+            Workflow.Logger.LogWarning(DelegatedRefusalLogTemplate, guard.SignalName);
+            return false;
+        }
 
         // An empty requirement list proves nothing about the visit; validation refuses it, and a
         // marked payload is discarded here rather than waved through.

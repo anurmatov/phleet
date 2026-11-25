@@ -9,10 +9,11 @@ namespace Fleet.Temporal.Mcp;
 /// <c>Phase</c> keyword search attribute that a <c>wait_for_signal</c> step sets when it parks.
 ///
 /// <para>
-/// Used only by the CTO <c>design-approval</c> feedback path (#430). The engine buffers a signal
-/// that arrives while nothing waits for it and hands it to the next wait of that name, so a
-/// feedback sent off-gate would silently consume the next gate visit before the CEO sees it.
-/// Checking the reported phase first is what keeps that feedback at the gate it was meant for.
+/// Used only by the CTO feedback path, for <c>design-approval</c> (#430) and <c>merge-approval</c>.
+/// The engine buffers a signal that arrives while nothing waits for it and hands it to the next
+/// wait of that name, so a feedback sent while the run is not reading it would silently consume
+/// the next gate visit before the CEO sees it, or never be read at all. Checking the reported
+/// phase first is what keeps that feedback where the run reads it.
 /// </para>
 /// </summary>
 public interface IWorkflowGateStateReader

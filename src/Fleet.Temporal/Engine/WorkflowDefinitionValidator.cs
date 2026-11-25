@@ -201,7 +201,9 @@ public static class WorkflowDefinitionValidator
     /// <summary>
     /// #436 — <c>visitVar</c> and <c>delegatedGuard</c>. The guard is what stops a stale or
     /// misaddressed delegated approval at consumption, so a guard that cannot tie a payload to the
-    /// current visit is refused here rather than run as a check that checks nothing.
+    /// current visit is refused here rather than run as a check that checks nothing. The one guard
+    /// allowed without a visit is the refusing one, which accepts no delegated payload at all
+    /// (<see cref="ValidateRefusingGuard"/>).
     /// </summary>
     private static void ValidateGateVisit(WaitForSignalStep wait, string workflowTypeName)
     {
@@ -219,6 +221,14 @@ public static class WorkflowDefinitionValidator
         }
 
         if (wait.DelegatedGuard is not { } guard) return;
+
+        // A refusing guard discards every delegated payload, so it has nothing to compare and no
+        // visit to compare with. It is checked on its own and leaves every rule below as it was.
+        if (guard.Refuse)
+        {
+            ValidateRefusingGuard(wait, guard, label, workflowTypeName);
+            return;
+        }
 
         if (wait.VisitVar is null)
         {
@@ -243,6 +253,40 @@ public static class WorkflowDefinitionValidator
                 $"'{label}' has a delegatedGuard whose 'require' has no 'VisitId'. A delegated " +
                 "approval must name the gate visit it was decided for, e.g. " +
                 "\"VisitId\": \"{{vars.<visitVar>}}\".");
+        }
+    }
+
+    /// <summary>
+    /// <c>delegatedGuard.refuse</c>: the wait accepts no delegated payload. It needs the marker
+    /// that identifies one, and nothing else of a gate visit: a <c>require</c> would be a
+    /// comparison nothing is accepted by, and a <c>visitVar</c> would publish the wait as an open
+    /// gate visit that no decision can be made at.
+    /// </summary>
+    private static void ValidateRefusingGuard(
+        WaitForSignalStep wait, DelegatedGuard guard, string label, string workflowTypeName)
+    {
+        var prefix = $"Workflow definition '{workflowTypeName}' is invalid: wait_for_signal step '{label}' " +
+                     "has a delegatedGuard with 'refuse'";
+
+        if (string.IsNullOrWhiteSpace(guard.Marker))
+        {
+            throw new InvalidOperationException(
+                $"{prefix} and a blank 'marker'. The marker names the payload property that identifies " +
+                "a delegated approval (e.g. \"GrantId\"); without it nothing would be refused.");
+        }
+
+        if (guard.Require is { Count: > 0 })
+        {
+            throw new InvalidOperationException(
+                $"{prefix} and 'require' entries. A refusing guard discards every delegated payload, " +
+                "so it compares nothing: remove 'require', or remove 'refuse' to guard a gate visit.");
+        }
+
+        if (wait.VisitVar is not null)
+        {
+            throw new InvalidOperationException(
+                $"{prefix} and a 'visitVar'. A refusing wait is not a gate visit: it must not mint or " +
+                "publish one. Remove 'visitVar', or remove 'refuse' to guard a gate visit.");
         }
     }
 

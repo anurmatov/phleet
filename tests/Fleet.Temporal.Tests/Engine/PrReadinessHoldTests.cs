@@ -299,7 +299,7 @@ public sealed partial class PrReadinessHoldTests
         Assert.Equal(14, run.Calls.Count(c => c.Step == "pin"));
         Assert.Single(run.ConsensusInputs);                       // the resume route is PIN, not a new review
         Assert.Single(run.Calls, c => c.Step == "notify_stalled");
-        Assert.Equal(["implementing", "consensus-review", "technical-stalled", "merge-approval"], Phases(run));
+        Assert.Equal(["implementing", "consensus-review", "technical-stalled", "merge-approval", "merging"], Phases(run));
         Assert.Single(run.Calls, c => c.Step == "phase4_merge");
         Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
         ValidWrites(run);
@@ -455,7 +455,7 @@ public sealed partial class PrReadinessHoldTests
         Assert.Single(run.Calls, c => c.Step == "merge_preflight");
         Assert.Contains($"--match-head-commit {script.Head}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction);
         Assert.DoesNotContain(run.Calls, c => c.Step is "notify_invalidation" or "notify_stalled");
-        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold"], Phases(run));
+        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "merging"], Phases(run));
         Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
     }
 
@@ -630,7 +630,7 @@ public sealed partial class PrReadinessHoldTests
         Assert.Single(run.ConsensusInputs);
         Assert.Single(run.Calls, c => c.Step == "phase4_merge");
         // Back from the stall the record is the gate's again, not a blocked one.
-        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled", "merge-hold"], Phases(run));
+        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled", "merge-hold", "merging"], Phases(run));
         Assert.Equal($"v1;head={script.Head};result=not_required;iso=production;block=none;fix=0;batch=0", run.Upserts("Acceptance").Last());
         ValidWrites(run);
     }
@@ -655,7 +655,7 @@ public sealed partial class PrReadinessHoldTests
         Assert.Single(run.ConsensusInputs);
         Assert.Contains($"--match-head-commit {script.Head}", Assert.Single(run.Calls, c => c.Step == "phase4_merge").Instruction);
         // Stalled while it waited, the gate's record again before the command.
-        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled", "merge-hold"], Phases(run));
+        Assert.Equal(["implementing", "consensus-review", "merge-approval", "merge-hold", "technical-stalled", "merge-hold", "merging"], Phases(run));
         Assert.Equal($"v1;head={script.Head};result=not_required;iso=production;block=none;fix=0;batch=0", run.Upserts("Acceptance").Last());
         Assert.Equal(WorkflowExecutionStatus.Completed, run.Status);
         ValidWrites(run);
@@ -1072,25 +1072,37 @@ public sealed partial class PrReadinessHoldTests
 
         long Sleep(string name) => Assert.Single(steps.OfType<SleepStep>(), s => s.Name == name).Seconds!.Value;
         Assert.Equal(300, Sleep("review_hold_sleep"));
-        Assert.Equal(300, Sleep("merge_hold_sleep"));
+        // The merge hold's pause is the same five minutes, spent listening for late feedback.
+        Assert.DoesNotContain(steps.OfType<SleepStep>(), s => s.Name == "merge_hold_sleep");
+        Assert.Equal(5, Assert.Single(steps.OfType<WaitForSignalStep>(), w => w.Name == "merge_hold_feedback_wait").TimeoutMinutes);
         Assert.Equal(1800, Sleep("stalled_sleep"));
         Assert.Equal(60, Sleep("merge_readback_sleep"));
         // 24 reads 30 minutes apart: the 720 minutes of the gate this state replaces.
         Assert.Equal(720 * 60, loops["stalled_reads"].MaxIterations * Sleep("stalled_sleep"));
         Assert.Equal((StallReads, StallSleepSeconds), (loops["stalled_reads"].MaxIterations, Sleep("stalled_sleep")));
 
-        // The stall and the holds wait on timers only: no signal wait, no gate reference.
-        foreach (var state in new[] { "STALLED", "REVIEW_HOLD", "MERGE_HOLD" })
+        // The stall and the holds are no gate: they write no gate reference, and the only signal
+        // read in them is late merge feedback, by a wait that is not a gate either.
+        var lateReads = new Dictionary<string, string[]>
+        {
+            ["STALLED"] = ["stalled_feedback_take"],
+            ["REVIEW_HOLD"] = [],
+            ["MERGE_HOLD"] = ["merge_hold_feedback_take", "merge_hold_feedback_wait"],
+        };
+        foreach (var (state, reads) in lateReads)
         {
             var inside = WorkflowDefinitionValidator.Walk(Assert.Single(steps.OfType<SequenceStep>(), s => s.Name == state)).ToList();
-            Assert.Empty(inside.OfType<WaitForSignalStep>());
+            Assert.Equal(reads, inside.OfType<WaitForSignalStep>().Select(w => w.Name).Order());
             Assert.DoesNotContain(inside.OfType<SetAttributeStep>(), w => w.Attributes.ContainsKey("GateRef"));
             Assert.All(inside.OfType<SetAttributeStep>(), w => Assert.True(w.Required));
         }
-        // The new phases are no wait's phase, so no signal can be addressed to them.
-        Assert.DoesNotContain(steps.OfType<WaitForSignalStep>(), w => w.Phase is "technical-stalled" or "merge-hold");
+        // The owned phases are no wait's phase, so no signal can be addressed to them.
+        Assert.DoesNotContain(steps.OfType<WaitForSignalStep>(), w => w.Phase is "technical-stalled" or "merge-hold" or "merging");
+        // One gate per signal name and place, as before; the other four merge-approval waits are the late reads.
         Assert.Equal(["acceptance-decision", "acceptance-decision", "human-review", "human-review", "merge-approval"],
-            steps.OfType<WaitForSignalStep>().Select(w => w.SignalName).Order());
+            steps.OfType<WaitForSignalStep>().Where(w => w.Phase is not null).Select(w => w.SignalName).Order());
+        Assert.Equal(["merge_entry_feedback_take", "merge_hold_feedback_take", "merge_hold_feedback_wait", "stalled_feedback_take"],
+            steps.OfType<WaitForSignalStep>().Where(w => w.Phase is null).Select(w => w.Name).Order());
 
         var notice = Assert.Single(steps.OfType<DelegateStep>(), d => d.Name == "notify_stalled");
         Assert.Equal("{{config.CtoAgent}}", notice.Target);
@@ -1153,6 +1165,9 @@ public sealed partial class PrReadinessHoldTests
         public Func<int, string> Verify = _ => "merged";
         public ManualResetEventSlim? HoldVerify;
 
+        /// <summary>The reviewer's verdict on merge-gate feedback; unset, that review is answered like any other.</summary>
+        public string? FeedbackVerdict;
+
         /// <summary>A step named here does not answer until its gate is set: the turn is out for as long as the test wants.</summary>
         public readonly Dictionary<string, ManualResetEventSlim> Hold = [];
 
@@ -1210,6 +1225,10 @@ public sealed partial class PrReadinessHoldTests
                 _head++;
                 return $"IMPLEMENTATION: complete\nPR_URL: {PrUrl}\nHEAD_RANGE: {old}..{Head}\nHEAD_SHA: {Head}";
             }
+            if (call.Step == $"review-{Reviewer}" && FeedbackVerdict is { } upheld && call.Instruction.Contains(FeedbackPrompt, StringComparison.Ordinal))
+                return $"SUMMARY: the feedback holds\nBLOCKER: apply the requested change\nVERDICT: {upheld}";
+            // A lone dissent goes to the synthesizer, which upholds it.
+            if (call.Step == "synthesis" && FeedbackVerdict is { } synthesized) return $"the concern holds\nVERDICT: {synthesized}";
             if (call.Step == $"review-{Reviewer}")
             {
                 return Review(Interlocked.Increment(ref _rounds)) switch
@@ -1347,6 +1366,8 @@ public sealed partial class PrReadinessHoldTests
     /// literal sleeps are skipped (60, 300 and the stall's 1800 seconds), so a gate is still open
     /// when the caller signals it: no gate of this definition starts a timer of one of those
     /// lengths (its shortest is a human-review reminder, 3600 seconds; a merge gate's is 10800).
+    /// The merge hold's five-minute pause is one of the skipped ones: it is a wait for late
+    /// feedback, and it ends as a timeout exactly as the sleep it replaced ended.
     /// A scenario that must not go through a stall passes <paramref name="pastStall"/> false: the
     /// stall's sleep is then left alone, and a run that stalls ends this wait with a timeout.
     /// The cleanup wait sleeps 1800 seconds too, but it is entered only from a required-mode PIN
